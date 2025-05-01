@@ -1,10 +1,18 @@
 [workspace]
 resolver = "2"
-members = [ "crypto", "bssl-bare-sys", "tpm2-interface", "utils-common", "bssl-bare-sys-target-integration"]
+members = [
+	"crypto",
+	"bssl-bare-sys",
+	"bssl-bare-sys-target-integration",
+	"tpm2-interface",
+	"utils-async",
+	"utils-common",
+]
 
 [patch.crates-io]
 cocoon-tpm-bssl-bare-sys = { path = "bssl-bare-sys" }
 cocoon-tpm-bssl-bare-sys-target-integration = { path = "bssl-bare-sys-target-integration" }
 cocoon-tpm-crypto = { path = "crypto" }
 cocoon-tpm-tpm2-interface = { path = "tpm2-interface" }
+cocoon-tpm-utils-async = { path = "utils-async" }
 cocoon-tpm-utils-common = { path = "utils-common" }
