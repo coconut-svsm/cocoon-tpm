@@ -2,9 +2,7 @@
 // Copyright 2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
-#![no_std]
+//! Concurrency related memory allocation utilities.
 
-use cocoon_tpm_utils_common as utils_common;
-
-pub mod alloc;
-pub mod sync_types;
+mod sync_vec;
+pub use sync_vec::{SyncVec, SyncVecError};
