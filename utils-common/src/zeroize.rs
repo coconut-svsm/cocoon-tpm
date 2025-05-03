@@ -32,6 +32,8 @@ mod cfg {
 #[cfg(not(feature = "zeroize"))]
 #[doc(hidden)]
 mod cfg {
+    use core::ops;
+
     pub trait Zeroize {
         fn zeroize(&mut self);
     }
@@ -55,7 +57,7 @@ mod cfg {
     }
 
     impl<T> ops::DerefMut for Zeroizing<T> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
+        fn deref_mut(&mut self) -> &mut <Self as ops::Deref>::Target {
             &mut self.0
         }
     }
@@ -163,6 +165,7 @@ impl<T> ZeroizingFlat<T> {
     ///
     /// * `f` - The callback to invoke on the unwrapped value. The return value
     ///   gets propagated back.
+    #[allow(unused_mut)]
     pub fn take_with<R, F: FnOnce(T) -> R>(mut self, f: F) -> R {
         // Enable the compiler to call f() on the original data without preparing a
         // temporary copy on the stack. Whether or not this works out depends on
