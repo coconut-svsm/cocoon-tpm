@@ -4,4 +4,6 @@
 
 #![no_std]
 
+use cocoon_tpm_utils_common as utils_common;
+
 pub mod sync_types;

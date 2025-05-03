@@ -16,7 +16,9 @@
 //! [`SyncRcPtr`]/[`SyncRcPtrFactory`]. For limiting the amount of generic
 //! parameters to get specified all over the place, group them together as
 //! associated types of the [`SyncTypes`] trait expected to get implemented for
-//! a target execution environment.
+//! a target execution environment. Execution environments might want to
+//! consider using the provided [`GenericArcFactory`] for their
+//! [`SyncRcPtrFactory`].
 //!
 //! # Elimination of [`Lock`] or [`SyncRcPtr`] nesting in data structures
 //!
@@ -1178,6 +1180,10 @@ pub trait SyncTypes: marker::Unpin + 'static {
     /// The execution environment's implementation of the [`RwLock`] trait.
     type RwLock<T>: RwLock<T>;
     /// The execution environment's implementation of the [`SyncRcPtrFactory`]
-    /// trait.
+    /// trait. Execution environments might want to consider using the
+    /// provided [`GenericArcFactory`] for their [`SyncRcPtrFactory`].
     type SyncRcPtrFactory: SyncRcPtrFactory;
 }
+
+mod generic_arc;
+pub use generic_arc::{GenericArc, GenericArcFactory, GenericWeak};
