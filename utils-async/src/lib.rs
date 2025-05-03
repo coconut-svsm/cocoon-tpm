@@ -8,3 +8,4 @@ use cocoon_tpm_utils_common as utils_common;
 
 pub mod alloc;
 pub mod sync_types;
+pub mod test;

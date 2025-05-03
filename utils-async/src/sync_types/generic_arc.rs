@@ -146,6 +146,21 @@ impl<T> Arc<T> {
         }
     }
 
+    /// Gets the number of [`Weak`] pointers to this allocation.
+    #[cfg(test)]
+    #[inline]
+    pub fn weak_count(this: &Self) -> usize {
+        let cnt = this.inner().weak.load(atomic::Ordering::Relaxed);
+        cnt - 1
+    }
+
+    /// Gets the number of strong (`Arc`) pointers to this allocation.
+    #[cfg(test)]
+    #[inline]
+    pub fn strong_count(this: &Self) -> usize {
+        this.inner().strong.load(atomic::Ordering::Relaxed)
+    }
+
     #[inline]
     fn inner(&self) -> &ArcInner<T> {
         // This unsafety is ok because while this arc is alive we're guaranteed
@@ -401,6 +416,21 @@ const fn data_offset<T>() -> usize {
 /// * [`GenericWeak`]
 pub struct GenericArc<T> {
     ptr: Arc<T>,
+}
+
+#[cfg(test)]
+impl<T> GenericArc<T> {
+    /// Gets the number of [`GenericWeak`] pointers to this allocation.
+    #[inline]
+    pub fn weak_count(this: &Self) -> usize {
+        Arc::weak_count(&this.ptr)
+    }
+
+    /// Gets the number of strong (`GenericArc`) pointers to this allocation.
+    #[inline]
+    pub fn strong_count(this: &Self) -> usize {
+        Arc::strong_count(&this.ptr)
+    }
 }
 
 impl<T> Deref for GenericArc<T> {
