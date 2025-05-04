@@ -4,5 +4,7 @@
 
 //! Rust `async` related [`Future`] adaptors.
 
+mod broadcast_future;
+pub use broadcast_future::{BroadcastFuture, BroadcastFutureError, BroadcastFutureSubscription};
 mod broadcast_waker;
 use broadcast_waker::{BroadcastWakerError, BroadcastWakerSubscriptionId, BroadcastWakerSubscriptions};
