@@ -8,3 +8,5 @@ mod broadcast_future;
 pub use broadcast_future::{BroadcastFuture, BroadcastFutureError, BroadcastFutureSubscription};
 mod broadcast_waker;
 use broadcast_waker::{BroadcastWakerError, BroadcastWakerSubscriptionId, BroadcastWakerSubscriptions};
+mod future_queue;
+pub use future_queue::{EnqueuedFutureSubscription, FutureQueue, FutureQueueError, QueuedFuture};
