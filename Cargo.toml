@@ -4,6 +4,7 @@ members = [
 	"crypto",
 	"bssl-bare-sys",
 	"bssl-bare-sys-target-integration",
+	"storage",
 	"tpm2-interface",
 	"utils-async",
 	"utils-common",
@@ -13,6 +14,7 @@ members = [
 cocoon-tpm-bssl-bare-sys = { path = "bssl-bare-sys" }
 cocoon-tpm-bssl-bare-sys-target-integration = { path = "bssl-bare-sys-target-integration" }
 cocoon-tpm-crypto = { path = "crypto" }
+cocoon-tpm-storage = { path = "storage" }
 cocoon-tpm-tpm2-interface = { path = "tpm2-interface" }
 cocoon-tpm-utils-async = { path = "utils-async" }
 cocoon-tpm-utils-common = { path = "utils-common" }
