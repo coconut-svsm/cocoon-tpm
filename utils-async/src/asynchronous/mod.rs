@@ -10,3 +10,9 @@ mod broadcast_waker;
 use broadcast_waker::{BroadcastWakerError, BroadcastWakerSubscriptionId, BroadcastWakerSubscriptions};
 mod future_queue;
 pub use future_queue::{EnqueuedFutureSubscription, FutureQueue, FutureQueueError, QueuedFuture};
+mod semaphore;
+pub use semaphore::{
+    AsyncSemaphore, AsyncSemaphoreError, AsyncSemaphoreExclusiveAllFuture, AsyncSemaphoreExclusiveAllGuard,
+    AsyncSemaphoreExclusiveAllWeakGuard, AsyncSemaphoreLeasesFuture, AsyncSemaphoreLeasesGuard,
+    AsyncSemaphoreLeasesWeakGuard,
+};
