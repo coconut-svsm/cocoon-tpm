@@ -3,3 +3,9 @@
 // Author: Nicolai Stange <nstange@suse.de>
 
 #![no_std]
+
+use cocoon_tpm_crypto as crypto;
+use cocoon_tpm_utils_async as utils_async;
+use cocoon_tpm_utils_common as utils_common;
+
+pub mod fs;
