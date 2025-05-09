@@ -8,4 +8,5 @@ use cocoon_tpm_crypto as crypto;
 use cocoon_tpm_utils_async as utils_async;
 use cocoon_tpm_utils_common as utils_common;
 
+pub mod chip;
 pub mod fs;

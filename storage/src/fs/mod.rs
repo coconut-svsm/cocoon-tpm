@@ -10,6 +10,7 @@
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
+use crate::chip;
 use crate::crypto;
 use crate::utils_async::sync_types::{self, SyncRcPtrRef as _};
 use crate::utils_common::{self, zeroize};
@@ -108,6 +109,19 @@ impl convert::From<utils_common::alloc::TryNewError> for NvFsError {
 impl convert::From<alloc::collections::TryReserveError> for NvFsError {
     fn from(_value: alloc::collections::TryReserveError) -> Self {
         Self::MemoryAllocationFailure
+    }
+}
+
+impl convert::From<chip::NvChipIoError> for NvFsError {
+    fn from(value: chip::NvChipIoError) -> Self {
+        match value {
+            chip::NvChipIoError::Internal => Self::Internal,
+            chip::NvChipIoError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
+            chip::NvChipIoError::OperationNotSupported => Self::OperationNotSupported,
+            chip::NvChipIoError::IoBlockOutOfRange => Self::IoError(NvFsIoError::RegionOutOfRange),
+            chip::NvChipIoError::IoBlockNotMapped => Self::IoError(NvFsIoError::RegionNotMapped),
+            chip::NvChipIoError::IoFailure => Self::IoError(NvFsIoError::IoFailure),
+        }
     }
 }
 
