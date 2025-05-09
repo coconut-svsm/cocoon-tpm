@@ -13,6 +13,8 @@ pub use chunked_io_region::{
 
 use core::{marker, pin, task};
 
+pub mod test;
+
 /// Error type returned by [`NvChip`] primitives.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum NvChipIoError {
