@@ -1415,7 +1415,6 @@ fn test_encrypt_decrypt_in_place_ecb_sm4_128() {
     )
 }
 
-#[cfg(test)]
 macro_rules! cfg_select_block_cipher_alg {
     (($f:literal, $id:expr)) => {
         #[cfg(feature = $f)]
@@ -1435,7 +1434,6 @@ macro_rules! cfg_select_block_cipher_alg {
     };
 }
 
-#[cfg(test)]
 pub const fn test_block_cipher_alg() -> SymBlockCipherAlg {
     cfg_select_block_cipher_alg!(
         ("aes", SymBlockCipherAlg::Aes(SymBlockCipherAesKeySize::Aes128)),
