@@ -163,6 +163,25 @@ macro_rules! gen_match_on_tpmi_alg_cipher_mode {
     };
 }
 
+// Convert a symbolic mode to the corresponding TpmiAlgCipherMode variant.
+macro_rules! mode_to_tpmi_alg_cipher_mode {
+    (Ctr) => {
+        tpm2_interface::TpmiAlgCipherMode::Ctr
+    };
+    (Ofb) => {
+        tpm2_interface::TpmiAlgCipherMode::Ofb
+    };
+    (Cbc) => {
+        tpm2_interface::TpmiAlgCipherMode::Cbc
+    };
+    (Cfb) => {
+        tpm2_interface::TpmiAlgCipherMode::Cfb
+    };
+    (Ecb) => {
+        tpm2_interface::TpmiAlgCipherMode::Ecb
+    };
+}
+
 // This gets invoked with the symbolic mode identifier appended to the args.
 macro_rules! __gen_match_on_tpmi_alg_cipher_mode_and_block_cipher_alg {
     ($block_cipher_alg_value:tt, $m:ident, $($args_and_mode_id:tt),*) => {
@@ -1221,6 +1240,24 @@ impl convert::From<&SymBlockCipherModeEncryptionInstance> for SymBlockCipherAlg 
     }
 }
 
+impl convert::From<&SymBlockCipherModeEncryptionInstance> for tpm2_interface::TpmiAlgCipherMode {
+    fn from(value: &SymBlockCipherModeEncryptionInstance) -> Self {
+        macro_rules! gen_block_cipher_to_tpmi_alg_cipher_mode {
+            ($mode_id:ident,
+             $_block_alg_id:ident,
+             $_key_size:tt,
+             $_block_cipher_instance:ident) => {
+                mode_to_tpmi_alg_cipher_mode!($mode_id)
+            };
+        }
+        gen_match_on_block_cipher_mode_encryption_instance!(
+            &*value.state,
+            gen_block_cipher_to_tpmi_alg_cipher_mode,
+            _block_cipher_instance
+        )
+    }
+}
+
 pub struct SymBlockCipherModeDecryptionInstance {
     state: Box<SymBlockCipherModeDecryptionInstanceState>,
 }
@@ -2086,6 +2123,24 @@ impl convert::From<&SymBlockCipherModeDecryptionInstance> for SymBlockCipherAlg 
         gen_match_on_block_cipher_mode_decryption_instance!(
             &*value.state,
             gen_block_cipher_to_block_cipher_alg,
+            _block_cipher_instance
+        )
+    }
+}
+
+impl convert::From<&SymBlockCipherModeDecryptionInstance> for tpm2_interface::TpmiAlgCipherMode {
+    fn from(value: &SymBlockCipherModeDecryptionInstance) -> Self {
+        macro_rules! gen_block_cipher_to_tpmi_alg_cipher_mode {
+            ($mode_id:ident,
+             $_block_alg_id:ident,
+             $_key_size:tt,
+             $_block_cipher_instance:ident) => {
+                mode_to_tpmi_alg_cipher_mode!($mode_id)
+            };
+        }
+        gen_match_on_block_cipher_mode_decryption_instance!(
+            &*value.state,
+            gen_block_cipher_to_tpmi_alg_cipher_mode,
             _block_cipher_instance
         )
     }

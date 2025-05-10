@@ -476,6 +476,25 @@ macro_rules! gen_match_on_tpmi_alg_cipher_mode {
     };
 }
 
+// Convert a symbolic mode to the corresponding TpmiAlgCipherMode variant.
+macro_rules! mode_to_tpmi_alg_cipher_mode {
+    (Ctr) => {
+        tpm2_interface::TpmiAlgCipherMode::Ctr
+    };
+    (Ofb) => {
+        tpm2_interface::TpmiAlgCipherMode::Ofb
+    };
+    (Cbc) => {
+        tpm2_interface::TpmiAlgCipherMode::Cbc
+    };
+    (Cfb) => {
+        tpm2_interface::TpmiAlgCipherMode::Cfb
+    };
+    (Ecb) => {
+        tpm2_interface::TpmiAlgCipherMode::Ecb
+    };
+}
+
 /// Map a pair of (symbolic mode, symbolic block cipher) to the IV length.
 macro_rules! mode_and_block_cipher_to_iv_len {
     (Ctr, $block_alg_id:ident) => {
@@ -767,6 +786,12 @@ impl convert::From<&SymBlockCipherModeEncryptionInstance> for SymBlockCipherAlg 
     }
 }
 
+impl convert::From<&SymBlockCipherModeEncryptionInstance> for tpm2_interface::TpmiAlgCipherMode {
+    fn from(value: &SymBlockCipherModeEncryptionInstance) -> Self {
+        tpm2_interface::TpmiAlgCipherMode::from(&value.state)
+    }
+}
+
 /// Map a symbolic mode to either BsslAesEncKey or BsslAesDecKey as is suitable
 /// for encryption with that mode
 macro_rules! enc_mode_to_bssl_aes_key_impl {
@@ -1049,6 +1074,23 @@ impl convert::From<&SymBlockCipherModeEncryptionInstanceState> for SymBlockCiphe
     }
 }
 
+impl convert::From<&SymBlockCipherModeEncryptionInstanceState> for tpm2_interface::TpmiAlgCipherMode {
+    fn from(value: &SymBlockCipherModeEncryptionInstanceState) -> Self {
+        macro_rules! gen_block_cipher_to_tpmi_alg_cipher_mode {
+            ($mode_id:ident,
+             $_block_alg_id:ident,
+             $_block_cipher_key_instance:ident) => {
+                mode_to_tpmi_alg_cipher_mode!($mode_id)
+            };
+        }
+        gen_match_on_block_cipher_mode_encryption_instance!(
+            value,
+            gen_block_cipher_to_tpmi_alg_cipher_mode,
+            _block_cipher_instance
+        )
+    }
+}
+
 pub struct SymBlockCipherModeDecryptionInstance {
     state: SymBlockCipherModeDecryptionInstanceState,
 }
@@ -1184,6 +1226,12 @@ impl zeroize::ZeroizeOnDrop for SymBlockCipherModeDecryptionInstance {}
 impl convert::From<&SymBlockCipherModeDecryptionInstance> for SymBlockCipherAlg {
     fn from(value: &SymBlockCipherModeDecryptionInstance) -> Self {
         SymBlockCipherAlg::from(&value.state)
+    }
+}
+
+impl convert::From<&SymBlockCipherModeDecryptionInstance> for tpm2_interface::TpmiAlgCipherMode {
+    fn from(value: &SymBlockCipherModeDecryptionInstance) -> Self {
+        tpm2_interface::TpmiAlgCipherMode::from(&value.state)
     }
 }
 
@@ -1465,6 +1513,23 @@ impl convert::From<&SymBlockCipherModeDecryptionInstanceState> for SymBlockCiphe
             value,
             gen_block_cipher_to_block_cipher_alg,
             block_cipher_key_instance
+        )
+    }
+}
+
+impl convert::From<&SymBlockCipherModeDecryptionInstanceState> for tpm2_interface::TpmiAlgCipherMode {
+    fn from(value: &SymBlockCipherModeDecryptionInstanceState) -> Self {
+        macro_rules! gen_block_cipher_to_tpmi_alg_cipher_mode {
+            ($mode_id:ident,
+             $_block_alg_id:ident,
+             $_block_cipher_key_instance:ident) => {
+                mode_to_tpmi_alg_cipher_mode!($mode_id)
+            };
+        }
+        gen_match_on_block_cipher_mode_decryption_instance!(
+            value,
+            gen_block_cipher_to_tpmi_alg_cipher_mode,
+            _block_cipher_instance
         )
     }
 }
