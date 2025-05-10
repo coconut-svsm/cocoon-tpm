@@ -5,7 +5,8 @@
 //! Storage backend filesystem traits and definitions.
 //!
 //! Storage backends define a [`NvFs`] implementation for other components to
-//! store sensitive data to.
+//! store sensitive data to. For a secure filesystem implemention suitable for
+//! deployments in untrusted environments see [`cocoonfs`].
 
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
@@ -15,6 +16,8 @@ use crate::crypto;
 use crate::utils_async::sync_types::{self, SyncRcPtrRef as _};
 use crate::utils_common::{self, zeroize};
 use core::{convert, future, marker, ops, pin, task};
+
+pub mod cocoonfs;
 
 /// [`NvFsError::IoError`] details.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -751,7 +754,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     ///   to the [`SyncRcPtr<Self>`](sync_types::SyncRcPtr) managing the `NvFs`
     ///   instance.
     fn try_cleanup_indeterminate_commit_log(this: &Self::SyncRcPtrRef<'_>)
-        -> Self::TryCleanupIndeterminateCommitLogFut;
+    -> Self::TryCleanupIndeterminateCommitLogFut;
 
     /// `NvFs` implementation specific [future](NvFsFuture) type instantiated
     /// through [`read_inode()`](Self::read_inode).
@@ -775,15 +778,15 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     ///         * `Ok((read_context, Ok(Some(data))))` - The inode exists and
     ///           its data is available as `data`.
     type ReadInodeFut: NvFsFuture<
-        Self,
-        Output = Result<
-            (
-                NvFsReadContext<Self>,
-                Result<Option<zeroize::Zeroizing<Vec<u8>>>, NvFsError>,
-            ),
-            NvFsError,
-        >,
-    >;
+            Self,
+            Output = Result<
+                (
+                    NvFsReadContext<Self>,
+                    Result<Option<zeroize::Zeroizing<Vec<u8>>>, NvFsError>,
+                ),
+                NvFsError,
+            >,
+        >;
 
     /// Read an inode's data.
     ///
@@ -835,9 +838,9 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     ///     * `Ok((transaction, data, Ok(())))` - Otherwise, `Ok(())` will get
     ///       returned for the operation result on success.
     type WriteInodeFut: NvFsFuture<
-        Self,
-        Output = Result<(Self::Transaction, zeroize::Zeroizing<Vec<u8>>, Result<(), NvFsError>), NvFsError>,
-    >;
+            Self,
+            Output = Result<(Self::Transaction, zeroize::Zeroizing<Vec<u8>>, Result<(), NvFsError>), NvFsError>,
+        >;
 
     /// Write an inode's data.
     ///
@@ -1054,10 +1057,7 @@ pub trait NvFsEnumerateCursor<FS: NvFs>: Sized {
     ///     * `Ok((cursor, Err(e)))` - In case of an error, the error reason `e`
     ///       is returned in an [`Err`].
     ///     * `Ok((cursor, Ok(data)))` - Otherwise the inode `data` is returned.
-    type ReadInodeDataFut: NvFsFuture<
-        FS,
-        Output = Result<(Self, Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>), NvFsError>,
-    >;
+    type ReadInodeDataFut: NvFsFuture<FS, Output = Result<(Self, Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>), NvFsError>>;
 
     /// Read the inode at point.
     ///
@@ -1213,10 +1213,7 @@ pub trait NvFsUnlinkCursor<FS: NvFs>: Sized {
     ///     * `Ok((cursor, Err(e)))` - In case of an error, the error reason `e`
     ///       is returned in an [`Err`].
     ///     * `Ok((cursor, Ok(data)))` - Otherwise the inode `data` is returned.
-    type ReadInodeDataFut: NvFsFuture<
-        FS,
-        Output = Result<(Self, Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>), NvFsError>,
-    >;
+    type ReadInodeDataFut: NvFsFuture<FS, Output = Result<(Self, Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>), NvFsError>>;
 
     /// Read the inode at point.
     ///
