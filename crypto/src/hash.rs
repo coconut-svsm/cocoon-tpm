@@ -160,7 +160,6 @@ pub const fn hash_alg_select_for_preimage_security_strength(
 
 pub use super::backend::hash::*;
 
-#[cfg(test)]
 macro_rules! cfg_select_hash {
     (($f:literal, $id:ident)) => {
         #[cfg(feature = $f)]
@@ -180,7 +179,6 @@ macro_rules! cfg_select_hash {
     };
 }
 
-#[cfg(test)]
 pub const fn test_hash_alg() -> tpm2_interface::TpmiAlgHash {
     cfg_select_hash!(
         ("sha512", Sha512),
