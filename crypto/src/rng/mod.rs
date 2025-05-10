@@ -230,7 +230,7 @@ pub trait ReseedableRngCore: RngCore + Sized {
     }
 }
 
-#[cfg(all(test, not(feature = "boringssl")))]
+#[cfg(not(feature = "boringssl"))]
 pub fn test_rng() -> HashDrbg {
     extern crate alloc;
     use super::hash;
@@ -242,7 +242,7 @@ pub fn test_rng() -> HashDrbg {
     HashDrbg::instantiate(hash_alg, &entropy, None, None).unwrap()
 }
 
-#[cfg(all(test, feature = "boringssl"))]
+#[cfg(feature = "boringssl")]
 pub fn test_rng() -> BsslRandBytesRng {
     BsslRandBytesRng::new()
 }
