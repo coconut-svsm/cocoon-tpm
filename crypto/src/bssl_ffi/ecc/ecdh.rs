@@ -10,6 +10,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
+
 use super::super::{
     bssl_bn::{BsslBn, BsslBnCtx},
     error::{bssl_get_error, bssl_get_raw_error},

@@ -4,6 +4,8 @@
 
 //! BoringSSL FFI backend [Random Number Generator](rng) implementations.
 
+use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
+
 use super::error::bssl_get_error;
 use crate::{io_slices, rng};
 

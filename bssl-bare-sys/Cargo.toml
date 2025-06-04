@@ -1,5 +1,5 @@
 [package]
-name = "bssl-bare-sys"
+name = "cocoon-tpm-bssl-bare-sys"
 version = "0.1.0"
 # Needs to have < 2024 for now, because boringssl's wrapper.h fed into
 # bindgen has function arguments named 'gen', which is a reserved
@@ -13,10 +13,10 @@ links = "bssl"
 [lib]
 
 [features]
-target-integration = ["dep:bssl-bare-sys-target-integration"]
+target-integration = ["dep:cocoon-tpm-bssl-bare-sys-target-integration"]
 
 [dependencies]
-bssl-bare-sys-target-integration = { workspace = true, optional = true }
+cocoon-tpm-bssl-bare-sys-target-integration = { workspace = true, optional = true }
 
 [build-dependencies]
 bindgen = "0.71.1"

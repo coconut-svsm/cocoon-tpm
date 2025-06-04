@@ -17,6 +17,8 @@
 extern crate alloc;
 use alloc::boxed::Box;
 
+use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
+
 use super::error::bssl_get_error;
 use crate::symcipher::{self, transform_next_blocks, transform_next_blocks_in_place, SymBlockCipherAlg};
 use crate::{

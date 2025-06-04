@@ -1,5 +1,5 @@
 [package]
-name = "bssl-bare-sys-target-integration"
+name = "cocoon-tpm-bssl-bare-sys-target-integration"
 version = "0.1.0"
 edition = "2021"
 

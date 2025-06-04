@@ -9,6 +9,8 @@
 
 extern crate alloc;
 
+use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
+
 use crate::bssl_ffi;
 use crate::hash::hash_alg_digest_len;
 use crate::{io_slices::CryptoIoSlicesIter, CryptoError};

@@ -7,6 +7,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
+
 use super::super::{bssl_bn::BsslBn, error::bssl_get_error};
 use super::curve;
 use crate::utils_common::{alloc::try_alloc_zeroizing_vec, zeroize};

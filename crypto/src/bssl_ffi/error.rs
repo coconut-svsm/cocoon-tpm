@@ -2,6 +2,8 @@
 // Copyright 2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
+
 use crate::error::CryptoError;
 
 use core::{convert, ffi};

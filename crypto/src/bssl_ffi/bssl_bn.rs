@@ -4,6 +4,8 @@
 
 //! BoringSSL FFI BIGNUM bindings.
 
+use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
+
 use super::error::bssl_get_error;
 use crate::utils_common::alloc::try_alloc_zeroizing_vec;
 use crate::CryptoError;
