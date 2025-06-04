@@ -88,7 +88,7 @@ cocoon-tpm-bssl-bare-sys = { workspace = true, optional = true }
 cocoon-tpm-utils-common = { workspace = true }
 cocoon-tpm-tpm2-interface = { workspace = true }
 
-cmpa = { git = "https://github.com/nicstange/cmpa-rs.git", branch = "master", default-features = false }
+cmpa = { version = "0.1.0", default-features = false }
 zeroize = { version = "1.8.1", optional = true, default-features = false, features= ["alloc"] }
 
 crypto-common = { version = "0.1.6", default-features = false}

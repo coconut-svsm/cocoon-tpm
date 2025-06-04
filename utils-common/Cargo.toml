@@ -12,5 +12,5 @@ default = ["zeroize"]
 zeroize = ["dep:zeroize", "cmpa/zeroize"]
 
 [dependencies]
-cmpa = { git = "https://github.com/nicstange/cmpa-rs.git", branch = "master", default-features = false }
+cmpa = { version = "0.1.0", default-features = false }
 zeroize = { version = "1.8.1", optional = true, default-features = false, features= ["alloc"] }
