@@ -6,6 +6,12 @@ version = "0.1.0"
 # keyword.
 edition = "2021"
 
+license = "Apache-2.0"
+description = "Cocoon TPM project - bare BoringSSL FFI bindings"
+homepage = "https://github.com/coconut-svsm/cocoon-tpm"
+repository = "https://github.com/coconut-svsm/cocoon-tpm"
+readme = "README.md"
+
 # Make usage if this crate exclusive with the official bssl-sys.
 # Otherwise linking conflicts will occur.
 links = "bssl"
@@ -16,7 +22,7 @@ links = "bssl"
 target-integration = ["dep:cocoon-tpm-bssl-bare-sys-target-integration"]
 
 [dependencies]
-cocoon-tpm-bssl-bare-sys-target-integration = { workspace = true, optional = true }
+cocoon-tpm-bssl-bare-sys-target-integration = { version = "0.1.0", optional = true }
 
 [build-dependencies]
 bindgen = "0.71.1"
