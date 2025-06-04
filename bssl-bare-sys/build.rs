@@ -21,8 +21,8 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = PathBuf::from(out_dir.clone());
 
-    // Remove the libcrypto.a from a previous run, if any -- the symbol renaming further below is
-    // not idempotent.
+    // Remove the libcrypto.a from a previous run, if any -- the symbol renaming
+    // further below is not idempotent.
     let bssl_libcrypto = out_path.join("build").join("libcrypto.a");
     let _ = std::fs::remove_file(bssl_libcrypto);
 
@@ -161,8 +161,7 @@ fn main() {
     // Generate the binding.
     // Essentially translated verbatim from boringssl/rust/bssl-sys/CMakeLists.txt.
     let bssl_src_path = PathBuf::from(bssl_src_dir);
-    let bssl_src_rust_bssl_sys_path = bssl_src_path.join("rust").join("bssl-sys");
-    let bssl_src_rust_bssl_sys_bindgen_hdr = bssl_src_rust_bssl_sys_path
+    let bssl_src_rust_bssl_sys_bindgen_hdr = PathBuf::from("third-party")
         .join("wrapper.h")
         .into_os_string()
         .into_string()
@@ -170,8 +169,9 @@ fn main() {
     let bssl_src_include_path = bssl_src_path.join("include");
     let bssl_src_include_dir = bssl_src_include_path.clone().into_os_string().into_string().unwrap();
     let bindgen_wrapper_rs_out_path = out_path.join("wrapper.rs");
-    // wrap_static_fns(true) is not possible unfortunately, as it would ignore functions with a
-    // link_name_override(), which includes all for some reason.
+    // wrap_static_fns(true) is not possible unfortunately, as it would ignore
+    // functions with a link_name_override(), which includes all for some
+    // reason.
     let mut bindings = bindgen::Builder::default()
         .header(&bssl_src_rust_bssl_sys_bindgen_hdr)
         .allowlist_file(bssl_src_rust_bssl_sys_bindgen_hdr)
