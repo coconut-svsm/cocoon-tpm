@@ -3,6 +3,12 @@ name = "cocoon-tpm-bssl-bare-sys-target-integration"
 version = "0.1.0"
 edition = "2021"
 
+license = "Apache-2.0"
+description = "Cocoon TPM project - trivial default bssl-bare-sys integration helper"
+homepage = "https://github.com/coconut-svsm/cocoon-tpm"
+repository = "https://github.com/coconut-svsm/cocoon-tpm"
+readme = "README.md"
+
 links = "bssl-bare-sys-target-integration"
 
 [dependencies]
