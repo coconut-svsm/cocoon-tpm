@@ -16,3 +16,4 @@ execution environments in mind, in partiuclar with regard to stack usage.
 * [`cocoon-tpm-crypto`](crypto/README.md) - A common interface to (and
   in part implementations of) all cryptography primitives needed by a
   TPM.
+* [`cocoon-tpm-storage`](storage/README.md) - Secure persistent storage.
