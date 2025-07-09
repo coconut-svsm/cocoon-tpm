@@ -92,7 +92,7 @@ ecc_sm2_p256 = ["ecc", "cocoon-tpm-tpm2-interface/ecc_sm2_p256"]
 cocoon-tpm-bssl-bare-sys = { version = "0.1.0", optional = true }
 
 cocoon-tpm-utils-common = { version = "0.1.0" }
-cocoon-tpm-tpm2-interface = { version = "0.1.0" }
+cocoon-tpm-tpm2-interface = { version = "0.1.0", default-features = false }
 
 cmpa = { version = "0.1.0", default-features = false }
 zeroize = { version = "1.8.1", optional = true, default-features = false, features= ["alloc"] }

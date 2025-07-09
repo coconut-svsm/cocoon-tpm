@@ -17,7 +17,7 @@ zeroize = [
 [dependencies]
 # CocoonFs needs CBC and also, ECB for the Journal disguise IV generation.
 cocoon-tpm-crypto = { version = "0.1.0", features = ["cbc", "ecb"] }
-cocoon-tpm-tpm2-interface = { version = "0.1.0" }
+cocoon-tpm-tpm2-interface = { version = "0.1.0", default-features = false }
 cocoon-tpm-utils-async = { version = "0.1.0" }
 cocoon-tpm-utils-common = { version = "0.1.0" }
 
