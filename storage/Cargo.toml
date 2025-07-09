@@ -3,6 +3,12 @@ name = "cocoon-tpm-storage"
 version = "0.1.0"
 edition = "2024"
 
+license = "Apache-2.0"
+description = "Cocoon TPM project - secure persistent storage"
+homepage = "https://github.com/coconut-svsm/cocoon-tpm"
+repository = "https://github.com/coconut-svsm/cocoon-tpm"
+readme = "README.md"
+
 [features]
 zeroize = [
     "dep:zeroize", "cocoon-tpm-crypto/zeroize",  "cocoon-tpm-utils-common/zeroize",
