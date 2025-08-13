@@ -330,6 +330,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
                                     cur_physical_auth_tree_data_block - last_physical_auth_tree_data_block;
                                 last_physical_auth_tree_data_block = cur_physical_auth_tree_data_block;
                                 if *auth_subrange_auth_tree_data_blocks_skip_mask & 1 != 0 {
+                                    debug_assert!(saved_auth_tree_data_block_index.is_none());
                                     *auth_subrange_states_index_range =
                                         AuthTreeDataBlocksUpdateStatesIndexRange::new(
                                             auth_subrange_states_index_range.begin().step(),
@@ -340,7 +341,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
 
                                 let auth_tree_config = fs_sync_state_auth_tree.get_config();
                                 let cur_auth_tree_data_block_index =
-                                    saved_auth_tree_data_block_index.unwrap_or_else(|| {
+                                    saved_auth_tree_data_block_index.take().unwrap_or_else(|| {
                                         auth_tree_config.translate_physical_to_data_block_index(
                                             cur_physical_auth_tree_data_block_allocation_blocks_begin
                                         )
@@ -400,7 +401,6 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
                                             auth_tree_data_block_index: cur_auth_tree_data_block_index,
                                             auth_tree_leaf_node_load_fut,
                                         };
-                                    continue;
                                 }
                             },
                             TransactionReadAuthenticateDataFutureAuthenticateSubrangeState::LoadAuthTreeLeafNode {
