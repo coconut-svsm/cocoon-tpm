@@ -1588,7 +1588,7 @@ impl InodeExtentsListExtentsPendingReallocation {
             if *freed {
                 *freed = false;
                 return transaction
-                    .rollback_extents_allocation(excess_preexisting_inode_extents_list_extents.iter(), alloc_bitmap);
+                    .rollback_extents_free(excess_preexisting_inode_extents_list_extents.iter(), alloc_bitmap, false);
             }
         }
         Ok(transaction)
