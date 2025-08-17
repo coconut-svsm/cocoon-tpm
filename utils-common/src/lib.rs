@@ -7,6 +7,7 @@
 pub mod alloc;
 pub mod bitmanip;
 pub mod ct_cmp;
+pub mod fixed_vec;
 pub mod index_permutation;
 pub mod io_slices;
 pub mod murmurhash3;
