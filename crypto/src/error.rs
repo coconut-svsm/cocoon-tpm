@@ -184,6 +184,27 @@ impl convert::From<utils_common::alloc::TryNewWithError<convert::Infallible>> fo
     }
 }
 
+impl convert::From<utils_common::fixed_vec::FixedVecMemoryAllocationFailure> for CryptoError {
+    fn from(_value: utils_common::fixed_vec::FixedVecMemoryAllocationFailure) -> Self {
+        Self::MemoryAllocationFailure
+    }
+}
+
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<CryptoError>> for CryptoError {
+    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<CryptoError>) -> Self {
+        match value {
+            utils_common::fixed_vec::FixedVecNewFromFnError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
+            utils_common::fixed_vec::FixedVecNewFromFnError::FnError(e) => e,
+        }
+    }
+}
+
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>> for CryptoError {
+    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>) -> Self {
+        Self::from(utils_common::fixed_vec::FixedVecMemoryAllocationFailure::from(value))
+    }
+}
+
 impl<BackendIteratorError> convert::From<utils_common::io_slices::IoSlicesIterError<BackendIteratorError>>
     for CryptoError
 where
