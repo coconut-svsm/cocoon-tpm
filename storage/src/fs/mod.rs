@@ -109,6 +109,27 @@ impl convert::From<utils_common::alloc::TryNewError> for NvFsError {
     }
 }
 
+impl convert::From<utils_common::fixed_vec::FixedVecMemoryAllocationFailure> for NvFsError {
+    fn from(_value: utils_common::fixed_vec::FixedVecMemoryAllocationFailure) -> Self {
+        Self::MemoryAllocationFailure
+    }
+}
+
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<NvFsError>> for NvFsError {
+    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<NvFsError>) -> Self {
+        match value {
+            utils_common::fixed_vec::FixedVecNewFromFnError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
+            utils_common::fixed_vec::FixedVecNewFromFnError::FnError(e) => e,
+        }
+    }
+}
+
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>> for NvFsError {
+    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>) -> Self {
+        Self::from(utils_common::fixed_vec::FixedVecMemoryAllocationFailure::from(value))
+    }
+}
+
 impl convert::From<alloc::collections::TryReserveError> for NvFsError {
     fn from(_value: alloc::collections::TryReserveError) -> Self {
         Self::MemoryAllocationFailure
