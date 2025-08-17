@@ -5,13 +5,16 @@
 //! Definition of the [`NvChip`] trait, a block device abstraction for
 //! [`NvFs`](super::fs::NvFs) implementations to build on.
 
+extern crate alloc;
+
+use crate::utils_common;
+use core::{convert, marker, pin, task};
+
 mod chunked_io_region;
 pub use chunked_io_region::{
     ChunkedIoRegion, ChunkedIoRegionAlignedBlockChunksRangesIterator, ChunkedIoRegionAlignedBlocksIterator,
     ChunkedIoRegionChunkIndex, ChunkedIoRegionChunkRange, ChunkedIoRegionError,
 };
-
-use core::{marker, pin, task};
 
 pub mod test;
 
@@ -36,6 +39,47 @@ pub enum NvChipIoError {
 
     /// Unspecified IO failure.
     IoFailure,
+}
+
+impl convert::From<convert::Infallible> for NvChipIoError {
+    fn from(value: convert::Infallible) -> Self {
+        match value {}
+    }
+}
+
+impl convert::From<utils_common::alloc::TryNewError> for NvChipIoError {
+    fn from(value: utils_common::alloc::TryNewError) -> Self {
+        match value {
+            utils_common::alloc::TryNewError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
+        }
+    }
+}
+
+impl convert::From<utils_common::fixed_vec::FixedVecMemoryAllocationFailure> for NvChipIoError {
+    fn from(_value: utils_common::fixed_vec::FixedVecMemoryAllocationFailure) -> Self {
+        Self::MemoryAllocationFailure
+    }
+}
+
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<NvChipIoError>> for NvChipIoError {
+    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<NvChipIoError>) -> Self {
+        match value {
+            utils_common::fixed_vec::FixedVecNewFromFnError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
+            utils_common::fixed_vec::FixedVecNewFromFnError::FnError(e) => e,
+        }
+    }
+}
+
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>> for NvChipIoError {
+    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>) -> Self {
+        Self::from(utils_common::fixed_vec::FixedVecMemoryAllocationFailure::from(value))
+    }
+}
+
+impl convert::From<alloc::collections::TryReserveError> for NvChipIoError {
+    fn from(_value: alloc::collections::TryReserveError) -> Self {
+        Self::MemoryAllocationFailure
+    }
 }
 
 /// Future trait implemented by all [`NvChip`] related futures.
@@ -437,5 +481,5 @@ pub trait NvChipReadRequest {
     ///
     /// Return `None` if the read result for the `range` is to be dismissed.
     fn get_destination_buffer(&mut self, range: &ChunkedIoRegionChunkRange)
-        -> Result<Option<&mut [u8]>, NvChipIoError>;
+    -> Result<Option<&mut [u8]>, NvChipIoError>;
 }
