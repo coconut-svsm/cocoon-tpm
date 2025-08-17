@@ -11,7 +11,9 @@ use crate::{
     chip,
     crypto::symcipher,
     fs::{
+        NvFsError,
         cocoonfs::{
+            CocoonFsFormatError,
             encryption_entities::{self, EncryptedExtentsDecryptionInstance, EncryptedExtentsLayout},
             extents,
             fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
@@ -19,9 +21,8 @@ use crate::{
             inode_index::{InodeIndexKeyType, InodeIndexLookupFuture, InodeKeySubdomain},
             keys,
             read_authenticate_extent::ReadAuthenticateExtentFuture,
-            transaction, CocoonFsFormatError,
+            transaction,
         },
-        NvFsError,
     },
     tpm2_interface,
     utils_async::sync_types,
@@ -33,11 +34,17 @@ use crate::{
 };
 use core::{mem, pin, task};
 
+/// Read an inode's data, optionally through a pending
+/// [`Transaction`](transaction::Transaction).
+///
+/// Used for the implementation of
+/// [`NvFs::read_inode()`](crate::fs::NvFs::read_inode).
 pub struct ReadInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inode: InodeIndexKeyType,
     fut_state: ReadInodeDataFutureState<ST, C>,
 }
 
+/// [`ReadInodeDataFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum ReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     LookupInode {
@@ -62,6 +69,19 @@ enum ReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadInodeDataFuture<ST, C> {
+    /// Instantiate a [`ReadInodeDataFuture`].
+    ///
+    /// If `transaction` is specified, then the inode's data will be read at the
+    /// state as if the `transaction` had already been committed. The
+    /// `ReadInodeDataFuture` assumes ownership of the `transaction` for the
+    /// duration of the operation, it will eventually get returned back from
+    /// [`poll`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - Optional [`Transaction`](transaction::Transaction) to
+    ///   read through.
+    /// * `inode` - The inode whose data to read.
     pub fn new(transaction: Option<Box<transaction::Transaction>>, inode: InodeIndexKeyType) -> Self {
         Self {
             inode,
@@ -71,6 +91,22 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadInodeDataFuture<ST, C> {
         }
     }
 
+    /// Instantiate a [`ReadInodeDataFuture`] with known inode data extents.
+    ///
+    /// If `transaction` is specified, then the inode's data will be read at the
+    /// state as if the `transaction` had already been committed. The
+    /// `ReadInodeDataFuture` assumes ownership of the `transaction` for the
+    /// duration of the operation, it will eventually get returned back from
+    /// [`poll`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - Optional [`Transaction`](transaction::Transaction) to
+    ///   read through.
+    /// * `inode` - The inode whose data to read.
+    /// * `inode_extents` - The `inode`'s data extents previously obtained from
+    ///   the inode index. If `transaction` is specified, then they must be
+    ///   consistent with its view on the inode index state.
     pub fn new_with_inode_extents(
         transaction: Option<Box<transaction::Transaction>>,
         inode: InodeIndexKeyType,
@@ -87,6 +123,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadInodeDataFuture<ST, C> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C> for ReadInodeDataFuture<ST, C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// The [`Transaction`](transaction::Transaction) initially passed to
+    /// [`new()`](Self::new()) is returned in the first component.
+    /// The second components holds the read result, which on success is either
+    /// the inode data wrapped in `Some` if the inode exists, or `None` if
+    /// it doesn't.
     type Output = (
         Option<Box<transaction::Transaction>>,
         Result<Option<zeroize::Zeroizing<Vec<u8>>>, NvFsError>,

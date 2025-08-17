@@ -46,12 +46,19 @@ use crate::{
 use alloc::{boxed::Box, vec::Vec};
 use core::{mem, pin, task};
 
+#[cfg(doc)]
+use crate::fs::cocoonfs::fs::CocoonFs;
+#[cfg(doc)]
+use journal::extents_covering_auth_digests::ExtentsCoveringAuthDigests;
+
+/// Write the journal for a to be committed [`Transaction`].
 pub struct TransactionWriteJournalFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: TransactionWriteJournalFutureState<ST, C>,
     encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction: Vec<u8>,
     issue_sync: bool,
 }
 
+/// [`TransactionWriteJournalFuture`] state-machine state.
 enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -147,6 +154,24 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvCh
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<ST, C> {
+    /// Instantiate a [`TransactionWriteJournalFuture`].
+    ///
+    /// The [`TransactionWriteJournalFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The committing [`Transaction`].
+    /// * `issue_sync` - Whether or not to submit a [synchronization
+    ///   barrier](chip::NvChip::write_sync) to the backing storage after the
+    ///   journal has been written.
+    /// * `_fs_instance_sync_state` - Reference to [`CocoonFs::sync_state`].
+    /// * `accumulated_pending_transactions_sync_state` - The accumulated
+    ///   [`CocoonFsPendingTransactionsSyncState`] taken from
+    ///   [`CocoonFs::pending_transactions_sync_state`] upon starting the commit
+    ///   process for `transaction`.
     pub fn new(
         mut transaction: Box<Transaction>,
         issue_sync: bool,
@@ -180,6 +205,21 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
         })
     }
 
+    /// Poll the [`TransactionWriteJournalFuture`] to completion.
+    ///
+    /// On successful completion, the input [`Transaction`] is returned back. On
+    /// error, a triplet consisting of a `bool` indicating whether the
+    /// journal is in an indeterminate state and might or might not be
+    /// effective at a subsequent filesystem opening operation, the input
+    /// [`Transaction`] if still available and the error reason is being
+    /// returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`].
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::type_complexity)]
     pub fn poll(
         self: pin::Pin<&mut Self>,
@@ -235,7 +275,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     ) = fs_instance_sync_state.fs_instance_and_destructure_borrow();
 
                     if let Err(e) = transaction.inode_index_updates.apply_all_tree_nodes_staged_updates(
-                        &mut transaction.allocs,
+                        &transaction.allocs,
                         &mut transaction.auth_tree_data_blocks_update_states,
                         transaction.rng.as_mut(),
                         &fs_instance.fs_config,
@@ -1244,6 +1284,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
     }
 }
 
+/// Collect and encode some [`ExtentsCoveringAuthDigests`].
 struct TransactionCollectExtentsCoveringAuthDigestsFuture<C: chip::NvChip> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
@@ -1256,6 +1297,7 @@ struct TransactionCollectExtentsCoveringAuthDigestsFuture<C: chip::NvChip> {
     fut_state: TransactionCollectExtentsCoveringAuthDigestsFutureState<C>,
 }
 
+/// [`TransactionCollectExtentsCoveringAuthDigestsFuture`] state-machine state.
 enum TransactionCollectExtentsCoveringAuthDigestsFutureState<C: chip::NvChip> {
     Init,
     LookupModified,
@@ -1270,6 +1312,23 @@ enum TransactionCollectExtentsCoveringAuthDigestsFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
+    /// Instantiate a [`TransactionCollectExtentsCoveringAuthDigestsFuture`].
+    ///
+    /// The [`TransactionCollectExtentsCoveringAuthDigestsFuture`] assumes
+    /// ownership of the `transaction` and the `out_buffer` for the duration
+    /// of the operation, they will eventually get returned back from
+    /// [`poll()`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The committing [`Transaction`].
+    /// * `covered_extents` - The extents to collect covering authentication
+    ///   digests for. Must be sorted by ascending storage location.
+    /// * `out_buffer` - The output buffer to encode the resulting
+    ///   [`ExtentsCoveringAuthDigests`] to, starting at the position specified
+    ///   by `out_buffer_destination_offset`. The remainder of `out_buffer` must
+    ///   have at least the size as determined by
+    ///   [`ExtentsCoveringAuthDigests::encoded_len()`].
     fn new(
         transaction: Box<Transaction>,
         covered_extents: extents::PhysicalExtents,
@@ -1287,6 +1346,24 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
         }
     }
 
+    /// Poll the [`TransactionCollectExtentsCoveringAuthDigestsFuture`] to
+    /// completion.
+    ///
+    /// A pair of the output buffer initially passed to [`new()`](Self::new) and
+    /// the operation result is returned back upon
+    /// [`future`](TransactionCollectExtentsCoveringAuthDigestsFuture)
+    /// completion. On success, a pair of the [`Transaction`] and the position
+    /// in the output buffer immediately past the encoded contents is
+    /// returned back for the result. Otherwise, on error,
+    /// the [`Transaction`], if still available, gets returned back alongside
+    /// the error reason.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`].
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
@@ -1760,6 +1837,8 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
     }
 }
 
+/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// internally by [`TransactionWriteJournalFuture`].
 struct WriteJournalLogExtentChipRequest {
     region: ChunkedIoRegion,
     src: Vec<u8>,

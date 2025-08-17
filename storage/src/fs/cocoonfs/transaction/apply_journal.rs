@@ -8,6 +8,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use super::{
+    Transaction,
     auth_tree_data_blocks_update_states::{
         AllocationBlockUpdateNvSyncState, AllocationBlockUpdateNvSyncStateAllocated,
         AllocationBlockUpdateNvSyncStateAllocatedModified, AllocationBlockUpdateStagedUpdate,
@@ -16,22 +17,32 @@ use super::{
     },
     cleanup::TransactionTrimJournalFuture,
     read_missing_data::TransactionReadMissingDataFuture,
-    Transaction,
 };
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     fs::{
+        NvFsError,
         cocoonfs::{
             alloc_bitmap, auth_tree, extents, fs::CocoonFsSyncStateMemberMutRef, inode_index, journal, layout,
             read_buffer,
         },
-        NvFsError,
     },
     nvfs_err_internal,
     utils_async::sync_types,
 };
 use core::{iter, mem, pin, task};
 
+#[cfg(doc)]
+use layout::ImageLayout;
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
+
+/// Apply a committing [`Transaction`]'s journal online.
+///
+/// It is expected that the journal [has been
+/// written](super::write_journal::TransactionWriteJournalFuture) beforehand,
+/// and thus, the changes staged at the [`Transaction`] are considered
+/// effective.
 pub struct TransactionApplyJournalFuture<C: chip::NvChip> {
     fut_state: TransactionApplyJournalFutureState<C>,
     low_memory: u32,
@@ -93,6 +104,19 @@ enum TransactionApplyJournalFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
+    /// Instantiate a [`TransactionApplyJournalFuture`].
+    ///
+    /// The [`TransactionApplyJournalFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion with failure.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The committing [`Transaction`].
+    /// * `_fs_instance_sync_state` - Reference to
+    ///   [`crate::fs::cocoonfs::fs::CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `low_memory` - Whether the system is in a low memory condition.
     pub fn new<ST: sync_types::SyncTypes>(
         transaction: Box<Transaction>,
         _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
@@ -107,6 +131,18 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
         })
     }
 
+    /// Poll the [`TransactionApplyJournalFuture`] to completion.
+    ///
+    /// On successful completion, `Ok(())` is returned. Otherwise on error, the
+    /// input [`Transaction`], if still available, is returned back alongside
+    /// the error reason.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
@@ -471,6 +507,17 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
         task::Poll::Ready(Err((transaction, e)))
     }
 
+    /// Enter a low memory condition.
+    ///
+    /// Free up some caches and otherwise no longer needed state in order to
+    /// reduce memory pressure for a subsequent retry. Return `true` if some
+    /// memory could be freed up.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The committing [`Transaction`].
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
     fn enter_low_memory<ST: sync_types::SyncTypes>(
         &mut self,
         transaction: &mut Transaction,
@@ -486,8 +533,8 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
 
         // If this is a retry already, or trimming is not enabled, deallocated anything
         // needed exclusively for trimming.
-        let fs_instace = fs_instance_sync_state.get_fs_ref();
-        if low_memory != 0 || !fs_instace.fs_config.enable_trimming {
+        let fs_instance = fs_instance_sync_state.get_fs_ref();
+        if low_memory != 0 || !fs_instance.fs_config.enable_trimming {
             transaction.allocs.pending_allocs = alloc_bitmap::SparseAllocBitmap::new();
             transaction.allocs.pending_frees = alloc_bitmap::SparseAllocBitmap::new();
             transaction.allocs.journal_allocs = alloc_bitmap::SparseAllocBitmap::new();
@@ -528,6 +575,19 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
         low_memory < self.low_memory
     }
 
+    /// Apply updates from the [`Transaction`] to the [filesystem
+    /// instance's read
+    /// buffer](crate::fs::cocoonfs::fs::CocoonFsSyncState::read_buffer).
+    ///
+    /// # Arguments:
+    ///
+    /// * `read_buffer` - The [filesystem instance's read
+    ///   buffer](crate::fs::cocoonfs::fs::CocoonFsSyncState::read_buffer).
+    /// * `transaction_update_states` - `mut` reference to
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
+    /// * `transaction_pending_frees` - Reference to the
+    ///   [`Transaction::allocs`]'
+    ///   [`TransactionAllocations::pending_frees`](super::TransactionAllocations::pending_frees).
     fn update_fs_sync_state_read_buffer<ST: sync_types::SyncTypes>(
         read_buffer: &mut read_buffer::ReadBuffer<ST>,
         transaction_update_states: &mut AuthTreeDataBlocksUpdateStates,
@@ -781,6 +841,16 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
     }
 }
 
+/// Drop a [`Transaction`]'s cached data buffers.
+///
+/// # Arguments:
+///
+/// * `transaction_update_states` - `mut` reference to
+///   [`Transaction::auth_tree_data_blocks_update_states`].
+/// * `update_states_allocation_blocks_index_range` - Optional [Allocation Block
+///   level index
+///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) in
+///   `transaction_update_states` to restrict the operation to.
 fn transaction_drop_data_buffers(
     transaction_update_states: &mut AuthTreeDataBlocksUpdateStates,
     update_states_allocation_blocks_index_range: Option<&AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange>,
@@ -820,12 +890,25 @@ fn transaction_drop_data_buffers(
     }
 }
 
+/// Apply the [`Transaction`]'s data writes to their final target storage
+/// location.
+///
+/// Write all modified data within a specified [Allocation Block level index
+/// range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) in the
+/// [`Transaction`]'s [storage tracking
+/// states](AllocationBlockUpdateNvSyncState) to their associated [target
+/// locations](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin)
+/// on storage.
+///
+/// Data currently not cached in the [`Transaction`]'s buffers will get read in
+/// in the course.
 struct TransactionWriteDataUpdatesFuture<C: chip::NvChip> {
     fut_state: TransactionWriteDataUpdatesFutureState<C>,
     remaining_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     low_memory: bool,
 }
 
+/// [`TransactionWriteDataUpdatesFuture`] state-machine state.
 enum TransactionWriteDataUpdatesFutureState<C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -844,6 +927,25 @@ enum TransactionWriteDataUpdatesFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
+    /// Instantiate [`TransactionWriteDataUpdatesFuture`].
+    ///
+    /// The [`TransactionWriteDataUpdatesFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion with failure.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The committing [`Transaction`].
+    /// * `states_allocation_blocks_index_range` - The [Allocation Block level
+    ///   entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   write updates from the [storage tracking
+    ///   states](AllocationBlockUpdateNvSyncState)' to their respective target
+    ///   locations in.
+    /// * `low_memory` - Whether the system is in a low memory condition.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     pub fn new(
         transaction: Box<Transaction>,
         states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -865,6 +967,26 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
         }
     }
 
+    /// Poll the [`TransactionWriteDataUpdatesFuture`] to completion.
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](TransactionWriteDataUpdatesFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input [`Transaction`], `transaction`, and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, Err(e)))` - In case of an error, the error
+    ///       reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, Ok(())))` -  Otherwise, `Ok(())` will get
+    ///       returned for the operation result on success.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
@@ -1063,6 +1185,25 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
         }
     }
 
+    /// Determine the next subrange to write.
+    ///
+    /// Return a pair of the next subrange to write, if any, and the remainder
+    /// of `remaining_states_allocation_blocks_index_range` to process in a
+    /// subsequent iteration.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The committing [`Transaction`].
+    /// * `remaining_states_allocation_blocks_index_range` - Remaining part of
+    ///   the initial request range not processed yet, extended to cover any
+    ///   preexisting states within the vicinity of a [IO
+    ///   Block](ImageLayout::io_block_allocation_blocks_log2) size as
+    ///   specified by `io_block_allocation_blocks_log2`.
+    /// * `low_memory` - Whether the system is in a low memory condition.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     fn determine_next_write_region(
         transaction: &Transaction,
         remaining_states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -1212,6 +1353,8 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
     }
 }
 
+/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// internally by [`TransactionWriteDataUpdatesFuture`].
 struct TransactionWriteDataUpdatesNvChipRequest {
     transaction: Box<Transaction>,
     aligned_write_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -1265,6 +1408,9 @@ impl chip::NvChipWriteRequest for TransactionWriteDataUpdatesNvChipRequest {
     }
 }
 
+/// [Trim](chip::NvChip::trim) [IO
+/// Blocks](ImageLayout::io_block_allocation_blocks_log2) that became
+/// fully unallocated with a [`Transaction`].
 struct TransactionTrimDeallocatedIoBlocksFuture<C: chip::NvChip> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
@@ -1273,12 +1419,23 @@ struct TransactionTrimDeallocatedIoBlocksFuture<C: chip::NvChip> {
     fut_state: TransactionTrimDeallocatedIoBlocksFutureState<C>,
 }
 
+/// [`TransactionTrimDeallocatedIoBlocksFuture`] state-machine state.
 enum TransactionTrimDeallocatedIoBlocksFutureState<C: chip::NvChip> {
     Init,
     TrimRegion { trim_fut: C::TrimFuture },
 }
 
 impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
+    /// Instantiate a [`TransactionTrimDeallocatedIoBlocksFuture`].
+    ///
+    /// The [`TransactionTrimDeallocatedIoBlocksFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// successful completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The committing [`Transaction`].
     pub fn new(transaction: Box<Transaction>) -> Self {
         Self {
             transaction: Some(transaction),
@@ -1287,6 +1444,19 @@ impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
         }
     }
 
+    /// Poll the [`TransactionTrimDeallocatedIoBlocksFuture`] to completion.
+    ///
+    /// Upon successful [future](TransactionTrimDeallocatedIoBlocksFuture)
+    /// completion, the [`Transaction`] initially passed to [`new()`](Self::new)
+    /// is returned back. Otherwise, on error, the [`Transaction`] is
+    /// consumed and the error reason is returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
         fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
@@ -1368,6 +1538,21 @@ impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
         }
     }
 
+    /// Determine the next region to trim.
+    ///
+    /// Return the next region on physical storage to trim, if any.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `transaction_pending_frees` - Reference to the
+    ///   [`Transaction::allocs`]'
+    ///   [`TransactionAllocations::pending_frees`](super::TransactionAllocations::pending_frees).
+    /// * `next_io_block_allocation_blocks_begin` - The current position on
+    ///   storage.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     fn determine_next_trim_region(
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
         transaction_pending_frees: &alloc_bitmap::SparseAllocBitmap,

@@ -2,6 +2,8 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Functionality related to the journal log.
+
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -12,15 +14,15 @@ use super::{
 };
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
-    crypto::{hash, symcipher, CryptoError},
+    crypto::{CryptoError, hash, symcipher},
     fs::{
+        NvFsError, NvFsIoError,
         cocoonfs::{
-            alloc_bitmap,
+            CocoonFsFormatError, alloc_bitmap,
             auth_subject_ids::AuthSubjectDataSuffix,
             encryption_entities::{
-                check_cbc_padding, EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix,
-                EncryptedChainedExtentsDecryptionInstance, EncryptedChainedExtentsEncryptionInstance,
-                EncryptedChainedExtentsLayout,
+                EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix, EncryptedChainedExtentsDecryptionInstance,
+                EncryptedChainedExtentsEncryptionInstance, EncryptedChainedExtentsLayout, check_cbc_padding,
             },
             extents,
             fs::CocoonFsConfig,
@@ -28,9 +30,7 @@ use crate::{
             layout::{self, BlockIndex as _},
             leb128,
             transaction::{Transaction, TransactionJournalUpdateAuthDigestsScriptIterator},
-            CocoonFsFormatError,
         },
-        NvFsError, NvFsIoError,
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
@@ -45,14 +45,22 @@ use crate::{
 };
 use core::{convert, mem, num, pin, task};
 
+/// Enum value of [`JournalLogFieldTag::AuthTreeExtents`].
 const JOURNAL_LOG_FIELD_TAG_AUTH_TREE_EXTENTS_VALUE: u8 = 1u8;
+/// Enum value of [`JournalLogFieldTag::AllocBitmapFileExtents`].
 const JOURNAL_LOG_FIELD_TAG_ALLOC_BITMAP_FILE_EXTENTS_VALUE: u8 = 2u8;
+/// Enum value of [`JournalLogFieldTag::AllocBitmapFileFragmentsAuthDigests`].
 const JOURNAL_LOG_FIELD_TAG_ALLOC_BITMAP_FILE_FRAGMENTS_AUTH_DIGESTS_VALUE: u8 = 3u8;
+/// Enum value of [`JournalLogFieldTag::ApplyWritesScript`].
 const JOURNAL_LOG_FIELD_TAG_APPLY_WRITES_SCRIPT_VALUE: u8 = 4u8;
+/// Enum value of [`JournalLogFieldTag::UpdateAuthDigestsScript`].
 const JOURNAL_LOG_FIELD_TAG_UPDATE_AUTH_DIGESTS_SCRIPT_VALUE: u8 = 5u8;
+/// Enum value of [`JournalLogFieldTag::TrimScript`].
 const JOURNAL_LOG_FIELD_TAG_TRIM_SCRIPT_VALUE: u8 = 6u8;
+/// Enum value of [`JournalLogFieldTag::JournalStagingCopyDisguise`].
 const JOURNAL_LOG_FIELD_TAG_JOURNAL_STAGING_COPY_DISGUISE_VALUE: u8 = 7u8;
 
+/// Tags identifying encoded journal log fields.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum JournalLogFieldTag {
@@ -65,6 +73,11 @@ pub enum JournalLogFieldTag {
     JournalStagingCopyDisguise = JOURNAL_LOG_FIELD_TAG_JOURNAL_STAGING_COPY_DISGUISE_VALUE,
 }
 
+/// Determine a [`JournalLogFieldTag`]'s encoded length.
+///
+/// # Arguments:
+///
+/// * `tag` - The [`JournalLogFieldTag`] value.
 fn encoded_field_tag_len(tag: JournalLogFieldTag) -> usize {
     // The field tag is encoded as an unsigned leb128. However, all currently
     // allocated tag values are < 0x80, meaning the encoding is just the plain
@@ -73,6 +86,15 @@ fn encoded_field_tag_len(tag: JournalLogFieldTag) -> usize {
     1
 }
 
+/// Encode a [`JournalLogFieldTag`].
+///
+/// Encode `tag` into `dst` and return the remainder of `dst`.
+///
+/// # Arguments:
+///
+/// * `dst` - Destination buffer. Must have at least the size as determined by
+///   [`encoded_field_tag_len()`].
+/// * `tag` - The [`JournalLogFieldTag`] to encode.
 fn encode_field_tag(dst: &mut [u8], tag: JournalLogFieldTag) -> &mut [u8] {
     // The field tag is encoded as an unsigned leb128. However, all currently
     // allocated tag values are < 0x80, meaning the encoding is just the plain
@@ -82,6 +104,16 @@ fn encode_field_tag(dst: &mut [u8], tag: JournalLogFieldTag) -> &mut [u8] {
     &mut dst[1..]
 }
 
+/// Decode a [`JournalLogFieldTag`].
+///
+/// If any tag is left in `src`, decode it, advance `src` by the consumed
+/// length, and return the decoded tag wrapped in a `Some`. Otherwise, if `src`
+/// has been exhausted already, return `None`.
+///
+/// # Arguments:
+///
+/// `src` - The source buffer to decode from. Will get advanced by the consumed
+/// length.
 fn decode_field_tag<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = convert::Infallible>>(
     mut src: SI,
 ) -> Result<Option<JournalLogFieldTag>, NvFsError> {
@@ -115,6 +147,13 @@ fn decode_field_tag<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = c
     Ok(Some(tag))
 }
 
+/// Determine the encoded length of a pair of [`JournalLogFieldTag`] and field
+/// payload length.
+///
+/// # Arguments:
+///
+/// * `tag` - The [`JournalLogFieldTag`] value.
+/// * `value_len` - The field's payload length.
 fn encoded_field_tag_and_len_len(tag: JournalLogFieldTag, value_len: usize) -> Result<usize, NvFsError> {
     let encoded_tag_len = encoded_field_tag_len(tag);
     let encoded_len_len = leb128::leb128u_u64_encoded_len(
@@ -123,6 +162,17 @@ fn encoded_field_tag_and_len_len(tag: JournalLogFieldTag, value_len: usize) -> R
     Ok(encoded_tag_len + encoded_len_len)
 }
 
+/// Encode a pair of [`JournalLogFieldTag`] and field payload length.
+///
+/// Encode the pair of `tag` and `value_len` into `dst` and return the remainder
+/// of `dst`.
+///
+/// # Arguments:
+///
+/// * `dst` - Destination buffer. Must have at least the size as determined by
+///   [`encoded_field_tag_and_len_len()`].
+/// * `tag` - The [`JournalLogFieldTag`] value to encode.
+/// * `value_len` - The field's payload length to encode.
 fn encode_field_tag_and_len(
     mut dst: &mut [u8],
     tag: JournalLogFieldTag,
@@ -135,6 +185,16 @@ fn encode_field_tag_and_len(
     Ok(dst)
 }
 
+/// Decode a pair of [`JournalLogFieldTag`] and field payload length.
+///
+/// If any bytes are left in `src`, decode a pair of tag and length, advance
+/// `src` by the consumed length, and return the decoded pair wrapped in a
+/// `Some`. Otherwise, if `src` has been exhausted already, return `None`.
+///
+/// # Arguments:
+///
+/// * `src` - The source buffer to decode from. Will get advanced by the
+///   consumed length.
 fn decode_field_tag_and_len<'a, SI: io_slices::PeekableIoSlicesIter<'a, BackendIteratorError = convert::Infallible>>(
     mut src: SI,
 ) -> Result<Option<(JournalLogFieldTag, usize)>, NvFsError> {
@@ -173,6 +233,13 @@ fn decode_field_tag_and_len<'a, SI: io_slices::PeekableIoSlicesIter<'a, BackendI
     Ok(Some((tag, value_len)))
 }
 
+/// [`JournalLog`] encoding buffer layout.
+///
+/// Before a [`JournalLog`] can get [encoded](JournalLog::encode), buffers of a
+/// suitable total size must get allocated. `JournalLogEncodeBufferLayout`
+/// provides a means to determine that total size, and to cache some
+/// intermediate encoding buffer layout results for reuse when doing the
+/// actual encoding later on.
 #[derive(Clone)]
 pub struct JournalLogEncodeBufferLayout {
     encoded_auth_tree_extents_value_len: usize,
@@ -186,6 +253,24 @@ pub struct JournalLogEncodeBufferLayout {
 }
 
 impl JournalLogEncodeBufferLayout {
+    /// Instantiate a [`JournalLogEncodeBufferLayout`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `transaction` - The [`Transaction`] to commit to the journal.
+    /// * `auth_tree_extents` - The [authentication tree's
+    ///   extents](crate::fs::cocoonfs::auth_tree::AuthTreeConfig::get_auth_tree_extents).
+    /// * `alloc_bitmap_file_extents` - The [allocation bitmap file's
+    ///   extents](alloc_bitmap::AllocBitmapFile::get_extents).
+    /// * `encoded_alloc_bitmap_file_fragments_auth_digests_len` - [Encoded
+    ///   length of the
+    ///   `ExtentsCoveringAuthDigests`](ExtentsCoveringAuthDigests::encoded_len)
+    ///   for the [allocation bitmap file fragments needed for authentication
+    ///   tree reconstruction during journal
+    ///   replay](super::auth_tree_updates::collect_alloc_bitmap_blocks_for_auth_tree_reconstruction).
     pub fn new(
         fs_config: &CocoonFsConfig,
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
@@ -322,23 +407,54 @@ impl JournalLogEncodeBufferLayout {
         })
     }
 
+    /// Get the [`JournalLog`]'s total encoded length.
     pub fn get_encoded_total_len(&self) -> usize {
         self.encoded_total_len
     }
 }
 
+/// To be encrypted journal log plaintext contents.
 pub struct JournalLog {
+    /// The extents forming the journal log's encrypted chained extents.
+    ///
+    /// Always starts
+    /// with the filesystem's fixed [journal log head
+    /// extent](Self::head_extent_physical_location)
     pub log_extents: extents::PhysicalExtents,
+    /// Contents of the [`AuthTreeExtents`](JournalLogFieldTag::AuthTreeExtents)
+    /// field.
     pub auth_tree_extents: extents::PhysicalExtents,
+    /// Contents of the
+    /// [`AllocBitmapFileExtents`](JournalLogFieldTag::AllocBitmapFileExtents)
+    /// field.
     pub alloc_bitmap_file_extents: extents::PhysicalExtents,
+    /// Contents of the
+    /// [`AllocBitmapFileFragmentsAuthDigests`](JournalLogFieldTag::AllocBitmapFileFragmentsAuthDigests)
+    /// field.
     pub alloc_bitmap_file_fragments_auth_digests: ExtentsCoveringAuthDigests,
+    /// Contents of the
+    /// [`ApplyWritesScript`](JournalLogFieldTag::ApplyWritesScript) field.
     pub apply_writes_script: apply_script::JournalApplyWritesScript,
+    /// Contents of the
+    /// [`UpdateAuthDigestsScript`](JournalLogFieldTag::UpdateAuthDigestsScript)
+    /// field.
     pub update_auth_digests_script: apply_script::JournalUpdateAuthDigestsScript,
+    /// Contents of the optional
+    /// [`TrimScript`](JournalLogFieldTag::TrimScript) field.
     pub trim_script: Option<apply_script::JournalTrimsScript>,
+    /// [`JournalStagingCopyUndisguise`] created from the contents of the
+    /// [`JournalStagingCopyDisguise`](JournalLogFieldTag::JournalStagingCopyDisguise) field, if any.
     pub journal_staging_copy_undisguise: Option<JournalStagingCopyUndisguise>,
 }
 
 impl JournalLog {
+    /// Instantiate a [`EncryptedChainedExtentsLayout`] suitable for the journal
+    /// log.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
     pub fn extents_encryption_layout(
         image_layout: &layout::ImageLayout,
     ) -> Result<EncryptedChainedExtentsLayout, NvFsError> {
@@ -358,6 +474,16 @@ impl JournalLog {
         )
     }
 
+    /// Instantiate a [`EncryptedChainedExtentsEncryptionInstance`] suitable for
+    /// the journal log.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `fs_root_key` - The filesystem's root key.
+    /// * `fs_sync_state_keys_cache` - The [filesystem instance's key
+    ///   cache](crate::fs::cocoonfs::fs::CocoonFsSyncState::keys_cache).
     pub fn extents_encryption_instance<ST: sync_types::SyncTypes>(
         image_layout: &layout::ImageLayout,
         fs_root_key: &keys::RootKey,
@@ -402,6 +528,16 @@ impl JournalLog {
         )
     }
 
+    /// Instantiate a [`EncryptedChainedExtentsDecryptionInstance`] suitable for
+    /// the journal log.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `fs_root_key` - The filesystem's root key.
+    /// * `fs_sync_state_keys_cache` - The [filesystem instance's key
+    ///   cache](crate::fs::cocoonfs::fs::CocoonFsSyncState::keys_cache).
     pub fn extents_decryption_instance<ST: sync_types::SyncTypes>(
         image_layout: &layout::ImageLayout,
         fs_root_key: &keys::RootKey,
@@ -446,6 +582,15 @@ impl JournalLog {
         )
     }
 
+    /// Determine the (fixed) location of the journal log's chained encrypted
+    /// extents' head extent.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](image_header::MutableImageHeader::physical_location).
     pub fn head_extent_physical_location(
         image_layout: &layout::ImageLayout,
         image_header_end: layout::PhysicalAllocBlockIndex,
@@ -501,6 +646,35 @@ impl JournalLog {
         ))
     }
 
+    /// Encode a [`JournalLog`].
+    ///
+    /// Encode the journal log's to be encrypted payload into `dst` and return
+    /// the remainder of `dst`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `dst` - The destination buffer. It must be at least
+    ///   [`encoded_buf_layout.
+    ///   get_encoded_total_len()`](JournalLogEncodeBufferLayout::get_encoded_total_len)
+    ///   in size.
+    /// * `encode_buf_layout` - The [`JournalLogEncodeBufferLayout`] obtained
+    ///   previously when computing the needed `dst` buffer size. Must have
+    ///   instantiated with arguments consistent with the ones passed here.
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `fs_sync_state_keys_cache` - The [filesystem instance's key
+    ///   cache](crate::fs::cocoonfs::fs::CocoonFsSyncState::keys_cache).
+    /// * `transaction` - The [`Transaction`] to commit to the journal.
+    /// * `auth_tree_extents` - The [authentication tree's
+    ///   extents](crate::fs::cocoonfs::auth_tree::AuthTreeConfig::get_auth_tree_extents).
+    /// * `alloc_bitmap_file_extents` - The [allocation bitmap file's
+    ///   extents](alloc_bitmap::AllocBitmapFile::get_extents).
+    /// * `encoded_alloc_bitmap_file_fragments_auth_digests` - [Encoded
+    ///   `ExtentsCoveringAuthDigests`](ExtentsCoveringAuthDigests) for
+    ///   the [allocation bitmap file fragments needed for authentication tree
+    ///   reconstruction during journal
+    ///   replay](super::auth_tree_updates::collect_alloc_bitmap_blocks_for_auth_tree_reconstruction).
     #[allow(clippy::too_many_arguments)]
     pub fn encode<'a, ST: sync_types::SyncTypes>(
         mut dst: &'a mut [u8],
@@ -678,6 +852,19 @@ impl JournalLog {
         Ok(dst)
     }
 
+    /// Decode a [`JournalLog`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - Buffers to decode from. Must have the CBC padding from the
+    ///   encryption stripped. `src` gets advanced past the decoded data, i.e.
+    ///   is empty upon (successful) return.
+    /// * `log_extents` - The extents forming the journal log's encrypted
+    ///   chained extents. Always starts with the filesystem's fixed [journal
+    ///   log head extent](Self::head_extent_physical_location)
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
     pub fn decode<
         'a,
         ST: sync_types::SyncTypes,
@@ -1017,11 +1204,17 @@ impl JournalLog {
     }
 }
 
+/// Invalidate the journal log.
+///
+/// Overwrite the filesystem's [journal log
+/// head](JournalLog::head_extent_physical_location) such that no more attempts
+/// to replay it will be made.
 pub struct JournalLogInvalidateFuture<C: chip::NvChip> {
     fut_state: JournalLogInvalidateFutureState<C>,
     issue_sync: bool,
 }
 
+/// [`JournalLogInvalidateFuture`] state-machine state.
 enum JournalLogInvalidateFutureState<C: chip::NvChip> {
     Init,
     WriteBarrierBeforeInvalidate {
@@ -1037,6 +1230,13 @@ enum JournalLogInvalidateFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
+    /// Instantiate a [`JournalLogInvalidateFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `issue_sync` - Whether or not to submit a [synchronization
+    ///   barrier](chip::NvChip::write_sync) to the backing storage after the
+    ///   journal log invalidation.
     pub fn new(issue_sync: bool) -> Self {
         Self {
             fut_state: JournalLogInvalidateFutureState::Init,
@@ -1044,6 +1244,17 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
         }
     }
 
+    /// Poll the [`JournalLogInvalidateFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](image_header::MutableImageHeader::physical_location).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
         chip: &C,
@@ -1153,6 +1364,8 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
     }
 }
 
+/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// internally by [`JournalLogInvalidateFuture`].
 struct JournalLogInvalidateNvChipWriteRequest {
     region: ChunkedIoRegion,
     overwrite_buf: Vec<u8>,
@@ -1199,6 +1412,7 @@ impl chip::NvChipWriteRequest for JournalLogInvalidateNvChipWriteRequest {
     }
 }
 
+/// Read the journal log at filesystem opening time.
 pub struct JournalLogReadFuture<C: chip::NvChip> {
     fut_state: JournalLogReadFutureState<C>,
     log_extents: extents::PhysicalExtents,
@@ -1206,6 +1420,7 @@ pub struct JournalLogReadFuture<C: chip::NvChip> {
     decrypted_journal_log_extents: Vec<zeroize::Zeroizing<Vec<u8>>>,
 }
 
+/// [`JournalLogReadFuture`] state-machine state.
 enum JournalLogReadFutureState<C: chip::NvChip> {
     Init,
     ReadJournalLogHeadExtentHead {
@@ -1237,6 +1452,7 @@ enum JournalLogReadFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> JournalLogReadFuture<C> {
+    /// Instantiate a [`JournalLogReadFuture`].
     pub fn new() -> Self {
         Self {
             fut_state: JournalLogReadFutureState::Init,
@@ -1246,6 +1462,24 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
         }
     }
 
+    /// Poll the [`JournalLogReadFuture`] to completion.
+    ///
+    /// On successful completion, a [`JournalLog`] wrapped in a `Some` is
+    /// returned if a journal to get replayed has been found, or a `None` in
+    /// case the journal is inactive.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `salt_len` - Length of the salt found in the filesystem's
+    ///   [`StaticImageHeader`](image_header::StaticImageHeader).
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
         chip: &C,
@@ -1688,6 +1922,8 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
     }
 }
 
+/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// internally by [`JournalLogReadFuture`].
 struct JournalLogReadExtentNvChipReadRequest {
     region: ChunkedIoRegion,
     dst: Vec<u8>,

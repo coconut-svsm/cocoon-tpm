@@ -38,13 +38,20 @@ use crate::{
 use core::{cmp, convert, iter, marker, mem, ops, pin, task};
 use ops::{Deref as _, DerefMut as _};
 
-/// [Allocation Block](layout::ImageLayout::allocation_block_size_128b_log2)
+#[cfg(doc)]
+use crate::chip::NvChipFuture as _;
+#[cfg(doc)]
+use crate::fs::cocoonfs::image_header::MutableImageHeader;
+#[cfg(doc)]
+use layout::ImageLayout;
+
+/// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
 /// index in the authentication tree's authenticated data domain.
 ///
 /// The data authenticated by an authentication tree comprises all of the
 /// filesystem's image without the extents storing the tree itself. An
 /// `AuthTreeDataAllocBlockIndex` refers to an [Allocation
-/// Block](layout::ImageLayout::allocation_block_size_128b_log2) in that domain.
+/// Block](ImageLayout::allocation_block_size_128b_log2) in that domain.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct AuthTreeDataAllocBlockIndex {
     index: u64,
@@ -54,9 +61,9 @@ impl AuthTreeDataAllocBlockIndex {
     /// Convert from a [`AuthTreeDataBlockIndex`].
     ///
     /// The returned [`AuthTreeDataAllocBlockIndex`] will refer to the first
-    /// [Allocation Block](layout::ImageLayout::allocation_block_size_128b_log2)
+    /// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
     /// in the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// identified by `data_block_index`.
     ///
     /// # Arguments:
@@ -64,9 +71,9 @@ impl AuthTreeDataAllocBlockIndex {
     /// * `data_block_index` - The [`AuthTreeDataBlockIndex`] to convert from.
     /// * `data_block_allocation_blocks_log2` - Base-2 logarithm of the
     ///   [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    ///   in units of [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) in
+    ///   units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     pub fn new_from_data_block_index(
         data_block_index: AuthTreeDataBlockIndex,
         data_block_allocation_blocks_log2: u32,
@@ -127,7 +134,7 @@ impl layout::BlockIndex<layout::AllocBlockCount> for AuthTreeDataAllocBlockIndex
 type AuthTreeDataAllocBlockRange = layout::BlockRange<AuthTreeDataAllocBlockIndex, layout::AllocBlockCount>;
 
 /// [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AuthTreeDataBlockCount {
@@ -175,13 +182,13 @@ impl layout::BlockCount for AuthTreeDataBlockCount {
 }
 
 /// [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// index in the authentication tree's authenticated data domain.
 ///
 /// The data authenticated by an authentication tree comprises all of the
 /// filesystem's image without the extents storing the tree itself. An
 /// `AuthTreeDataBlockIndex` refers to an [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2) in
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) in
 /// that domain.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct AuthTreeDataBlockIndex {
@@ -193,9 +200,9 @@ impl AuthTreeDataBlockIndex {
     ///
     /// The returned [`AuthTreeDataBlockIndex`] will refer to the
     /// [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// containing the [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) identified
+    /// Block](ImageLayout::allocation_block_size_128b_log2) identified
     /// by `data_allocation_block_index`.
     ///
     /// # Arguments:
@@ -204,9 +211,9 @@ impl AuthTreeDataBlockIndex {
     ///   convert from.
     /// * `data_block_allocation_blocks_log2` - Base-2 logarithm of the
     ///   [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    ///   in units of [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) in
+    ///   units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     fn new_from_data_allocation_block_index(
         data_allocation_block_index: AuthTreeDataAllocBlockIndex,
         data_block_allocation_blocks_log2: u32,
@@ -288,7 +295,7 @@ impl AuthTreeNodeId {
     /// # Arguments:
     ///
     /// * `covered_data_blocks_index` - Index of some [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   within the data range covered by the subtree rooted at the node.
     /// * `level` - The node level, counted zero-based from bottom, i.e. from
     ///   the leaves.
@@ -355,19 +362,19 @@ impl AuthTreeNodeId {
     }
 
     /// Index of the first [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// covered by the (possibly virtual) subtree rooted at the node.
     pub fn first_covered_data_block(&self) -> AuthTreeDataBlockIndex {
         self.covered_data_blocks_begin
     }
 
     /// Index of the last [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// covered by a (possibly virtual) complete subtree rooted at the node.
     ///
     /// Note that it is possible in certain configurations that the index of the
     /// (virtual) last covered [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// is not representable as an `u64`, in which case `u64::MAX` would get
     /// returned.
     pub fn last_covered_data_block(&self) -> AuthTreeDataBlockIndex {
@@ -387,7 +394,7 @@ impl AuthTreeNodeId {
     }
 
     /// Index of the first [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// covered by the (possibly virtual) subtree rooted at the node's last
     /// possible child.
     ///
@@ -494,22 +501,22 @@ impl AuthTreeNode {
 }
 
 /// Map physical [Allocation
-/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) indices into
-/// the [Authentication Tree Data Block index
-/// domain](AuthTreeDataAllocBlockIndex) and vice versa.
+/// Blocks](ImageLayout::allocation_block_size_128b_log2) indices into the
+/// [Authentication Tree Data Block index domain](AuthTreeDataAllocBlockIndex)
+/// and vice versa.
 ///
 /// The authentication trees don't verify their own storage, therefore the
 /// authenticated data is not contiguous on the physical storage, but
 /// interspersed with authentication tree node storage extents. The
 /// `AuthTreeDataAllocationBlocksMap` provides a means for translating
 /// between physical addresses of [Allocation
-/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) subject to
+/// Blocks](ImageLayout::allocation_block_size_128b_log2) subject to
 /// authentication and contiguous [Authentication Tree Data domain
 /// indices](AuthTreeDataAllocBlockIndex).
 struct AuthTreeDataAllocationBlocksMap {
     /// Authentication tree storage extents represented as
     /// `(physical_end, accumulated_block_count)`, in units of [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2), ordered
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2), ordered
     /// by `physical_end`, with `accumulated_block_count` being equal to the
     /// sum of all Allocation Blocks allocated to the authentication tree
     /// node storage up to `physical_end`.
@@ -616,11 +623,11 @@ impl AuthTreeDataAllocationBlocksMap {
     /// always `<=` the one of the corresponding
     /// [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) and the two
     /// differ by at most the total number of [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) occupied
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) occupied
     /// by the authentication tree storage. If `data_allocation_block_index` is
     /// within the maximum possible numerical range, which is bounded by
     /// `u64::MAX` bytes converted to units of [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2), then the
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2), then the
     /// conversion will not cause an integer overflow. However, in case
     /// `data_allocation_block_index` refers to a location beyond the
     /// filesystem image's actual authenticated data range, then it's not
@@ -680,7 +687,7 @@ impl AuthTreeDataAllocationBlocksMap {
     /// [`PhysicalAllocBlockRange`](layout::PhysicalAllocBlockRange)s
     /// would ever exceed the upper bound of
     /// `u64::MAX` bytes converted to [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
     ///
     /// # Arguments:
     ///
@@ -710,7 +717,7 @@ impl AuthTreeDataAllocationBlocksMap {
     }
 
     /// Return the total number of [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) occupied
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) occupied
     /// by the authentication tree storage extents.
     fn total_auth_tree_extents_allocation_blocks(&self) -> layout::AllocBlockCount {
         layout::AllocBlockCount::from(self.auth_tree_storage_physical_extents.last().map(|e| e.1).unwrap_or(0))
@@ -1345,43 +1352,38 @@ pub struct AuthTreeConfig {
 
     /// Height of the authentication tree.
     auth_tree_levels: u8,
-    /// Maximum number of [`Authentication Tree Data
-    /// Blocks`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Maximum number of [Authentication Tree Data
+    /// Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// authenticated by the authentication tree.
     max_covered_data_block_count: u64,
 
-    /// Copied verbatim from
-    /// [`ImageLayout::auth_tree_node_hash_alg`](layout::ImageLayout::auth_tree_node_hash_alg).
+    /// Copied verbatim from [`ImageLayout::auth_tree_node_hash_alg`].
     node_hash_alg: tpm2_interface::TpmiAlgHash,
     /// Length of a digest of type [`node_hash_alg`](Self::node_hash_alg).
     node_digest_len: u8,
 
-    /// Copied verbatim from
-    /// [`ImageLayout::auth_tree_data_hmac_hash_alg`](layout::ImageLayout::auth_tree_data_hmac_hash_alg).
+    /// Copied verbatim from [`ImageLayout::auth_tree_data_hmac_hash_alg`].
     data_hmac_hash_alg: tpm2_interface::TpmiAlgHash,
-    /// HMAC key used for forming digests over [`Authentication Tree Data
-    /// Blocks`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2) with
+    /// HMAC key used for forming digests over [Authentication Tree Data
+    /// Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) with
     /// [`data_hmac_hash_alg`](Self::data_hmac_hash_alg)
     data_hmac_key: zeroize::Zeroizing<Vec<u8>>,
     /// Length of a digest of type
     /// [`data_hmac_hash_alg`](Self::data_hmac_hash_alg).
     data_digest_len: u8,
 
-    /// Copied verbatim from
-    /// [`ImageLayout::auth_tree_root_hmac_hash_alg`](layout::ImageLayout::auth_tree_root_hmac_hash_alg).
+    /// Copied verbatim from [`ImageLayout::auth_tree_root_hmac_hash_alg`].
     root_hmac_hash_alg: tpm2_interface::TpmiAlgHash,
     /// HMAC key used for forming authentication tree root digests with
     /// [`root_hmac_hash_alg`](Self::root_hmac_hash_alg).
     root_hmac_key: zeroize::Zeroizing<Vec<u8>>,
 
-    /// Copied verbatim from
-    /// [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// Copied verbatim from [`ImageLayout::allocation_block_size_128b_log2`].
     allocation_block_size_128b_log2: u8,
-    /// Derived from from
-    /// [`ImageLayout::auth_tree_node_io_blocks_log2`](layout::ImageLayout::auth_tree_node_io_blocks_log2).
+    /// Derived from from [`ImageLayout::auth_tree_node_io_blocks_log2`].
     node_allocation_blocks_log2: u8,
-    /// Copied verbatim  from
-    /// [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    /// Copied verbatim from
+    /// [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     data_block_allocation_blocks_log2: u8,
 
     /// Digest over image context data to be included in the final root digest.
@@ -1394,13 +1396,12 @@ impl AuthTreeConfig {
     /// # Arguments:
     ///
     /// * `root_key` - The filesystem's root key.
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `inode_index_entry_leaf_node_block_ptr` -  The inode index entry leaf
     ///   node pointer as found in the filesystem's
-    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`](super::image_header::MutableImageHeader::inode_index_entry_leaf_node_block_ptr).
+    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`].
     /// * `image_size` - The filesystem image size as found in the filesystem's
-    ///   [`MutableImageHeader::image_size`](super::image_header::MutableImageHeader::image_size).
+    ///   [`MutableImageHeader::image_size`].
     /// * `auth_tree_extents` - Storage extents of the authentication tree.
     /// * `allocation_bitmap_extents` - Storage extents of the allocation bitmap
     ///   file.
@@ -1574,8 +1575,7 @@ impl AuthTreeConfig {
     ///
     /// # Arguments:
     ///
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `image_allocation_blocks` - The desired filesystem image size.
     pub fn image_allocation_blocks_to_auth_tree_node_count(
         image_layout: &layout::ImageLayout,
@@ -1651,13 +1651,12 @@ impl AuthTreeConfig {
     ///   [`root_hmac_hash_alg`](Self::root_hmac_hash_alg).
     /// * `root_hmac_key` -  Reference to the
     ///   [`root_hmac_key`](Self::root_hmac_key) or equivalent.
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `inode_index_entry_leaf_node_block_ptr` -  The inode index entry leaf
     ///   node pointer as found in the filesystem's
-    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`](super::image_header::MutableImageHeader::inode_index_entry_leaf_node_block_ptr).
+    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`].
     /// * `image_size` - The filesystem image size as found in the filesystem's
-    ///   [`MutableImageHeader::image_size`](super::image_header::MutableImageHeader::image_size).
+    ///   [`MutableImageHeader::image_size`].
     /// * `auth_tree_extents` - Storage extents of the authentication tree.
     /// * `allocation_bitmap_extents` - Storage extents of the allocation bitmap
     ///   file.
@@ -1729,7 +1728,7 @@ impl AuthTreeConfig {
     /// domain](AuthTreeDataBlockIndex).
     ///
     /// Return the [`AuthTreeDataBlockIndex`] for the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// containing the specified `physical_allocation_block_index`.
     ///
     /// # Arguments:
@@ -1760,9 +1759,9 @@ impl AuthTreeConfig {
     ///
     /// Return the [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex)
     /// of the first [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) within the
-    /// physical [`Authentication Tree Data
-    /// Block`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) within the
+    /// physical [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// associated with the specified `data_block_index`.
     ///
     /// # Arguments:
@@ -1811,7 +1810,7 @@ impl AuthTreeConfig {
     /// associated
     /// [`PhysicalAllocBlockRange`](layout::PhysicalAllocBlockRange)s would ever
     /// exceed the upper bound of `u64::MAX` bytes converted to [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
     ///
     /// # Arguments:
     ///
@@ -1838,20 +1837,20 @@ impl AuthTreeConfig {
 
     /// Determine the leaf authentication tree node authenticating a given
     /// [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     ///
     /// Return the [`AuthTreeNodeId`] identifying the leaf node storing the
     /// digest of the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// specified by `data_block_index`.
     ///
     /// # Arguments:
     ///
     /// * `data_block_index` - The [Authentication Tree Data Block index domain
     ///   index](AuthTreeDataBlockIndex) of the [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    ///   to determine the authenticating leaf node of. Must be strictly within
-    ///   the interior of the authentication tree's covered data range.
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) to
+    ///   determine the authenticating leaf node of. Must be strictly within the
+    ///   interior of the authentication tree's covered data range.
     pub fn covering_leaf_node_id(&self, data_block_index: AuthTreeDataBlockIndex) -> AuthTreeNodeId {
         AuthTreeNodeId::new(
             data_block_index,
@@ -1867,8 +1866,8 @@ impl AuthTreeConfig {
     /// authentication tree node identified by `node_id`. Note that the
     /// resulting region's bounds are always aligned to the larger of
     /// the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    /// or [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// or [IO Block](ImageLayout::io_block_allocation_blocks_log2)
     /// size.
     ///
     /// # Arguments:
@@ -1990,9 +1989,8 @@ impl AuthTreeConfig {
     /// # Arguments:
     ///
     /// * `expected_root_hmac_digest` - Buffer containing the expected digest,
-    ///   as usually stored in
-    ///   [`MutableImageHeader::root_hmac_digest`](super::image_header::MutableImageHeader::root_hmac_digest).
-    ///   Its size must match the digest length of
+    ///   as usually stored in [`MutableImageHeader::root_hmac_digest`].  Its
+    ///   size must match the digest length of
     ///   [`root_hmac_hash_alg`](Self::root_hmac_hash_alg) exactly.
     /// * `root_node_id` - The [`AuthTreeNodeId`] identifying the tree's root
     ///   node.
@@ -2129,35 +2127,38 @@ impl AuthTreeConfig {
     }
 
     /// Compute a digest over an [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// into a newly allocated buffer.
     ///
     /// # Arguments:
     ///
     /// * `data_block_index` - The [Authentication Tree Data Block index domain
     ///   index](AuthTreeDataBlockIndex) of the to be digested [Authentication
-    ///   Tree Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    ///   Tree Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     /// * `data_block_allocation_blocks_iter` - [`Iterator`] over the the
     ///   [Authentication Tree Data
-    ///   Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   individual [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2). The
-    ///   iterator must yield one entry for each of the [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) as
-    ///   follows:
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2). The iterator
+    ///   must yield one entry for each of the [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2) as follows:
     ///
     ///   * `Err(e)` - The iterator's implementation encountered some error `e`.
     ///     The iteration will be cancelled at this point and the error `e`
     ///     propagated back.
     ///   * `Ok(allocation_block_data)`, with `allocation_block_data` either
     ///      * `None` if the [Allocation
-    ///        Block](layout::ImageLayout::allocation_block_size_128b_log2) is
+    ///        Block](ImageLayout::allocation_block_size_128b_log2) is
     ///        unallocated or
     ///      * a buffer containing the [Allocation
-    ///        Block's](layout::ImageLayout::allocation_block_size_128b_log2)
-    ///        data wrapped in a `Some`.
+    ///        Block's](ImageLayout::allocation_block_size_128b_log2) data
+    ///        wrapped in a `Some`.
     /// * `image_header_end` - [End of the filesystem image header on
-    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    ///   storage](MutableImageHeader::physical_location).
+    ///
+    /// # See also:
+    ///
+    /// * [`AuthTreeDigestDataBlockContext`].
     pub fn digest_data_block<'a, ABI: Iterator<Item = Result<Option<&'a [u8]>, NvFsError>>>(
         &self,
         data_block_index: AuthTreeDataBlockIndex,
@@ -2207,40 +2208,39 @@ impl AuthTreeConfig {
     }
 
     /// Authenticate an [Authentication Tree Data
-    /// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// contents against an expected digest.
     ///
     /// # Arguments:
     ///
     /// * `expected_data_block_digest` - The expected [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   digest. Its length must match the
     ///   [`data_hmac_hash_alg`](Self::data_hmac_hash_alg) digest length
     ///   exactly.
     /// * `data_block_index` - The [Authentication Tree Data Block index domain
     ///   index](AuthTreeDataBlockIndex) of the to be digested [Authentication
-    ///   Tree Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    ///   Tree Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     /// * `data_block_allocation_blocks_iter` - [`Iterator`] over the the
     ///   [Authentication Tree Data
-    ///   Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   individual [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2). The
-    ///   iterator must yield one entry for each of the [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) as
-    ///   follows:
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2). The iterator
+    ///   must yield one entry for each of the [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2) as follows:
     ///
     ///   * `Err(e)` - The iterator's implementation encountered some error `e`.
     ///     The iteration will be cancelled at this point and the error `e`
     ///     propagated back.
     ///   * `Ok(allocation_block_data)`, with `allocation_block_data` either
     ///      * `None` if the [Allocation
-    ///        Block](layout::ImageLayout::allocation_block_size_128b_log2) is
+    ///        Block](ImageLayout::allocation_block_size_128b_log2) is
     ///        unallocated or
     ///      * a buffer containing the [Allocation
-    ///        Block's](layout::ImageLayout::allocation_block_size_128b_log2)
-    ///        data wrapped in a `Some`.
+    ///        Block's](ImageLayout::allocation_block_size_128b_log2) data
+    ///        wrapped in a `Some`.
     /// * `image_header_end` - [End of the filesystem image header on
-    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    ///   storage](MutableImageHeader::physical_location).
     pub fn authenticate_data_block<'a, ABI: Iterator<Item = Result<Option<&'a [u8]>, NvFsError>>>(
         &self,
         expected_data_block_digest: &[u8],
@@ -2259,19 +2259,19 @@ impl AuthTreeConfig {
     }
 
     /// Access a given [Authentication Tree Data
-    /// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digest stored in its authenticating leaf node.
     ///
     /// # Arguments
     ///
     /// * `leaf_node` - [`AuthTreeNodeCache`] entry storing the leaf node
     ///   covering the [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   identified by `data_block_index`.
     /// * `data_block_index` - Index in the [Authentication Tree Data Block
     ///   index domain](AuthTreeDataBlockIndex) of the [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    ///   to access the associated digest of.
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) to
+    ///   access the associated digest of.
     pub fn get_data_block_digest_entry_from_tree<'a, 'b, ST: sync_types::SyncTypes>(
         &self,
         leaf_node: &'a AuthTreeNodeCacheEntryRef<'b, ST>,
@@ -2301,33 +2301,32 @@ impl AuthTreeConfig {
     ///
     /// * `leaf_node` - [`AuthTreeNodeCache`] entry storing the leaf node
     ///   covering the [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   identified by `data_block_index`.
     /// * `data_block_index` - Index in the [Authentication Tree Data Block
     ///   index domain](AuthTreeDataBlockIndex) of the to be authenticated
     ///   [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     /// * `data_block_allocation_blocks_iter` - [`Iterator`] over the the
     ///   [Authentication Tree Data
-    ///   Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   individual [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2). The
-    ///   iterator must yield one entry for each of the [Allocation
-    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) as
-    ///   follows:
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2). The iterator
+    ///   must yield one entry for each of the [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2) as follows:
     ///
     ///   * `Err(e)` - The iterator's implementation encountered some error `e`.
     ///     The iteration will be cancelled at this point and the error `e`
     ///     propagated back.
     ///   * `Ok(allocation_block_data)`, with `allocation_block_data` either
     ///      * `None` if the [Allocation
-    ///        Block](layout::ImageLayout::allocation_block_size_128b_log2) is
-    ///        to be considered unallocated for the authentication or
+    ///        Block](ImageLayout::allocation_block_size_128b_log2) is to be
+    ///        considered unallocated for the authentication or
     ///      * a buffer containing the [Allocation
-    ///        Block's](layout::ImageLayout::allocation_block_size_128b_log2) to
-    ///        be authenticated data wrapped in a `Some`.
+    ///        Block's](ImageLayout::allocation_block_size_128b_log2) to be
+    ///        authenticated data wrapped in a `Some`.
     /// * `image_header_end` - [End of the filesystem image header on
-    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    ///   storage](MutableImageHeader::physical_location).
     pub fn authenticate_data_block_from_tree<
         'a,
         ST: sync_types::SyncTypes,
@@ -2360,7 +2359,7 @@ impl AuthTreeConfig {
     }
 
     /// Determine the number of [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// authenticated by a single authentication tree leaf node.
     pub fn covered_data_blocks_per_leaf_node_log2(&self) -> u8 {
         self.data_digests_per_node_log2
@@ -2368,16 +2367,16 @@ impl AuthTreeConfig {
 }
 
 /// Compute a digest over an [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// incrementally.
 ///
 /// When not all of an [Authentication Tree Data
-/// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// data is available at once, `AuthTreeDigestDataBlockContext` may be used to
 /// compute its digest incrementally.  Users are supposed to call
 /// [`update()`](Self::update) for each of the [Authentication Tree Data
-/// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-/// [Allocation Blocks](layout::ImageLayout::allocation_block_size_128b_log2),
+/// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2),
 /// allocated or not, and eventually
 /// invoke [`finalize_into()`](Self::finalize_into) to obtain the digest.
 struct AuthTreeDigestDataBlockContext {
@@ -2385,23 +2384,22 @@ struct AuthTreeDigestDataBlockContext {
     /// with [`data_hmac_hash_alg`](AuthTreeConfig::data_hmac_hash_alg)
     /// and the [`data_hmac_key`](AuthTreeConfig::data_hmac_key) to be used for
     /// digesting [Authentication Tree
-    /// Data Blocks](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    /// Data Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     data_block_hmac_instance: hash::HmacInstance,
     /// Bitmap tracking which of the [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) in the
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) in the
     /// to be digested [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// are considered allocated.
     data_block_alloc_bitmap: u64,
     /// Current position within the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// being digested in units of [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
     allocation_block_in_data_block_index: u32,
     /// Verbatim copy of [`AuthTreeConfig::data_block_allocation_blocks_log2`].
     data_block_allocation_blocks_log2: u8,
-    /// Verbatim copy of
-    /// [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// Verbatim copy of [`ImageLayout::allocation_block_size_128b_log2`].
     allocation_block_size_128b_log2: u8,
 }
 
@@ -2418,7 +2416,7 @@ impl AuthTreeDigestDataBlockContext {
     /// * `data_block_allocation_blocks_log2` - Verbatim copy of
     ///   [`AuthTreeConfig::data_block_allocation_blocks_log2`].
     /// * `allocation_block_size_128b_log2` - Verbatim copy of
-    ///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     fn new(
         data_block_hmac_instance: hash::HmacInstance,
         data_block_allocation_blocks_log2: u8,
@@ -2434,26 +2432,26 @@ impl AuthTreeDigestDataBlockContext {
     }
 
     /// Update the [`AuthTreeDigestDataBlockContext`] with the [Authentication
-    /// Tree Data Block'
-    /// s](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    /// next [Allocation
-    /// Block's](layout::ImageLayout::allocation_block_size_128b_log2) data.
+    /// Tree Data
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2) next
+    /// [Allocation Block's](ImageLayout::allocation_block_size_128b_log2)
+    /// data.
     ///
     /// Must get invoked for each of the [Authentication Tree Data
-    /// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// individual [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) before
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) before
     /// [`finalize_into()`](Self::finalize_into) may eventually get invoked.
     ///
     /// # Arguments:
     ///
     /// * `allocation_block_data` - either
     ///   * `None` if the [Allocation
-    ///     Block](layout::ImageLayout::allocation_block_size_128b_log2) is
-    ///     unallocated or
+    ///     Block](ImageLayout::allocation_block_size_128b_log2) is unallocated
+    ///     or
     ///   * a buffer containing the [Allocation
-    ///     Block's](layout::ImageLayout::allocation_block_size_128b_log2) data
-    ///     wrapped in a `Some`.
+    ///     Block's](ImageLayout::allocation_block_size_128b_log2) data wrapped
+    ///     in a `Some`.
     fn update(&mut self, allocation_block_data: Option<&[u8]>) -> Result<(), NvFsError> {
         // As per AuthTreeConfig::new() it is known that the number of Allocation Blocks
         // in an Authentication Tree Data Block is <= 64, so the shift is
@@ -2474,14 +2472,14 @@ impl AuthTreeDigestDataBlockContext {
     }
 
     /// Obtain the final [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digest.
     ///
     /// Must get invoked only after [`update()`](Self::update) had been called
     /// on each of the [Authentication Tree Data
-    /// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// individual [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
     ///
     /// # Arguments:
     ///
@@ -2491,8 +2489,8 @@ impl AuthTreeDigestDataBlockContext {
     ///   length exactly.
     /// * `data_block_index` - The [Authentication Tree Data Block index domain
     ///   index](AuthTreeDataBlockIndex) of the [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    ///   being digested.
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) being
+    ///   digested.
     fn finalize_into(
         mut self,
         data_block_digest: &mut [u8],
@@ -2537,18 +2535,17 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
     /// # Arguments:
     ///
     /// * `root_key` - The filesystem's root key.
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `inode_index_entry_leaf_node_block_ptr` -  The inode index entry leaf
     ///   node pointer as found in the filesystem's
-    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`](super::image_header::MutableImageHeader::inode_index_entry_leaf_node_block_ptr).
+    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`].
     /// * `image_size` - The filesystem image size as found in the filesystem's
-    ///   [`MutableImageHeader::image_size`](super::image_header::MutableImageHeader::image_size).
+    ///   [`MutableImageHeader::image_size`].
     /// * `auth_tree_extents` - Storage extents of the authentication tree.
     /// * `allocation_bitmap_extents` - Storage extents of the allocation bitmap
     ///   file.
     /// * `root_hmac_digest` - The filesystem's root digest, as found in
-    ///   [`MutableImageHeader::root_hmac_digest`](super::image_header::MutableImageHeader::root_hmac_digest).
+    ///   [`MutableImageHeader::root_hmac_digest`].
     pub fn new(
         root_key: &keys::RootKey,
         image_layout: &layout::ImageLayout,
@@ -2585,7 +2582,7 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
     ///
     /// * `config` - The [`AuthTree`]'s assoicated [`AuthTreeConfig`].
     /// * `root_hmac_digest` - The filesystem's root digest, as found in
-    ///   [`MutableImageHeader::root_hmac_digest`](super::image_header::MutableImageHeader::root_hmac_digest).
+    ///   [`MutableImageHeader::root_hmac_digest`].
     /// * `node_cache` - The authentication tree node cached, possibly
     ///   containing some (authenticated) nodes already.
     pub fn new_from_parts(config: AuthTreeConfig, root_hmac_digest: Vec<u8>, node_cache: AuthTreeNodeCache) -> Self {
@@ -2827,21 +2824,6 @@ impl chip::NvChipReadRequest for AuthTreeNodeReadNvChipRequest {
 }
 
 /// Write an authentication tree node to storage.
-///
-/// The `AuthTreeNodeWriteFuture` assumes ownership of the source buffer for
-/// the duration of the write operation.
-///
-/// A two-level [`Result`] is returned upon [future](chip::NvChipFuture)
-/// completion.
-/// * `Err(e)` -  The outer level [`Result`] is set to [`Err`] upon encountering
-///   an internal error causing the input buffer to get lost.
-/// * `Ok((src_buf, ...))` - Otherwise the outer level [`Result`] is set to
-///   [`Ok`] and a pair of the input `src_buf` and the operation result will get
-///   returned within:
-///     * `Ok((`src_buf`, Err(e)))` - In case of an error, the error reason `e`
-///       is returned in an [`Err`].
-///     * `Ok((`src_buf`, Ok(())))` - Otherwise, `Ok(())` will get returned for
-///       the operation result on success.
 struct AuthTreeNodeWriteFuture<C: chip::NvChip> {
     write_fut: C::WriteFuture<AuthTreeNodeWriteNvChipRequest>,
 }
@@ -2859,7 +2841,8 @@ impl<C: chip::NvChip> AuthTreeNodeWriteFuture<C> {
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to write.
     /// * `src_buf` - The node data to get written. Its length must match the
-    ///   [`node size`](AuthTreeConfig::node_size) exactly.
+    ///   [`node size`](AuthTreeConfig::node_size) exactly. Returned back from
+    ///   [`poll()`](Self::poll) upon future completion.
     fn new(
         chip: &C,
         tree_config: &AuthTreeConfig,
@@ -2881,6 +2864,19 @@ impl<C: chip::NvChip> AuthTreeNodeWriteFuture<C> {
 }
 
 impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeWriteFuture<C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon [future](chip::NvChipFuture)
+    /// completion.
+    /// * `Err(e)` -  The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error causing the input buffer to get lost.
+    /// * `Ok((src_buf, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input `src_buf` and the operation result will
+    ///   get returned within:
+    ///     * `Ok((`src_buf`, Err(e)))` - In case of an error, the error reason
+    ///       `e` is returned in an [`Err`].
+    ///     * `Ok((`src_buf`, Ok(())))` - Otherwise, `Ok(())` will get returned
+    ///       for the operation result on success.
     type Output = Result<(Vec<u8>, Result<(), NvFsError>), NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
@@ -3212,7 +3208,7 @@ struct AuthTreePendingNodeUpdates {
 ///
 /// Note that the [`AuthTreeDataBlocksUpdatesIterator`] trait implementation
 /// used for collecting updated [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// digests through [`AuthTreePrepareUpdatesFuture`] may steal those digests
 /// from e.g. a [`Transaction`](super::transaction::Transaction) instance and
 /// transfer them over to the `AuthTreePendingNodesUpdates` instance.
@@ -3234,7 +3230,7 @@ impl AuthTreePendingNodesUpdates {
     }
 
     /// Obtain the leaf-level [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digests back.
     pub fn into_updated_data_blocks(
         self,
@@ -3249,12 +3245,12 @@ impl AuthTreePendingNodesUpdates {
 pub struct AuthTreePendingNodesUpdatesIntoDataUpdatesIter<'a> {
     /// The [`AuthTreePendingNodeUpdates`] instance to obtain the
     /// [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digests back from.
     nodes_updates: Vec<AuthTreePendingNodeUpdates>,
     /// [Authentication Tree Data Block index domain
     /// index](AuthTreeDataBlockIndex) of the last [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// level entry in `nodes_updates`.
     nodes_updates_last_data_block_index: AuthTreeDataBlockIndex,
     /// Position within `nodes_updates`.
@@ -3414,53 +3410,53 @@ impl<'a> iter::Iterator for AuthTreePendingNodesUpdatesIntoDataUpdatesIter<'a> {
 }
 
 /// [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// digest update in the [Authentication Tree Data Block index
 /// domain](AuthTreeDataBlockIndex).
 struct LogicalAuthTreeDataBlockUpdate {
     /// [Authentication Tree Data Block index domain
     /// index](AuthTreeDataAllocBlockIndex) of the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// the updated `data_block_digest` is associated with.
     data_block_index: AuthTreeDataBlockIndex,
     /// The updated [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digest.
     data_block_digest: Vec<u8>,
 }
 
 /// [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// digest update in the [physical index
 /// domain](layout::PhysicalAllocBlockIndex).
 pub struct PhysicalAuthTreeDataBlockUpdate {
     /// Beginning of the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// on physical storage the updated `data_block_digest` is associated
     /// with.
     pub data_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     /// The updated [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digest.
     pub data_block_digest: Vec<u8>,
 }
 
 /// Pollable iterator trait supplying [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// level digest updates to an [`AuthTreePrepareUpdatesFuture`].
 ///
 /// Obtaining the next updated [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// digest may involve some non-trivial operations including IO, like is e.g.
 /// the authentication of its retained [Allocation
-/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2)'s data.
+/// Blocks](ImageLayout::allocation_block_size_128b_log2)'s data.
 ///
 /// For this reason, the primitive for obtaining the next iterator item,
 /// [`poll_for_next()`](Self::poll_for_next), implements
 /// [`Future::poll()`](core::future::Future::poll)-like semantics.
 pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::NvChip> {
     /// Poll the iterator for the next [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// level digest update.
     ///
     /// # Arguments:
@@ -3477,7 +3473,7 @@ pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::
 
     /// Invoked upon error from [`AuthTreePrepareUpdatesFuture`] for
     /// transferring any possibly stolen [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// level digests back.
     ///
     /// # Arguments:
@@ -3486,8 +3482,8 @@ pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::
     /// * `returned_updates` -
     ///   [`AuthTreePendingNodesUpdatesIntoDataUpdatesIter`] iterator over the
     ///   [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    ///   level digests previously obtained from
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) level
+    ///   digests previously obtained from
     ///   [`poll_for_next()`](Self::poll_for_next).
     fn return_digests_on_error(
         &mut self,
@@ -3497,15 +3493,15 @@ pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::
 
     /// Invoked upon error from [`AuthTreePrepareUpdatesFuture`] for
     /// transferring a single possibly stolen [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// level digests back.
     ///
     /// # Arguments:
     ///
     /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
     /// * `returned_update` - The [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    ///   level digest previously obtained from
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) level
+    ///   digest previously obtained from
     ///   [`poll_for_next()`](Self::poll_for_next).
     fn return_digest_on_error(
         &mut self,
@@ -3519,27 +3515,11 @@ pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::
 /// root digest.
 ///
 /// The updated [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// level digests are to be supplied from extern by means of some
 /// [`AuthTreeDataBlocksUpdatesIterator`] implementation. The
 /// `AuthTreePrepareUpdatesFuture` assumes ownership on it for the duration of
 /// the operation and eventually returns it back when done.
-///
-/// A two-level [`Result`] is returned upon
-/// [future](CocoonFsSyncStateReadFuture) completion:
-/// * `Err(e)` -  The outer level [`Result`] is set to [`Err`] upon encountering
-///   an internal error causing the [`AuthTreeDataBlocksUpdatesIterator`] to get
-///   lost.
-/// * `Ok((data_block_updates_iter, ...))` - Otherwise the outer level
-///   [`Result`] is set to [`Ok`] and a pair of the input
-///   `data_block_updates_iter` and the operation result will get returned
-///   within:
-///     * `Ok((data_block_updates_iter, Err(e)))` - In case of an error, the
-///       error reason `e` is returned in an [`Err`].
-///     * `Ok((data_block_updates_iter, Ok((root_hmac_digest,
-///       pending_nodes_updates))))` - Otherwise, a pair of the updated root
-///       digest and the [`AuthTreePendingNodesUpdates`] instance will get
-///       returned wrapped in an `Ok`.
 pub struct AuthTreePrepareUpdatesFuture<
     ST: sync_types::SyncTypes,
     C: chip::NvChip,
@@ -3575,6 +3555,15 @@ enum AuthTreePrepareUpdatesFutureState<C: chip::NvChip> {
 impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesIterator<ST, C> + marker::Unpin>
     AuthTreePrepareUpdatesFuture<ST, C, DUI>
 {
+    /// Instantiate a new [`AuthTreePrepareUpdatesFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `data_block_updates_iter` - The [`AuthTreeDataBlocksUpdatesIterator`]
+    ///   over the [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   updates. Will get returned back from [`poll()`](Self::poll) upon
+    ///   future completion.
     pub fn new(data_block_updates_iter: DUI) -> Self {
         Self {
             data_block_updates_iter: Some(data_block_updates_iter),
@@ -3669,6 +3658,23 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
 impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesIterator<ST, C> + marker::Unpin>
     CocoonFsSyncStateReadFuture<ST, C> for AuthTreePrepareUpdatesFuture<ST, C, DUI>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion:
+    /// * `Err(e)` -  The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error causing the
+    ///   [`AuthTreeDataBlocksUpdatesIterator`] to get lost.
+    /// * `Ok((data_block_updates_iter, ...))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a pair of the input
+    ///   `data_block_updates_iter` and the operation result will get returned
+    ///   within:
+    ///     * `Ok((data_block_updates_iter, Err(e)))` - In case of an error, the
+    ///       error reason `e` is returned in an [`Err`].
+    ///     * `Ok((data_block_updates_iter, Ok((root_hmac_digest,
+    ///       pending_nodes_updates))))` - Otherwise, a pair of the updated root
+    ///       digest and the [`AuthTreePendingNodesUpdates`] instance will get
+    ///       returned wrapped in an `Ok`.
     type Output = Result<(DUI, Result<(Vec<u8>, AuthTreePendingNodesUpdates), NvFsError>), NvFsError>;
     type AuxPollData<'a> = ();
 
@@ -4153,6 +4159,10 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
 
     /// Poll the [`AuthTreeApplyUpdatesFuture`] to completion.
     ///
+    /// Upon future completion, a pair of the input
+    /// [`AuthTreePendingNodesUpdates`] and the operation's result will get
+    /// returned.
+    ///
     /// # Arguments:
     ///
     /// * `chip` - The filesystem image backing storage.
@@ -4504,8 +4514,8 @@ fn test_digests_per_node_minus_one_inv_mod_u64() {
 ///   in a leaf node, c.f. [`AuthTreeConfig::data_digests_per_node_log2`].
 /// * `node_allocation_blocks_log2` - The size of an authentication tree node,
 ///   c.f. [`AuthTreeConfig::node_allocation_blocks_log2`].
-/// * `data_block_allocation_blocks_log2` - The size of an [`Authentication Tree
-///   Data Block`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// * `data_block_allocation_blocks_log2` - The size of an [Authentication Tree
+///   Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
 fn image_allocation_blocks_to_auth_tree_levels(
     image_allocation_blocks: layout::AllocBlockCount,
     node_digests_per_node_log2: u32,
@@ -4824,8 +4834,8 @@ fn test_image_allocation_blocks_to_auth_tree_levels() {
 ///   in a leaf node, c.f. [`AuthTreeConfig::data_digests_per_node_log2`].
 /// * `node_allocation_blocks_log2` - The size of an authentication tree node,
 ///   c.f. [`AuthTreeConfig::node_allocation_blocks_log2`].
-/// * `data_block_allocation_blocks_log2` - The size of an [`Authentication Tree
-///   Data Block`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// * `data_block_allocation_blocks_log2` - The size of an [Authentication Tree
+///   Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
 fn image_allocation_blocks_to_auth_tree_node_count(
     image_allocation_blocks: layout::AllocBlockCount,
     auth_tree_levels: u8,
@@ -4917,8 +4927,8 @@ fn image_allocation_blocks_to_auth_tree_node_count(
 ///   in a non-leaf node, c.f. [`AuthTreeConfig::node_digests_per_node_log2`].
 /// * `data_digests_per_node_log2` - Base-2 logarithm of the number of digests
 ///   in a leaf node, c.f. [`AuthTreeConfig::data_digests_per_node_log2`].
-/// * `data_block_allocation_blocks_log2` - The size of an [`Authentication Tree
-///   Data Block`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// * `data_block_allocation_blocks_log2` - The size of an [Authentication Tree
+///   Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
 fn auth_tree_node_count_to_auth_tree_levels(
     auth_tree_node_count: u64,
     node_digests_per_node_log2: u32,
@@ -5050,8 +5060,8 @@ fn test_auth_tree_node_count_to_auth_tree_levels() {
 ///   [`digests_per_node_minus_one_inv_mod_u64()`].
 /// * `data_digests_per_node_log2` - Base-2 logarithm of the number of digests
 ///   in a leaf node, c.f. [`AuthTreeConfig::data_digests_per_node_log2`].
-/// * `data_block_allocation_blocks_log2` - The size of an [`Authentication Tree
-///   Data Block`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// * `data_block_allocation_blocks_log2` - The size of an [Authentication Tree
+///   Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
 fn auth_tree_node_count_to_max_covered_data_block_count(
     mut auth_tree_node_count: u64,
     auth_tree_levels: u8,
@@ -5253,7 +5263,7 @@ fn test_auth_tree_node_count_to_max_covered_data_block_count() {
 ///
 /// * `covered_data_block_index` - [Authentication Tree Data Block index domain
 ///   index](AuthTreeDataBlockIndex) of some [Authentication Tree Data
-///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 ///   authenticated by the subtree rooted at the node in question.
 /// * `level` - Level of the node within the the tree, counted zero-based from
 ///   the leaves.
@@ -5359,7 +5369,7 @@ impl AuthTreeInitializationCursor {
     ///
     /// * `tree_config` - The to be created filesystem's [`AuthTreeConfig`].
     /// * `image_header_end` - [End of the filesystem image header on
-    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    ///   storage](MutableImageHeader::physical_location).
     /// * `image_size` - The to be created filesystem's image size.
     pub fn new(
         tree_config: &AuthTreeConfig,
@@ -5433,7 +5443,7 @@ impl AuthTreeInitializationCursor {
     ///
     /// Advance the cursor to the specified position at
     /// `to_physical_allocation_block_index`, recording any [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) skipped
+    /// Block](ImageLayout::allocation_block_size_128b_log2) skipped
     /// over as unallocated. The returned
     /// [`AuthTreeInitializationCursorAdvanceFuture`] assumes ownership of the
     /// cursor and must get polled to completion in order to  fill in any
@@ -5455,13 +5465,13 @@ impl AuthTreeInitializationCursor {
     }
 
     /// Record some [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) data at the
+    /// Block](ImageLayout::allocation_block_size_128b_log2) data at the
     /// cursor's current position.
     ///
     /// Record the `allocation_block_data` at the cursor's current position and
     /// advance the cursor past it. Depending of whether moving the cursor
     /// past the current [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) results
+    /// Block](ImageLayout::allocation_block_size_128b_log2) results
     /// in some subtrees having become completed, either
     /// * [`AuthTreeInitializationCursorUpdateResult::NeedAuthTreePartWrite`]
     ///   wrapping a [future](AuthTreeInitializationCursorWritePartFuture) for
@@ -5597,7 +5607,7 @@ impl AuthTreeInitializationCursor {
 
     /// Adance the cursor's current position by a single [Authentication Tree
     /// Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     fn cur_auth_tree_data_block_index_step(&mut self, tree_config: &AuthTreeConfig) -> Result<(), NvFsError> {
         // Advance the cursor's Authentication Tree Data Block index by one block.
         self.cur_data_block_index += AuthTreeDataBlockCount::from(1u64);
@@ -6086,16 +6096,14 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///
     /// # Arguments:
     ///
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `image_header_end` - [End of the filesystem image header on
-    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    ///   storage](MutableImageHeader::physical_location).
     /// * `journal_log_head_extent` - [Location of the journal log head
     ///   extent](super::journal::log::JournalLog::head_extent_physical_location).
     /// * `image_size` - The filesystem image size as found in the filesystem's
-    ///   (possibly updated)
-    ///   [`MutableImageHeader::image_size`](super::image_header::MutableImageHeader::image_size).
+    ///   (possibly updated) [`MutableImageHeader::image_size`].
     /// * `alloc_bitmap_journal_fragments` - [Allocation bitmap](AllocBitmap)
     ///   needed for the authentication tree reconstruction, i.e. the updated
     ///   [`AllocBitmap`] with valid entries for any range covered by some
@@ -6171,7 +6179,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///
     /// Advance the cursor to the specified position at
     /// `to_physical_allocation_block_index`, assuming any [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2)s' data
+    /// Block](ImageLayout::allocation_block_size_128b_log2)s' data
     /// skipped over as unmodified by the journal. The returned
     /// [`AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture`] assumes
     /// ownership of the cursor and must get polled to completion in order
@@ -6198,13 +6206,13 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     }
 
     /// Record some modified [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) data at the
+    /// Block](ImageLayout::allocation_block_size_128b_log2) data at the
     /// cursor's current position.
     ///
     /// Record the modified `allocation_block_data` at the cursor's current
     /// position and advance the cursor past it. Depending of whether moving
     /// the cursor past the current [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) results in
+    /// Block](ImageLayout::allocation_block_size_128b_log2) results in
     /// some subtrees having become completed, either
     /// * [`AuthTreeReplayJournalUpdateScriptCursorUpdateResult::NeedAuthTreePartWrite`] wrapping a
     ///   [future](AuthTreeReplayJournalUpdateScriptCursorWritePartFuture) for writing out any
@@ -6451,6 +6459,9 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
 
     /// Poll the [`AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture`] to
     /// completion.
+    ///
+    /// Upon successful completion, the
+    /// [`AuthTreeReplayJournalUpdateScriptCursor`] will get returned back.
     ///
     /// # Arguments:
     ///
@@ -7101,7 +7112,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
     /// * `cursor` - The [`AuthTreeReplayJournalUpdateScriptCursor`] to advance.
     /// * `to_data_allocation_block_index` - Target position to advance the
     ///   cursor to. Must be located at some [Authentication Tree Data
-    ///   Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     ///   boundary covered by the `cursor`'s current bottom node, which must be
     ///   a leaf.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].

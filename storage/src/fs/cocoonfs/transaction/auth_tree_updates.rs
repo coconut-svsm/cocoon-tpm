@@ -29,6 +29,14 @@ use crate::{
 };
 use core::{marker, pin, task};
 
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
+#[cfg(doc)]
+use layout::ImageLayout;
+
+/// Compute the updated digest of an [Authentication Tree Data
+/// Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) with some
+/// deallocations but no data modifications in it.
 struct RedigestAuthTreeDataBlockFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     auth_tree_data_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     updated_auth_tree_data_block_alloc_bitmap: alloc_bitmap::BitmapWord,
@@ -37,6 +45,7 @@ struct RedigestAuthTreeDataBlockFuture<ST: sync_types::SyncTypes, C: chip::NvChi
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
+/// [`RedigestAuthTreeDataBlockFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum RedigestAuthTreeDataBlockFutureState<C: chip::NvChip> {
     DetermineNextReadAuthenticateSubrange {
@@ -50,6 +59,21 @@ enum RedigestAuthTreeDataBlockFutureState<C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> RedigestAuthTreeDataBlockFuture<ST, C> {
+    /// Instantiate a [`RedigestAuthTreeDataBlockFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `auth_tree_data_block_allocation_blocks_begin` - Storage location of
+    ///   the [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) whose
+    ///   digest to recompute.
+    /// * `updated_auth_tree_data_block_alloc_bitmap` -
+    ///   [`BitmapWord`](alloc_bitmap::BitmapWord) representing the updated
+    ///   allocation status of the [Authentication Tree Data
+    ///   Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2)
+    ///   each.
     fn new(
         fs_config: &CocoonFsConfig,
         auth_tree_data_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -83,6 +107,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> RedigestAuthTreeDataBlockFuture
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for RedigestAuthTreeDataBlockFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// On successful completion, the recomputed digest over the [Authentication
+    /// Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) is
+    /// returned.
     type Output = Result<Vec<u8>, NvFsError>;
     type AuxPollData<'a> = ();
 
@@ -220,6 +250,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
+/// [`AuthTreeDataBlocksUpdatesIterator`](auth_tree::AuthTreeDataBlocksUpdatesIterator) implementation over
+/// a [`Transaction`].
+///
+/// Used for [preparing](auth_tree::AuthTreePrepareUpdatesFuture) updates to the
+/// authentication tree upon [`Transaction`] commit.
 pub struct TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST: sync_types::SyncTypes, C: chip::NvChip> {
     transaction: Option<Box<Transaction>>,
     next_auth_tree_data_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -229,6 +264,22 @@ pub struct TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST: sync_types::S
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, C> {
+    /// Instantiate a new
+    /// [`TransactionAuthTreeDataBlocksDigestsUpdatesIterator`].
+    ///
+    /// The [`TransactionAuthTreeDataBlocksDigestsUpdatesIterator`] assumes
+    /// ownership of the `transaction` for the duration of its lifetime. It
+    /// may eventually get obtained back via
+    /// [`into_transaction()`](Self::into_transaction).
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to compute authentication tree
+    ///   updates for.
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
     pub fn new(
         transaction: Box<Transaction>,
         auth_tree_data_block_allocation_blocks_log2: u8,
@@ -260,10 +311,29 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAuthTreeDataBlocksDi
         }
     }
 
+    /// Obtain the [`Transaction`] initially passed to [`new()`](Self::new)
+    /// back.
     pub fn into_transaction(self) -> Result<Box<Transaction>, NvFsError> {
         self.transaction.ok_or_else(|| nvfs_err_internal!())
     }
 
+    /// Skip over the [`Transaction`]'s [`AuthTreeDataBlockUpdateState`]s with
+    /// no recorded data modifications.
+    ///
+    /// Return the new index corresponding to the new position in
+    /// `update_states`.
+    ///
+    /// Arguments:
+    ///
+    /// * `update_states` - Reference to
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
+    /// * `update_states_index` - Current position in `update_states`.
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    /// * `auth_tree_data_block_allocation_blocks` - Number of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2) in an
+    ///   [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     fn skip_to_auth_tree_update_state_with_modified_data(
         update_states: &AuthTreeDataBlocksUpdateStates,
         mut update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
@@ -489,6 +559,23 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> auth_tree::AuthTreeDataBlocksUp
 }
 
 impl Transaction {
+    /// Restore the [`Transaction`]'s
+    /// [`AuthTreeDataBlockUpdateState::auth_digest`]s from an
+    /// [`AuthTreePendingNodesUpdatesIntoDataUpdatesIter`](auth_tree::AuthTreePendingNodesUpdatesIntoDataUpdatesIter).
+    ///
+    /// Invoked by [`TransactionAuthTreeDataBlocksDigestsUpdatesIterator`] to
+    /// restore the [`Transaction`]'s
+    /// [`AuthTreeDataBlockUpdateState::auth_digest`]s on error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `returned_updates` -
+    ///   [`AuthTreePendingNodesUpdatesIntoDataUpdatesIter`](auth_tree::AuthTreePendingNodesUpdatesIntoDataUpdatesIter`)
+    ///   over the returned digests.
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
     pub(super) fn restore_update_states_auth_digests(
         &mut self,
         returned_updates: auth_tree::AuthTreePendingNodesUpdatesIntoDataUpdatesIter,
@@ -562,6 +649,14 @@ impl Transaction {
     }
 }
 
+/// Implementation of
+/// [`JournalUpdateAuthDigestsScriptIterator`](journal::apply_script::JournalUpdateAuthDigestsScriptIterator)
+/// over a [`Transaction`].
+///
+/// Used for [encoding](journal::apply_script::JournalUpdateAuthDigestsScript::encode) the journal
+/// log's [`UpdateAuthDigestsScript`
+/// field](journal::log::JournalLogFieldTag::UpdateAuthDigestsScript) at
+/// [`Transaction`] commit.
 #[derive(Clone)]
 pub struct TransactionJournalUpdateAuthDigestsScriptIterator<'a> {
     transaction_update_states: &'a AuthTreeDataBlocksUpdateStates,
@@ -573,6 +668,19 @@ pub struct TransactionJournalUpdateAuthDigestsScriptIterator<'a> {
 }
 
 impl<'a> TransactionJournalUpdateAuthDigestsScriptIterator<'a> {
+    /// Instantiate a [`TransactionJournalUpdateAuthDigestsScriptIterator`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction_update_states` - `mut` reference to
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
+    /// * `transaction_pending_frees` - Reference to the
+    ///   [`Transaction::allocs`]'
+    ///   [`TransactionAllocations::pending_frees`](super::TransactionAllocations::pending_frees).
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn new(
         transaction_update_states: &'a AuthTreeDataBlocksUpdateStates,
         transaction_pending_frees: &'a alloc_bitmap::SparseAllocBitmap,

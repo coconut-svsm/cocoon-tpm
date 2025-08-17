@@ -8,6 +8,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use super::{
+    Transaction,
     auth_tree_data_blocks_update_states::{
         AllocationBlockUpdateNvSyncState, AllocationBlockUpdateNvSyncStateAllocated,
         AllocationBlockUpdateNvSyncStateAllocatedModified, AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
@@ -17,17 +18,16 @@ use super::{
     },
     journal_allocations::TransactionAllocateJournalStagingCopiesFuture,
     read_missing_data::TransactionReadMissingDataFuture,
-    Transaction,
 };
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
     crypto::rng,
     fs::{
+        NvFsError,
         cocoonfs::{
             fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             layout,
         },
-        NvFsError,
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -38,6 +38,32 @@ use crate::{
 };
 use core::{pin, task};
 
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::{AuthTreeDataBlockUpdateState, AuthTreeDataBlocksUpdateStates};
+
+/// Write dirty data to storage.
+///
+/// Write all data tracked as dirty within a specified [Allocation Block level
+/// index range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) in
+/// the [`Transaction`]'s [storage tracking
+/// states](AllocationBlockUpdateNvSyncState)' buffers to the associated
+/// [journal
+/// staging copies](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin)
+/// on storage.
+///
+/// [Journal staging
+/// copies](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin) will get
+/// allocated as needed in case there's any dirty [storage tracking
+/// state](AllocationBlockUpdateNvSyncState) in the range with none associated
+/// yet.
+///
+/// Only
+/// [`AllocationBlockUpdateState`](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateState)s
+/// existing within the requested range at the time of
+/// `TransactionWriteDirtyDataFuture` instantiation will be considered.
+/// Additional ones may get inserted, populated and written out as a byproduct
+/// for [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
+/// alignment purposes in the course though.
 pub(super) struct TransactionWriteDirtyDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
@@ -46,6 +72,7 @@ pub(super) struct TransactionWriteDirtyDataFuture<ST: sync_types::SyncTypes, C: 
     fut_state: TransactionWriteDirtyDataFutureState<ST, C>,
 }
 
+/// [`TransactionWriteDirtyDataFuture`] state-machine state.
 enum TransactionWriteDirtyDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -74,6 +101,33 @@ enum TransactionWriteDirtyDataFutureState<ST: sync_types::SyncTypes, C: chip::Nv
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture<ST, C> {
+    /// Instantiate a [`TransactionWriteDirtyDataFuture`].
+    ///
+    /// The [`TransactionWriteDirtyDataFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] whose [storage tracking
+    ///   states](AllocationBlockUpdateNvSyncState)' buffers to populate.
+    /// * `states_allocation_blocks_index_range` - The [Allocation Block level
+    ///   entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   write out dirty [storage tracking
+    ///   states](AllocationBlockUpdateNvSyncState)' buffers within. Applicable
+    ///   [correction
+    ///   offsets](AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets)
+    ///   will get returned from [`poll()`](Self::poll) upon completion in case
+    ///   additional state entries had to get inserted in order to [fill
+    ///   alignment gaps](AuthTreeDataBlocksUpdateStates::fill_states_index_range_regions_alignment_gaps).
+    /// * `min_clean_block_allocation_blocks_log2` - Base-2 logarithm of the
+    ///   Minimum Clean Block size in units of [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2). In
+    ///   general, a [storage tracking state](AllocationBlockUpdateNvSyncState)'
+    ///   buffer will not get written, dirty or not, unless its contained in
+    ///   some Minimum Clean Block having some actual data modifications to it.
     pub fn new(
         transaction: Box<Transaction>,
         states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -114,6 +168,18 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         })
     }
 
+    /// Determine the minimum IO block size.
+    ///
+    /// Return the base-2 logarithm of the minimum IO block size in units of
+    /// [Allocation
+    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip_io_block_size_128b_log2` - Value of
+    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
     pub fn min_write_block_allocation_blocks_log2(
         chip_io_block_size_128b_log2: u32,
         allocation_block_size_128b_log2: u32,
@@ -121,6 +187,19 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         min_write_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2)
     }
 
+    /// Determine the next subrange to write.
+    ///
+    /// Return a pair of the next subrange to write, if any, and the remainder
+    /// of `remaining_states_allocation_blocks_index_range` to process in a
+    /// subsequent iteration.
+    ///
+    /// # Arguments:
+    ///
+    /// * `remaining_states_allocation_blocks_index_range` - Remaining part of
+    ///   the initial request range not processed yet, extended to cover any
+    ///   preexisting states within the vicinity of a [`minimum IO
+    ///   Block`](Self::min_write_block_allocation_blocks_log2) or a Minimum
+    ///   Clean Block as specified to [`new()`](Self::new), whichever is larger.
     fn determine_next_write_region(
         &self,
         transaction: &Transaction,
@@ -509,6 +588,20 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         }
     }
 
+    /// Fill [Minimum IO Block](Self::min_write_block_allocation_blocks_log2)
+    /// alignment gaps within a given range of the [`Transaction`]'s [data
+    /// update tracking
+    /// states](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateState).
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `transaction` - The [`Transaction`].
+    /// * `write_region_states_allocation_blocks_index_range` - [Allocation
+    ///   Block level index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   fill alignment gaps within.
     fn fill_write_region_states_min_write_block_alignment_gaps(
         &mut self,
         fs_instance_sync_state: &CocoonFsSyncStateMemberRef<'_, ST, C>,
@@ -732,6 +825,16 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         Ok(())
     }
 
+    /// Prepare a storage write request.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`].
+    /// * `aligned_write_region_states_allocation_blocks_index_range` - [Minimum
+    ///   IO Block](Self::min_write_block_allocation_blocks_log2) aligned
+    ///   [Allocation Block level index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   write out.
     fn prepare_write_request(
         mut transaction: Box<Transaction>,
         aligned_write_region_states_allocation_blocks_index_range:
@@ -783,7 +886,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
                 AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => {
                     match &unallocated_state.random_fillup {
                         None => {
-                            // Fill any uninitialized Allocation Blocks in the range with random.
+                            // Fill any uninitialized Allocation Blocks in the range with random bytes.
                             debug_assert!(!unallocated_state.target_state.is_initialized());
                             debug_assert!(!unallocated_state.copied_to_journal);
                             let mut random_fillup = match try_alloc_vec(allocation_block_size) {
@@ -898,6 +1001,23 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for TransactionWriteDirtyDataFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, offsets, ...))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a tuple of the input [`Transaction`],
+    ///   `transaction`, correction `offsets` to apply to the input [Allocation
+    ///   Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) in
+    ///   order to account for the insertion of new state entries, if any, and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, offsets, Err(e)))` - In case of an error, the
+    ///       error reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, offsets, Ok(())))` -  Otherwise, `Ok(())` will
+    ///       get returned for the operation result on success.
     type Output = Result<
         (
             Box<Transaction>,
@@ -1134,6 +1254,18 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
+/// Determine the minimum IO block size for writes.
+///
+/// Return the base-2 logarithm of the minimum IO block size in units of
+/// [Allocation
+/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+///
+/// # Arguments:
+///
+/// * `chip_io_block_size_128b_log2` - Value of
+///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+/// * `allocation_block_size_128b_log2` - Verbatim value of
+///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
 pub(super) fn min_write_block_allocation_blocks_log2(
     chip_io_block_size_128b_log2: u32,
     allocation_block_size_128b_log2: u32,
@@ -1143,6 +1275,8 @@ pub(super) fn min_write_block_allocation_blocks_log2(
     chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2)
 }
 
+/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// internally by [`TransactionWriteDirtyDataFuture`].
 struct TransactionWriteDirtyDataNvChipWriteRequest {
     transaction: Box<Transaction>,
     aligned_write_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,

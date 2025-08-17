@@ -13,7 +13,7 @@ use crate::{
         kdf::{self, Kdf as _},
         symcipher,
     },
-    fs::{cocoonfs::set_assoc_cache, NvFsError},
+    fs::{NvFsError, cocoonfs::set_assoc_cache},
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types::{self, RwLock as _},
     utils_common::{
@@ -24,32 +24,63 @@ use crate::{
 };
 use core::{convert, iter, mem, ops, slice};
 
+#[cfg(doc)]
+use crate::fs::cocoonfs::layout::ImageLayout;
+
 /// Intended cryptographic purpose of a derived key.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum KeyPurpose {
     /// Subkey derivation.
+    ///
+    /// The KDF used is [`TcgTpm2KdfA`](kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA) with a
+    /// hash algorithm of [`ImageLayout::kdf_hash_alg`].
     Derivation = 1,
     /// Computation of the authentication tree root HMAC.
+    ///
+    /// The hash algorithm used for the HMAC is
+    /// [`ImageLayout::auth_tree_root_hmac_hash_alg`].
     AuthenticationRoot = 2,
-    /// Computation of Authentication Tree Data Block HMACs.
+    /// Computation of [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) HMACs.
+    ///
+    /// The hash algorithm used for the HMACs is
+    /// [`ImageLayout::auth_tree_data_hmac_hash_alg`].
     AuthenticationData = 3,
-    /// Computation of HMACs stored inline for CCA protection before the authentication tree is
-    /// available at filesystem opening time.
+    /// Computation of HMACs stored inline for CCA protection before the
+    /// authentication tree is available at filesystem opening time.
+    ///
+    /// The hash algorithm used for the HMACs is
+    /// [`ImageLayout::preauth_cca_protection_hmac_hash_alg`].
     PreAuthCcaProtectionAuthentication = 4,
     /// Encryption.
+    ///
+    /// The block cipher to be used for encryption is
+    /// [`ImageLayout::block_cipher_alg`] in CBC mode.
     Encryption = 5,
 }
 
 /// Key identifier for the purpose of subkey derivation.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KeyId {
+    /// Domain, usually an inode number.
     domain: u32,
+    /// Subdomain identifier further specifying the scope of the key within the
+    /// given [`domain`](Self::domain).
     subdomain: u32,
+    /// The cryptographic purpose the key is to be used for.
     purpose: KeyPurpose,
 }
 
 impl KeyId {
+    /// Instantiate a [`KeyId`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `domain` - The key's domain, usually an inode number.
+    /// * `subdomain` - Subdomain identifier further specifying the scope of the
+    ///   key within the given `domain`.
+    /// * `purpose` - The cryptographic purpose the key is to be used for.
     pub fn new(domain: u32, subdomain: u32, purpose: KeyPurpose) -> Self {
         Self {
             domain,
@@ -60,11 +91,23 @@ impl KeyId {
 }
 
 /// Cache of derived subkeys.
+///
+/// A `KeyCache` is always associated with a single, unique [`RootKey`], and
+/// stores subkeys derived therefrom.
+///
+/// <div class="warning">
+///
+/// The associated [`RootKey`] is not stored with the `KeyCache` instance
+/// itself. Be careful to always pass the same one to
+/// [`get_key()`](Self::get_key).
+///
+/// </div>
 pub struct KeyCache {
     cache: set_assoc_cache::SetAssocCache<KeyId, zeroize::Zeroizing<Vec<u8>>, KeyCacheMapKeyIdToSetAssocCacheSet>,
 }
 
 impl KeyCache {
+    /// Instantiate a [`KeyCache`].
     pub fn new() -> Result<Self, NvFsError> {
         // Create a cache of two full sets, i.e. 16 slots in total.
         let cache =
@@ -88,6 +131,19 @@ impl KeyCache {
         Ok(Self { cache })
     }
 
+    /// Obtain a subkey from the cache or derive if not present.
+    ///
+    /// Lookup the subkey identified by `key_id` in the cache. If it doesn't
+    /// exist yet, derive it and insert it into the cache.
+    ///
+    /// On success, a reference to the subkey's cache entry is returned as
+    /// a [`KeyCacheEntryRef`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `this` - [`KeyCacheRef`] to `self`.
+    /// * `root_key` - The [`RootKey`] associated with `self`.
+    /// * `key_id` - [`KeyId`] of the subkey to obtain.
     pub fn get_key<'a, ST: sync_types::SyncTypes>(
         this: &'a mut KeyCacheRef<'_, ST>,
         root_key: &RootKey,
@@ -118,22 +174,52 @@ impl KeyCache {
         })
     }
 
+    /// Prune all cache entries.
     pub fn clear(&mut self) {
         self.cache.prune_all();
     }
 }
 
 /// Reference to [`KeyCache`] wrapped in a [`RwLock`](sync_types::RwLock).
+///
+/// Instances of [`KeyCache`] are expected to get wrapped in a
+/// [`RwLock`](sync_types::RwLock). `KeyCacheRef` can represent either
+/// immutable references to the containing [`RwLock`](sync_types::RwLock) or
+/// a mutable reference to the inner [`KeyCache`].
+///
+/// API functions needing access to an [`KeyCache`] usually take it as
+/// an argument of type `KeyCacheRef`, thereby potentially alleviating
+/// the need to take the lock in case the caller can provide exclusive access
+/// already.
 pub enum KeyCacheRef<'a, ST: sync_types::SyncTypes> {
+    /// Immutable reference to the [`RwLock`](sync_types::RwLock) wrapping the
+    /// [`KeyCache`].
+    ///
+    /// Accessing the wrapped [`KeyCache`] requires locking the
+    /// protecting [`RwLock`](sync_types::RwLock).
     Ref { cache: &'a ST::RwLock<KeyCache> },
+    /// Direct mutable reference to the [`KeyCache`].
+    ///
+    /// Accessing the referenced [`KeyCache`] does not involve any
+    /// locking operation.
     MutRef { cache: &'a mut KeyCache },
 }
 
 impl<'a, ST: sync_types::SyncTypes> KeyCacheRef<'a, ST> {
+    /// Instantiate a [`KeyCacheRef`] from a `mut` [`KeyCache`] reference.
+    ///
+    /// # Arguments:
+    ///
+    /// * `cache` - The [`KeyCache`] `mut` reference to wrap.
     pub fn new_mut(cache: &'a mut KeyCache) -> Self {
         Self::MutRef { cache }
     }
 
+    /// Reborrow the reference.
+    ///
+    /// [`KeyCacheRef`] is not covariant over its lifetime parameter.
+    /// `make_borrow()` enables reborrowing with a shorter lifetime if
+    /// needed.
     fn make_borrow(&mut self) -> KeyCacheRef<'_, ST> {
         match self {
             Self::Ref { cache } => KeyCacheRef::Ref { cache },
@@ -160,18 +246,26 @@ impl<'a, ST: sync_types::SyncTypes> convert::From<KeyCacheWriteGuard<'a, ST>> fo
     }
 }
 
-/// Read lock guard for a [`RwLock`](sync_types::RwLock) [`KeyCache`].
+/// Read lock guard for a [`KeyCache`] wrapped in a
+/// [`RwLock`](sync_types::RwLock).
+///
+/// Usually obtained from an [`KeyCacheRef`] via [`From`] or constructed
+/// explicitly from an [`KeyCacheWriteGuard`].
 enum KeyCacheReadGuard<'a, ST: sync_types::SyncTypes>
 where
     <ST as sync_types::SyncTypes>::RwLock<KeyCache>: 'a,
 {
+    /// The `KeyReadGuard` instance is realized by an actual
+    /// [`RwLock::ReadGuard`](sync_types::RwLock::ReadGuard).
+    ///
+    /// Usually spawned off from a [`KeyCacheRef::Ref`].
     ReadGuard {
         cache: &'a ST::RwLock<KeyCache>,
         guard: <ST::RwLock<KeyCache> as sync_types::RwLock<KeyCache>>::ReadGuard<'a>,
     },
-    WriteGuard {
-        guard: KeyCacheWriteGuard<'a, ST>,
-    },
+    /// The `KeyCacheReadGuard` instance is realized by an
+    /// [`KeyCacheWriteGuard`].
+    WriteGuard { guard: KeyCacheWriteGuard<'a, ST> },
 }
 
 impl<'a, ST: sync_types::SyncTypes> ops::Deref for KeyCacheReadGuard<'a, ST> {
@@ -199,18 +293,24 @@ impl<'a, ST: sync_types::SyncTypes> convert::From<KeyCacheRef<'a, ST>> for KeyCa
     }
 }
 
-/// Write lock guard for a [`RwLock`](sync_types::RwLock) [`KeyCache`].
+/// Write guard for a [`KeyCache`] wrapped in a [`RwLock`](sync_types::RwLock).
 enum KeyCacheWriteGuard<'a, ST: sync_types::SyncTypes>
 where
     <ST as sync_types::SyncTypes>::RwLock<KeyCache>: 'a,
 {
+    /// The `KeyCacheWriteGuard` instance is realized by an actual
+    /// [`RwLock::WriteGuard`](sync_types::RwLock::WriteGuard).
+    ///
+    /// Usually spawned off from a [`KeyCacheRef::Ref`].
     WriteGuard {
         cache: &'a ST::RwLock<KeyCache>,
         guard: <ST::RwLock<KeyCache> as sync_types::RwLock<KeyCache>>::WriteGuard<'a>,
     },
-    MutRef {
-        cache: &'a mut KeyCache,
-    },
+    /// The `KeyCacheWriteGuard` instance is realized by a mutable reference to
+    /// the [`KeyCache`].
+    ///
+    /// Usually spawned off by borrowing from a [`KeyCacheRef::MutRef`].
+    MutRef { cache: &'a mut KeyCache },
 }
 
 impl<'a, ST: sync_types::SyncTypes> ops::Deref for KeyCacheWriteGuard<'a, ST> {
@@ -245,9 +345,12 @@ impl<'a, ST: sync_types::SyncTypes> convert::From<KeyCacheRef<'a, ST>> for KeyCa
     }
 }
 
-/// Reference to an entry in a [`KeyCache`] wrapped in a [`RwLock`](sync_types::RwLock).
+/// Reference to an entry in a [`KeyCache`] wrapped in a
+/// [`RwLock`](sync_types::RwLock).
 pub struct KeyCacheEntryRef<'a, ST: sync_types::SyncTypes> {
+    /// Read guard on the [`KeyCache`].
     cache: KeyCacheReadGuard<'a, ST>,
+    /// Cache entry index into [`KeyCache::cache`].
     cache_entry_index: set_assoc_cache::SetAssocCacheIndex,
 }
 
@@ -259,6 +362,10 @@ impl<'a, ST: sync_types::SyncTypes> ops::Deref for KeyCacheEntryRef<'a, ST> {
     }
 }
 
+/// [`SetAssocCacheMapKeyToSet`](set_assoc_cache::SetAssocCacheMapKeyToSet)
+/// implementation controlling the layout of the
+/// [`SetAssocCache`](set_assoc_cache::SetAssocCache) used internally by
+/// [`KeyCache`].
 struct KeyCacheMapKeyIdToSetAssocCacheSet {
     cache_sets_count: u32,
 }
@@ -275,20 +382,54 @@ impl set_assoc_cache::SetAssocCacheMapKeyToSet<KeyId> for KeyCacheMapKeyIdToSetA
     }
 }
 
-
 /// Filesystem root key derived from externally supplied key material.
 pub struct RootKey {
+    /// [`TcgTpm2KdfA`](kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA) input parent key
+    /// material to be used for subkey derivation.
     root_key: zeroize::Zeroizing<Vec<u8>>,
 
+    /// The hash algorithm to use with
+    /// [`TcgTpm2KdfA`](kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA).
     kdf_hash_alg: tpm2_interface::TpmiAlgHash,
 
+    /// Length of subkeys to be derived for [`KeyPurpose::AuthenticationRoot`].
     auth_tree_root_hmac_key_len: usize,
+    /// Length of subkeys to be derived for [`KeyPurpose::AuthenticationData`].
     auth_tree_data_hmac_key_len: usize,
+    /// Length of subkeys to be derived for
+    /// [`KeyPurpose::PreAuthCcaProtectionAuthentication`].
     preauth_cca_protection_hmac_key_len: usize,
+    /// Length of subkeys to be derived for [`KeyPurpose::Encryption`].
     block_cipher_key_len: usize,
 }
 
 impl RootKey {
+    /// Instantiate a [`RootKey`] from externally supplied key material.
+    ///
+    /// # Arguments:
+    ///
+    /// * `key` - The externally supplied raw key material.
+    /// * `salt` - Root key derivation salt as found in the
+    ///   [`StaticImageHeader::salt`](super::image_header::StaticImageHeader::salt).
+    /// * `kdf_hash_alg` - The hash algorithm to be used with
+    ///   [`TcgTpm2KdfA`](kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA) for subkey
+    ///   derivation, i.e. the value of [`ImageLayout::kdf_hash_alg`].
+    /// * `auth_tree_root_hmac_hash_alg` - The HMAC hash algorithm to be used
+    ///   with subkeys derived for [`KeyPurpose::AuthenticationRoot`], i.e. the
+    ///   value of [`ImageLayout::auth_tree_root_hmac_hash_alg`].
+    /// * `auth_tree_node_hash_alg``  The hash algorithm to be used for forming
+    ///   digests over authentication tree nodes, i.e. the value of
+    ///   [`ImageLayout::auth_tree_node_hash_alg`].
+    /// * `auth_tree_data_hmac_hash_alg` - The HMAC hash algorithm to be used
+    ///   with subkeys derived for [`KeyPurpose::AuthenticationData`], i.e. the
+    ///   value of [`ImageLayout::auth_tree_data_hmac_hash_alg`].
+    /// * `preauth_cca_protection_hmac_hash_alg` - The HMAC hash algorithm to be
+    ///   used with subkeys derived for
+    ///   [`KeyPurpose::PreAuthCcaProtectionAuthentication`], i.e. the value of
+    ///   [`ImageLayout::preauth_cca_protection_hmac_hash_alg`].
+    /// * `block_cipher_alg` - The block cipher algorithm to be used with
+    ///   subkeys derived for [`KeyPurpose::Encryption`], i.e. the value of
+    ///   [`ImageLayout::block_cipher_alg`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         key: &[u8],
@@ -385,6 +526,11 @@ impl RootKey {
         })
     }
 
+    /// Derive a subkey from the [`RootKey`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `key_id` - [`KeyId`] of the subkey to derive.
     pub fn derive_key(&self, key_id: &KeyId) -> Result<zeroize::Zeroizing<Vec<u8>>, NvFsError> {
         let key_len = match key_id.purpose {
             KeyPurpose::Derivation => hash::hash_alg_digest_len(self.kdf_hash_alg) as usize,

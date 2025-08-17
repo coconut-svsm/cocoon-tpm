@@ -3,7 +3,7 @@
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Implementation of [`AuthTreeDataBlocksUpdateStates`] for managing a
-//! [transaction](super::Transaction)'s associated data updates.
+//! [`Transaction`](super::Transaction)'s associated data updates.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -23,12 +23,35 @@ use crate::{
 };
 use core::{convert, mem, ops, slice};
 
+#[cfg(doc)]
+use super::journal_allocations::TransactionAllocateJournalStagingCopiesFuture;
+#[cfg(doc)]
+use super::prepare_staged_updates_application::TransactionPrepareStagedUpdatesApplicationFuture;
+#[cfg(doc)]
+use layout::ImageLayout;
+
+/// Cached [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+/// data.
+///
+/// The cached data itself is amended by a flag whether or not its
+/// authenticated.
 pub(super) struct CachedEncryptedAllocationBlockData {
+    /// The [Allocation Block's](ImageLayout::allocation_block_size_128b_log2)
+    /// encrypted data.
     encrypted_data: Vec<u8>,
+    /// Whether or not `encrypted_data` is authenticated.
     authenticated: bool,
 }
 
 impl CachedEncryptedAllocationBlockData {
+    /// Instantiate a [`CachedEncryptedAllocationBlockData`].
+    ///
+    /// The `encrypted_data` is initially tracked as unauthenticated.
+    ///
+    /// # Arguments:
+    ///
+    /// * `encrypted_data` - The [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) data to cache.
     pub fn new(encrypted_data: Vec<u8>) -> Self {
         debug_assert!(!encrypted_data.is_empty());
         Self {
@@ -37,18 +60,22 @@ impl CachedEncryptedAllocationBlockData {
         }
     }
 
+    /// Get the cached data.
     pub fn get_encrypted_data(&self) -> &[u8] {
         &self.encrypted_data
     }
 
+    /// Whether or not the cached data is authenticated.
     pub fn is_authenticated(&self) -> bool {
         self.authenticated
     }
 
+    /// Mark the cached data as authenticated.
     pub fn set_authenticated(&mut self) {
         self.authenticated = true;
     }
 
+    /// Obtain the cached data back.
     pub fn into_encrypted_data(self) -> Vec<u8> {
         self.encrypted_data
     }
@@ -57,6 +84,8 @@ impl CachedEncryptedAllocationBlockData {
 /// Details specific to the
 /// [`AllocationBlockUpdateNvSyncStateAllocated::Unmodified`] state.
 pub(super) struct AllocationBlockUpdateNvSyncStateAllocatedUnmodified {
+    /// Cached [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    /// data, if any.
     pub cached_encrypted_data: Option<CachedEncryptedAllocationBlockData>,
 
     /// Whether or not the unmodifed data has been copied over to the [Journal
@@ -64,9 +93,9 @@ pub(super) struct AllocationBlockUpdateNvSyncStateAllocatedUnmodified {
     /// Copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin) already.
     ///
     /// All of a [Chip IO
-    /// block's](crate::chip::NvChip::chip_io_block_size_128b_log2) [`Allocation
-    /// Blocks`](layout::ImageLayout::allocation_block_size_128b_log2) are
-    /// homogenous in that regard.
+    /// block's](crate::chip::NvChip::chip_io_block_size_128b_log2) [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) are homogenous in
+    /// that regard.
     pub copied_to_journal: bool,
 }
 
@@ -74,23 +103,24 @@ pub(super) struct AllocationBlockUpdateNvSyncStateAllocatedUnmodified {
 /// [`AllocationBlockUpdateNvSyncStateAllocated::Modified`] state.
 pub(super) enum AllocationBlockUpdateNvSyncStateAllocatedModified {
     /// The most recently applied [staged
-    /// update](AllocationBlockUpdateState::staged_update) has
-    /// not been written out to the [Journal Staging
+    /// update](AllocationBlockUpdateStagedUpdate) has not been written out
+    /// to the [Journal Staging
     /// Copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin) yet.
     ///
     /// The updated contents are considered for the reproduction of the
     /// containing [Authentication Tree Data Block'
-    /// s](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    /// [authentication digest](AuthTreeDataBlockUpdateState::auth_digest), if
-    /// any and if needed. The main motivation for having this intermediate
-    /// state is the ability to selectively write out updates or e.g.
-    /// discard unmodified buffers at a [Chip IO
+    /// s](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// [authentication digest](AuthTreeDataBlockUpdateState::auth_digest),
+    /// if any and if needed. The main motivation for having this
+    /// intermediate state is the ability to selectively write out
+    /// updates or e.g.  discard unmodified buffers at a [Chip IO
     /// block](crate::chip::NvChip::chip_io_block_size_128b_log2) granularity in
-    /// case a single Authentication Tree Data Block comprises several such
-    /// ones.
+    /// case a single [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// comprises several such ones.
     JournalDirty {
         /// The encrypted data as applied from a [staged
-        /// update](AllocationBlockUpdateState::staged_update).
+        /// update](AllocationBlockUpdateStagedUpdate).
         ///
         /// As the data is not coming from extern storage, it's always
         /// considered genuine.
@@ -98,10 +128,12 @@ pub(super) enum AllocationBlockUpdateNvSyncStateAllocatedModified {
     },
 
     /// The most recently applied [staged
-    /// update](AllocationBlockUpdateState::staged_update) has been written
-    /// out to the [Journal Staging
+    /// update](AllocationBlockUpdateStagedUpdate) has been written out to
+    /// the [Journal Staging
     /// Copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin).
     JournalClean {
+        /// Cached [Allocation
+        /// Block](ImageLayout::allocation_block_size_128b_log2) data, if any.
         cached_encrypted_data: Option<CachedEncryptedAllocationBlockData>,
     },
 }
@@ -109,21 +141,20 @@ pub(super) enum AllocationBlockUpdateNvSyncStateAllocatedModified {
 /// Details specific to the [`AllocationBlockUpdateNvSyncState::Allocated`]
 /// state.
 pub(super) enum AllocationBlockUpdateNvSyncStateAllocated {
-    /// No [staged update](AllocationBlockUpdateState::staged_update) has been
-    /// applied to the [Allocation
-    /// Block's](layout::ImageLayout::allocation_block_size_128b_log2)
-    /// associated
-    /// [`nv_sync_state`](AllocationBlockUpdateState::nv_sync_state) yet.
+    /// No [staged update](AllocationBlockUpdateStagedUpdate) has been applied
+    /// to the [Allocation
+    /// Block's](ImageLayout::allocation_block_size_128b_log2) associated
+    /// [storage tracking state](AllocationBlockUpdateNvSyncState) yet.
     Unmodified(AllocationBlockUpdateNvSyncStateAllocatedUnmodified),
 
-    /// Some [staged update](AllocationBlockUpdateState::staged_update) has been
-    /// applied to the [Allocation
-    /// Block's](layout::ImageLayout::allocation_block_size_128b_log2)
-    /// associated
-    /// [`nv_sync_state`](AllocationBlockUpdateState::nv_sync_state).
+    /// Some [staged update](AllocationBlockUpdateStagedUpdate) has been applied
+    /// to the [Allocation
+    /// Block's](ImageLayout::allocation_block_size_128b_log2) associated
+    /// [storage tracking state](AllocationBlockUpdateNvSyncState).
     ///
     /// Note that this does *not* necessarily imply that the change has actually
-    /// been written out to storage.
+    /// been written out to storage, as it could still be in the
+    /// [`JournalDirty`](AllocationBlockUpdateNvSyncStateAllocatedModified::JournalDirty) state.
     Modified(AllocationBlockUpdateNvSyncStateAllocatedModified),
 }
 
@@ -131,15 +162,15 @@ pub(super) enum AllocationBlockUpdateNvSyncStateAllocated {
 /// [`AllocationBlockUpdateNvSyncStateUnallocated::target_state`].
 pub(super) enum AllocationBlockUpdateNvSyncStateUnallocatedTargetState {
     /// The target [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) had been
+    /// Block](ImageLayout::allocation_block_size_128b_log2) had been
     /// unallocated before the transaction, and remains so.
     ///
-    /// `is_initialized` is set to true if the target Allocation Block's can be
-    /// considered to have been filled with essentially random data, which
-    /// is relevant when trimming is enabled and will be true if some other
-    /// Allocation Block of the containing [IO
-    /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) had been
-    /// allocated.
+    /// `is_initialized` is set to true if the target [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) can be considered
+    /// to have been filled with essentially random data, which is relevant
+    /// when trimming is disabled and will be true if some other Allocation
+    /// Block of the containing [IO
+    /// Block](ImageLayout::io_block_allocation_blocks_log2) had been allocated.
     Unallocated { is_initialized: bool },
 
     /// The target Allocation Block had been allocated before the transaction,
@@ -148,6 +179,9 @@ pub(super) enum AllocationBlockUpdateNvSyncStateUnallocatedTargetState {
 }
 
 impl AllocationBlockUpdateNvSyncStateUnallocatedTargetState {
+    /// Determine whether the target [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) can be considered
+    /// to have been filled with essentially random data.
     pub fn is_initialized(&self) -> bool {
         match self {
             Self::Unallocated { is_initialized } => *is_initialized,
@@ -159,6 +193,8 @@ impl AllocationBlockUpdateNvSyncStateUnallocatedTargetState {
 /// Details specific to the [`AllocationBlockUpdateNvSyncState::Unallocated`]
 /// state.
 pub(super) struct AllocationBlockUpdateNvSyncStateUnallocated {
+    /// (Essentially) random data to write to the unallocated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2).
     pub(super) random_fillup: Option<Vec<u8>>,
 
     /// Whether or not some essentially random data has been writen to the
@@ -167,21 +203,19 @@ pub(super) struct AllocationBlockUpdateNvSyncStateUnallocated {
     /// already.
     pub(super) copied_to_journal: bool,
 
-    /// Details about the [Allocation
-    /// Block's](layout::ImageLayout::allocation_block_size_128b_log2)
-    /// [target destination](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin) status.
+    /// Details about the target [Allocation
+    /// Block's](ImageLayout::allocation_block_size_128b_log2) state from
+    /// before the transaction.
     pub(super) target_state: AllocationBlockUpdateNvSyncStateUnallocatedTargetState,
 }
 
 /// Representation of the [`AllocationBlockUpdateState::nv_sync_state`] field.
 pub(super) enum AllocationBlockUpdateNvSyncState {
-    /// The [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2)
-    /// is allocated.
+    /// The [Allocation Block](ImageLayout::allocation_block_size_128b_log2) is
+    /// allocated.
     Allocated(AllocationBlockUpdateNvSyncStateAllocated),
 
-    /// The [`Allocation
-    /// Block`](layout::ImageLayout::allocation_block_size_128b_log2)
+    /// The [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
     /// is unallocated.
     Unallocated(AllocationBlockUpdateNvSyncStateUnallocated),
 }
@@ -191,58 +225,61 @@ pub(super) enum AllocationBlockUpdateStagedUpdate {
     /// No update staged.
     None,
 
-    /// The [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) is to get
-    /// deallocated.
+    /// The [Allocation Block](ImageLayout::allocation_block_size_128b_log2) is
+    /// to get deallocated.
     Deallocate,
 
-    /// The [Allocation
-    /// Block's](layout::ImageLayout::allocation_block_size_128b_log2)
+    /// The [Allocation Block's](ImageLayout::allocation_block_size_128b_log2)
     /// contents are to get overwritten with `encrypted_data`.
     Update { encrypted_data: Vec<u8> },
 
     /// A previous update to either the [Allocation
-    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) itself or
-    /// some other in a logical sequence it's a member of failed and the
-    /// contents are to be considered indeterminate.
+    /// Block](ImageLayout::allocation_block_size_128b_log2) itself or some
+    /// other in a logical sequence it's a member of failed and the contents
+    /// are to be considered indeterminate.
+    ///
+    /// A subsequent update staging operation may move the state out of
+    /// `FailedUpdate` again.
     FailedUpdate,
 }
 
 /// Update status of a single [`Allocation
-/// Block`](layout::ImageLayout::allocation_block_size_128b_log2).
+/// Block`](ImageLayout::allocation_block_size_128b_log2).
 ///
 /// Managed exclusively at
 /// [AuthTreeDataBlockUpdateState::allocation_blocks_states].
 pub struct AllocationBlockUpdateState {
-    /// The [Allocation
-    /// Block's](layout::ImageLayout::allocation_block_size_128b_log2) update
-    /// status on storage.
+    /// The [Allocation Block's](ImageLayout::allocation_block_size_128b_log2)
+    /// update status on storage.
     ///
     /// Most importantly, next to dirtiness, this provides the authorative
     /// source of information on how to reconstruct the containing
     /// [Authentication Tree Data
-    /// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2) most recent
-    /// [`AuthTreeDataBlockUpdateState::auth_digest`] value, if any, which
-    /// becomes important when some Allocation Block data buffers of the
-    /// containing Authentication Tree Data Block had previously been
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2) most
+    /// recent [`AuthTreeDataBlockUpdateState::auth_digest`] value, if any,
+    /// which becomes important when some Allocation Block data buffers of
+    /// the containing Authentication Tree Data Block had previously been
     /// discarded, but need to get reloaded.
     pub(super) nv_sync_state: AllocationBlockUpdateNvSyncState,
 
     /// The update staged for application to the [Allocation
-    /// Block's](layout::ImageLayout::allocation_block_size_128b_log2)
-    /// [nv_sync_state](Self::nv_sync_state), if any.
+    /// Block's](ImageLayout::allocation_block_size_128b_log2) [storage tracking
+    /// state](AllocationBlockUpdateNvSyncState), if any.
     ///
     /// The purpose of staging updates separately is to foster a potential
     /// accumulation of updates to several different Allocation Blocks in a
-    /// containing Authentication Tree Data Block before applying them
-    /// collectively to their associated
-    /// [`nv_sync_state`](AllocationBlockUpdateState::nv_sync_state) each, which
-    /// potentially alleviates the need to authenticate the formers'
-    /// contents.
+    /// containing [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) before
+    /// applying them collectively to their associated [storage tracking
+    /// state](AllocationBlockUpdateNvSyncState) each, which potentially
+    /// alleviates the need to authenticate the formers' contents.
     pub(super) staged_update: AllocationBlockUpdateStagedUpdate,
 }
 
 impl AllocationBlockUpdateState {
+    /// Determine whether the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) is
+    /// allocated and has its data updated by the transaction.
     pub fn has_modified_data(&self) -> bool {
         // Consider a failed update as a modification so that any attempt to
         // subsequently read it will report an error as appropriate.
@@ -255,6 +292,9 @@ impl AllocationBlockUpdateState {
         )
     }
 
+    /// Determine whether the [`AllocationBlockUpdateState`] has the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) data loaded and
+    /// authenticated.
     pub fn has_encrypted_data_loaded(&self) -> Option<bool> {
         match &self.staged_update {
             AllocationBlockUpdateStagedUpdate::None => (),
@@ -266,7 +306,7 @@ impl AllocationBlockUpdateState {
             }
             AllocationBlockUpdateStagedUpdate::FailedUpdate => {
                 // The Allocation Block's contents are indeterminate. Return a fake indication
-                // that the data is loaded, so that it will not get attempted to
+                // that the data is loaded, so that it will not be attempted to
                 // get read from storage and an error will get reported upon
                 // subsequently accessing it.
                 return Some(true);
@@ -292,6 +332,13 @@ impl AllocationBlockUpdateState {
         }
     }
 
+    /// Access the [Allocation
+    /// Block's](ImageLayout::allocation_block_size_128b_log2) authenticated
+    /// encrypted data.
+    ///
+    /// Must get called only if
+    /// [`has_encrypted_data_loaded()`](Self::has_encrypted_data_loaded) returns
+    /// true.
     pub fn get_authenticated_encrypted_data(&self) -> Result<&[u8], NvFsError> {
         match &self.staged_update {
             AllocationBlockUpdateStagedUpdate::None => (),
@@ -343,18 +390,18 @@ impl AllocationBlockUpdateState {
 
 /// Track a [transaction's](super::Transaction) accumulated data updates to a
 /// given [Authentication
-/// Tree Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// Tree Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
 ///
 /// Note that even though perhaps completely unrelated otherwise, all of an
 /// Authentication Tree Data Block's indivdual [Allocation
-/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) contribute to
-/// its authentication digest, hence are managed together.
+/// Blocks](ImageLayout::allocation_block_size_128b_log2) contribute
+/// to its authentication digest, hence are managed together.
 ///
 /// Instances are exclusively stored and managed in the containing
 /// [`AuthTreeDataBlocksUpdateStates::states`].
 pub struct AuthTreeDataBlockUpdateState {
     /// Location of the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// associated with and tracked by this instance.
     target_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
 
@@ -365,22 +412,40 @@ pub struct AuthTreeDataBlockUpdateState {
     journal_staging_copy_allocation_blocks_begin: Option<layout::PhysicalAllocBlockIndex>,
 
     /// Update states of the [Authentication Tree Data
-    /// Block's](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2) individual
-    /// [Allocation
-    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// individual [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
     allocation_blocks_states: Vec<AllocationBlockUpdateState>,
 
-    /// The updated authentication digest, if any. All information needed for
-    /// its reproduction (except possibly the data itself), can be
-    /// collectively found in the
+    /// The updated authentication digest, if any.
+    ///
+    /// All information needed for its reproduction (except possibly the data
+    /// itself), can be collectively found in the
     /// [`allocation_blocks_states`'s](Self::allocation_blocks_states)
     /// [`nv_sync_state`s](AllocationBlockUpdateState::nv_sync_state).
+    ///
+    /// The following invariant holds: if there is any modification to the
+    /// [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) and any
+    /// of the `allocation_blocks_states` entries (corresponding to
+    /// allocated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2)) does not have the
+    /// data [loaded and
+    /// authenticated](AllocationBlockUpdateState::has_encrypted_data_loaded),
+    /// then there will always be an `auth_digest`.
+    ///
+    /// In principle it would be possible to authenticate the missing data
+    /// without an `auth_digest` from the authentication tree if the
+    /// corresponding [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) all happened to be
+    /// unmodified, but this case is currently not supported as it's
+    /// probably not worth the extra complexity.
     auth_digest: Option<Vec<u8>>,
 }
 
 impl AuthTreeDataBlockUpdateState {
     /// Location of the [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// associated with and tracked by this instance.
     pub fn get_target_allocation_blocks_begin(&self) -> layout::PhysicalAllocBlockIndex {
         self.target_allocation_blocks_begin
@@ -391,23 +456,28 @@ impl AuthTreeDataBlockUpdateState {
     /// In general, data updates are not written directly to their target
     /// location, but to a "Journal Staging Copy" first (and only applied to
     /// the final destination once all of the Journal is in place). This
-    /// returns the location of the Journal Staging Area, if any has
-    /// been allocated for the given [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    /// yet.
+    /// returns the location of the Journal Staging Area, if any has been
+    /// allocated for the given [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// already.
+    ///
+    /// In some special cases it is possible that data writes are made directly
+    /// to their target locations "in-place" without going through a journal
+    /// staging copy first. In this case the location returned by
+    /// `get_journal_staging_copy_allocation_blocks_begin()` matches that of
+    /// [`get_target_allocation_blocks_begin()`](Self::get_target_allocation_blocks_begin).
     ///
     /// If no Journal Staging Copy area has been allocated yet, `None` is being
     /// returned.
     ///
-    /// If the [IO Block
-    /// size](layout::ImageLayout::io_block_allocation_blocks_log2) happens to
-    /// be larger than that of an Authentication Tree Data Block, then all
-    /// of the IO Block needs to get copied to a Journal Staging Area, even
-    /// if some of the Authentication Tree Data Blocks contained therein are
-    /// unmodified. The individual Authentication Tree Data Blocks' offsets in
-    /// that staging copy IO Block match their position within the
-    /// [destination](Self::get_target_allocation_blocks_begin) IO Block each in
-    /// this case.
+    /// If the [IO Block size](ImageLayout::io_block_allocation_blocks_log2)
+    /// happens to be larger than that of an Authentication Tree Data Block,
+    /// then all of the IO Block needs to get copied to a Journal Staging
+    /// Area, even if some of the Authentication Tree Data Blocks contained
+    /// therein are unmodified. The individual Authentication Tree Data Blocks'
+    /// offsets in that staging copy IO Block match their position within
+    /// the [destination](Self::get_target_allocation_blocks_begin) IO Block
+    /// each in this case.
     ///
     /// If on the other hand a single Authentication Tree Data Block comprises
     /// several IO Blocks, then only the IO Blocks with updates in them need
@@ -420,30 +490,71 @@ impl AuthTreeDataBlockUpdateState {
     /// Tree Data Block is being allocated for the IO Blocks' staging copies
     /// and those being actually written out retain their relative position
     /// (including distances) therein.
+    ///
+    /// # See also:
+    ///
+    /// * [`TransactionAllocateJournalStagingCopiesFuture`].
     pub fn get_journal_staging_copy_allocation_blocks_begin(&self) -> Option<layout::PhysicalAllocBlockIndex> {
         self.journal_staging_copy_allocation_blocks_begin
     }
 
+    /// Get the [Authentication Tree Data
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// updated authentication digest, if any.
     pub fn get_auth_digest(&self) -> Option<&[u8]> {
         self.auth_digest.as_deref()
     }
 
+    /// Steal the [Authentication Tree Data
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// updated authentication digest, if any.
     pub fn steal_auth_digest(&mut self) -> Option<Vec<u8>> {
         self.auth_digest.take()
     }
 
+    /// Set the [Authentication Tree Data
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// updated authentication digest, if any.
     pub fn set_auth_digest(&mut self, auth_digest: Vec<u8>) {
         self.auth_digest = Some(auth_digest);
     }
 
+    /// Iterate over the [Authentication Tree Data
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// individual [Allocation
+    /// Block's](ImageLayout::allocation_block_size_128b_log2)
+    /// [`AllocationBlockUpdateState`]s.
     pub fn iter_allocation_blocks(&self) -> slice::Iter<'_, AllocationBlockUpdateState> {
         self.allocation_blocks_states.iter()
     }
 
+    /// Iterate over the [Authentication Tree Data
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// individual [Allocation
+    /// Block's](ImageLayout::allocation_block_size_128b_log2)
+    /// [`AllocationBlockUpdateState`]s with `mut` access.
     pub fn iter_allocation_blocks_mut(&mut self) -> slice::IterMut<'_, AllocationBlockUpdateState> {
         self.allocation_blocks_states.iter_mut()
     }
 
+    /// Iterate over the [Authentication Tree Data
+    /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// individual [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) for the purpose of
+    /// [computing the authentication
+    /// digest](auth_tree::AuthTreeConfig::digest_data_block).
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    /// * `expect_authenticated_data` - If true, verify in the course of the
+    ///   iteration that all of the Authentication Tree Data
+    ///   Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   individual [Allocation
+    ///   Block's](ImageLayout::allocation_block_size_128b_log2)
+    ///   [`AllocationBlockUpdateState`]s have their data available as
+    ///   authenticated.
     pub(super) fn iter_auth_digest_allocation_blocks(
         &self,
         image_header_end: layout::PhysicalAllocBlockIndex,
@@ -465,6 +576,8 @@ impl ops::Index<usize> for AuthTreeDataBlockUpdateState {
     }
 }
 
+/// Iterator returned by
+/// [`AuthTreeDataBlockUpdateState::iter_auth_digest_allocation_blocks`].
 pub(super) struct AuthTreeDataBlockUpdateStateAuthDigestAllocationBlocksIter<'a> {
     auth_tree_block_allocation_blocks_states_iter: slice::Iter<'a, AllocationBlockUpdateState>,
     skip_count: usize,
@@ -472,6 +585,23 @@ pub(super) struct AuthTreeDataBlockUpdateStateAuthDigestAllocationBlocksIter<'a>
 }
 
 impl<'a> AuthTreeDataBlockUpdateStateAuthDigestAllocationBlocksIter<'a> {
+    /// Instantiate a
+    /// [`AuthTreeDataBlockUpdateStateAuthDigestAllocationBlocksIter`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `auth_tree_data_block_update_state` - The
+    ///   [`AuthTreeDataBlockUpdateState`] to create an iterator over.
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate:
+    ///   fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    /// * `expect_authenticated_data` - If true, verify in the course of the
+    ///   iteration that all of the Authentication Tree Data
+    ///   Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   individual [Allocation
+    ///   Block's](ImageLayout::allocation_block_size_128b_log2)
+    ///   [`AllocationBlockUpdateState`]s have their data available as
+    ///   authenticated.
     fn new(
         auth_tree_data_block_update_state: &'a AuthTreeDataBlockUpdateState,
         image_header_end: layout::PhysicalAllocBlockIndex,
@@ -549,54 +679,95 @@ impl<'a> Iterator for AuthTreeDataBlockUpdateStateAuthDigestAllocationBlocksIter
 
 /// Track all of a [transaction's](super::Transaction) accumulated data updates
 /// at [Authentication
-/// Tree Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2) granularity.
+/// Tree Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// granularity.
 ///
 /// Note that even though perhaps completely unrelated otherwise, all of an
 /// [Authentication Tree
-/// Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2) indivdual
-/// [Allocation Blocks](layout::ImageLayout::allocation_block_size_128b_log2)
+/// Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// indivdual [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2)
 /// contribute to its authentication digest, hence are managed together in an
 /// [`AuthTreeDataBlockUpdateState`] instance each.
 ///
 /// The collection is sparse, in general only
-/// - Authentication Tree Data Blocks with modifications in them and
-/// - possibly unmodified Authentication Tree Data Blocks part of a larger
-///   modified [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
+/// - [Authentication Tree Data
+///   Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) with
+///   modifications in them and
+/// - possibly unmodified [Authentication Tree Data
+///   Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) part of
+///   a larger modified [IO Block](ImageLayout::io_block_allocation_blocks_log2)
 ///   or [Chip IO Block](crate::chip::NvChip::chip_io_block_size_128b_log2) have
 ///   associated entries.
+///
+/// For each [Allocation Block level entry](AllocationBlockUpdateState), the
+/// current [state as already written or to be written to
+/// storage](AllocationBlockUpdateNvSyncState) is tracked.  In addition to that,
+/// there's an [update staging](AllocationBlockUpdateStagedUpdate) layer. Its
+/// main purpose is to enable the accumulation of multiple independent updates
+/// to a containing [Authentication Tree Data
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) individual
+/// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2), thereby
+/// potentially alleviating the need to read in and authenticate the
+/// [Authentication Tree Data
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) in case
+/// none of its original [Allocation
+/// Blocks](ImageLayout::allocation_block_size_128b_log2) are retained.
+/// Furthermore, staged updates may get reset, which provides a mechanism to
+/// revert them for graceful error handling.
+///
+/// In general, the application of data update writes takes the following steps:
+/// 1. The states corresponding to the updated storage range are
+///    [inserted](Self::insert_missing_in_range).
+/// 2. The update staging buffers are
+///    [allocated](Self::allocate_allocation_blocks_update_staging_bufs) and the
+///    updated data [written to
+///    those](Self::iter_allocation_blocks_update_staging_bufs_mut).
+/// 3. Eventually, once one or more data updates have been staged, they're
+///    getting prepared for application to the storage tracking state via
+///    [`TransactionPrepareStagedUpdatesApplicationFuture`].  This will read in
+///    and authenticate any retained data in the containing [Authentication Tree
+///    Data Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// 4. The staged updates are then getting [applied to the storage tracking
+///    state](Self::apply_allocation_blocks_staged_updates), tracked as
+///    [dirty](AllocationBlockUpdateNvSyncStateAllocatedModified::JournalDirty).
+/// 5. Somewhen later, the updates may get written to storage, possibly to a
+///    [journal staging
+///    copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin)
+///    as appropriate, by means of a
+///    [`TransactionWriteDirtyDataFuture`](super::write_dirty_data::TransactionWriteDirtyDataFuture).
 pub struct AuthTreeDataBlocksUpdateStates {
     /// State of data updates at [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// granularity, with one entry for each modified such block.
     ///
     /// Ordered by the associated Authentication Tree Data Blocks' [location on
     /// storage](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin).
     states: Vec<AuthTreeDataBlockUpdateState>,
 
-    /// Copied verbatim  from
-    /// [`ImageLayout`](layout::ImageLayout::io_block_allocation_blocks_log2).
+    /// Copied verbatim from
+    /// [`ImageLayout`](ImageLayout::io_block_allocation_blocks_log2).
     io_block_allocation_blocks_log2: u8,
 
     /// Copied verbatim from
-    /// [`ImageLayout`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    /// [`ImageLayout`](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     auth_tree_data_block_allocation_blocks_log2: u8,
 
     /// Copied verbatim from
-    /// [`ImageLayout`](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// [`ImageLayout`](ImageLayout::allocation_block_size_128b_log2).
     allocation_block_size_128b_log2: u8,
 }
 
 impl AuthTreeDataBlocksUpdateStates {
-    /// Create a new instance.
+    /// Create a new [`AuthTreeDataBlocksUpdateStates`] instance.
     ///
     /// # Arguments:
     ///
     /// * `io_block_allocation_blocks_log2` - Value of
-    ///   [`ImageLayout::io_block_allocation_blocks_log2`](layout::ImageLayout::io_block_allocation_blocks_log2).
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     /// * `auth_tree_data_block_allocation_blocks_log2` - Value of
-    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     /// * `allocation_block_size_128_log2` - Value of
-    ///   [`ImageLayout::allocation_block_size_128_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn new(
         io_block_allocation_blocks_log2: u8,
         auth_tree_data_block_allocation_blocks_log2: u8,
@@ -610,18 +781,19 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Number of [`AuthTreeDataBlockUpdateState`] entries.
     pub fn len(&self) -> usize {
         self.states.len()
     }
 
+    /// Clear.
     pub fn clear(&mut self) {
         self.states = Vec::new();
     }
 
-    /// Lookup an [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    /// [level entry index](AuthTreeDataBlocksUpdateStatesIndex) by
-    /// [location on
+    /// Lookup an
+    /// [Authentication Tree Data Block level entry
+    /// index](AuthTreeDataBlocksUpdateStatesIndex) by [location on
     /// storage](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin).
     ///
     /// Returns the index wrapped in a result, in an [`Ok`] if a match was
@@ -735,6 +907,16 @@ impl AuthTreeDataBlocksUpdateStates {
         ))
     }
 
+    /// Iterate over the [`AuthTreeDataBlockUpdateState`] entries.
+    ///
+    /// If `range` is specified, restrict the iteration to it, otherwise iterate
+    /// over all entries.
+    ///
+    /// # Arguments:
+    ///
+    /// * `range` - [Authentication Tree Data Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesIndexRange) to restrict the
+    ///   iteration to, if any.
     pub fn iter_auth_tree_data_blocks<'a>(
         &'a self,
         range: Option<&'a AuthTreeDataBlocksUpdateStatesIndexRange>,
@@ -745,6 +927,16 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Iterate over the [`AllocationBlockUpdateState`] entries.
+    ///
+    /// If `range` is specified, restrict the iteration to it, otherwise iterate
+    /// over all entries.
+    ///
+    /// # Arguments:
+    ///
+    /// * `range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   restrict the iteration to, if any.
     pub fn iter_allocation_blocks(
         &self,
         states_allocation_blocks_range: Option<&AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange>,
@@ -752,6 +944,17 @@ impl AuthTreeDataBlocksUpdateStates {
         AuthTreeDataBlocksUpdateStatesAllocationBlocksIter::new(self, states_allocation_blocks_range)
     }
 
+    /// Iterate over the [`AllocationBlockUpdateState`] entries with `mut`
+    /// access.
+    ///
+    /// If `range` is specified, restrict the iteration to it, otherwise iterate
+    /// over all entries.
+    ///
+    /// # Arguments:
+    ///
+    /// * `range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   restrict the iteration to, if any.
     pub fn iter_allocation_blocks_mut(
         &mut self,
         states_allocation_blocks_range: Option<&AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange>,
@@ -1176,7 +1379,7 @@ impl AuthTreeDataBlocksUpdateStates {
     /// If any new entries have been inserted, any previously obtained update
     /// tracking states index range, including the input
     /// `states_index_range` is invalidated. However, it is possible to
-    /// apply correction offsets to to such pre-existing index range to account
+    /// apply correction offsets to such pre-existing index range to account
     /// for the insertions. If new states had been inserted, then the
     /// [offsets](AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets)
     /// applicable to the input `states_index_range` are returned
@@ -1447,6 +1650,21 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Prune [`AuthTreeDataBlockUpdateState`] entries not overlapping with an
+    /// [IO Block](ImageLayout::io_block_allocation_blocks_log2) with
+    /// pending data updates.
+    ///
+    /// # Arguments:
+    ///
+    /// * `abandoned_journal_staging_copy_blocks` - Destination for collecting
+    ///   abandoned journal staging copy blocks. Entries will point to the
+    ///   beginning of abandoned blocks, all equal to the larger of an
+    ///   [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) and
+    ///   an [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2) in
+    ///   size.
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
     pub fn prune_unmodified(
         &mut self,
         abandoned_journal_staging_copy_blocks: &mut Vec<layout::PhysicalAllocBlockIndex>,
@@ -2050,9 +2268,9 @@ impl AuthTreeDataBlocksUpdateStates {
     ///
     /// Note that the current implementation always assigns a contiguous Journal
     /// Staging Copy area to all Allocation Blocks contained within a common
-    /// block of size the larger of an [Authentication
-    /// Tree Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2) and and
-    /// an [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2). See
+    /// block of size the larger of an [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) and
+    /// and an [IO Block](ImageLayout::io_block_allocation_blocks_log2). See
     /// also the reasoning
     /// [here](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin).
     pub fn get_contiguous_region_journal_staging_copy_range(
@@ -2118,10 +2336,9 @@ impl AuthTreeDataBlocksUpdateStates {
     ///
     /// The provided Journal Staging Copy block must be the size of and aligned
     /// to the larger of [Authentication Tree Data
-    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-    /// and and an [IO
-    /// Block](layout::ImageLayout::io_block_allocation_blocks_log2). The same
-    /// applies to the update states' [associated covered region on
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) and
+    /// and an [IO Block](ImageLayout::io_block_allocation_blocks_log2). The
+    /// same applies to the update states' [associated covered region on
     /// storage](Self::get_contiguous_region_target_range). Relative offsets
     /// will be preserved when assigning portions of the provided Journal
     /// Staging Copy block to individual Authentication Tree Data Block
@@ -2181,6 +2398,35 @@ impl AuthTreeDataBlocksUpdateStates {
         Ok(())
     }
 
+    /// Allocate [data update
+    /// staging](AllocationBlockUpdateStagedUpdate) buffers for a
+    /// given [Allocation Block level index
+    /// range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange).
+    ///
+    /// Move all the [`AllocationBlockUpdateState::staged_update`] in
+    /// `states_allocation_blocks_range` to the
+    /// [`AllocationBlockUpdateStagedUpdate::Update`] state
+    /// with an allocated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) sized
+    /// data buffer each.
+    ///
+    /// Once the data update staging buffers have been allocated, they may get
+    /// populated by encrypting directly into them by means of a
+    /// [`MutPeekableIoSlicesMutIter`](io_slices::MutPeekableIoSlicesMutIter)
+    /// instantiated via
+    /// [`iter_allocation_blocks_update_staging_bufs_mut()`](Self::iter_allocation_blocks_update_staging_bufs_mut).
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_allocation_blocks_range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   allocate data update staging buffers in.
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    ///
+    /// # See also:
+    ///
+    /// * [`iter_allocation_blocks_update_staging_bufs_mut()`](Self::iter_allocation_blocks_update_staging_bufs_mut).
     pub fn allocate_allocation_blocks_update_staging_bufs(
         &mut self,
         states_allocation_blocks_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -2202,6 +2448,19 @@ impl AuthTreeDataBlocksUpdateStates {
         Ok(())
     }
 
+    /// Create a [`MutPeekableIoSlicesMutIter`](io_slices::MutPeekableIoSlicesMutIter) for the
+    /// combined [data update
+    /// staging](AllocationBlockUpdateStagedUpdate) buffers in a given
+    /// [Allocation Block level index
+    /// range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange).
+    ///
+    /// The data update staging buffers must have been allocated before via
+    /// [`allocate_allocation_blocks_update_staging_bufs()`](Self::allocate_allocation_blocks_update_staging_bufs).
+    ///
+    /// * `states_allocation_blocks_range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   create a [`MutPeekableIoSlicesMutIter`](io_slices::MutPeekableIoSlicesMutIter)
+    ///   for.
     pub fn iter_allocation_blocks_update_staging_bufs_mut(
         &mut self,
         states_allocation_blocks_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -2213,6 +2472,18 @@ impl AuthTreeDataBlocksUpdateStates {
         )
     }
 
+    /// Reset the [staged updates](AllocationBlockUpdateStagedUpdate) in
+    /// a given [Allocation Block level index
+    /// range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange).
+    ///
+    /// The staged updates will all get reset to
+    /// [`AllocationBlockUpdateStagedUpdate::None`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_allocation_blocks_range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   reset any staged updates in.
     pub fn reset_allocation_blocks_staged_updates(
         &mut self,
         states_allocation_blocks_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -2223,6 +2494,17 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Move the [staged updates](AllocationBlockUpdateStagedUpdate) in
+    /// a given [Allocation Block level index
+    /// range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to the
+    /// [`FailedUpdate`]( AllocationBlockUpdateStagedUpdate::FailedUpdate)
+    /// state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_allocation_blocks_range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   reset any staged updates in.
     pub fn reset_allocation_blocks_staged_updates_to_failed(
         &mut self,
         states_allocation_blocks_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -2233,6 +2515,21 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Reset some power-of-two sized block's [staged
+    /// updates](AllocationBlockUpdateStagedUpdate).
+    ///
+    /// Reset all updates staged for the block starting at
+    /// `target_block_allocation_blocks_begin` on storage with size as
+    /// determined by `block_allocation_blocks_log2` to the
+    /// [`AllocationBlockUpdateStagedUpdate::None`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `target_block_allocation_blocks_begin` - Beginning of the block on
+    ///   storage.
+    /// * `block_allocation_blocks_log2` - Base-2 logarithm of the block size in
+    ///   units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     pub fn reset_staged_block_updates(
         &mut self,
         target_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -2244,6 +2541,21 @@ impl AuthTreeDataBlocksUpdateStates {
         )));
     }
 
+    /// Reset some power-of-two sized blocks' [staged
+    /// updates](AllocationBlockUpdateStagedUpdate).
+    ///
+    /// Reset all updates staged for the blocks starting at the respective
+    /// locations obtained from the `target_blocks_allocation_blocks_begin_iter`
+    /// with sizes as determined by `block_allocation_blocks_log2` each to
+    /// the [`AllocationBlockUpdateStagedUpdate::None`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `target_blocks_allocation_blocks_begin_iter` - Iterator over the
+    ///   respective blocks' beginning on storage.
+    /// * `block_allocation_blocks_log2` - Base-2 logarithm of the block size in
+    ///   units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     #[allow(dead_code)]
     pub fn reset_staged_blocks_updates<BI: Iterator<Item = layout::PhysicalAllocBlockIndex>>(
         &mut self,
@@ -2255,6 +2567,15 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Reset some storage extent's [staged
+    /// updates](AllocationBlockUpdateStagedUpdate).
+    ///
+    /// Reset all updates staged for the `target_extent` to the
+    /// [`AllocationBlockUpdateStagedUpdate::None`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `target_extent` - The storage extent to reset any staged updates for.
     pub fn reset_staged_extent_updates(&mut self, target_extent: &layout::PhysicalAllocBlockRange) {
         let states_allocation_blocks_range =
             match self.lookup_allocation_blocks_update_states_index_range(target_extent) {
@@ -2264,6 +2585,17 @@ impl AuthTreeDataBlocksUpdateStates {
         self.reset_allocation_blocks_staged_updates(&states_allocation_blocks_range);
     }
 
+    /// Reset some storage extents' [staged
+    /// updates](AllocationBlockUpdateStagedUpdate).
+    ///
+    /// Reset all updates staged for the storage extents obtained from
+    /// `target_extents_iter` to the
+    /// [`AllocationBlockUpdateStagedUpdate::None`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `target_extents_iter` - Iterator over the storage extents to reset any
+    ///   staged updates for.
     pub fn reset_staged_extents_updates<EI: Iterator<Item = layout::PhysicalAllocBlockRange>>(
         &mut self,
         target_extents_iter: EI,
@@ -2273,6 +2605,14 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Reset some storage extent's [staged
+    /// updates](AllocationBlockUpdateStagedUpdate) to the to the
+    /// [`FailedUpdate`]( AllocationBlockUpdateStagedUpdate::FailedUpdate)
+    /// state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `target_extent` - The storage extent to reset any staged updates for.
     pub fn reset_staged_extent_updates_to_failed(&mut self, target_extent: &layout::PhysicalAllocBlockRange) {
         let states_allocation_blocks_range =
             match self.lookup_allocation_blocks_update_states_index_range(target_extent) {
@@ -2282,6 +2622,19 @@ impl AuthTreeDataBlocksUpdateStates {
         self.reset_allocation_blocks_staged_updates_to_failed(&states_allocation_blocks_range);
     }
 
+    /// Reset some storage extents' [staged
+    /// updates](AllocationBlockUpdateStagedUpdate) to the
+    /// [`FailedUpdate`]( AllocationBlockUpdateStagedUpdate::FailedUpdate)
+    /// state.
+    ///
+    /// Reset all staged updates for the storage extents obtained from
+    /// `target_extents_iter` to the
+    /// [`AllocationBlockUpdateStagedUpdate::FailedUpdate`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `target_extents_iter` - Iterator over the storage extents to reset any
+    ///   staged updates for.
     pub fn reset_staged_extents_updates_to_failed<EI: Iterator<Item = layout::PhysicalAllocBlockRange>>(
         &mut self,
         target_extents_iter: EI,
@@ -2291,6 +2644,35 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Apply the [staged updates](AllocationBlockUpdateStagedUpdate) to
+    /// the [storage tracking
+    /// states](AllocationBlockUpdateNvSyncState).
+    ///
+    /// If `states_allocation_blocks_range` is specified, only updates staged in
+    /// that range are applied. Any applied staged updates are getting moved
+    /// to the [`AllocationBlockUpdateStagedUpdate::None`] state afterwards.
+    ///
+    /// Any [`AuthTreeDataBlockUpdateState`] in the
+    /// `states_allocation_blocks_range` with updates staged to it must have
+    /// all of its retained [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2)s' data loaded and
+    /// authenticated before the staged updates may get applied.
+    /// [`TransactionPrepareStagedUpdatesApplicationFuture`] may be used for
+    /// preparation.
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_allocation_blocks_range` - Optional [Allocation Block level
+    ///   entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   restrict the staged updates application to.
+    /// * `alloc_bitmap` - The filesystem's
+    ///   [`AllocBitmap`](alloc_bitmap::AllocBitmap) in the state from before
+    ///   the transaction.
+    ///
+    /// # See also:
+    ///
+    /// * [`TransactionPrepareStagedUpdatesApplicationFuture`].
     pub fn apply_allocation_blocks_staged_updates(
         &mut self,
         states_allocation_blocks_range: Option<&AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange>,
@@ -2511,6 +2893,22 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Stage [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate)
+    /// updates for some power-of-two sized block.
+    ///
+    /// Move all existing [`AllocationBlockUpdateStagedUpdate`] entries
+    /// associated with the block starting at
+    /// `deallocated_target_block_allocation_blocks_begin` on storage with size
+    /// as determined by `block_allocation_blocks_log2` to the
+    /// [`AllocationBlockUpdateStagedUpdate::Deallocate`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `deallocated_target_block_allocation_blocks_begin` - Beginning of the
+    ///   block on storage.
+    /// * `block_allocation_blocks_log2` - Base-2 logarithm of the block size in
+    ///   units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     pub fn stage_block_deallocation_updates(
         &mut self,
         deallocated_target_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -2522,6 +2920,23 @@ impl AuthTreeDataBlocksUpdateStates {
         )));
     }
 
+    /// Stage [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate)
+    /// updates for some power-of-two sized blocks.
+    ///
+    /// Move all existing [`AllocationBlockUpdateStagedUpdate`] entries
+    /// associated with the blocks starting at the respective locations
+    /// obtained from the
+    /// `deallocated_target_blocks_allocation_blocks_begin_iter` with
+    /// sizes as determined by `block_allocation_blocks_log2` each to the
+    /// [`AllocationBlockUpdateStagedUpdate::Deallocate`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `deallocated_target_blocks_allocation_blocks_begin_iter` - Iterator
+    ///   over the respective blocks' beginning on storage.
+    /// * `block_allocation_blocks_log2` - Base-2 logarithm of the block size in
+    ///   units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     pub fn stage_blocks_deallocation_updates<BI: Iterator<Item = layout::PhysicalAllocBlockIndex>>(
         &mut self,
         deallocated_target_blocks_allocation_blocks_begin_iter: BI,
@@ -2535,6 +2950,18 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Stage [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate)
+    /// updates for some extent.
+    ///
+    /// Move all existing [`AllocationBlockUpdateStagedUpdate`] entries
+    /// associated with `deallocated_target_extent` to the
+    /// [`AllocationBlockUpdateStagedUpdate::Deallocate`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `deallocated_target_extent` - The storage extent to stage
+    ///   [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate) updates
+    ///   for.
     pub fn stage_extent_deallocation_updates(&mut self, deallocated_target_extent: &layout::PhysicalAllocBlockRange) {
         let auth_tree_data_block_allocation_blocks_log2 = self.auth_tree_data_block_allocation_blocks_log2 as u32;
         let mut cur_states_allocation_block_index = match self.lookup_auth_tree_data_block_update_state_index(
@@ -2575,6 +3002,21 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Stage [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate)
+    /// updates for some extents.
+    ///
+    /// Move all existing [`AllocationBlockUpdateStagedUpdate`] entries
+    /// associated with the storage extents obtained from
+    /// `deallocated_target_extents_iter` to the
+    /// [`AllocationBlockUpdateStagedUpdate::Deallocate`] state.
+    ///
+    /// # Arguments:
+    ///
+    /// # Arguments:
+    ///
+    /// * `deallocated_target_extents_iter` - Iterator over the storage extents
+    ///   to stage [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate)
+    ///   updates for.
     pub fn stage_extents_deallocation_updates<EI: Iterator<Item = layout::PhysicalAllocBlockRange>>(
         &mut self,
         deallocated_target_extents_iter: EI,
@@ -2584,6 +3026,20 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Mark all [`AllocationBlockUpdateNvSyncState`]s in a given [Allocation
+    /// Block level entry
+    /// index range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange)
+    /// as clean.
+    ///
+    /// Mark all [`AllocationBlockUpdateNvSyncState`] in
+    /// `states_allocation_blocks_range` as having been written to
+    /// the journal staging copy.
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_allocation_blocks_range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   mark as clean.
     pub fn mark_states_clean(
         &mut self,
         states_allocation_blocks_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -2624,6 +3080,27 @@ impl AuthTreeDataBlocksUpdateStates {
         }
     }
 
+    /// Compute authentication digests for some
+    /// [`AuthTreeDataBlockUpdateState`]s.
+    ///
+    /// Update the [`AuthTreeDataBlockUpdateState::auth_digest`] for all entries
+    /// if `states_index_range` is `None`, or only for those in the
+    /// specified range.
+    ///
+    /// All [`AllocationBlockUpdateState`]s for any
+    /// [`AuthTreeDataBlockUpdateState`] whose authentication digest is to
+    /// get computed must have [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) [loaded and
+    /// authenticated](AllocationBlockUpdateState::has_encrypted_data_loaded).
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_index_range` - Optional entry range to restrict the operation
+    ///   to.
+    /// * `auth_tree_config` - The fileystem's
+    ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
     pub fn update_auth_digests(
         &mut self,
         states_index_range: Option<&AuthTreeDataBlocksUpdateStatesIndexRange>,
@@ -2723,18 +3200,22 @@ impl ops::IndexMut<AuthTreeDataBlocksUpdateStatesAllocationBlockIndex> for AuthT
 
 /// Index into [`AuthTreeDataBlocksUpdateStates`] referring to a single
 /// [Authentication Tree Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-/// level entry.
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) level
+/// entry.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct AuthTreeDataBlocksUpdateStatesIndex {
     index: usize,
 }
 
 impl AuthTreeDataBlocksUpdateStatesIndex {
+    /// Increment the index.
     pub fn step(&self) -> Self {
         Self { index: self.index + 1 }
     }
 
+    /// Decrement the index.
+    ///
+    /// Return `None` if already at the beginning.
     pub fn step_back(&self) -> Option<Self> {
         self.index.checked_sub(1).map(|index| Self { index })
     }
@@ -2759,9 +3240,8 @@ impl convert::From<AuthTreeDataBlocksUpdateStatesAllocationBlockIndex> for AuthT
 }
 
 /// [Index](AuthTreeDataBlocksUpdateStatesIndex) range of [Authentication Tree
-/// Data
-/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-/// level entries managed in an [`AuthTreeDataBlocksUpdateStates`] instance.
+/// Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) level
+/// entries managed in an [`AuthTreeDataBlocksUpdateStates`] instance.
 ///
 /// Note that the Authentication Tree Data Blocks described by such an index
 /// range are ordered by their [location on
@@ -2775,27 +3255,38 @@ pub struct AuthTreeDataBlocksUpdateStatesIndexRange {
 }
 
 impl AuthTreeDataBlocksUpdateStatesIndexRange {
+    /// Instantiate a new [`AuthTreeDataBlocksUpdateStatesIndexRange`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `begin` - Beginning of the range.
+    /// * `end` - End of the range.
     pub fn new(begin: AuthTreeDataBlocksUpdateStatesIndex, end: AuthTreeDataBlocksUpdateStatesIndex) -> Self {
         debug_assert!(begin <= end);
         Self { begin, end }
     }
 
+    /// Number of [`AuthTreeDataBlockUpdateState`] entries in the range.
     pub fn len(&self) -> usize {
         self.end.index - self.begin.index
     }
 
+    /// Whether or not the range is entry.
     pub fn is_empty(&self) -> bool {
         self.end.index == self.begin.index
     }
 
+    /// Get the range's beginning.
     pub fn begin(&self) -> AuthTreeDataBlocksUpdateStatesIndex {
         self.begin
     }
 
+    /// Get the range's end.
     pub fn end(&self) -> AuthTreeDataBlocksUpdateStatesIndex {
         self.end
     }
 
+    /// Iterate over the indices in the range.
     pub fn iter(&self) -> AuthTreeDataBlocksUpdateStatesIndexRangeIter {
         AuthTreeDataBlocksUpdateStatesIndexRangeIter {
             next_index: self.begin,
@@ -2803,6 +3294,15 @@ impl AuthTreeDataBlocksUpdateStatesIndexRange {
         }
     }
 
+    /// Apply correction offsets to account for [`AuthTreeDataBlockUpdateState`]
+    /// entry insertions.
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_inserted_before_count` - Number of new entries inserted before
+    ///   the range.
+    /// * `states_inserted_within_count` - Number of new entries inserted within
+    ///   the range.
     pub fn apply_states_insertions_offsets(
         &self,
         states_inserted_before_count: usize,
@@ -2841,6 +3341,10 @@ impl convert::From<AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange>
 /// Iterator over the individual [Authentication Tree Data Block level
 /// indices](AuthTreeDataBlocksUpdateStatesIndex) in an
 /// [`AuthTreeDataBlocksUpdateStatesIndexRange`].
+///
+/// # See also:
+///
+/// * [`AuthTreeDataBlocksUpdateStatesIndexRange::iter()`].
 pub struct AuthTreeDataBlocksUpdateStatesIndexRangeIter {
     next_index: AuthTreeDataBlocksUpdateStatesIndex,
     end: AuthTreeDataBlocksUpdateStatesIndex,
@@ -2861,8 +3365,8 @@ impl Iterator for AuthTreeDataBlocksUpdateStatesIndexRangeIter {
 }
 
 /// Index into [`AuthTreeDataBlocksUpdateStates`] referring to a single
-/// [Allocation Block](layout::ImageLayout::allocation_block_size_128b_log2)
-/// level entry.
+/// [Allocation Block](ImageLayout::allocation_block_size_128b_log2) level
+/// entry.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
     auth_tree_data_blocks_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
@@ -2870,6 +3374,20 @@ pub struct AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
 }
 
 impl AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
+    /// Instantiate a [`AuthTreeDataBlocksUpdateStatesAllocationBlockIndex`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `auth_tree_data_blocks_update_states_index` - Index identifying the
+    ///   containing [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)'s
+    ///   associated [`AuthTreeDataBlockUpdateState`] entry.
+    /// * `allocation_block_index_in_auth_tree_data_block` - Index of the
+    ///   [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    ///   within the containing [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2). Must
+    ///   not point past the [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     pub fn new(
         auth_tree_data_blocks_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
         allocation_block_index_in_auth_tree_data_block: usize,
@@ -2880,6 +3398,12 @@ impl AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
         }
     }
 
+    /// Increment the index.
+    ///
+    /// # Arguments:
+    ///
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn step(&self, auth_tree_data_block_allocation_blocks_log2: u32) -> Self {
         self.advance(
             layout::AllocBlockCount::from(1),
@@ -2887,6 +3411,12 @@ impl AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
         )
     }
 
+    /// Decrement the index.
+    ///
+    /// # Arguments:
+    ///
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn step_back(&self, auth_tree_data_block_allocation_blocks_log2: u32) -> Option<Self> {
         if self.allocation_block_index_in_auth_tree_data_block == 0 {
             if usize::from(self.auth_tree_data_blocks_update_states_index) == 0 {
@@ -2909,6 +3439,15 @@ impl AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
         }
     }
 
+    /// Advance the index by a specified distance.
+    ///
+    /// # Arguments:
+    ///
+    /// * `distance` - Number of [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) entries to
+    ///   advance the index by.
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn advance(&self, distance: layout::AllocBlockCount, auth_tree_data_block_allocation_blocks_log2: u32) -> Self {
         // Cannot overflow: the total number of Allocation Blocks always fits an u64.
         let mut allocation_block_index_in_auth_tree_data_block =
@@ -2939,16 +3478,15 @@ impl convert::From<AuthTreeDataBlocksUpdateStatesIndex> for AuthTreeDataBlocksUp
 }
 
 /// [Index](AuthTreeDataBlocksUpdateStatesAllocationBlockIndex) range of
-/// [Allocation Block](layout::ImageLayout::allocation_block_size_128b_log2)
-/// level entries managed in an [`AuthTreeDataBlocksUpdateStates`] instance.
+/// [Allocation Block](ImageLayout::allocation_block_size_128b_log2) level
+/// entries managed in an [`AuthTreeDataBlocksUpdateStates`] instance.
 ///
 /// Note that the Allocation Blocks described by such an index range are ordered
-/// by their [location on
-/// storage](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin),
-/// but not necessarily contiguous because there might be some [Authentication
-/// Tree Data
-/// Blocks](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
-/// sized entries missing in the associated [`AuthTreeDataBlocksUpdateStates`]
+/// by their [location
+/// on storage](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin), but not
+/// necessarily contiguous because there might be some [Authentication Tree Data
+/// Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) sized
+/// entries missing in the associated [`AuthTreeDataBlocksUpdateStates`]
 /// instance.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange {
@@ -2957,6 +3495,13 @@ pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange {
 }
 
 impl AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange {
+    /// Instantiate a new
+    /// [`AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `begin` - Beginning of the range.
+    /// * `end` - End of the range.
     pub fn new(
         begin: &AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
         end: &AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
@@ -2968,18 +3513,22 @@ impl AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange {
         }
     }
 
+    /// Whether or not the range is entry.
     pub fn is_empty(&self) -> bool {
         self.begin == self.end
     }
 
+    /// Get the range's beginning.
     pub fn begin(&self) -> &AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
         &self.begin
     }
 
+    /// Get the range's end.
     pub fn end(&self) -> &AuthTreeDataBlocksUpdateStatesAllocationBlockIndex {
         &self.end
     }
 
+    /// Iterate over the indices in the range.
     pub fn iter(
         &self,
         auth_tree_data_block_allocation_blocks_log2: u32,
@@ -2991,6 +3540,15 @@ impl AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange {
         }
     }
 
+    /// Apply correction offsets to account for [`AuthTreeDataBlockUpdateState`]
+    /// entry insertions.
+    ///
+    /// # Arguments:
+    ///
+    /// * `states_inserted_before_count` - Number of new
+    ///   [`AuthTreeDataBlockUpdateState`] entries inserted before the range.
+    /// * `states_inserted_within_count` - Number of new
+    ///   [`AuthTreeDataBlockUpdateState`] entries inserted within the range.
     pub fn apply_states_insertions_offsets(
         &self,
         states_inserted_before_count: usize,
@@ -3038,6 +3596,10 @@ impl convert::From<AuthTreeDataBlocksUpdateStatesIndexRange>
 /// Iterator over the individual [Allocation Block level
 /// indices](AuthTreeDataBlocksUpdateStatesAllocationBlockIndex) in an
 /// [`AuthTreeDataBlocksUpdateStatesIndexRange`].
+///
+/// # See also:
+///
+/// * [`AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange::iter()`].
 pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRangeIter {
     next_index: AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
     end: AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
@@ -3059,7 +3621,8 @@ impl Iterator for AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRangeIter {
 }
 
 /// Offsets to apply to an [`AuthTreeDataBlocksUpdateStatesIndexRange`] to
-/// account for insertion of additional states from
+/// account for insertion of additional [`AuthTreeDataBlockUpdateState`] entries
+/// from
 /// [`fill_states_index_range_regions_alignment_gaps()`](AuthTreeDataBlocksUpdateStates::fill_states_index_range_regions_alignment_gaps).
 ///
 /// Without further action, states insertions invalidate any pre-existing index
@@ -3072,13 +3635,16 @@ impl Iterator for AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRangeIter {
 /// or
 /// [`AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsetsTransformToContaining`].
 pub struct AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
-    /// Number of states that had been inserted before the associated
+    /// Number of [`AuthTreeDataBlockUpdateState`] entries that had been
+    /// inserted before the associated
     /// [`AuthTreeDataBlocksUpdateStatesIndexRange`].
     pub inserted_states_before_range_count: usize,
-    /// Number of states that had been inserted in the interior of the
-    /// associated [`AuthTreeDataBlocksUpdateStatesIndexRange`].
+    /// Number of [`AuthTreeDataBlockUpdateState`] entries that had been
+    /// inserted in the interior of the associated
+    /// [`AuthTreeDataBlocksUpdateStatesIndexRange`].
     pub inserted_states_within_range_count: usize,
-    /// Number of states that had been inserted after the associated
+    /// Number of [`AuthTreeDataBlockUpdateState`] entries that had been
+    /// inserted after the associated
     /// [`AuthTreeDataBlocksUpdateStatesIndexRange`]. Needed for transforming
     /// the offsets from one range to another.
     pub inserted_states_after_range_count: usize,
@@ -3090,12 +3656,15 @@ pub struct AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
 }
 
 impl AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
+    /// Get the total number of inserted [`AuthTreeDataBlockUpdateState`]
+    /// entries.
     pub fn total_inserted_states_count(&self) -> usize {
         self.inserted_states_before_range_count
             + self.inserted_states_within_range_count
             + self.inserted_states_after_range_count
     }
 
+    /// Merge two [`AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets`] instances by accumulation.
     pub fn accumulate(&self, other: &Self) -> Self {
         Self {
             inserted_states_before_range_count: self.inserted_states_before_range_count
@@ -3515,6 +4084,8 @@ impl AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsetsTransformToConta
     }
 }
 
+/// Iterator returned by
+/// [`AuthTreeDataBlocksUpdateStates::iter_allocation_blocks()`].
 #[derive(Clone)]
 pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a> {
     // Until slice::take() has been stabilized, remaining_states needs to live in an
@@ -3532,6 +4103,14 @@ pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a> {
 }
 
 impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a> {
+    /// Instantiate a [`AuthTreeDataBlocksUpdateStatesAllocationBlocksIter`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `states` - The [`AuthTreeDataBlocksUpdateStates`] to iterate over.
+    /// * `states_allocation_blocks_range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   restrict the iteration to, if any.
     fn new(
         states: &'a AuthTreeDataBlocksUpdateStates,
         states_allocation_blocks_range: Option<&AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange>,
@@ -3600,6 +4179,11 @@ impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a> {
 }
 
 impl<'a> Iterator for AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a> {
+    /// The type of the elements being iterated over.
+    ///
+    /// The iterator yields pairs of the [`AllocationBlockUpdateState`]s
+    /// associated target storage location and a reference to the
+    /// [`AllocationBlockUpdateState`]s themselves each.
     type Item = (layout::PhysicalAllocBlockIndex, &'a AllocationBlockUpdateState);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -3665,6 +4249,8 @@ impl<'a> Iterator for AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a> {
     }
 }
 
+/// Iterator returned by
+/// [`AuthTreeDataBlocksUpdateStates::iter_allocation_blocks_mut()`].
 pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> {
     // Until slice::take() has been stabilized, remaining_states needs to live in an
     // Option: apparently Rust would not allow moving temporarily out of it,
@@ -3684,6 +4270,14 @@ pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> {
 }
 
 impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> {
+    /// Instantiate a [`AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `states` - The [`AuthTreeDataBlocksUpdateStates`] to iterate over.
+    /// * `states_allocation_blocks_range` - [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   restrict the iteration to, if any.
     fn new(
         states: &'a mut AuthTreeDataBlocksUpdateStates,
         states_allocation_blocks_range: Option<&AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange>,
@@ -3748,6 +4342,8 @@ impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> {
         }
     }
 
+    /// Spawn off a [`AuthTreeDataBlocksUpdateStatesAllocationBlocksIter`] from
+    /// `self`'s current state.
     fn peek(&self) -> AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'_> {
         AuthTreeDataBlocksUpdateStatesAllocationBlocksIter {
             remaining_states: self.remaining_states.as_deref(),
@@ -3767,6 +4363,8 @@ impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> {
         }
     }
 
+    /// Spawn off a [`AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut`]
+    /// from `self`'s current state.
     fn peek_mut(&mut self) -> AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'_> {
         AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut {
             remaining_states: self.remaining_states.as_deref_mut(),
@@ -3788,6 +4386,11 @@ impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> {
 }
 
 impl<'a> Iterator for AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> {
+    /// The type of the elements being iterated over.
+    ///
+    /// The iterator yields pairs of the [`AllocationBlockUpdateState`]s
+    /// associated target storage location and a `mut` reference to the
+    /// [`AllocationBlockUpdateState`]s themselves each.
     type Item = (layout::PhysicalAllocBlockIndex, &'a mut AllocationBlockUpdateState);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -3852,6 +4455,13 @@ impl<'a> Iterator for AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a> 
     }
 }
 
+/// [`PeekableIoSlicesIter`](io_slices::PeekableIoSlicesIter) over some
+/// [`AllocationBlockUpdateStagedUpdate`] entries' combined buffers.
+///
+/// Provided primarily for supporting the
+/// [`MutPeekableIoSlicesMutIter`](io_slices::MutPeekableIoSlicesMutIter)
+/// implementation for
+/// [`AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIterMut`].
 pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIter<'a> {
     update_states_allocation_blocks_iter: AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a>,
     head: Option<&'a [u8]>,
@@ -3859,6 +4469,17 @@ pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIter<'a
 }
 
 impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIter<'a> {
+    /// Instantiate a
+    /// [`AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIter`].
+    ///
+    ///
+    /// # Arguments:
+    ///
+    /// * `update_states_allocation_blocks_iter` - Iterator over the
+    ///   [`AllocationBlockUpdateState`] entries whose update staging buffers to
+    ///   combine.
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     #[allow(dead_code)]
     fn new(
         mut update_states_allocation_blocks_iter: AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a>,
@@ -3987,6 +4608,9 @@ impl<'a> io_slices::PeekableIoSlicesIter<'a>
     }
 }
 
+/// [`MutPeekableIoSlicesMutIter`](io_slices::MutPeekableIoSlicesMutIter)
+/// returned by
+/// [`AuthTreeDataBlocksUpdateStates::iter_allocation_blocks_update_staging_bufs_mut()`].
 pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIterMut<'a> {
     update_states_allocation_blocks_iter: AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a>,
     head: Option<&'a mut [u8]>,
@@ -3994,6 +4618,17 @@ pub struct AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIterMut
 }
 
 impl<'a> AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIterMut<'a> {
+    /// Instantiate a
+    /// [`AuthTreeDataBlocksUpdateStatesAllocationBlocksStagedUpdateBufsIterMut`].
+    ///
+    ///
+    /// # Arguments:
+    ///
+    /// * `update_states_allocation_blocks_iter` - Iterator over the
+    ///   [`AllocationBlockUpdateState`] entries whose update staging buffers to
+    ///   combine.
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     fn new(
         mut update_states_allocation_blocks_iter: AuthTreeDataBlocksUpdateStatesAllocationBlocksIterMut<'a>,
         allocation_block_size_128b_log2: u8,

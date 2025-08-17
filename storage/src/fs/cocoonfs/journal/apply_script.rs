@@ -2,20 +2,36 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Functionality related to the various change application scripts stored in
+//! the journal [`log`](super::log).
+//!
+//! The journal log stores up to three different types of change application
+//! scripts specifying the actions to be carried out during journal replay:
+//! * Which data regions to copy from the journal staging copies over to their
+//!   target destination, represented in a [`JournalApplyWritesScript`] stored
+//!   in the journal log's [`ApplyWritesScript`
+//!   field](super::log::JournalLogFieldTag::ApplyWritesScript).
+//! * Which parts of the authentication tree need updating, recoreded in and
+//!   [`JournalUpdateAuthDigestsScript`] stored in the journal log's
+//!   [`UpdateAuthDigestsScript`
+//!   field](super::log::JournalLogFieldTag::UpdateAuthDigestsScript).
+//! * And optionally, which data regions may get trimmed for cleanup once the
+//!   journal replay has been completed, recorded in a [`JournalTrimsScript`]
+//!   stored in the journal log's [`TrimScript`
+//!   field](super::log::JournalLogFieldTag::TrimScript).
 extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::{
     fs::{
+        NvFsError,
         cocoonfs::{
-            alloc_bitmap, image_header, layout, leb128,
+            CocoonFsFormatError, alloc_bitmap, image_header, layout, leb128,
             transaction::auth_tree_data_blocks_update_states::{
                 AuthTreeDataBlocksUpdateStates, AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
                 AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange, AuthTreeDataBlocksUpdateStatesIndex,
             },
-            CocoonFsFormatError,
         },
-        NvFsError,
     },
     nvfs_err_internal,
     utils_common::{
@@ -25,25 +41,45 @@ use crate::{
 };
 use core::{cmp, ops};
 
+#[cfg(doc)]
+use layout::ImageLayout;
+#[cfg(doc)]
+use crate::fs::cocoonfs::transaction::Transaction;
+
+/// Entry in a [`JournalApplyWritesScript`].
 pub struct JournalApplyWritesScriptEntry {
+    /// The target range on storage to copy the contents of the associated
+    /// journal staging copy from.
     target_range: layout::PhysicalAllocBlockRange,
+    /// Beginning of the associated journal staging copy on storage.
     journal_staging_copy_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
 }
 
 impl JournalApplyWritesScriptEntry {
+    /// Get the target range on storage to copy the contents of the associated
+    /// journal staging copy from.
     pub fn get_target_range(&self) -> &layout::PhysicalAllocBlockRange {
         &self.target_range
     }
 
+    /// Get the beginning of the associated journal staging copy on storage.
     pub fn get_journal_staging_copy_allocation_blocks_begin(&self) -> layout::PhysicalAllocBlockIndex {
         self.journal_staging_copy_allocation_blocks_begin
     }
 }
 
+/// Iterator over [`JournalApplyWritesScriptEntry`] items.
 pub trait JournalApplyWritesScriptIterator {
     fn next(&mut self) -> Result<Option<JournalApplyWritesScriptEntry>, NvFsError>;
 }
 
+/// Implementation of [`JournalApplyWritesScriptIterator`] over a
+/// [`Transaction`].
+///
+/// Used for [encoding](JournalApplyWritesScript::encode) the journal log's
+/// [`ApplyWritesScript`
+/// field](super::log::JournalLogFieldTag::ApplyWritesScript) at transaction
+/// commit.
 #[derive(Clone)]
 pub struct TransactionJournalApplyWritesScriptIterator<'a> {
     transaction_update_states: &'a AuthTreeDataBlocksUpdateStates,
@@ -54,6 +90,15 @@ pub struct TransactionJournalApplyWritesScriptIterator<'a> {
 }
 
 impl<'a> TransactionJournalApplyWritesScriptIterator<'a> {
+    /// Instantiate a [`TransactionJournalApplyWritesScriptIterator`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction_update_states` - Reference to the transaction's
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `salt_len` - Length of the salt found in the filesystem's
+    ///   [`StaticImageHeader`](crate::fs::cocoonfs::image_header::StaticImageHeader).
     pub fn new(
         transaction_update_states: &'a AuthTreeDataBlocksUpdateStates,
         image_layout: &layout::ImageLayout,
@@ -324,11 +369,21 @@ impl<'a> JournalApplyWritesScriptIterator for TransactionJournalApplyWritesScrip
     }
 }
 
+/// Writes application script stored in the journal log's [`ApplyWritesScript`
+/// field](super::log::JournalLogFieldTag::ApplyWritesScript).
 pub struct JournalApplyWritesScript {
     script: Vec<JournalApplyWritesScriptEntry>,
 }
 
 impl JournalApplyWritesScript {
+    /// Determine a [`JournalApplyWritesScript`]'s encoded length.
+    ///
+    /// # Arguments:
+    ///
+    /// * `script_entry_iter` - [`JournalApplyWritesScriptIterator`] over the
+    ///   script entries to encode.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     pub fn encoded_len<I: JournalApplyWritesScriptIterator>(
         mut script_entry_iter: I,
         io_block_allocation_blocks_log2: u32,
@@ -366,6 +421,16 @@ impl JournalApplyWritesScript {
         encoded_len.checked_add(3).ok_or(NvFsError::DimensionsNotSupported)
     }
 
+    /// Encode a [`JournalApplyWritesScript`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `buf` - Destination buffer to encode into. It must be at least
+    ///   [`encodeded_len()`](Self::encoded_len) in size.
+    /// * `script_entry_iter` - [`JournalApplyWritesScriptIterator`] over the
+    ///   script entries to encode.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     pub fn encode<I: Clone + JournalApplyWritesScriptIterator>(
         mut buf: &mut [u8],
         mut script_entry_iter: I,
@@ -406,10 +471,20 @@ impl JournalApplyWritesScript {
         Ok(&mut buf[3..])
     }
 
+    /// Decode a [`JournalApplyWritesScript`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - Source buffers to decode from. `src` will be advanced past the
+    ///   encoded script.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn decode<'a, SI: io_slices::PeekableIoSlicesIter<'a, BackendIteratorError = NvFsError>>(
         mut src: SI,
         io_block_allocation_blocks_log2: u32,
-        allocation_block_size128b_log2: u32,
+        allocation_block_size_128b_log2: u32,
     ) -> Result<Self, NvFsError> {
         let mut script = Vec::new();
         // One leb128-encoded 64 bit integer, signed or unsigned, is at most 10 bytes
@@ -511,7 +586,7 @@ impl JournalApplyWritesScript {
                 .ok_or(NvFsError::from(
                     CocoonFsFormatError::InvalidJournalApplyWritesScriptEntry,
                 ))?;
-            if entry_target_allocation_blocks_end > u64::MAX >> (allocation_block_size128b_log2 + 7) {
+            if entry_target_allocation_blocks_end > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
                 return Err(NvFsError::from(
                     CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
                 ));
@@ -521,7 +596,7 @@ impl JournalApplyWritesScript {
                 .ok_or(NvFsError::from(
                     CocoonFsFormatError::InvalidJournalApplyWritesScriptEntry,
                 ))?;
-            if entry_journal_staging_copy_allocation_blocks_end > u64::MAX >> (allocation_block_size128b_log2 + 7) {
+            if entry_journal_staging_copy_allocation_blocks_end > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
                 return Err(NvFsError::from(
                     CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
                 ));
@@ -553,15 +628,28 @@ impl JournalApplyWritesScript {
         Ok(Self { script })
     }
 
+    /// Number of entries in the script.
     pub fn len(&self) -> usize {
         self.script.len()
     }
 
+    /// Lookup an entry by target storage location.
+    ///
+    /// If an entry covering the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) identified by
+    /// `target_allocation_block_index` exists, its index is returned in an
+    /// `Ok`. Otherwise the (hypothetical) insertion position is returned in an
+    /// `Err`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `target_allocation_block_index` - [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) index to lookup.
     pub fn lookup(&self, target_allocation_block_index: layout::PhysicalAllocBlockIndex) -> Result<usize, usize> {
         self.script.binary_search_by(
             |entry| match entry.target_range.end().cmp(&target_allocation_block_index) {
                 cmp::Ordering::Less | cmp::Ordering::Equal => cmp::Ordering::Less,
-                cmp::Ordering::Greater => match entry.target_range.end().cmp(&target_allocation_block_index) {
+                cmp::Ordering::Greater => match entry.target_range.begin().cmp(&target_allocation_block_index) {
                     cmp::Ordering::Less | cmp::Ordering::Equal => cmp::Ordering::Equal,
                     cmp::Ordering::Greater => cmp::Ordering::Greater,
                 },
@@ -578,7 +666,10 @@ impl ops::Index<usize> for JournalApplyWritesScript {
     }
 }
 
+/// Entry in a [`JournalUpdateAuthDigestsScript`].
 pub struct JournalUpdateAuthDigestsScriptEntry {
+    /// Location on storage that needs its corresponding data authentication
+    /// digests to get updated.
     target_range: layout::PhysicalAllocBlockRange,
 }
 
@@ -594,15 +685,27 @@ impl JournalUpdateAuthDigestsScriptEntry {
     }
 }
 
+/// Iterator over [`JournalUpdateAuthDigestsScriptEntry`] items.
 pub trait JournalUpdateAuthDigestsScriptIterator {
     fn next(&mut self) -> Result<Option<JournalUpdateAuthDigestsScriptEntry>, NvFsError>;
 }
 
+/// Authentication digests update script stored in the journal log's
+/// [`UpdateAuthDigestsScript`
+/// field](super::log::JournalLogFieldTag::UpdateAuthDigestsScript).
 pub struct JournalUpdateAuthDigestsScript {
     script: Vec<JournalUpdateAuthDigestsScriptEntry>,
 }
 
 impl JournalUpdateAuthDigestsScript {
+    /// Determine a [`JournalUpdateAuthDigestsScript`]'s encoded length.
+    ///
+    /// # Arguments:
+    ///
+    /// * `script_entry_iter` - [`JournalUpdateAuthDigestsScriptIterator`] over
+    ///   the script entries to encode.
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn encoded_len<I: JournalUpdateAuthDigestsScriptIterator>(
         mut script_entry_iter: I,
         auth_tree_data_blocks_allocation_blocks_log2: u32,
@@ -627,6 +730,16 @@ impl JournalUpdateAuthDigestsScript {
         encoded_len.checked_add(2).ok_or(NvFsError::DimensionsNotSupported)
     }
 
+    /// Encode a [`JournalUpdateAuthDigestsScript`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `buf` - Destination buffer to encode into. It must be at least
+    ///   [`encodeded_len()`](Self::encoded_len) in size.
+    /// * `script_entry_iter` - [`JournalUpdateAuthDigestsScriptIterator`] over
+    ///   the script entries to encode.
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn encode<I: Clone + JournalUpdateAuthDigestsScriptIterator>(
         mut buf: &mut [u8],
         mut script_entry_iter: I,
@@ -656,10 +769,20 @@ impl JournalUpdateAuthDigestsScript {
         Ok(&mut buf[2..])
     }
 
+    /// Decode a [`JournalUpdateAuthDigestsScript`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - Source buffers to decode from. `src` will be advanced past the
+    ///   encoded script.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn decode<'a, SI: io_slices::PeekableIoSlicesIter<'a, BackendIteratorError = NvFsError>>(
         mut src: SI,
         auth_tree_data_blocks_allocation_blocks_log2: u32,
-        allocation_block_size128b_log2: u32,
+        allocation_block_size_128b_log2: u32,
     ) -> Result<Self, NvFsError> {
         let mut script = Vec::new();
         // One leb128-encoded 64 bit integer, signed or unsigned, is at most 10 bytes
@@ -743,7 +866,7 @@ impl JournalUpdateAuthDigestsScript {
                 .ok_or(NvFsError::from(
                     CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
                 ))?;
-            if entry_target_allocation_blocks_end > u64::MAX >> (allocation_block_size128b_log2 + 7) {
+            if entry_target_allocation_blocks_end > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
                 return Err(NvFsError::from(
                     CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
                 ));
@@ -771,10 +894,12 @@ impl JournalUpdateAuthDigestsScript {
         Ok(Self { script })
     }
 
+    /// Test whether the script is empty.
     pub fn is_empty(&self) -> bool {
         self.script.is_empty()
     }
 
+    /// Number of entries in the script.
     pub fn len(&self) -> usize {
         self.script.len()
     }
@@ -788,6 +913,7 @@ impl ops::Index<usize> for JournalUpdateAuthDigestsScript {
     }
 }
 
+/// Entry in a [`JournalTrimsScript`].
 pub struct JournalTrimsScriptEntry {
     target_range: layout::PhysicalAllocBlockRange,
 }
@@ -798,10 +924,17 @@ impl JournalTrimsScriptEntry {
     }
 }
 
+/// Iterator over [`JournalTrimsScriptEntry`] items.
 pub trait JournalTrimsScriptIterator {
     fn next(&mut self) -> Result<Option<JournalTrimsScriptEntry>, NvFsError>;
 }
 
+/// Implementation of [`JournalTrimsScriptIterator`] over a [`Transaction`].
+///
+/// Used for [encoding](JournalTrimsScript::encode) the journal log's
+/// [`TrimScript`
+/// field](super::log::JournalLogFieldTag::TrimScript) at transaction
+/// commit.
 #[derive(Clone)]
 pub struct TransactionJournalTrimsScriptIterator<'a> {
     alloc_bitmap: &'a alloc_bitmap::AllocBitmap,
@@ -888,11 +1021,21 @@ impl<'a> JournalTrimsScriptIterator for TransactionJournalTrimsScriptIterator<'a
     }
 }
 
+/// Trim script stored in the journal log's [`TrimScript`
+/// field](super::log::JournalLogFieldTag::TrimScript).
 pub struct JournalTrimsScript {
     script: Vec<JournalTrimsScriptEntry>,
 }
 
 impl JournalTrimsScript {
+    /// Determine a [`JournalTrimsScript`]'s encoded length.
+    ///
+    /// # Arguments:
+    ///
+    /// * `script_entry_iter` - [`JournalTrimsScriptIterator`] over the script
+    ///   entries to encode.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     pub fn encoded_len<I: JournalTrimsScriptIterator>(
         mut script_entry_iter: I,
         io_block_allocation_blocks_log2: u32,
@@ -917,6 +1060,16 @@ impl JournalTrimsScript {
         encoded_len.checked_add(2).ok_or(NvFsError::DimensionsNotSupported)
     }
 
+    /// Encode a [`JournalTrimsScript`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `buf` - Destination buffer to encode into. It must be at least
+    ///   [`encodeded_len()`](Self::encoded_len) in size.
+    /// * `script_entry_iter` - [`JournalTrimsScriptIterator`] over the script
+    ///   entries to encode.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     pub fn encode<I: Clone + JournalTrimsScriptIterator>(
         mut buf: &mut [u8],
         mut script_entry_iter: I,
@@ -944,6 +1097,16 @@ impl JournalTrimsScript {
         Ok(&mut buf[2..])
     }
 
+    /// Decode a [`JournalTrimsScript`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - Source buffers to decode from. `src` will be advanced past the
+    ///   encoded script.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn decode<'a, SI: io_slices::PeekableIoSlicesIter<'a, BackendIteratorError = NvFsError>>(
         mut src: SI,
         io_block_allocation_blocks_log2: u32,
@@ -1040,6 +1203,7 @@ impl JournalTrimsScript {
         Ok(Self { script })
     }
 
+    /// Number of entries in the script.
     pub fn len(&self) -> usize {
         self.script.len()
     }

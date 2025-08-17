@@ -33,21 +33,31 @@ use crate::{
 };
 use core::{pin, task};
 
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStates;
+
 /// Read and authenticate data from storage.
 ///
-/// Read and authenticate all missing data from storage into a specified range's
-/// [Allocation Blocks'](layout::ImageLayout::allocation_block_size_128b_log2)
-/// associated
-/// [`nv_sync_state`s](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateState::nv_sync_state)
-/// buffers as appropriate.
+/// Read and authenticate all missing data from storage within a specified
+/// [Allocation Block level index
+/// range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) into the
+/// [`Transaction`]'s [storage
+/// tracking states](AllocationBlockUpdateNvSyncState)' buffers.
 ///
 /// Note that the data loaded for a particular [Allocation
 /// Block](layout::ImageLayout::allocation_block_size_128b_log2) might perhaps
-/// have been superseded logically by
-/// [`staged_update`s](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateState::staged_update),
-/// but could still be needed to form an authentication digest over the
-/// containing [Authentication
-/// Tree Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// have been superseded logically by [staged
+/// updates](AllocationBlockUpdateStagedUpdate), but could still be needed to
+/// form an authentication digest over the containing [Authentication Tree Data
+/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+///
+/// Only
+/// [`AllocationBlockUpdateState`](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateState)s
+/// existing within the requested range at the time of
+/// `TransactionReadAuthenticateDataFuture` instantiation will be considered.
+/// Additional ones may get inserted and populated as a byproduct
+/// for [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
+/// alignment purposes in the course though.
 pub(in super::super) struct TransactionReadAuthenticateDataFuture<C: chip::NvChip> {
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
@@ -59,6 +69,41 @@ pub(in super::super) struct TransactionReadAuthenticateDataFuture<C: chip::NvChi
 }
 
 impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
+    /// Instantiate a new [`TransactionReadAuthenticateDataFuture`].
+    ///
+    /// The [`TransactionReadAuthenticateDataFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] whose [storage tracking
+    ///   states](AllocationBlockUpdateNvSyncState)' buffers to populate.
+    /// * `request_states_allocation_blocks_index_range` - The [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to populate the [storage
+    ///   tracking states](AllocationBlockUpdateNvSyncState)' buffers within.  Applicable
+    ///   [correction offsets](AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets) will get
+    ///   returned from [`poll()`](Self::poll) upon completion in case additional state entries had
+    ///   to get inserted in order to [fill alignment
+    ///   gaps](AuthTreeDataBlocksUpdateStates::fill_states_index_range_regions_alignment_gaps).
+    /// * `consider_staged_updates` - Whether or not to consider [staged
+    ///   updates](AllocationBlockUpdateStagedUpdate) when determining if some
+    ///   [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) has its
+    ///   data available already.
+    /// * `only_allocated` - If `false`, explicitly attempt to read (essentially
+    ///   random) data for [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) in the
+    ///   [`AllocationBlockUpdateNvSyncState::Unallocated`] storage state if
+    ///   missing. The data might still not get read if the [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) in
+    ///   question could possibly have been trimmed somewhen before. If `true`,
+    ///   data for [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) in the
+    ///   [`AllocationBlockUpdateNvSyncState::Unallocated`] storage state will
+    ///   possibly only get read as a byproduct when reading others in the
+    ///   vicinity.
     pub fn new(
         transaction: Box<Transaction>,
         request_states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -82,6 +127,34 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
         }
     }
 
+    /// Poll the [`TransactionReadAuthenticateDataFuture`] to completion.
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](TransactionReadAuthenticateDataFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, offsets, ...))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a tuple of the input [`Transaction`],
+    ///   `transaction`, correction `offsets` to apply to the input [Allocation
+    ///   Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) in
+    ///   order to account for the insertion of new state entries, if any, and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, offsets, Err(e)))` - In case of an error, the
+    ///       error reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, offsets, Ok(())))` -  Otherwise, `Ok(())` will
+    ///       get returned for the operation result on success.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `fs_sync_state_auth_tree` - The [filesystem instance's authentication
+    ///   tree](crate::fs::cocoonfs::fs::CocoonFsSyncState::auth_tree).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
@@ -476,7 +549,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
                                     cur_states_index = cur_states_index.step();
                                     // Skip over states having their correspondig bit set in the
                                     // skip bitmask, or which cannot get authenticated through the
-                                    // Authentication Tree anymore..
+                                    // Authentication Tree anymore.
                                     while cur_states_index != auth_subrange_states_index_range.end() {
                                         let cur_auth_tree_block_state = &mut states[cur_states_index];
                                         let cur_physical_auth_tree_data_block_allocation_blocks_begin =
@@ -563,6 +636,19 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
         }
     }
 
+    /// Create [Authentication Tree Data
+    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// skip mask for the head of the remaining range.
+    ///
+    /// Create a mask of missing [`AuthTreeDataBlockUpdateState`] entries at the
+    /// head of `remaining_states_index_range`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `remaining_states_index_range` - Current remainder of the
+    ///   [Authentication Tree Data Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesIndexRange) spanning the original
+    ///   request range.
     fn create_remaining_auth_tree_data_blocks_head_skip_mask(
         transaction: &Transaction,
         remaining_states_index_range: &AuthTreeDataBlocksUpdateStatesIndexRange,
@@ -607,6 +693,41 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
         skip_mask
     }
 
+    /// Determine the next subrange to read and authenticate.
+    ///
+    /// On success, a triple is returned, with the
+    /// the second entry holding the remainder of the input
+    /// `remaining_states_index_range` to process in a subsequent iteration,
+    /// and the third one the corresponding tail of the input
+    /// `remaining_auth_tree_data_blocks_head_skip_mask`.
+    ///
+    /// The returned triplet's first entry stores details about the next
+    /// subrange to process, if any:
+    /// 1. The subrange itself.
+    /// 2. A bitmask corresponding to [Authentication Tree Data
+    ///    Blocks](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///    in that subrange to skip the authentication of.
+    /// 3. Whether or not there's any data missing in the subrange.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`].
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    /// * `request_states_allocation_blocks_range` - The original input request
+    ///   range.
+    /// * `remaining_states_index_range` - Current remainder of the
+    ///   [Authentication Tree Data Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesIndexRange) spanning the original
+    ///   request range.
+    /// * `remaining_auth_tree_data_blocks_head_skip_mask` - The skip mask
+    ///   computed by
+    ///   [`create_remaining_auth_tree_data_blocks_head_skip_mask()`](Self::create_remaining_auth_tree_data_blocks_head_skip_mask)
+    ///   for the `remaining_states_index_range`.
+    /// * `consider_staged_updates` - Value of the `consider_staged_updates`
+    ///   parameter initially passed to [`new()`](Self::new).
+    /// * `only_allocated` - Value of the `only_allocated` parameter initially
+    ///   passed to [`new()`](Self::new).
     #[allow(clippy::type_complexity)]
     fn determine_next_read_authenticate_subrange(
         transaction: &Transaction,
@@ -661,7 +782,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
             let cur_physical_auth_tree_data_block_index =
                 u64::from(cur_physical_auth_tree_data_block_allocation_blocks_begin)
                     >> auth_tree_data_block_allocation_blocks_log2;
-            // If there are any bits set in the skip mask, advance (shift) it so  that its
+            // If there are any bits set in the skip mask, advance (shift) it so that its
             // least significant bit corresponds to the current position and
             // examine that.
             if remaining_auth_tree_data_blocks_head_skip_mask != 0 {
@@ -1027,6 +1148,15 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
         }
     }
 
+    /// Mark all [`AllocationBlockUpdateNvSyncState`]s' data buffers within a
+    /// given [`AuthTreeDataBlockUpdateState`] as authenticated.
+    ///
+    /// # Arguments:
+    ///
+    /// * `state` - The [`AuthTreeDataBlockUpdateState`] to mark data buffers as
+    ///   authenticated within.
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
     fn mark_auth_tree_block_allocation_blocks_states_authenticated(
         state: &mut AuthTreeDataBlockUpdateState,
         image_header_end: layout::PhysicalAllocBlockIndex,
@@ -1066,6 +1196,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
     }
 }
 
+/// [`TransactionReadAuthenticateDataFuture`] state-machine state.
 enum TransactionReadAuthenticateDataFutureState<C: chip::NvChip> {
     Init {
         transaction: Option<Box<Transaction>>,
@@ -1089,6 +1220,8 @@ enum TransactionReadAuthenticateDataFutureState<C: chip::NvChip> {
     Done,
 }
 
+/// [`TransactionReadAuthenticateDataFutureState::AuthenticateSubrange`]
+/// sub-state-machine state.
 enum TransactionReadAuthenticateDataFutureAuthenticateSubrangeState<C: chip::NvChip> {
     AuthenticateNextDataBlock {
         saved_auth_tree_data_block_index: Option<auth_tree::AuthTreeDataBlockIndex>,

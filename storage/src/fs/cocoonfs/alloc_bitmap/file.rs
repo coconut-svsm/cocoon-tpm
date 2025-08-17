@@ -34,6 +34,9 @@ use crate::{
 };
 use core::{mem, pin, task};
 
+#[cfg(doc)]
+use transaction::Transaction;
+
 /// Information about the allocation bitmap file on storage.
 pub struct AllocBitmapFile {
     /// Number of bitmap words stored in a single [Allocation Bitmap File
@@ -330,19 +333,19 @@ impl AllocBitmapFile {
     }
 
     /// Stage pending updates to the allocation bitmap file at a
-    /// [`Transaction`](transaction::Transaction).
+    /// [`Transaction`].
     ///
-    /// Translate a [`Transaction`](transaction::Transaction)'s pending
-    /// allocations and deallocations relative to a base [`alloc_bitmap`
-    /// into updates to the allocation bitmap file's contents on storage and
-    /// stage them for write out at transaction commit at the
-    /// [`Transaction::auth_tree_data_blocks_update_states`](transaction::Transaction::auth_tree_data_blocks_update_states).
+    /// Translate a [`Transaction`]'s pending allocations and deallocations
+    /// relative to a base [`alloc_bitmap` into updates to the allocation
+    /// bitmap file's contents on storage and stage them for write out at
+    /// transaction commit at the
+    /// [`Transaction::auth_tree_data_blocks_update_states`].
     ///
     /// # Arguments:
     ///
     /// * `transaction_updates_states` - `mut` reference to the
-    ///   [`Transaction`](transaction::Transaction)'s
-    ///   [`auth_tree_data_blocks_update_states`](transaction::Transaction::auth_tree_data_blocks_update_states)
+    ///   [`Transaction`]'s
+    ///   [`auth_tree_data_blocks_update_states`](Transaction::auth_tree_data_blocks_update_states)
     ///   member to stage the allocation bitmap file content updates at.
     /// * `transaction_pending_allocs` - The [`Transaction`'s pending
     ///   allocations](transaction::TransactionAllocations::pending_allocs] to

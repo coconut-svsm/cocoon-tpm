@@ -2,6 +2,8 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Helpers related to authentication tree reconstruction.
+
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -17,6 +19,35 @@ use crate::{
 };
 use core::cmp;
 
+#[cfg(doc)]
+use layout::ImageLayout;
+
+/// Collect the set of [Allocation Bitmap File
+/// Blocks](ImageLayout::allocation_bitmap_file_block_allocation_blocks_log2)
+/// needed for authentication tree reconstruction during journal replay.
+///
+/// For the authentication tree reconstruction at journal replay, the allocation
+/// bitmap status for any [Allocation
+/// Block](ImageLayout::allocation_block_size_128b_log2) within the data range
+/// covered by any updated authentication tree leaf node will be needed.
+/// Collect the set of relevant [Allocation Bitmap File
+/// Blocks](ImageLayout::allocation_bitmap_file_block_allocation_blocks_log2)
+/// and return their indices.
+///
+/// # Arguments:
+///
+/// * `update_auth_digests_script_iter` - Iterator over the storage locations
+///   with updated associated authentication digests.
+/// * `alloc_bitmap_file` - The filesystem's
+///   [`AllocBitmapFile`](alloc_bitmap::AllocBitmapFile).
+/// * `auth_tree_config` - The filesystem's
+///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
+/// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
+///
+/// # See also:
+///
+/// * `alloc_bitmap_file_block_indices_to_physical_extents()`
 pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdateAuthDigestsScriptIterator>(
     mut update_auth_digests_script_iter: UI,
     alloc_bitmap_file: &alloc_bitmap::AllocBitmapFile,
@@ -122,6 +153,27 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
     Ok(alloc_bitmap_file_block_indices)
 }
 
+/// Map a set of [Allocation Bitmap File
+/// Blocks](ImageLayout::allocation_bitmap_file_block_allocation_blocks_log2) to
+/// corresponding extents on storage.
+///
+/// Determine the storage extents occupied by the the [Allocation Bitmap File
+/// Blocks](ImageLayout::allocation_bitmap_file_block_allocation_blocks_log2)
+/// identified by `alloc_bitmap_file_block_indices` and return them in
+/// increasing order.
+///
+/// # Arguments:
+///
+/// * `alloc_bitmap_file_block_indices` - Indices of the [Allocation Bitmap File
+///   Blocks](ImageLayout::allocation_bitmap_file_block_allocation_blocks_log2)
+///   whose extents on storage to find.
+/// * `alloc_bitmap_file_extents` - The [allocation bitmap file's
+///   extents](alloc_bitmap::AllocBitmapFile::get_extents).
+/// * `image_layout` - The filesystem's [`ImageLayout`].
+///
+/// # See also:
+///
+/// * `collect_alloc_bitmap_blocks_for_auth_tree_reconstruction()`.
 pub fn alloc_bitmap_file_block_indices_to_physical_extents(
     alloc_bitmap_file_block_indices: &[u64],
     alloc_bitmap_file_extents: &extents::LogicalExtents,

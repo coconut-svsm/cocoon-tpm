@@ -2,23 +2,23 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
-//! Implementation of [`TransactionCleanupPreCommitCancelled`] and
+//! Implementation of [`TransactionCleanupPreCommitCancelledFuture`] and
 //! [`TransactionAbortJournalFuture`].
 
 extern crate alloc;
 use alloc::boxed::Box;
 
-use super::{auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndex, Transaction};
+use super::{Transaction, auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndex};
 use crate::{
     chip::{self, NvChipIoError},
     fs::{
+        NvFsError,
         cocoonfs::{
             alloc_bitmap,
             fs::CocoonFsSyncStateMemberMutRef,
             journal,
             layout::{self, BlockCount as _},
         },
-        NvFsError,
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -26,6 +26,12 @@ use crate::{
 };
 use core::{pin, task};
 
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
+
+/// [Trim](chip::NvChip::trim) any [IO
+/// Block](layout::ImageLayout::io_block_allocation_blocks_log2) occupied by the
+/// journal.
 pub(super) struct TransactionTrimJournalFuture<C: chip::NvChip> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
@@ -34,6 +40,7 @@ pub(super) struct TransactionTrimJournalFuture<C: chip::NvChip> {
     fut_state: TransactionTrimJournalFutureState<C>,
 }
 
+/// [`TransactionTrimJournalFuture`] state-machine state.
 enum TransactionTrimJournalFutureState<C: chip::NvChip> {
     Init,
     WriteBarrier {
@@ -71,6 +78,20 @@ enum TransactionTrimJournalFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
+    /// Instantiate a [`TransactionTrimJournalFuture`].
+    ///
+    /// The [`TransactionTrimJournalFuture`] assumes ownership of the
+    /// `transaction` for the duration of the operation. It will eventually
+    /// get returned from [`poll()`](Self::poll) upon successful completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] the journal had been written for.
+    /// * `retain_in_place_writes` - Whether to retain "in-place" writes that
+    ///   didn't go through the [journal staging
+    ///   copies](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin).
+    ///   Should be set to `true` upon a successful [`Transaction`] commit,
+    ///   `false` when cleaning up after a failed [`Transaction`] commit.
     pub fn new(transaction: Box<Transaction>, retain_in_place_writes: bool) -> Self {
         Self {
             transaction: Some(transaction),
@@ -79,6 +100,18 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
         }
     }
 
+    /// Poll the [`TransactionTrimJournalFuture`] to completion.
+    ///
+    /// On successful completion, the input [`Transaction`] is returned back. On
+    /// error, the [`Transaction`] is consumed and an error reason is
+    /// returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
         fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
@@ -636,17 +669,40 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
     }
 }
 
-pub struct TransactionCleanupPreCommitCancelled<C: chip::NvChip> {
+/// Cleanup the journal written for a [`Transaction`] that got cancelled
+/// pre-commit.
+///
+/// Cleanup after a [`Transaction`] cancelled before the journal log head extent
+/// got written to.
+pub struct TransactionCleanupPreCommitCancelledFuture<C: chip::NvChip> {
     trim_journal_fut: TransactionTrimJournalFuture<C>,
 }
 
-impl<C: chip::NvChip> TransactionCleanupPreCommitCancelled<C> {
+impl<C: chip::NvChip> TransactionCleanupPreCommitCancelledFuture<C> {
+    /// Instantiate a [`TransactionCleanupPreCommitCancelledFuture`].
+    ///
+    /// The [`TransactionCleanupPreCommitCancelledFuture`] consumes the
+    /// `transaction`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] after which to cleanup.
     pub fn new(transaction: Box<Transaction>) -> Self {
         Self {
             trim_journal_fut: TransactionTrimJournalFuture::new(transaction, false),
         }
     }
 
+    /// Poll the [`TransactionCleanupPreCommitCancelledFuture`] to completion.
+    ///
+    /// Nothing is returned upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         mut self: pin::Pin<&mut Self>,
         fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
@@ -661,10 +717,15 @@ impl<C: chip::NvChip> TransactionCleanupPreCommitCancelled<C> {
     }
 }
 
+/// Invalidate and cleanup the journal written for a [`Transaction`].
+///
+/// Cleanup after a [`Transaction`] for which the final the journal log head
+/// extent write failed, leaving it in an indeterminate state.
 pub struct TransactionAbortJournalFuture<C: chip::NvChip> {
     fut_state: TransactionAbortJournalFutureState<C>,
 }
 
+/// [`TransactionAbortJournalFuture`] state-machine state.
 enum TransactionAbortJournalFutureState<C: chip::NvChip> {
     Init {
         // Is optional, but None only on internal error or memory allocation failures.
@@ -686,6 +747,20 @@ enum TransactionAbortJournalFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> TransactionAbortJournalFuture<C> {
+    /// Instantiate a [`TransactionAbortJournalFuture`].
+    ///
+    /// The [`TransactionAbortJournalFuture`] assumes ownership of
+    /// `transaction`, if any, and returns it back from
+    /// [`poll()`](Self::poll) upon completion with failure.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] for which the journal had been
+    ///   written, if still available. If `None`, the journal log will only get
+    ///   invalidated and no further cleanup will take place.
+    /// * `_fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `low_memory` - Whether the system is in a low memory condition.
     pub fn new<ST: sync_types::SyncTypes>(
         mut transaction: Option<Box<Transaction>>,
         _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
@@ -699,6 +774,18 @@ impl<C: chip::NvChip> TransactionAbortJournalFuture<C> {
         })
     }
 
+    /// Poll the [`TransactionAbortJournalFuture`] to completion.
+    ///
+    /// Nothing is returned on successful completion. Otherwise, on error,
+    /// a pair of the input [`Transaction`] initially passed to
+    /// [`new()`](Self::new) and the error reason is returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_instance_sync_state` - Exclusive reference to
+    ///   [`CocoonFs::sync_state`](crate::fs::cocoonfs::fs::CocoonFs::sync_state).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
@@ -785,6 +872,16 @@ impl<C: chip::NvChip> TransactionAbortJournalFuture<C> {
         }
     }
 
+    /// Enter a low memory condition.
+    ///
+    /// Try to free up some memory to reduce the pressure when subsequently
+    /// attempting another try. Return `true` if some memory could get freed up.
+    ///
+    ///
+    /// # Arguments:
+    //
+    /// * `transaction` - `mut` reference to the `transaction` initially passed
+    ///   to [`new()`](Self::new()).
     fn enter_low_memory(transaction: &mut Option<Box<Transaction>>) -> bool {
         // Drop the transaction with all its data. This will render the best-effort trim
         // operation into a nop.

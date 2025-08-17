@@ -11,40 +11,71 @@ use crate::{
     chip,
     crypto::CryptoError,
     fs::{
+        NvFsError,
         cocoonfs::{
             fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             layout,
             read_buffer::BufferedReadAuthenticateDataFuture,
             transaction::{
+                Transaction,
                 auth_tree_data_blocks_update_states::{
                     AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
                     AuthTreeDataBlocksUpdateStatesAllocationBlocksIter,
                 },
                 read_authenticate_data::TransactionReadAuthenticateDataFuture,
-                Transaction,
             },
         },
-        NvFsError,
     },
     nvfs_err_internal,
     utils_async::sync_types,
 };
 use core::{marker, pin, slice, task};
 
+/// Result of [`ReadAuthenticateExtentFuture`].
+///
+/// Depending on whether or not a pending [`Transaction`] had initially been
+/// passed to [`ReadAuthenticateExtentFuture::new()`] for reading at the state
+/// as if the transaction had already been applied, and on whether or not the
+/// requested storage extent has been modified by that transaction, the read
+/// result is either a reference to buffers held by transaction or some owned
+/// ones. The `ReadAuthenticateExtentFutureResult` enum is capable of
+/// representing either case.
+///
+/// Independent of the enum variant, the buffers may always be iterated over via
+/// [`iter_allocation_blocks_bufs()`](Self::iter_allocation_blocks_bufs) and the
+/// [`Transaction`] initially passed to [`ReadAuthenticateExtentFuture::new()`],
+/// if any, may be obtained back via
+/// [`into_transaction()`](Self::into_transaction).
 pub enum ReadAuthenticateExtentFutureResult {
+    /// Owned data buffer.
+    ///
+    /// Either no [`Transaction`] had initially been
+    /// passed to [`ReadAuthenticateExtentFuture::new()`] or the transaction has
+    /// no updates to the requested storage extent pending.
     Owned {
+        /// The [`Transaction`] initially passed to
+        /// [`ReadAuthenticateExtentFuture::new()`], if any,
+        /// returned back.
         returned_transaction: Option<Box<Transaction>>,
-        /// Authenticated encrypted extent contents, provided in units of
-        /// Allocation Blocks.
+        /// Authenticated extent contents, provided in units of Allocation
+        /// Blocks.
         allocation_blocks_bufs: Vec<Vec<u8>>,
     },
+    /// Reference to data modified by the [`Transaction`] initially passed to
+    /// [`ReadAuthenticateExtentFuture::new()`].
     PendingTransactionUpdatesRef {
+        /// The [`Transaction`].
         transaction: Box<Transaction>,
+        /// Index range in the
+        /// [`Transaction::auth_tree_data_blocks_update_states`] corresponding
+        /// to the requested storage extent to read.
         update_states_allocation_blocks_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     },
 }
 
 impl ReadAuthenticateExtentFutureResult {
+    /// Iterate over the read data in units of [Allocation
+    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
     pub fn iter_allocation_blocks_bufs(&self) -> ReadAuthenticateExtentFutureResultAllocationBlocksBufsIter<'_> {
         match self {
             Self::Owned {
@@ -64,6 +95,8 @@ impl ReadAuthenticateExtentFutureResult {
         }
     }
 
+    /// Obtain the [`Transaction`] initially passed to
+    /// [`ReadAuthenticateExtentFuture::new()`], if any, back.
     pub fn into_transaction(self) -> Option<Box<Transaction>> {
         match self {
             Self::Owned {
@@ -78,11 +111,15 @@ impl ReadAuthenticateExtentFutureResult {
     }
 }
 
+/// [`Iterator`] returned by
+/// [`ReadAuthenticateExtentFutureResult::iter_allocation_blocks_bufs`].
 #[derive(Clone)]
 pub enum ReadAuthenticateExtentFutureResultAllocationBlocksBufsIter<'a> {
-    Owned {
-        iter: slice::Iter<'a, Vec<u8>>,
-    },
+    /// Iterator for the [`ReadAuthenticateExtentFutureResult::Owned`] case.
+    Owned { iter: slice::Iter<'a, Vec<u8>> },
+    /// Iterator for the
+    /// [`ReadAuthenticateExtentFutureResult::PendingTransactionUpdatesRef`]
+    /// case.
     PendingTransactionUpdatesRef {
         iter: AuthTreeDataBlocksUpdateStatesAllocationBlocksIter<'a>,
     },
@@ -106,11 +143,14 @@ impl<'a> Iterator for ReadAuthenticateExtentFutureResultAllocationBlocksBufsIter
     }
 }
 
+/// Read and authenticate a given data storage extent, optionally through a
+/// pending [`Transaction`].
 pub struct ReadAuthenticateExtentFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: ReadAuthenticateExtentFutureState<C>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
+/// [`ReadAuthenticateExtentFuture`] state-machine state.
 enum ReadAuthenticateExtentFutureState<C: chip::NvChip> {
     Init {
         transaction: Option<Box<Transaction>>,
@@ -128,6 +168,26 @@ enum ReadAuthenticateExtentFutureState<C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadAuthenticateExtentFuture<ST, C> {
+    /// Instantiate a [`ReadAuthenticateExtentFuture`].
+    ///
+    /// The requested storage extent, as specified through `request_range`, may
+    /// either be read in a state as if some pending [`Transaction`] passed
+    /// for `transaction` had already been commited, or, if `transaction` is
+    /// set to `None`, in the state as last committed to storage.
+    ///
+    /// The instantiated [`ReadAuthenticateExtentFuture`] assumes ownership of
+    /// the `transaction`. It will get returned back upon completion from
+    /// [`poll()`](Self::poll), either directly in case of an error, or
+    /// indirectly as part of a [`ReadAuthenticateExtentFutureResult`] on
+    /// success.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - Optional [`Transaction`] to read through.
+    /// * `request_range` - The storage extent to read and authenticate. It is
+    ///   assumed that the extent is contained in some filesystem entity,
+    ///   meaning that if `transaction` is specified, then it has either updates
+    ///   to all of it staged or none at all.
     pub fn new(transaction: Option<Box<Transaction>>, request_range: &layout::PhysicalAllocBlockRange) -> Self {
         Self {
             fut_state: ReadAuthenticateExtentFutureState::Init {
@@ -142,6 +202,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadAuthenticateExtentFuture<ST
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for ReadAuthenticateExtentFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// On success, a [`ReadAuthenticateExtentFutureResult`] providing access to
+    /// the read data is returned. On failure, a pair of the [`Transaction`]
+    /// initially passed to [`new()`](Self::new) and the error reason is
+    /// returned.
     type Output = Result<ReadAuthenticateExtentFutureResult, (Option<Box<Transaction>>, NvFsError)>;
     type AuxPollData<'a> = ();
 

@@ -11,7 +11,9 @@ use crate::{
     chip,
     crypto::symcipher,
     fs::{
+        NvFsError,
         cocoonfs::{
+            CocoonFsFormatError,
             alloc_bitmap::{self, ExtentsAllocationRequest, ExtentsReallocationRequest},
             encryption_entities::{EncryptedExtentsEncryptionInstance, EncryptedExtentsLayout},
             extents,
@@ -21,9 +23,8 @@ use crate::{
                 InodeIndexInsertEntryFuture, InodeIndexKeyType, InodeIndexLookupForInsertFuture,
                 InodeIndexLookupForInsertResult, InodeKeySubdomain,
             },
-            keys, layout, transaction, CocoonFsFormatError,
+            keys, layout, transaction,
         },
-        NvFsError,
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
@@ -34,12 +35,22 @@ use crate::{
 };
 use core::{default, mem, pin, task};
 
+#[cfg(doc)]
+use transaction::Transaction;
+
+/// Stage updates to an inode's data at a [`Transaction`].
+///
+/// If the inode doesn't exist yet, it will be created.
+///
+/// Used for the implementation of
+/// [`NvFs::write_inode()`](crate::fs::NvFs::write_inode).
 pub struct WriteInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inode: InodeIndexKeyType,
     data: zeroize::Zeroizing<Vec<u8>>,
     fut_state: WriteInodeDataFutureState<ST, C>,
 }
 
+/// [`WriteInodeDataFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum WriteInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     LookupInode {
@@ -95,6 +106,18 @@ enum WriteInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> WriteInodeDataFuture<ST, C> {
+    /// Instantiate a [`WriteInodeDataFuture`].
+    ///
+    /// The [`WriteInodeDataFuture`] assumes ownership of the `transaction` for
+    /// the duration of the operation, it will eventually get returned back
+    /// from [`poll()`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to stage the updates at.
+    /// * `inode` - The inode whose contents to update. It will get created if
+    ///   not existing yet.
+    /// * `data` - The inode's new data.
     pub fn new(
         mut transaction: Box<transaction::Transaction>,
         inode: InodeIndexKeyType,
@@ -112,6 +135,20 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> WriteInodeDataFuture<ST, C> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C> for WriteInodeDataFuture<ST, C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, data, ...))` - Otherwise the outer level [`Result`]
+    ///   is set to [`Ok`] and a tuple of the input [`Transaction`],
+    ///   `transaction`,  the input `data`, and the operation result will get
+    ///   returned within:
+    ///     * `Ok((transaction, data, Err(e)))` - In case of an error, the error
+    ///       reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, data, Ok(())))` -  Otherwise, `Ok(())` will get
+    ///       returned for the operation result on success.
     type Output = Result<
         (
             Box<transaction::Transaction>,
@@ -623,13 +660,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     }
 
                     // All of the data should have been encrypted now.
-                    if let Err(e) = data.is_empty().map_err(NvFsError::from).and_then(|is_empty| {
-                        if is_empty {
-                            Ok(())
-                        } else {
-                            Err(nvfs_err_internal!())
-                        }
-                    }) {
+                    if let Err(e) = data
+                        .is_empty()
+                        .map_err(NvFsError::from)
+                        .and_then(|is_empty| if is_empty { Ok(()) } else { Err(nvfs_err_internal!()) })
+                    {
                         break match rollback(
                             transaction,
                             new_inode_extents,
@@ -771,12 +806,24 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
+/// Preexisting inode extents from before the write operation.
 struct PreexistingInodeExtents {
+    /// The preexisting inode's extents list's extents, if any.
     extents_list_extents: Option<extents::PhysicalExtents>,
+    /// The preexisting inode's data extents.
     extents: extents::PhysicalExtents,
 }
 
 impl PreexistingInodeExtents {
+    /// Instantiate a [`PreexistingInodeExtents`] for an inode with no inode
+    /// extents list.
+    ///
+    /// Instantiate a [`PreexistingInodeExtents`] for an inode whose single data
+    /// extent is referenced directly from the inode index entry.
+    ///
+    /// # Arguments:
+    ///
+    /// * `inode_extent` - The inode's data extent.
     pub fn new_direct(inode_extent: layout::PhysicalAllocBlockRange) -> Result<Self, NvFsError> {
         let mut extents = extents::PhysicalExtents::new();
         extents.push_extent(&inode_extent, true)?;
@@ -786,6 +833,16 @@ impl PreexistingInodeExtents {
         })
     }
 
+    /// Instantiate a [`PreexistingInodeExtents`] for an inode with an inode
+    /// extents list.
+    ///
+    /// Instantiate a [`PreexistingInodeExtents`] for an inode whose inode index
+    /// entry points at an inode extents list.
+    ///
+    /// # Arguments:
+    ///
+    /// * `inode_extents_list_extents` - The inode's extents list's extents.
+    /// * `inode_extent` - The inode's data extents.
     pub fn new_indirect(
         inode_extents_list_extents: extents::PhysicalExtents,
         inode_extents: extents::PhysicalExtents,
@@ -797,18 +854,39 @@ impl PreexistingInodeExtents {
     }
 }
 
+/// Inode extents reallocation info.
 pub enum InodeExtentsPendingReallocation {
+    /// Keep the preexisting inode extents as-is.
     None,
+    /// Truncate the preexisting inode extents.
     Truncation {
+        /// Excess extents to free.
         excess_preexisting_inode_extents: extents::PhysicalExtents,
+        /// Whether the `excess_preexisting_inode_extents` have already been
+        /// marked as freed at the [`Transaction`].
         freed: bool,
     },
+    /// Extend the preexisting inode extents, if any.
     Extension {
+        /// Newly allocated extents.
         allocated_inode_extents: extents::PhysicalExtents,
     },
 }
 
 impl InodeExtentsPendingReallocation {
+    /// Record preexisting excess extents, if any, as freed at the
+    /// [`Transaction`].
+    ///
+    /// Until [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback) gets
+    /// invoked on `transaction_allocs`, the operation may still get rolled back
+    /// via [`rollback()`](Self::rollback) or
+    /// [`rollback_excess_preexisting_inode_extents_free()`](Self::rollback_excess_preexisting_inode_extents_free).
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction_allocs` - `mut` reference to the [`Transaction::allocs`].
+    /// * `transaction_updates_states` - `mut` reference to the
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
     pub fn free_excess_preexisting_inode_extents(
         &mut self,
         transaction_allocs: &mut transaction::TransactionAllocations,
@@ -833,6 +911,16 @@ impl InodeExtentsPendingReallocation {
         Ok(())
     }
 
+    /// Rollback excess extents deallocation, if any.
+    ///
+    /// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback) must not have been
+    /// called on the `transaction`'s [`allocs`](Transaction::allocs) since the
+    /// excess extents deallocation, if any.
+    ///
+    /// * `transaction` - The [`Transaction`].
+    /// * `alloc_bitmap` - The filesystem's
+    ///   [`AllocBitmap`](alloc_bitmap::AllocBitmap) in the state from before
+    ///   the `transaction`.
     pub fn rollback_excess_preexisting_inode_extents_free(
         &mut self,
         transaction: Box<transaction::Transaction>,
@@ -845,12 +933,24 @@ impl InodeExtentsPendingReallocation {
         {
             if *freed {
                 *freed = false;
-                return transaction.rollback_extents_allocation(excess_preexisting_inode_extents.iter(), alloc_bitmap);
+                // The retained extents might have been gotten written to, so mark the truncated
+                // ones as being in an indeterminate state now.
+                return transaction.rollback_extents_free(excess_preexisting_inode_extents.iter(), alloc_bitmap, true);
             }
         }
         Ok(transaction)
     }
 
+    /// Rollback the extents reallocation, if any.
+    ///
+    /// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback) must not have been
+    /// called on the `transaction`'s [`allocs`](Transaction::allocs) since any
+    /// additional extents have been allocated or excess extents freed up.
+    ///
+    /// * `transaction` - The [`Transaction`].
+    /// * `alloc_bitmap` - The filesystem's
+    ///   [`AllocBitmap`](alloc_bitmap::AllocBitmap) in the state from before
+    ///   the `transaction`.
     pub fn rollback(
         self,
         transaction: Box<transaction::Transaction>,

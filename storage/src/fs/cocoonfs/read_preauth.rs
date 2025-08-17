@@ -12,8 +12,8 @@ use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     crypto::{hash, symcipher},
     fs::{
-        cocoonfs::{encryption_entities, keys, layout, CocoonFsFormatError},
         NvFsError, NvFsIoError,
+        cocoonfs::{CocoonFsFormatError, encryption_entities, keys, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
@@ -25,10 +25,15 @@ use crate::{
 };
 use core::{mem, pin, task};
 
+#[cfg(doc)]
+use crate::chip::NvChipFuture as _;
+
+/// Read an extent from storage without authentication.
 pub struct ReadExtentUnauthenticatedFuture<C: chip::NvChip> {
     fut_state: ReadExtentUnauthenticatedFutureState<C>,
 }
 
+/// [`ReadExtentUnauthenticatedFuture`] state-machine state.
 enum ReadExtentUnauthenticatedFutureState<C: chip::NvChip> {
     Init {
         extent_range: layout::PhysicalAllocBlockRange,
@@ -41,6 +46,13 @@ enum ReadExtentUnauthenticatedFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> ReadExtentUnauthenticatedFuture<C> {
+    /// Instantiate a [`ReadExtentUnauthenticatedFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `extent_range` - The extent to read.
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
     pub fn new(extent_range: &layout::PhysicalAllocBlockRange, allocation_block_size_128b_log2: u8) -> Self {
         Self {
             fut_state: ReadExtentUnauthenticatedFutureState::Init {
@@ -52,6 +64,9 @@ impl<C: chip::NvChip> ReadExtentUnauthenticatedFuture<C> {
 }
 
 impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// On success, the extent's data read from storage is returned.
     type Output = Result<Vec<u8>, NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
@@ -104,6 +119,8 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<
     }
 }
 
+/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// internally by [`ReadExtentUnauthenticatedFuture`].
 struct ReadExtentUnauthenticatedNvChipReadRequest {
     dst_buf: Vec<u8>,
     extent_range: layout::PhysicalAllocBlockRange,
@@ -205,6 +222,12 @@ impl chip::NvChipReadRequest for ReadExtentUnauthenticatedNvChipReadRequest {
     }
 }
 
+/// Read some filesystem entity stored in "chained encrypted extents" and
+/// authenticate by means of the inline preauthentication CCA protection digests
+/// stored inline to it.
+///
+/// Used early at filesystem opening time when the authentication tree based
+/// authentication is not yet available.
 pub struct ReadChainedExtentsPreAuthCcaProtectedFuture<C: chip::NvChip> {
     decrypted_extents: Vec<zeroize::Zeroizing<Vec<u8>>>,
     authenticated_associated_data: Vec<u8>,
@@ -213,6 +236,7 @@ pub struct ReadChainedExtentsPreAuthCcaProtectedFuture<C: chip::NvChip> {
     fut_state: ReadChainedExtentsPreauthCcaProtectedFutureState<C>,
 }
 
+/// [`ReadChainedExtentsPreAuthCcaProtectedFuture`] state-machine state.
 enum ReadChainedExtentsPreauthCcaProtectedFutureState<C: chip::NvChip> {
     ReadNextExtentPrepare {
         next_extent: layout::PhysicalAllocBlockRange,
@@ -225,6 +249,32 @@ enum ReadChainedExtentsPreauthCcaProtectedFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> ReadChainedExtentsPreAuthCcaProtectedFuture<C> {
+    /// Instantiate a [`ReadChainedExtentsPreAuthCcaProtectedFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `first_extent` - The head extent of the chain.
+    /// * `plain_data_extents_hdr_len` - Length of the plain header stored in
+    ///   `first_extent`, c.f.
+    ///   [`EncryptedChainedExtentsLayout::new()`](encryption_entities::EncryptedChainedExtentsLayout::new).
+    /// * `authenticated_associated_data` - Associated data authenticated with
+    ///   the "encrypted chained extents"' inline preauthentication CCA
+    ///   protection digests.
+    /// * `extent_alignment_allocation_blocks_log2` - Base-2 logarithm of the
+    ///   alignment of any extent in the chain in units of [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2), c.f.
+    ///   [`EncryptedChainedExtentsLayout::new()`](encryption_entities::EncryptedChainedExtentsLayout::new).
+    /// * `key_domain` - The key derivation domain associated with the
+    ///   filesystem entity stored in the "chained encrypted extents", c.f.
+    ///   [`KeyId::new()`](keys::KeyId::new).
+    /// * `key_subdomain` - The key derivation subdomain associated with the
+    ///   filesystem entity stored in the "chained encrypted extents", c.f.
+    ///   [`KeyId::new()`](keys::KeyId::new).
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
     #[allow(clippy::too_many_arguments)]
     pub fn new<ST: sync_types::SyncTypes>(
         first_extent: &layout::PhysicalAllocBlockRange,
@@ -291,6 +341,11 @@ impl<C: chip::NvChip> ReadChainedExtentsPreAuthCcaProtectedFuture<C> {
 }
 
 impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadChainedExtentsPreAuthCcaProtectedFuture<C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// On success, the entity's decrypted payload data, distributed over
+    /// one or more buffers, possibly of different sizes each, is being
+    /// returned.
     type Output = Result<Vec<zeroize::Zeroizing<Vec<u8>>>, NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {

@@ -2258,7 +2258,7 @@ enum ProgressCommittingTransactionFuture<ST: sync_types::SyncTypes, C: chip::NvC
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         sync_state_write_guard: Option<CocoonFsSyncStateMemberWriteWeakGuard<ST, C>>,
-        cleanup_fut: transaction::TransactionCleanupPreCommitCancelled<C>,
+        cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture<C>,
         pre_commit_error: NvFsError,
     },
 
@@ -2550,7 +2550,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for ProgressComm
                                         // CocoonFsSyncStateMemberWriteGuard::into_weak() upon
                                         // return from this poll() function.
                                         sync_state_write_guard: None,
-                                        cleanup_fut: transaction::TransactionCleanupPreCommitCancelled::new(
+                                        cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                             transaction,
                                         ),
                                         pre_commit_error: e,
@@ -2574,7 +2574,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for ProgressComm
                                         // CocoonFsSyncStateMemberWriteGuard::into_weak() upon
                                         // return from this poll() function.
                                         sync_state_write_guard: None,
-                                        cleanup_fut: transaction::TransactionCleanupPreCommitCancelled::new(
+                                        cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                             transaction,
                                         ),
                                         pre_commit_error: e,
@@ -2629,7 +2629,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for ProgressComm
                     cleanup_fut,
                     pre_commit_error,
                 } => {
-                    match transaction::TransactionCleanupPreCommitCancelled::poll(
+                    match transaction::TransactionCleanupPreCommitCancelledFuture::poll(
                         pin::Pin::new(cleanup_fut),
                         CocoonFsSyncStateMemberMutRef::from(&mut sync_state_write_guard),
                         cx,
@@ -2693,7 +2693,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for ProgressComm
                                             // CocoonFsSyncStateMemberWriteGuard::into_weak() upon
                                             // return from this poll() function.
                                             sync_state_write_guard: None,
-                                            cleanup_fut: transaction::TransactionCleanupPreCommitCancelled::new(
+                                            cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                                 transaction,
                                             ),
                                             pre_commit_error: e,
@@ -3776,21 +3776,18 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> asynchronous::QueuedFuture<Coco
 /// Allocate extents on behalf of a transaction at pre-commit time.
 ///
 /// [`CocoonFsAllocateExtentsFuture`] assumes ownership of the
-/// [`Transaction`](transaction::Transaction) for the duration of the operation.
-///
-/// A two-level result is returned upon [future](CocoonFsSyncStateReadFuture)
+/// [`Transaction`](transaction::Transaction) for the duration of the operation
+/// and eventually returns it back from [`poll()`](Self::poll) upon future
 /// completion.
 ///
-/// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon encountering
-///   an internal error and the [`Transaction`](transaction::Transaction) is
-///   lost.
-/// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set to
-///   [`Ok`] and a pair of the input `Transaction`](transaction::Transaction)
-///   and the operation result will get returned within:
-///   * `Ok((transaction, Ok((extents, excess)))` - The allocation was
-///     successful, the `extents` had been allocated with an excess payload
-///     length of `excess` over the originally requested one.
-///   * `Ok((transaction, Err(e))` - The allocation failed with error `e`.
+/// On success, the allocation may get rolled back again by invoking
+/// [`Transaction::rollback_extents_allocation()`](transaction::Transaction::rollback_extents_allocation),
+/// unless [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback) has been called
+/// on [`Transaction::allocs`](transaction::Transaction::allocs) in the
+/// meanwhile. Maintaing the ability to rollback incurs some memory overhead
+/// though, so
+/// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback)
+/// should get invoked once its no longer needed.
 pub(super) struct CocoonFsAllocateExtentsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     pending_transactions_sync_state_fut: QueuedPendingTransactionsSyncFuture<ST, C>,
 }
@@ -3808,7 +3805,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsAllocateExtentsFuture<S
     ///
     /// * `fs_instance` - The [`CocoonFs`] instance.
     /// * `transaction` - The [`Transaction`](transaction::Transaction) on whose
-    ///   behalf to allocate.
+    ///   behalf to allocate. Will get returned back from [`poll()`](Self::poll)
+    ///   upon future completion.
     /// * `request` - The allocation request.
     /// * `for_journal` - Whether or not the allocation is for the journal.
     pub fn new(
@@ -3843,6 +3841,22 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsAllocateExtentsFuture<S
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for CocoonFsAllocateExtentsFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level result is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the
+    ///   [`Transaction`](transaction::Transaction) is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input
+    ///   `Transaction`](transaction::Transaction) and the operation result will
+    ///   get returned within:
+    ///   * `Ok((transaction, Ok((extents, excess)))` - The allocation was
+    ///     successful, the `extents` had been allocated with an excess payload
+    ///     length of `excess` over the originally requested one.
+    ///   * `Ok((transaction, Err(e))` - The allocation failed with error `e`.
     type Output = Result<
         (
             Box<transaction::Transaction>,
@@ -3879,21 +3893,17 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 /// Allocate a block on behalf of a transaction at pre-commit time.
 ///
 /// [`CocoonFsAllocateBlockFuture`] assumes ownership of the
-/// [`Transaction`](transaction::Transaction) for the duration of the operation.
+/// [`Transaction`](transaction::Transaction) for the duration of the operation
+/// and returns it back  from [`poll()`](Self::poll) upon future completion.
 ///
-/// A two-level result is returned upon [future](CocoonFsSyncStateReadFuture)
-/// completion.
-///
-/// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon encountering
-///   an internal error and the [`Transaction`](transaction::Transaction) is
-///   lost.
-/// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set to
-///   [`Ok`] and a pair of the input `Transaction`](transaction::Transaction)
-///   and the operation result will get returned within:
-///   * `Ok((transaction, Ok(block_allocation_blocks_begin))` - The allocation
-///     was successful, the block starting at `block_allocation_blocks_begin`
-///     had been allocated.
-///   * `Ok((transaction, Err(e))` - The allocation failed with error `e`.
+/// On success, the allocation may get rolled back again by invoking
+/// [`Transaction::rollback_block_allocation()`](transaction::Transaction::rollback_block_allocation),
+/// unless [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback) has been called
+/// on [`Transaction::allocs`](transaction::Transaction::allocs) in the
+/// meanwhile. Maintaing the ability to rollback incurs some memory overhead
+/// though, so
+/// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback)
+/// should get invoked once its no longer needed.
 pub(super) struct CocoonFsAllocateBlockFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     pending_transactions_sync_state_fut: QueuedPendingTransactionsSyncFuture<ST, C>,
 }
@@ -3911,7 +3921,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsAllocateBlockFuture<ST,
     ///
     /// * `fs_instance` - The [`CocoonFs`] instance.
     /// * `transaction` - The [`Transaction`](transaction::Transaction) on whose
-    ///   behalf to allocate.
+    ///   behalf to allocate. Will get returned from [`poll()`](Self::poll) upon
+    ///   future completion.
     /// * `block_allocation_blocks_log2` - Base-2 logarithm of the desired block
     ///   size in units of [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
@@ -3948,6 +3959,22 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsAllocateBlockFuture<ST,
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for CocoonFsAllocateBlockFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level result is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the
+    ///   [`Transaction`](transaction::Transaction) is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input
+    ///   `Transaction`](transaction::Transaction) and the operation result will
+    ///   get returned within:
+    ///   * `Ok((transaction, Ok(block_allocation_blocks_begin))` - The
+    ///     allocation was successful, the block starting at
+    ///     `block_allocation_blocks_begin` had been allocated.
+    ///   * `Ok((transaction, Err(e))` - The allocation failed with error `e`.
     type Output = Result<
         (
             Box<transaction::Transaction>,
@@ -3985,21 +4012,17 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 /// pre-commit time.
 ///
 /// [`CocoonFsAllocateBlocksFuture`] assumes ownership of the
-/// [`Transaction`](transaction::Transaction) for the duration of the operation.
+/// [`Transaction`](transaction::Transaction) for the duration of the operation
+/// and returns it back from [`poll()`](Self::poll) upon future completion.
 ///
-/// A two-level result is returned upon [future](CocoonFsSyncStateReadFuture)
-/// completion.
-///
-/// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon encountering
-///   an internal error and the [`Transaction`](transaction::Transaction) is
-///   lost.
-/// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set to
-///   [`Ok`] and a pair of the input `Transaction`](transaction::Transaction)
-///   and the operation result will get returned within:
-///   * `Ok((transaction, Ok(blocks_allocation_blocks_begin))` - The allocation
-///     was successful, the blocks starting at the location found in the
-///     respective `blocks_allocation_blocks_begin` entries had been allocated.
-///   * `Ok((transaction, Err(e))` - The allocation failed with error `e`.
+/// On success, the allocation may get rolled back again by invoking
+/// [`Transaction::rollback_blocks_allocation()`](transaction::Transaction::rollback_blocks_allocation),
+/// unless [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback) has been called
+/// on [`Transaction::allocs`](transaction::Transaction::allocs) in the
+/// meanwhile. Maintaing the ability to rollback incurs some memory overhead
+/// though, so
+/// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback)
+/// should get invoked once its no longer needed.
 pub(super) struct CocoonFsAllocateBlocksFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     pending_transactions_sync_state_fut: QueuedPendingTransactionsSyncFuture<ST, C>,
 }
@@ -4017,7 +4040,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsAllocateBlocksFuture<ST
     ///
     /// * `fs_instance` - The [`CocoonFs`] instance.
     /// * `transaction` - The [`Transaction`](transaction::Transaction) on whose
-    ///   behalf to allocate.
+    ///   behalf to allocate. Will get returned back from [`poll()`](Self::poll)
+    ///   upon future completion.
     /// * `block_allocation_blocks_log2` - Base-2 logarithm of the desired block
     ///   size in units of [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
@@ -4063,6 +4087,23 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsAllocateBlocksFuture<ST
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for CocoonFsAllocateBlocksFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level result is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the
+    ///   [`Transaction`](transaction::Transaction) is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input
+    ///   `Transaction`](transaction::Transaction) and the operation result will
+    ///   get returned within:
+    ///   * `Ok((transaction, Ok(blocks_allocation_blocks_begin))` - The
+    ///     allocation was successful, the blocks starting at the location found
+    ///     in the respective `blocks_allocation_blocks_begin` entries had been
+    ///     allocated.
+    ///   * `Ok((transaction, Err(e))` - The allocation failed with error `e`.
     type Output = Result<
         (
             Box<transaction::Transaction>,

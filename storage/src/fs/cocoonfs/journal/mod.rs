@@ -2,6 +2,8 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Functionality related to journal encoding/decoding and replay.
+
 pub mod apply_script;
 pub mod auth_tree_updates;
 pub mod extents_covering_auth_digests;

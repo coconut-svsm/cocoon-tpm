@@ -2,11 +2,13 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Implementation of [`ExtentsCoveringAuthDigests`].
+
 extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::{
-    fs::cocoonfs::{extents, layout, leb128, CocoonFsFormatError, NvFsError},
+    fs::cocoonfs::{CocoonFsFormatError, NvFsError, extents, layout, leb128},
     nvfs_err_internal,
     utils_common::{
         alloc::try_alloc_zeroizing_vec,
@@ -16,15 +18,41 @@ use crate::{
 };
 use core::ops;
 
+#[cfg(doc)]
+use layout::ImageLayout;
+
+/// Sequence of [Authentication Tree Data
+/// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// digests associated with some possibly discontiguous storage extents.
+///
+/// Used for the journal log's
+/// [`AllocBitmapFileFragmentsAuthDigests`
+/// field](super::log::JournalLogFieldTag::AllocBitmapFileFragmentsAuthDigests).
 pub struct ExtentsCoveringAuthDigests {
+    /// Pairs of physical [Authentication Tree Data
+    /// Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// location on storage and associated digest.
+    ///
+    /// Sorted by location on storage.
     auth_digests: Vec<(layout::PhysicalAllocBlockIndex, zeroize::Zeroizing<Vec<u8>>)>,
 }
 
 impl ExtentsCoveringAuthDigests {
+    /// Determine a [`ExtentsCoveringAuthDigests`]'s encoded length.
+    ///
+    /// # Arguments:
+    ///
+    /// * `covered_extents` - Storage extents to be covered by the
+    ///   authentication digests, sorted by increasing storage location.
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
+    /// * `auth_digest_len` - Length of a single [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   digest.
     pub fn encoded_len(
         covered_extents: &extents::PhysicalExtents,
         auth_tree_data_block_allocation_blocks_log2: u8,
-        digest_len: usize,
+        auth_digest_len: usize,
     ) -> Result<usize, NvFsError> {
         let auth_tree_data_block_allocation_blocks_log2 = auth_tree_data_block_allocation_blocks_log2 as u32;
 
@@ -69,13 +97,25 @@ impl ExtentsCoveringAuthDigests {
         }
 
         let total_auth_digests_len = total_auth_digests_count
-            .checked_mul(digest_len)
+            .checked_mul(auth_digest_len)
             .ok_or(NvFsError::DimensionsNotSupported)?;
         total_encoded_auth_tree_data_blocks_offsets_len
             .checked_add(total_auth_digests_len)
             .ok_or(NvFsError::DimensionsNotSupported)
     }
 
+    /// Decode a [`ExtentsCoveringAuthDigests`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - Source buffers to decode from. `src` will get fully consumed.
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    /// * `auth_digest_len` - Length of a single [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   digest.
     pub fn decode<'a, SI: io_slices::PeekableIoSlicesIter<'a, BackendIteratorError = NvFsError>>(
         mut src: SI,
         auth_tree_data_block_allocation_blocks_log2: u8,
@@ -161,6 +201,9 @@ impl ExtentsCoveringAuthDigests {
         Ok(Self { auth_digests })
     }
 
+    /// Number of [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) digest
+    /// entries.
     pub fn len(&self) -> usize {
         self.auth_digests.len()
     }

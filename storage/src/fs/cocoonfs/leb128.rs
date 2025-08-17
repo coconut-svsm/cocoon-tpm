@@ -2,24 +2,46 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
-//! LEB128 en- and decoding.
+//! LEB128 integer en- and decoding.
 
 use crate::utils_common::bitmanip::BitManip as _;
 
+/// LEB128 decoding errors.
 #[derive(Debug)]
 pub enum Leb128EncodingError {
+    /// The LEB128 encoding is truncated.
     TruncatedEncoding,
+    /// The decoded value exceeds the range representable by the
+    /// target integer type.
     DecodeOverflow,
 }
 
+/// Signed LEB128 encoding length for a given `i64` value.
+///
+/// # Arguments:
+///
+/// * `value` - The value to encode.
 pub fn leb128s_i64_encoded_len(value: i64) -> usize {
     value.significant_bits().div_ceil(7) as usize
 }
 
+/// Unsigned LEB128 encoding length for a given `u64` value.
+///
+/// # Arguments:
+///
+/// * `value` - The value to encode.
 pub fn leb128u_u64_encoded_len(value: u64) -> usize {
     value.significant_bits().div_ceil(7) as usize
 }
 
+/// Encode an `i64` value in signed LEB128 format.
+///
+/// Encode `value` into `dst` and return the remainder of `dst`.
+///
+/// # Arguments:
+///
+/// * `dst` - Destination buffer to encode into.
+/// * `value` - The value to encode.
 pub fn leb128s_i64_encode(dst: &mut [u8], value: i64) -> &mut [u8] {
     let significand_bits = value.significant_bits();
     let mut value = value as u64;
@@ -60,6 +82,14 @@ fn test_leb128s_i64_encode() {
     }
 }
 
+/// Encode an `u64` value in unsigned LEB128 format.
+///
+/// Encode `value` into `dst` and return the remainder of `dst`.
+///
+/// # Arguments:
+///
+/// * `dst` - Destination buffer to encode into.
+/// * `value` - The value to encode.
 pub fn leb128u_u64_encode(dst: &mut [u8], mut value: u64) -> &mut [u8] {
     let encoded_len = leb128u_u64_encoded_len(value);
     for dst in dst.iter_mut().take(encoded_len) {
@@ -88,6 +118,14 @@ fn test_leb128u_u64_encode() {
     }
 }
 
+/// Decode a signed LEB128 encoding into an `i64`.
+///
+/// Decode from `src` and return a pair of the decoded value and the remainder
+/// of `src` on success.
+///
+/// # Arguments:
+///
+/// * `src` - The source buffer to decode from.
 pub fn leb128s_i64_decode(src: &[u8]) -> Result<(i64, &[u8]), Leb128EncodingError> {
     let mut encoded_len = 0usize;
     let mut value: u64 = 0;
@@ -223,6 +261,14 @@ fn test_leb128s_i64_decode() {
     ));
 }
 
+/// Decode a unsigned LEB128 encoding into an `u64`.
+///
+/// Decode from `src` and return a pair of the decoded value and the remainder
+/// of `src` on success.
+///
+/// # Arguments:
+///
+/// * `src` - The source buffer to decode from.
 pub fn leb128u_u64_decode(src: &[u8]) -> Result<(u64, &[u8]), Leb128EncodingError> {
     let mut encoded_len = 0usize;
     let mut value: u64 = 0;

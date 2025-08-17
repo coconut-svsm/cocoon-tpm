@@ -2,6 +2,9 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Implementation of [`ReadBuffer`] and the related
+//! [`BufferedReadAuthenticateDataFuture`].
+
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -17,14 +20,42 @@ use crate::{
 };
 use core::{mem, pin, sync::atomic, task};
 
+#[cfg(doc)]
+use layout::ImageLayout;
+
+/// Buffered [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+/// update specification.
 pub enum ReadBufferAllocationBlockUpdate {
+    /// The [Allocation Block](ImageLayout::allocation_block_size_128b_log2) is
+    /// known to be unallocated.
     Unallocated,
+    /// Invalidate any state buffered for the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2).
     Invalidate,
+    /// Retain what's buffered for the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2).
     Retain,
-    Update { data: Vec<u8> },
+    /// Update the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2)'s buffered data.
+    Update {
+        /// The updated data.
+        ///
+        /// Must match the size as determined by
+        /// [`ImageLayout::allocation_block_size_128b_log2`].
+        data: Vec<u8>,
+    },
 }
 
+/// Buffer for some power-of-two size block's individual [Allocation
+/// Blocks](ImageLayout::allocation_block_size_128b_log2).
+///
+/// The [`ReadBuffer`] maintains one [`BlockAllocationBlocksReadBuffer`] for the
+/// most recently read [Authentication Tree Data
+/// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) as well as
+/// [Chip IO Block](chip::NvChip::chip_io_block_size_128b_log2) respectively
+/// each.
 struct BlockAllocationBlocksReadBuffer {
+    /// Beginning of the currently buffered block on storage, if any.
     buffered_block_allocation_blocks_begin: Option<layout::PhysicalAllocBlockIndex>,
     /// Buffered Allocation Blocks.
     ///
@@ -35,6 +66,13 @@ struct BlockAllocationBlocksReadBuffer {
 }
 
 impl BlockAllocationBlocksReadBuffer {
+    /// Instantiate a new [`BlockAllocationBlocksReadBuffer`].
+    ///
+    /// # Arguments:
+    ///
+    /// `block_allocation_blocks_log2` - Base-2 logarithm of the buffered
+    /// block's size in units of [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
     fn new(block_allocation_blocks_log2: u32) -> Result<Self, NvFsError> {
         if block_allocation_blocks_log2 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
@@ -47,6 +85,33 @@ impl BlockAllocationBlocksReadBuffer {
         })
     }
 
+    /// Take a contiguous sequence of buffered [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// Transfer any of the buffered block's [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) starting
+    /// at index `take_begin` to the corresponding entry from
+    /// `dst_allocation_blocks_bufs`. For any Allocation Block
+    /// buffered as unallocated, the `Vec` from the corresponding
+    /// `dst_allocation_blocks_bufs` entry will get reset to zero length.
+    /// Any entry from `dst_allocation_blocks_bufs`, for which no [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) is
+    /// found in the buffer anymore, will be left unmodified.
+    ///
+    /// A pair of two `bool`s is returned:
+    /// * The first entry is set to `true` if and only if all entries from
+    ///   `dst_allocation_blocks_bufs` received an assignment from the buffer.
+    /// * The second entry is set to `true` if no more entries are remaining in
+    ///   the buffer after the transfer.
+    ///
+    /// # Arguments:
+    ///
+    /// * `take_begin` - Index of the first [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) in the buffered
+    ///   block to transfer (if present).
+    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut Vec` items to
+    ///   transfer the respective [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to.
     fn take_buffers<'a, DI: Iterator<Item = &'a mut Vec<u8>>>(
         &mut self,
         take_begin: usize,
@@ -85,6 +150,7 @@ impl BlockAllocationBlocksReadBuffer {
         (!any_missing, !any_remaining)
     }
 
+    /// Clear the buffer.
     fn clear(&mut self) {
         for buffered_allocation_block in &mut self.buffered_allocation_blocks {
             *buffered_allocation_block = None;
@@ -92,6 +158,34 @@ impl BlockAllocationBlocksReadBuffer {
         self.buffered_block_allocation_blocks_begin = None;
     }
 
+    /// Insert a contiguous sequence of [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffers.
+    ///
+    /// Reset any existing [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffer
+    /// entries and transfer the ones from `src_allocation_blocks_bufs` into the
+    /// buffer. The first entry from `src_allocation_blocks_bufs`
+    /// corresponds to the storage location specified by
+    /// `src_allocation_blocks_begin`.
+    ///
+    /// If an entry from `src_allocation_blocks_bufs` is `None`, then the
+    /// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    /// will get tracked as unavailable. Otherwise, if the `Vec` is empty,
+    /// it get buffered as unallocated. Otherwise the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) will
+    /// get buffered with the data from the `Vec` taken.
+    ///
+    /// On success, the location of the buffer's first buffered [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) will get
+    /// returned, if any.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src_allocation_blocks_begin` - Location of the first entry from
+    ///   `src_allocation_blocks_bufs` on storage.
+    /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to
+    ///   insert.
     fn insert_buffers<'a, SI: Iterator<Item = Option<&'a mut Vec<u8>>>>(
         &mut self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -132,6 +226,27 @@ impl BlockAllocationBlocksReadBuffer {
         self.buffered_block_allocation_blocks_begin
     }
 
+    /// Update buffered [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// Update [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    /// buffer entries as specified by `src_allocation_block_bufs`. The
+    /// first entry from `src_allocation_blocks_bufs` corresponds to the
+    /// storage location specified by `src_allocation_blocks_begin`. Existing
+    /// entries not in range of the `src_allocation_blocks_bufs` will be left
+    /// unmodified.
+    ///
+    /// On success, the location of the buffer's first buffered [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) will get returned,
+    /// if any.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src_allocation_blocks_begin` - Location of the first entry from
+    ///   `src_allocation_blocks_bufs` on storage.
+    /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffer update
+    ///   specifications.
     fn update_buffers<SI: Iterator<Item = ReadBufferAllocationBlockUpdate>>(
         &mut self,
         mut src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -204,12 +319,27 @@ impl BlockAllocationBlocksReadBuffer {
     }
 }
 
+/// A [`ReadBuffer`]'s buffered data.
 struct ReadBufferBufferedData {
+    /// Unauthenticated data buffered from most recently read [Chip IO
+    /// block](chip::NvChip::chip_io_block_size_128b_log2).
     min_io_block_buf: BlockAllocationBlocksReadBuffer,
+    /// Authenticated data buffered from the most recently read and
+    /// authenticated [Authentication
+    /// Tree Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     auth_tree_data_block_buf: BlockAllocationBlocksReadBuffer,
 }
 
 impl ReadBufferBufferedData {
+    /// Instantiate a [`ReadBufferBufferedData`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `min_io_block_allocation_blocks_log2` - Base-2 logarithm of the [Chip
+    ///   IO Block](chip::NvChip::chip_io_block_size_128b_log2) size in units of
+    ///   [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     fn new(
         min_io_block_allocation_blocks_log2: u32,
         auth_tree_data_block_allocation_blocks_log2: u32,
@@ -223,18 +353,78 @@ impl ReadBufferBufferedData {
     }
 }
 
+/// Data read buffer.
+///
+/// In general, read requests don't align with [Chip IO
+/// Block](chip::NvChip::chip_io_block_size_128b_log2) or [Authentication Tree
+/// Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// boundaries, yet reads from physical storage must get processed at a
+/// granularity of the former, and authentication at that of the latter.
+///
+/// In order to exploit spatial locality, a `ReadBuffer` buffers the unused
+/// portions from prior reads for potential consumption from subsequent ones.
+///
+/// More specifically, it maintains a buffer of [Allocation
+/// Blocks](ImageLayout::allocation_block_size_128b_log2) authenticated in the
+/// course of proecessing a prior read request but not consumed yet.
+/// Furthermore, if the [Chip IO
+/// Block](chip::NvChip::chip_io_block_size_128b_log2) happens to exceed the
+/// [Authentication Tree
+/// Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) size,
+/// then it also buffers not yet authenticated [Allocation
+/// Blocks](ImageLayout::allocation_block_size_128b_log2) read in as a byproduct
+/// in the course of processing a prior read request.
+///
+/// No data is ever inserted directly into a `ReadBuffer` nor consumed from it,
+/// that's all handled transparently through the
+/// [`BufferedReadAuthenticateDataFuture`]. Interfaces are provided to supersede
+/// or invalidate buffered data at
+/// [`Transaction`](super::transaction::Transaction) commit though.
+///
+/// # See also:
+///
+/// * [`BufferedReadAuthenticateDataFuture`].
 pub struct ReadBuffer<ST: sync_types::SyncTypes> {
+    /// Verbatim copy of
+    /// [`ImageLayout::allocation_block_size_128b_log2`].
     allocation_block_size_128b_log2: u8,
+    /// Value of [`NvChip::chip_io_block_size_128b_log2`](chip::NvChip::chip_io_block_size_128b_log2) converted to units
+    /// of [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
     min_io_block_allocation_blocks_log2: u8,
+    /// Verbatim copy of
+    /// [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     auth_tree_data_block_allocation_blocks_log2: u8,
 
+    /// The buffered data.
     buf: ST::Lock<ReadBufferBufferedData>,
 
+    /// Copy of the
+    /// [`buffered_block_allocation_blocks_begin`](BlockAllocationBlocksReadBuffer::buffered_block_allocation_blocks_begin)
+    /// value from [`buf`](Self::buf)'s
+    /// [`min_io_block_buf`](ReadBufferBufferedData::min_io_block_buf).
+    ///
+    /// A value of `None` is mapped to `u64::MAX`.
+    /// Modified only under the [`Lock`](sync_types::Lock) wrapping
+    /// [`buf`](Self::buf).
     buffered_min_io_block_allocation_blocks_begin: atomic::AtomicU64,
+    /// Copy of the
+    /// [`buffered_block_allocation_blocks_begin`](BlockAllocationBlocksReadBuffer::buffered_block_allocation_blocks_begin)
+    /// value from [`buf`](Self::buf)'s
+    /// [`auth_tree_data_block_buf`](ReadBufferBufferedData::auth_tree_data_block_buf).
+    ///
+    /// A value of `None` is mapped to `u64::MAX`.
+    /// Modified only under the [`Lock`](sync_types::Lock) wrapping
+    /// [`buf`](Self::buf).
     buffered_auth_tree_data_block_allocation_blocks_begin: atomic::AtomicU64,
 }
 
 impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
+    /// Instantiate a [`ReadBuffer`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `chip` - The filesystem image backing storage.
     pub fn new<C: chip::NvChip>(image_layout: &layout::ImageLayout, chip: &C) -> Result<Self, NvFsError> {
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
 
@@ -259,6 +449,32 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         })
     }
 
+    /// Take a contiguous sequence of buffered authenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2), if any.
+    ///
+    /// Transfer any of the buffered authenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) to the
+    /// corresponding entry from `dst_allocation_blocks_bufs`. For any
+    /// Allocation Block buffered as unallocated, the `Vec`
+    /// from the corresponding `dst_allocation_blocks_bufs` entry will get reset
+    /// to zero length. Any entry from `dst_allocation_blocks_bufs`, for
+    /// which no [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) is found in the
+    /// buffer anymore, will be left unmodified.
+    ///
+    /// If no [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    /// in the requested `range` was buffered, `None` will get returned.
+    /// Otherwise, a pair of the subrange of `range` possibly populated with
+    /// data from the buffer and a bool indicating whether buffered data for
+    /// all of that subrange was transferred is returned, wrapped in a `Some`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `range`  - The requested storage range.
+    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut Vec` items to
+    ///   transfer the respective [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to. Must
+    ///   yield one entry for each Allocation Block in `range`.
     fn take_authenticated_buffers<'a, DI: Iterator<Item = &'a mut Vec<u8>>>(
         &self,
         range: &layout::PhysicalAllocBlockRange,
@@ -324,6 +540,32 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         None
     }
 
+    /// Take a contiguous sequence of buffered unauthenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2), if any.
+    ///
+    /// Transfer any of the buffered unauthenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2) to the
+    /// corresponding entry from `dst_allocation_blocks_bufs`. For any
+    /// Allocation Block buffered as unallocated, the `Vec`
+    /// from the corresponding `dst_allocation_blocks_bufs` entry will get reset
+    /// to zero length. Any entry from `dst_allocation_blocks_bufs`, for
+    /// which no [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) is found in the
+    /// buffer anymore, will be left unmodified.
+    ///
+    /// If no [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    /// in the requested `range` was buffered, `None` will get returned.
+    /// Otherwise, a pair of the subrange of `range` possibly populated with
+    /// data from the buffer and a bool indicating whether buffered data for
+    /// all of that subrange was transferred is returned, wrapped in a `Some`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `range`  - The requested storage range.
+    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut Vec` items to
+    ///   transfer the respective [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to. Must
+    ///   yield one entry for each Allocation Block in `range`.
     fn take_unauthenticated_buffers<'a, DI: Iterator<Item = &'a mut Vec<u8>>>(
         &self,
         range: &layout::PhysicalAllocBlockRange,
@@ -389,6 +631,29 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         None
     }
 
+    /// Insert a contiguous sequence of authenticated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffers.
+    ///
+    /// Reset any existing authenticated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffer entries and
+    /// transfer the ones from `src_allocation_blocks_bufs` into the buffer.
+    /// The first entry from `src_allocation_blocks_bufs` corresponds to the
+    /// storage location specified by `src_allocation_blocks_begin`.
+    ///
+    /// If an entry from `src_allocation_blocks_bufs` is `None`, then the
+    /// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    /// will get tracked as unavailable. Otherwise, if the `Vec` is empty,
+    /// it get buffered as unallocated. Otherwise the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) will get buffered
+    /// with the data from the `Vec` taken.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src_allocation_blocks_begin` - Location of the first entry from
+    ///   `src_allocation_blocks_bufs` on storage.
+    /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to
+    ///   insert. The buffers must all have been authenticated!
     fn insert_authenticated_buffers<'a, SI: Iterator<Item = Option<&'a mut Vec<u8>>>>(
         &self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -409,6 +674,29 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         );
     }
 
+    /// Insert a contiguous sequence of unauthenticated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffers.
+    ///
+    /// Reset any existing unauthenticated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffer entries and
+    /// transfer the ones from `src_allocation_blocks_bufs` into the buffer.
+    /// The first entry from `src_allocation_blocks_bufs` corresponds to the
+    /// storage location specified by `src_allocation_blocks_begin`.
+    ///
+    /// If an entry from `src_allocation_blocks_bufs` is `None`, then the
+    /// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
+    /// will get tracked as unavailable. Otherwise, if the `Vec` is empty,
+    /// it get buffered as unallocated. Otherwise the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) will get buffered
+    /// with the data from the `Vec` taken.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src_allocation_blocks_begin` - Location of the first entry from
+    ///   `src_allocation_blocks_bufs` on storage.
+    /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to
+    ///   insert.
     fn insert_unauthenticated_buffers<'a, SI: Iterator<Item = Option<&'a mut Vec<u8>>>>(
         &self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -429,6 +717,9 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         );
     }
 
+    /// Get the current storage range window spanning all possibly buffered
+    /// authenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2), if any.
     pub fn get_buffered_authenticated_range(&self) -> Option<layout::PhysicalAllocBlockRange> {
         if !self.auth_tree_blocks_are_buffered() {
             return None;
@@ -450,6 +741,9 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         )))
     }
 
+    /// Get the current storage range window spanning all possibly buffered
+    /// unauthenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2), if any.
     pub fn get_buffered_unauthenticated_range(&self) -> Option<layout::PhysicalAllocBlockRange> {
         if !self.min_io_blocks_are_buffered() {
             return None;
@@ -471,6 +765,26 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         )))
     }
 
+    /// Update buffered authenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// Update authenticated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffer
+    /// entries as specified by `src_allocation_block_bufs`. The first entry
+    /// from `src_allocation_blocks_bufs` corresponds to the storage
+    /// location specified by `src_allocation_blocks_begin`. Existing
+    /// entries not in range of the `src_allocation_blocks_bufs` will be
+    /// left unmodified.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src_allocation_blocks_begin` - Location of the first entry from
+    ///   `src_allocation_blocks_bufs` on storage.
+    /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffer update
+    ///   specifications. Except for the
+    ///   [`Invalidate`](ReadBufferAllocationBlockUpdate::Invalidate) case, all
+    ///   update entries must be authenticated!
     pub fn update_authenticated_buffers<SI: Iterator<Item = ReadBufferAllocationBlockUpdate>>(
         &mut self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -491,6 +805,23 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         );
     }
 
+    /// Update buffered unauthenticated [Allocation
+    /// Blocks](ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// Update unauthenticated [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) buffer entries
+    /// as specified by `src_allocation_block_bufs`. The first entry from
+    /// `src_allocation_blocks_bufs` corresponds to the storage location
+    /// specified by `src_allocation_blocks_begin`. Existing entries not in
+    /// range of the `src_allocation_blocks_bufs` will be left unmodified.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src_allocation_blocks_begin` - Location of the first entry from
+    ///   `src_allocation_blocks_bufs` on storage.
+    /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) buffer update
+    ///   specifications.
     pub fn update_unauthenticated_buffers<SI: Iterator<Item = ReadBufferAllocationBlockUpdate>>(
         &mut self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -511,6 +842,7 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         );
     }
 
+    /// Clear all buffered data.
     pub fn clear_caches(&self) {
         let mut locked_buf = self.buf.lock();
         locked_buf.auth_tree_data_block_buf.clear();
@@ -521,14 +853,32 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
             .store(u64::MAX, atomic::Ordering::Relaxed);
     }
 
+    /// Determine whether unauthenticated data from read
+    /// [Chip IO Blocks](chip::NvChip::chip_io_block_size_128b_log2) reads is to
+    /// be buffered.
     fn min_io_blocks_are_buffered(&self) -> bool {
         self.min_io_block_allocation_blocks_log2 > self.auth_tree_data_block_allocation_blocks_log2
     }
 
+    /// Determine whether data from authenticated [Authentication Tree Data
+    /// Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) is to
+    /// be buffered.
     fn auth_tree_blocks_are_buffered(&self) -> bool {
         self.auth_tree_data_block_allocation_blocks_log2 != 0
     }
 
+    /// Test if a given storage range overlaps with some aligned, power-of-two
+    /// sized block.
+    ///
+    /// # Arguments:
+    ///
+    /// * `range` - The extent on storage to test for an overlap with the block.
+    /// * `block_allocation_blocks_begin` - The block's beginning on storage.
+    ///   Must be aligned to the size as determined by
+    ///   `block_allocation_blocks_log2`.
+    /// * `block_allocation_blocks_log2` - Base-2 logarithm of the block's size
+    ///   in units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     fn range_overlaps_block(
         range: &layout::PhysicalAllocBlockRange,
         block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -550,6 +900,21 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
         true
     }
 
+    /// Trim a given storage range to its overlap with some aligned,
+    /// power-of-two sized block, if any.
+    ///
+    /// If the `range` doesn't overlap with the block, return `None`. Otherwise
+    /// return the overlapping subrange wrapped in a `Some`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `range` - The extent on storage to trim to overlap with the block.
+    /// * `block_allocation_blocks_begin` - The block's beginning on storage.
+    ///   Must be aligned to the size as determined by
+    ///   `block_allocation_blocks_log2`.
+    /// * `block_allocation_blocks_log2` - Base-2 logarithm of the block's size
+    ///   in units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     fn trim_range_to_block(
         range: &layout::PhysicalAllocBlockRange,
         block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -577,6 +942,7 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     }
 }
 
+/// Read and authenticate committed data through a [`ReadBuffer`].
 pub struct BufferedReadAuthenticateDataFuture<C: chip::NvChip> {
     /// All other data bundled together to allow for independenr borrowing from
     /// [`fut_state`](Self::fut_state).
@@ -584,20 +950,28 @@ pub struct BufferedReadAuthenticateDataFuture<C: chip::NvChip> {
     fut_state: BufferedReadAuthenticateDataFutureState<C>,
 }
 
+/// Internal [`BufferedReadAuthenticateDataFuture`] state.
 struct BufferedReadAuthenticatedDataFutureData {
     request_range: layout::PhysicalAllocBlockRange,
 
-    /// The request region aligned to the Authentication Tree Data Block size.
+    /// The request region aligned to the [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) size.
     auth_tree_data_block_aligned_request_range: layout::PhysicalAllocBlockRange,
 
     /// The beginning of the `auth_tree_data_block_aligned_request_range`
     /// as represented in the Authentication Tree Data domain.
     request_range_auth_tree_data_allocation_blocks_begin: auth_tree::AuthTreeDataAllocBlockIndex,
 
-    /// The request range aligned to the larger of a Chip IO Block and an
-    /// Authentication Tree Data Block. This is the area of operation.
+    /// The request range aligned to the larger of a [Chip IO
+    /// Block](chip::NvChip::chip_io_block_size_128b_log2)) and an
+    /// [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+    ///
+    /// This is the area of operation.
     aligned_request_range: layout::PhysicalAllocBlockRange,
 
+    /// Destination buffers for the `request_range`, one for each [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2).
     dst_allocation_blocks_bufs: Vec<Vec<u8>>,
 
     /// Head and tail portions of the scratch Allocation Block buffers needed to
@@ -606,18 +980,45 @@ struct BufferedReadAuthenticatedDataFutureData {
     /// a single array.
     alignment_scratch_allocation_blocks_bufs: Vec<Vec<u8>>,
 
+    /// Subrange of [`request_range`](Self::request_range) for which
+    /// authenticated data has been obtained from the [`ReadBuffer`].
     authenticated_subrange_from_read_buf: Option<layout::PhysicalAllocBlockRange>,
+    /// Subrange of
+    /// [`auth_tree_data_block_aligned_request_range`](Self::auth_tree_data_block_aligned_request_range)
+    /// for which unauthenticated data has been obtained from the
+    /// [`ReadBuffer`].
     unauthenticated_subrange_from_read_buf: Option<layout::PhysicalAllocBlockRange>,
 
+    /// End of the
+    /// [`auth_tree_data_block_aligned_request_range`](Self::auth_tree_data_block_aligned_request_range)
+    /// head subrange authenticated so far.
     authenticated_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
 
+    /// [Chip IO Block](chip::NvChip::chip_io_block_size_128b_log2) in units of
+    /// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
     min_io_block_allocation_blocks_log2: u8,
+    /// [Preferred Chip IO bulk
+    /// size](chip::NvChip::preferred_chip_io_blocks_bulk_log2) in units of
+    /// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
     preferred_chip_io_bulk_allocation_blocks_log2: u8,
+    /// Verbatim value of
+    /// [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     auth_tree_data_block_allocation_blocks_log2: u8,
+    /// Verbatim value of [`ImageLayout::allocation_block_size_128b_log2`].
     allocation_block_size_128b_log2: u8,
 }
 
 impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
+    /// Instantiate a [`BufferedReadAuthenticateDataFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `request_range` - The data storage range to read and authenticate.
+    ///   Must all be allocated.
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `auth_tree_config` - The filesystem's
+    ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
+    /// * `chip` - The filesystem image backing storage.
     pub fn new(
         request_range: &layout::PhysicalAllocBlockRange,
         image_layout: &layout::ImageLayout,
@@ -704,6 +1105,27 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
         })
     }
 
+    /// Poll the [`BufferedReadAuthenticateDataFuture`] to completion.
+    ///
+    /// On successful completion, a `Vec` of buffers is being returned, one for
+    /// each [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) in the requested
+    /// read range.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](super::image_header::MutableImageHeader::physical_location).
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](super::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `fs_sync_state_auth_tree` - The [filesystem instance's authentication
+    ///   tree](super::fs::CocoonFsSyncState::auth_tree).
+    /// * `fs_sync_state_read_buffer` - The [filesystem instance's read
+    ///   buffer](super::fs::CocoonFsSyncState::read_buffer).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::too_many_arguments)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
@@ -853,19 +1275,18 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                     // Finally allocate Allocation Block destination buffers for anything not
                     // obtained from the read buffer.
                     let (head_alignment_scratch_allocation_blocks_bufs, tail_alignment_scratch_allocation_blocks_bufs) =
-                        BufferedReadAuthenticatedDataFutureData
-                            ::get_min_io_block_alignment_scratch_allocation_blocks_bufs(
+                        BufferedReadAuthenticatedDataFutureData::get_alignment_scratch_allocation_blocks_bufs(
                             &mut this.d.alignment_scratch_allocation_blocks_bufs,
                             &this.d.request_range,
                             &this.d.aligned_request_range,
-                            );
+                        );
 
                     let ((unused_head_alignment_scratch_allocation_blocks_bufs,
                           used_head_alignment_scratch_allocation_blocks_bufs),
                          (used_tail_alignment_scratch_allocation_blocks_bufs,
                           _unused_tail_alignment_scratch_allocation_blocks_bufs)) =
                          BufferedReadAuthenticatedDataFutureData
-                        ::split_off_unused_min_io_block_alignment_scratch_allocation_blocks_bufs(
+                        ::split_off_unused_alignment_scratch_allocation_blocks_bufs(
                             head_alignment_scratch_allocation_blocks_bufs,
                             tail_alignment_scratch_allocation_blocks_bufs,
                             &this.d.request_range,
@@ -1334,19 +1755,18 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                         let (
                             head_alignment_scratch_allocation_blocks_bufs,
                             tail_alignment_scratch_allocation_blocks_bufs,
-                        ) = BufferedReadAuthenticatedDataFutureData
-                                ::get_min_io_block_alignment_scratch_allocation_blocks_bufs(
+                        ) = BufferedReadAuthenticatedDataFutureData::get_alignment_scratch_allocation_blocks_bufs(
                             &mut this.d.alignment_scratch_allocation_blocks_bufs,
                             &this.d.request_range,
                             &this.d.aligned_request_range,
-                                );
+                        );
                         let (
                             (unused_head_alignment_scratch_allocation_blocks_bufs,
                              used_head_alignment_scratch_allocation_blocks_bufs),
                              (used_tail_alignment_scratch_allocation_blocks_bufs,
                               _unused_tail_alignment_scratch_allocation_blocks_bufs)
                         ) = BufferedReadAuthenticatedDataFutureData
-                                ::split_off_unused_min_io_block_alignment_scratch_allocation_blocks_bufs(
+                                ::split_off_unused_alignment_scratch_allocation_blocks_bufs(
                                     head_alignment_scratch_allocation_blocks_bufs,
                                     tail_alignment_scratch_allocation_blocks_bufs,
                                     &this.d.request_range,
@@ -1457,6 +1877,22 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
 }
 
 impl BufferedReadAuthenticatedDataFutureData {
+    /// Convenience wrapper to
+    /// [`_translate_physical_to_auth_tree_data_allocation_block_index()`](Self::_translate_physical_to_auth_tree_data_allocation_block_index).
+    ///
+    /// Translate the `request_range_allocation_block_index`
+    /// [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex)
+    /// within the (aligned) request range into the
+    /// [`AuthTreeDataAllocBlockIndex`](auth_tree::AuthTreeDataAllocBlockIndex)
+    /// domain.
+    ///
+    /// # Arguments:
+    ///
+    /// * `request_range_allocation_block_index` - The
+    ///   [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) to
+    ///   translate. Must be within the [Authentication Tree Data
+    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   aligned request range.
     fn translate_physical_to_auth_tree_data_allocation_block_index(
         &self,
         request_range_allocation_block_index: layout::PhysicalAllocBlockIndex,
@@ -1468,6 +1904,24 @@ impl BufferedReadAuthenticatedDataFutureData {
         )
     }
 
+    /// Translate a [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex)
+    /// within the (aligned) request range into the
+    /// [`AuthTreeDataAllocBlockIndex`](auth_tree::AuthTreeDataAllocBlockIndex)
+    /// domain.
+    ///
+    /// # Arguments:
+    ///
+    /// * `request_range_allocation_block_index` - The
+    ///   [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) to
+    ///   translate. Must be within the bounds of
+    ///   `auth_tree_data_block_aligned_request_range`.
+    /// * `request_range_auth_tree_data_allocation_blocks_begin` - The
+    ///   [`AuthTreeDataAllocBlockIndex`](auth_tree::AuthTreeDataAllocBlockIndex)
+    ///   corresponding to the beginning of the
+    ///   `auth_tree_data_block_aligned_request_range`.
+    /// * `auth_tree_data_block_aligned_request_range` - The [Authentication
+    ///   Tree Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    ///   aligned request range.
     fn _translate_physical_to_auth_tree_data_allocation_block_index(
         request_range_allocation_block_index: layout::PhysicalAllocBlockIndex,
         request_range_auth_tree_data_allocation_blocks_begin: auth_tree::AuthTreeDataAllocBlockIndex,
@@ -1484,6 +1938,7 @@ impl BufferedReadAuthenticatedDataFutureData {
             + (request_range_allocation_block_index - auth_tree_data_block_aligned_request_range.begin())
     }
 
+    /// Allocate the [`Self::alignment_scratch_allocation_blocks_bufs`].
     fn allocate_alignment_scratch_allocation_blocks_buf(&mut self) -> Result<(), NvFsError> {
         debug_assert!(
             self.aligned_request_range
@@ -1501,7 +1956,20 @@ impl BufferedReadAuthenticatedDataFutureData {
         Ok(())
     }
 
-    fn get_min_io_block_alignment_scratch_allocation_blocks_bufs<'a>(
+    /// Get the alignment padding scratch buffers.
+    ///
+    /// Return the head and tail scratch buffers corresponding to the
+    /// head and tail alignment padding from the
+    /// [`aligned_request_range`](Self::aligned_request_range).
+    ///
+    /// # Arguments:
+    ///
+    /// * `alignment_scratch_allocation_blocks_bufs` - `mut` reference to
+    ///   [`Self::alignment_scratch_allocation_blocks_bufs`].
+    /// * `request_range` - Reference to [`Self::request_range`].
+    /// * `aligned_request_range` - Reference to
+    ///   [`Self::aligned_request_range`].
+    fn get_alignment_scratch_allocation_blocks_bufs<'a>(
         alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
         request_range: &layout::PhysicalAllocBlockRange,
         aligned_request_range: &layout::PhysicalAllocBlockRange,
@@ -1529,10 +1997,34 @@ impl BufferedReadAuthenticatedDataFutureData {
         )
     }
 
+    /// Split off the unused parts of the alignment padding scratch buffers.
+    ///
+    /// In some specific constellations of data obtained from the [`ReadBuffer`]
+    /// it is known that certain parts of the alignment padding scratch
+    /// buffers wouldn't ever get accessed. Split these parts off.
+    /// More specifically, return a quadruplet of buffers,
+    /// with the outer entries corresponding to the unused, and the inner two
+    /// entries to the used parts of the head and tail padding scratch
+    /// buffers respectively.
+    ///
+    /// # Arguments:
+    /// * `head_alignment_scratch_allocation_blocks_bufs` - Head part obtained
+    ///   from [`get_alignment_scratch_allocation_blocks_bufs()`](Self::get_alignment_scratch_allocation_blocks_bufs).
+    /// * `tail_alignment_scratch_allocation_blocks_bufs` - Tail part obtained
+    ///   from [`get_alignment_scratch_allocation_blocks_bufs()`](Self::get_alignment_scratch_allocation_blocks_bufs).
+    /// * `request_range` - Reference to [`Self::request_range`].
+    /// * `auth_tree_data_block_aligned_request_range` - Reference to
+    ///   [`Self::auth_tree_data_block_aligned_request_range`].
+    /// * `authenticated_subrange_from_read_buf` - Reference to
+    ///   [`Self::authenticated_subrange_from_read_buf`].
+    /// * `unauthenticated_subrange_from_read_buf` - Reference to
+    ///   [`Self::unauthenticated_subrange_from_read_buf`].
+    /// * `min_io_block_allocation_blocks_log2` - Value of
+    ///   [`Self::min_io_block_allocation_blocks_log2`].
     #[allow(clippy::type_complexity)]
-    fn split_off_unused_min_io_block_alignment_scratch_allocation_blocks_bufs<'a>(
-        head_min_io_block_alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
-        tail_min_io_block_alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
+    fn split_off_unused_alignment_scratch_allocation_blocks_bufs<'a>(
+        head_alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
+        tail_alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
         request_range: &layout::PhysicalAllocBlockRange,
         auth_tree_data_block_aligned_request_range: &layout::PhysicalAllocBlockRange,
         authenticated_subrange_from_read_buf: Option<&layout::PhysicalAllocBlockRange>,
@@ -1557,7 +2049,7 @@ impl BufferedReadAuthenticatedDataFutureData {
         // region at the head or tail, if any, always extends up to some
         // boundary which is both, Minimum IO Block as well as Authentication
         // Tree Data Block aligned within the original request region.
-        let (head_min_io_scratch_is_unused, tail_min_io_scratch_is_unused) = unauthenticated_subrange_from_read_buf
+        let (head_scratch_is_unused, tail_scratch_is_unused) = unauthenticated_subrange_from_read_buf
             .map(|unauthenticated_subrange_from_read_buf| {
                 debug_assert!(
                     authenticated_subrange_from_read_buf
@@ -1581,16 +2073,16 @@ impl BufferedReadAuthenticatedDataFutureData {
         // interior of the request range happens to be aligned to the Chip IO
         // Block size, then the alignment scratch buffers for that end will not
         // be neeeded either.
-        let (head_min_io_scratch_is_unused, tail_min_io_scratch_is_unused) = authenticated_subrange_from_read_buf
+        let (head_scratch_is_unused, tail_scratch_is_unused) = authenticated_subrange_from_read_buf
             .map(|authenticated_subrange_from_read_buf| {
                 (
-                    head_min_io_scratch_is_unused
+                    head_scratch_is_unused
                         || (authenticated_subrange_from_read_buf.begin() == request_range.begin()
                             && authenticated_subrange_from_read_buf
                                 .end()
                                 .align_down(min_io_block_allocation_blocks_log2)
                                 == authenticated_subrange_from_read_buf.end()),
-                    tail_min_io_scratch_is_unused
+                    tail_scratch_is_unused
                         || (authenticated_subrange_from_read_buf.end() == request_range.end()
                             && authenticated_subrange_from_read_buf
                                 .begin()
@@ -1598,27 +2090,42 @@ impl BufferedReadAuthenticatedDataFutureData {
                                 == authenticated_subrange_from_read_buf.begin()),
                 )
             })
-            .unwrap_or((head_min_io_scratch_is_unused, tail_min_io_scratch_is_unused));
+            .unwrap_or((head_scratch_is_unused, tail_scratch_is_unused));
 
-        let head_min_io_block_alignment_scratch_allocation_blocks_bufs_len =
-            head_min_io_block_alignment_scratch_allocation_blocks_bufs.len();
-        let tail_min_io_block_alignment_scratch_allocation_blocks_bufs_len =
-            tail_min_io_block_alignment_scratch_allocation_blocks_bufs.len();
+        let head_alignment_scratch_allocation_blocks_bufs_len = head_alignment_scratch_allocation_blocks_bufs.len();
+        let tail_alignment_scratch_allocation_blocks_bufs_len = tail_alignment_scratch_allocation_blocks_bufs.len();
 
         (
-            head_min_io_block_alignment_scratch_allocation_blocks_bufs.split_at_mut(if head_min_io_scratch_is_unused {
-                head_min_io_block_alignment_scratch_allocation_blocks_bufs_len
+            head_alignment_scratch_allocation_blocks_bufs.split_at_mut(if head_scratch_is_unused {
+                head_alignment_scratch_allocation_blocks_bufs_len
             } else {
                 0
             }),
-            tail_min_io_block_alignment_scratch_allocation_blocks_bufs.split_at_mut(if tail_min_io_scratch_is_unused {
+            tail_alignment_scratch_allocation_blocks_bufs.split_at_mut(if tail_scratch_is_unused {
                 0
             } else {
-                tail_min_io_block_alignment_scratch_allocation_blocks_bufs_len
+                tail_alignment_scratch_allocation_blocks_bufs_len
             }),
         )
     }
 
+    /// Get the [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// alignment padding scratch buffers.
+    ///
+    /// Return the head and tail scratch buffers corresponding to the
+    /// head and tail alignment padding from the
+    /// [`auth_tree_data_block_aligned_request_range`](Self::auth_tree_data_block_aligned_request_range).
+    ///
+    /// # Arguments:
+    ///
+    /// * `alignment_scratch_allocation_blocks_bufs` - `mut` reference to
+    ///   [`Self::alignment_scratch_allocation_blocks_bufs`].
+    /// * `request_range` - Reference to [`Self::request_range`].
+    /// * `auth_tree_data_block_aligned_request_range` - Reference to
+    ///   [`Self::auth_tree_data_block_aligned_request_range`].
+    /// * `aligned_request_range` - Reference to
+    ///   [`Self::aligned_request_range`].
     fn get_auth_tree_data_block_alignment_scratch_allocation_blocks_bufs<'a>(
         alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
         request_range: &layout::PhysicalAllocBlockRange,
@@ -1634,7 +2141,7 @@ impl BufferedReadAuthenticatedDataFutureData {
         debug_assert!(aligned_request_range.contains(auth_tree_data_block_aligned_request_range));
         debug_assert!(auth_tree_data_block_aligned_request_range.contains(request_range));
         let (head_alignment_scratch_allocation_blocks_bufs, tail_alignment_scratch_allocation_blocks_bufs) =
-            Self::get_min_io_block_alignment_scratch_allocation_blocks_bufs(
+            Self::get_alignment_scratch_allocation_blocks_bufs(
                 alignment_scratch_allocation_blocks_bufs,
                 request_range,
                 aligned_request_range,
@@ -1655,6 +2162,22 @@ impl BufferedReadAuthenticatedDataFutureData {
         )
     }
 
+    /// Determine the next region to read from physical storage.
+    ///
+    /// Depending on the current progress, return the next region to read in
+    /// from storage. If `None` is returned, the caller is supposed to
+    /// authenticate the currently accumulated batch read in so far but not
+    /// authenticated yet and invoke `determine_next_read_region()` again
+    /// afterwards in case the the request hasn't been completed by then.
+    /// Otherwise the caller will proceed to read the returned range from
+    /// storage and invoke `determine_next_read_region()` again.
+    ///
+    /// # Arguments:
+    ///
+    /// * `cur_request_allocation_block_index` - Current read position in the
+    ///   [`Self::aligned_request_range`].
+    /// * `auth_tree_config` - The filesystem's
+    ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
     fn determine_next_read_region(
         &mut self,
         mut cur_request_allocation_block_index: layout::PhysicalAllocBlockIndex,
@@ -1703,7 +2226,7 @@ impl BufferedReadAuthenticatedDataFutureData {
         // - over any authenticated or unauthenticated regions initially retrieved from
         //   the read buffer.
         let (head_alignment_scratch_allocation_blocks_bufs, tail_alignment_scratch_allocation_blocks_bufs) =
-            Self::get_min_io_block_alignment_scratch_allocation_blocks_bufs(
+            Self::get_alignment_scratch_allocation_blocks_bufs(
                 &mut self.alignment_scratch_allocation_blocks_bufs,
                 &self.request_range,
                 &self.aligned_request_range,
@@ -2004,6 +2527,7 @@ impl BufferedReadAuthenticatedDataFutureData {
     }
 }
 
+/// [`BufferedReadAuthenticateDataFuture`] state-machine state.
 enum BufferedReadAuthenticateDataFutureState<C: chip::NvChip> {
     Init,
     PrepareNextSubrangeDataRead {
@@ -2020,6 +2544,8 @@ enum BufferedReadAuthenticateDataFutureState<C: chip::NvChip> {
     Done,
 }
 
+/// [`BufferedReadAuthenticateDataFutureState::AuthenticateSubrange`]
+/// sub-state-machine state.
 enum BufferedReadAuthenticateDataFutureAuthenticateState<C: chip::NvChip> {
     Init,
     LoadAuthTreeLeafNode {
@@ -2028,6 +2554,8 @@ enum BufferedReadAuthenticateDataFutureAuthenticateState<C: chip::NvChip> {
     },
 }
 
+/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// internally by [`BufferedReadAuthenticateDataFuture`].
 struct BufferedReadAuthenticateDataFutureNvChipReadRequest {
     aligned_request_range_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     dst_allocation_blocks_bufs: Vec<Vec<u8>>,

@@ -8,6 +8,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use super::{
+    Transaction,
     auth_tree_data_blocks_update_states::{
         AllocationBlockUpdateNvSyncState, AllocationBlockUpdateNvSyncStateAllocated,
         AllocationBlockUpdateNvSyncStateAllocatedModified, AllocationBlockUpdateStagedUpdate,
@@ -19,19 +20,37 @@ use super::{
     },
     read_authenticate_data::TransactionReadAuthenticateDataFuture,
     read_missing_data::TransactionReadMissingDataFuture,
-    Transaction,
 };
 use crate::{
     chip,
     fs::cocoonfs::{
+        NvFsError,
         fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
-        layout, NvFsError,
+        layout,
     },
     nvfs_err_internal,
     utils_async::sync_types,
 };
 use core::{marker, pin, task};
 
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStates;
+
+/// Prepare for the
+/// [application](AuthTreeDataBlocksUpdateStates::apply_allocation_blocks_staged_updates) of [staged
+/// updates](AllocationBlockUpdateStagedUpdate) to the [storage tracking
+/// states](AllocationBlockUpdateNvSyncState).
+///
+/// Before staged updates may get applied, the retained [Allocation
+/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2) of the
+/// containing [Authentication Tree Data
+/// Blocks](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+/// must get read in and authenticated. `TransactionReadMissingDataFuture`
+/// implements that.
+///
+/// # See also:
+///
+/// * [`AuthTreeDataBlocksUpdateStates::apply_allocation_blocks_staged_updates()`].
 pub struct TransactionPrepareStagedUpdatesApplicationFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
@@ -41,6 +60,28 @@ pub struct TransactionPrepareStagedUpdatesApplicationFuture<ST: sync_types::Sync
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionPrepareStagedUpdatesApplicationFuture<ST, C> {
+    /// Instantiate a [`TransactionPrepareStagedUpdatesApplicationFuture`].
+    ///
+    /// The [`TransactionPrepareStagedUpdatesApplicationFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to prepare.
+    /// * `request_states_allocation_blocks_index_range` - The [Allocation Block
+    ///   level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) into
+    ///   [`Transaction::auth_tree_data_blocks_update_states`] of the the states
+    ///   to prepare for the
+    ///   [application](AuthTreeDataBlocksUpdateStates::apply_allocation_blocks_staged_updates)
+    ///   of their [staged updates](AllocationBlockUpdateStagedUpdate).
+    ///   Applicable [correction
+    ///   offsets](AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets)
+    ///   will get returned from [`poll()`](Self::poll) upon completion in case
+    ///   additional state entries had to get inserted in order to [fill
+    ///   alignment gaps](AuthTreeDataBlocksUpdateStates::fill_states_index_range_regions_alignment_gaps).
     pub fn new(
         transaction: Box<Transaction>,
         request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -58,6 +99,23 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionPrepareStagedUpdates
         }
     }
 
+    /// Determine the next subrange to read and authenticate.
+    ///
+    /// Returns a pair of the next subrange of `remaining_states_index_range` to
+    /// read and authenticate, if any, as well as the remainder of
+    /// `remaining_states_index_range` to process in a subsequent iteration.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to prepare.
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
+    /// * `request_states_allocation_blocks_range` - The original input request
+    ///   range.
+    /// * `remaining_states_index_range` - Remaining part of the [Authentication
+    ///   Tree Data Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesIndexRange) spanning
+    ///   `request_states_allocation_blocks_range` and not processed yet.
     fn determine_next_prepare_subrange(
         transaction: &Transaction,
         image_header_end: layout::PhysicalAllocBlockIndex,
@@ -238,6 +296,23 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionPrepareStagedUpdates
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for TransactionPrepareStagedUpdatesApplicationFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, offsets, ...))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a tuple of the input [`Transaction`],
+    ///   `transaction`, correction `offsets` to apply to the input [Allocation
+    ///   Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) in
+    ///   order to account for the insertion of new state entries, if any, and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, offsets, Err(e)))` - In case of an error, the
+    ///       error reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, offsets, Ok(())))` -  Otherwise, `Ok(())` will
+    ///       get returned for the operation result on success.
     type Output = Result<
         (
             Box<Transaction>,
@@ -375,6 +450,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
+/// [`TransactionPrepareStagedUpdatesApplicationFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum TransactionPrepareStagedUpdatesApplicationFutureState<C: chip::NvChip> {
     Init {

@@ -2,6 +2,8 @@
 // Copyright 2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Implementation of [`JournalReplayFuture`].
+
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
@@ -14,12 +16,11 @@ use super::{
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError, NvChipIoError},
     fs::{
-        cocoonfs::{
-            alloc_bitmap, auth_tree, extents, image_header, keys,
-            layout::{self, BlockIndex as _},
-            CocoonFsFormatError,
-        },
         NvFsError, NvFsIoError,
+        cocoonfs::{
+            CocoonFsFormatError, alloc_bitmap, auth_tree, extents, image_header, keys,
+            layout::{self, BlockIndex as _},
+        },
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -31,6 +32,10 @@ use crate::{
 };
 use core::{mem, pin, task};
 
+/// Replay the journal at filesystem opening time if needed.
+///
+/// Check if the journal is active and needs replay. If so, do that and cleanup
+/// afterwards, including an invalidation of the journal.
 pub struct JournalReplayFuture<C: chip::NvChip> {
     enable_trimming: bool,
 
@@ -55,6 +60,7 @@ pub struct JournalReplayFuture<C: chip::NvChip> {
     fut_state: JournalReplayFutureState<C>,
 }
 
+/// [`JournalReplayFuture`] state-machine state.
 enum JournalReplayFutureState<C: chip::NvChip> {
     ReadLog {
         read_log_fut: JournalLogReadFuture<C>,
@@ -87,6 +93,12 @@ enum JournalReplayFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> JournalReplayFuture<C> {
+    /// Instantiate a [`JournalReplayFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `enable_trimming` - Whether or not to submit [trim
+    ///   commands](chip::NvChip::trim) to the underlying storage for cleanup.
     pub fn new(enable_trimming: bool) -> Self {
         let read_log_fut = JournalLogReadFuture::new();
         Self {
@@ -102,6 +114,20 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
         }
     }
 
+    /// Poll the [`JournalReplayFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `salt_len` - Length of the salt found in the filesystem's
+    ///   [`StaticImageHeader`](image_header::StaticImageHeader).
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
         chip: &C,
@@ -433,6 +459,13 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
     }
 }
 
+/// Read the filesystem's
+/// [`MutableImageHeader`](image_header::MutableImageHeader) through
+/// the journal.
+///
+/// Read the filesystem's
+/// [`MutableImageHeader`](image_header::MutableImageHeader) in the state as if
+/// the any updates to it recorded in the journal had been applied already.
 struct JournalReadMutableImageHeaderFuture<C: chip::NvChip> {
     mutable_image_header_allocation_blocks_range: layout::PhysicalAllocBlockRange,
     cur_target_allocation_block_index: layout::PhysicalAllocBlockIndex,
@@ -441,6 +474,7 @@ struct JournalReadMutableImageHeaderFuture<C: chip::NvChip> {
     fut_state: JournalReadMutableImageHeaderFutureState<C>,
 }
 
+/// [`JournalReadMutableImageHeaderFuture`] state-machine state.
 enum JournalReadMutableImageHeaderFutureState<C: chip::NvChip> {
     PrepareReadPart,
     ReadPart {
@@ -451,6 +485,15 @@ enum JournalReadMutableImageHeaderFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
+    /// Instantiate a [`JournalReadMutableImageHeaderFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `salt_len` - Length of the salt found in the filesystem's
+    ///   [`StaticImageHeader`](image_header::StaticImageHeader).
     fn new(chip: &C, image_layout: &layout::ImageLayout, salt_len: u8) -> Result<Self, NvFsError> {
         let mutable_image_header_allocation_blocks_range =
             image_header::MutableImageHeader::physical_location(image_layout, salt_len);
@@ -496,6 +539,18 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
         })
     }
 
+    /// Poll the [`JournalReadMutableImageHeaderFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `apply_writes_script` - The [`JournalLog::apply_writes_script`].
+    /// * `journal_staging_copy_undisguise` - The
+    ///   [`JournalLog::journal_staging_copy_undisguise`].
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     fn poll(
         self: pin::Pin<&mut Self>,
         chip: &C,
@@ -692,6 +747,8 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
     }
 }
 
+/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// internally by [`JournalReadMutableImageHeaderFuture`].
 struct JournalReadMutableImageHeaderPartNvChipRequest {
     region: ChunkedIoRegion,
     buffer: Vec<u8>,
@@ -716,6 +773,8 @@ impl chip::NvChipReadRequest for JournalReadMutableImageHeaderPartNvChipRequest 
     }
 }
 
+/// Replay the data writes recorded in [`JournalLog::apply_writes_script`] and
+/// update the authentication tree in the course.
 struct JournalReplayWritesFuture<C: chip::NvChip> {
     image_size: layout::AllocBlockCount,
     apply_writes_script_index: usize,
@@ -730,6 +789,7 @@ struct JournalReplayWritesFuture<C: chip::NvChip> {
     preferred_chip_io_bulk_allocation_blocks_log2: u8,
 }
 
+/// [`JournalReplayWritesFuture`] state-machine state.
 enum JournalReplayWritesFutureState<C: chip::NvChip> {
     Init,
     AdvanceAuthTreeCursor {
@@ -756,6 +816,26 @@ enum JournalReplayWritesFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
+    /// Instantiate a [`JournalReplayWritesFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `auth_tree_config` - The filesystem's
+    ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
+    /// * `image_header_end` - [End of the filesystem image header on
+    ///   storage](image_header::MutableImageHeader::physical_location).
+    /// * `journal_log_head_extent` - The filesystem's fixed [journal log head
+    ///   extent](JournalLog::head_extent_physical_location)
+    /// * `image_size` - The filesystem image size as found in the filesystem's
+    ///   [`MutableImageHeader::image_size`](image_header::MutableImageHeader::image_size).
+    /// * `alloc_bitmap_journal_fragments` - Allocation bitmap with valid
+    ///   entries for the parts covered by
+    ///   [`JournalLog::alloc_bitmap_file_fragments_auth_digests`].
+    /// * `update_auth_digests_script` - The
+    ///   [`JournalLog::update_auth_digests_script`].
     #[allow(clippy::too_many_arguments)]
     fn new(
         chip: &C,
@@ -814,6 +894,18 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
         })
     }
 
+    /// Poll the [`JournalReplayWritesFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `auth_tree_config` - The filesystem's
+    ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
+    /// * `apply_writes_script` - The [`JournalLog::apply_writes_script`].
+    /// * `journal_staging_copy_undisguise` - The
+    ///   [`JournalLog::journal_staging_copy_undisguise`].
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     fn poll(
         self: pin::Pin<&mut Self>,
         chip: &C,
@@ -928,18 +1020,24 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     let chip_io_block_allocation_blocks_log2 = this.chip_io_block_allocation_blocks_log2 as u32;
                     let preferred_chip_io_bulk_allocation_blocks_log2 =
                         this.preferred_chip_io_bulk_allocation_blocks_log2 as u32;
-                    debug_assert!(u64::from(this.next_target_allocation_block_index)
-                        .is_aligned_pow2(chip_io_block_allocation_blocks_log2));
+                    debug_assert!(
+                        u64::from(this.next_target_allocation_block_index)
+                            .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                    );
                     debug_assert!(this.apply_writes_script_index < apply_writes_script.len());
                     let cur_apply_writes_script_entry = &apply_writes_script[this.apply_writes_script_index];
                     debug_assert_ne!(
                         cur_apply_writes_script_entry.get_target_range().begin(),
                         cur_apply_writes_script_entry.get_journal_staging_copy_allocation_blocks_begin()
                     );
-                    debug_assert!((u64::from(cur_apply_writes_script_entry.get_target_range().begin())
-                        | u64::from(cur_apply_writes_script_entry.get_target_range().end())
-                        | u64::from(cur_apply_writes_script_entry.get_journal_staging_copy_allocation_blocks_begin()))
-                    .is_aligned_pow2(chip_io_block_allocation_blocks_log2));
+                    debug_assert!(
+                        (u64::from(cur_apply_writes_script_entry.get_target_range().begin())
+                            | u64::from(cur_apply_writes_script_entry.get_target_range().end())
+                            | u64::from(
+                                cur_apply_writes_script_entry.get_journal_staging_copy_allocation_blocks_begin()
+                            ))
+                        .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                    );
                     debug_assert!(
                         this.next_target_allocation_block_index
                             >= cur_apply_writes_script_entry.get_target_range().begin()
@@ -1250,6 +1348,8 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
     }
 }
 
+/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// internally by [`JournalReplayWritesFuture`].
 struct ReadJournalStagingCopyNvChipRequest {
     region: ChunkedIoRegion,
     buffers: Vec<Vec<u8>>,
@@ -1271,6 +1371,8 @@ impl chip::NvChipReadRequest for ReadJournalStagingCopyNvChipRequest {
     }
 }
 
+/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// internally by [`JournalReplayWritesFuture`].
 struct WriteTargetNvChipRequest {
     region: chip::ChunkedIoRegion,
     buffers: Vec<Vec<u8>>,
@@ -1287,11 +1389,13 @@ impl chip::NvChipWriteRequest for WriteTargetNvChipRequest {
     }
 }
 
+/// Invalidate and cleanup the journal after replay.
 struct JournalCleanupFuture<C: chip::NvChip> {
     enable_trimming: bool,
     fut_state: JournalCleanupFutureState<C>,
 }
 
+/// [`JournalCleanupFuture`] state-machine state.
 enum JournalCleanupFutureState<C: chip::NvChip> {
     Init,
     InvalidateJournalLogHead {
@@ -1326,6 +1430,12 @@ enum JournalCleanupFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> JournalCleanupFuture<C> {
+    /// Instantiate a [`JournalCleanupFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `enable_trimming` - Whether or not to submit [trim
+    ///   commands](chip::NvChip::trim) to the underlying storage.
     fn new(enable_trimming: bool) -> Self {
         Self {
             enable_trimming,
@@ -1333,6 +1443,20 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
         }
     }
 
+    /// Poll the [`JournalCleanupFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `salt_len` - Length of the salt found in the filesystem's
+    ///   [`StaticImageHeader`](image_header::StaticImageHeader).
+    /// * `journal_log_extents` - The [`JournalLog::log_extents`].
+    /// * `apply_writes_script` - The [`JournalLog::apply_writes_script`].
+    /// * `trim_script` - The [`JournalLog::trim_script`].
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::too_many_arguments)]
     fn poll(
         self: pin::Pin<&mut Self>,

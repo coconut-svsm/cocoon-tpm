@@ -11,12 +11,13 @@ use crate::{
     chip,
     crypto::{self, hash, rng, symcipher},
     fs::{
+        NvFsError,
         cocoonfs::{
+            CocoonFsFormatError,
             alloc_bitmap::{self, ExtentsAllocationRequest, ExtentsReallocationRequest},
             encryption_entities::{
-                check_cbc_padding, EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix,
-                EncryptedChainedExtentsDecryptionInstance, EncryptedChainedExtentsEncryptionInstance,
-                EncryptedChainedExtentsLayout,
+                EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix, EncryptedChainedExtentsDecryptionInstance,
+                EncryptedChainedExtentsEncryptionInstance, EncryptedChainedExtentsLayout, check_cbc_padding,
             },
             extent_ptr::{self, EncodedExtentPtr},
             extents,
@@ -28,9 +29,7 @@ use crate::{
             transaction::{
                 self, auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
             },
-            CocoonFsFormatError,
         },
-        NvFsError,
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
@@ -41,10 +40,34 @@ use crate::{
 };
 use core::{default, mem, pin, task};
 
+#[cfg(doc)]
+use transaction::Transaction;
+
+/// Determine whether a given inode's extents list, if any, must get inline
+/// authenticated.
+///
+/// Check whether `inode` is among the few special inodes that have their
+/// extents lists, if any, inline authenticated for preauthentication CCA
+/// protection.
+///
+/// # Arguments:
+///
+/// * `inode` - The inode number.
 fn extents_list_is_pre_auth_cca_protected(inode: InodeIndexKeyType) -> bool {
     inode == SpecialInode::AuthTree as u32 || inode == SpecialInode::AllocBitmap as u32
 }
 
+/// Check whether an inode's extents qualify for a direct [`EncodedExtentPtr`]
+/// reference or need an extents list.
+///
+/// An inode's data extents qualify for a direct [`EncodedExtentPtr`] reference
+/// from the inode index entry if there's only one single extent and that
+/// extent's length does not exceed the maximum extent length encodable in an
+/// [`EncodedExtentPtr`].
+///
+/// # Arguments:
+///
+/// * `inode_extents` - The inode's data extent.
 pub fn can_encode_direct(inode_extents: &extents::PhysicalExtents) -> bool {
     inode_extents.is_empty()
         || inode_extents.len() == 1
@@ -52,6 +75,13 @@ pub fn can_encode_direct(inode_extents: &extents::PhysicalExtents) -> bool {
                 <= layout::AllocBlockCount::from(EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS)
 }
 
+/// Encode a direct [`EncodedExtentPtr`] reference to an inode's (single) data
+/// extent.
+///
+/// # Arguments:
+///
+/// * `inode_extents` - The inode data extents. Must qualify for a direct
+///   [`EncodedExtentPtr`] reference, as determined by [`can_encode_direct()`].
 pub fn extent_ptr_encode_direct(inode_extents: &extents::PhysicalExtents) -> Result<EncodedExtentPtr, NvFsError> {
     if !can_encode_direct(inode_extents) {
         return Err(nvfs_err_internal!());
@@ -62,6 +92,11 @@ pub fn extent_ptr_encode_direct(inode_extents: &extents::PhysicalExtents) -> Res
     }
 }
 
+/// Determine the length of an extents list encoding.
+///
+/// # Arguments:
+///
+/// * `extents`  - [`Iterator`] over the extents to encode in an extents list.
 pub fn indirect_extents_list_encoded_len<EI: Iterator<Item = layout::PhysicalAllocBlockRange>>(
     extents: EI,
 ) -> Result<usize, NvFsError> {
@@ -84,6 +119,16 @@ pub fn indirect_extents_list_encoded_len<EI: Iterator<Item = layout::PhysicalAll
     Ok(encoded_len)
 }
 
+/// Encode an extents list into a preallocated buffer.
+///
+/// Encode an extents list of `extents` into `dst`. The unused remainder of
+/// `dst` is returned upon success.
+///
+/// # Arguments:
+///
+/// * `dst` - The destination buffer. Must have at least the length as
+///   determined by [`indirect_extents_list_encoded_len()`].
+/// * `extents`  - [`Iterator`] over the extents to encode in an extents list.
 pub fn indirect_extents_list_encode_into<EI: Iterator<Item = layout::PhysicalAllocBlockRange>>(
     mut dst: &mut [u8],
     extents: EI,
@@ -106,6 +151,13 @@ pub fn indirect_extents_list_encode_into<EI: Iterator<Item = layout::PhysicalAll
     &mut dst[2..]
 }
 
+/// Encode an extents list into a newly allocated buffer.
+///
+/// # Arguments:
+///
+/// * `extents`  - [`Iterator`] over the extents to encode in an extents list.
+/// * `encoded_len` - The result of [`indirect_extents_list_encoded_len()`]
+///   wrapped in a `Some` if available, `None` otherwise.
 pub fn indirect_extents_list_encode<EI: Clone + Iterator<Item = layout::PhysicalAllocBlockRange>>(
     extents: EI,
     encoded_len: Option<usize>,
@@ -120,6 +172,11 @@ pub fn indirect_extents_list_encode<EI: Clone + Iterator<Item = layout::Physical
     Ok(encoded)
 }
 
+/// Decode an extents list.
+///
+/// # Arguments:
+///
+/// * `src` - The buffers containing the encoded extents list.
 pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = NvFsError>>(
     mut src: SI,
 ) -> Result<extents::PhysicalExtents, NvFsError> {
@@ -220,7 +277,13 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
     }
 }
 
-/// Read, authenticate, decrypt and decode an inodes' encoded extent list.
+/// Read, authenticate, decrypt and decode an inode's encoded extents list.
+///
+/// The extents list may be either read as previously committed to storage, or
+/// in the state as if a given [`Transaction`] had already been applied. In the
+/// latter case, the `InodeExtentsListReadFuture` assumes ownership of the
+/// [`Transaction`] and eventually returns it back from [`poll()`](Self::poll)
+/// upon future completion.
 pub struct InodeExtentsListReadFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inode_extents_list_decryption_instance: EncryptedChainedExtentsDecryptionInstance,
     inode_extents_list_extents: extents::PhysicalExtents,
@@ -228,6 +291,7 @@ pub struct InodeExtentsListReadFuture<ST: sync_types::SyncTypes, C: chip::NvChip
     fut_state: InodeExtentsListReadFutureState<ST, C>,
 }
 
+/// [`InodeExtentsListReadFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum InodeExtentsListReadFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     ReadExtentsListExtentPrepare {
@@ -242,6 +306,24 @@ enum InodeExtentsListReadFutureState<ST: sync_types::SyncTypes, C: chip::NvChip>
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListReadFuture<ST, C> {
+    /// Instantiate a [`InodeExtentsListReadFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - Optional [`Transaction`] to read through. If `Some`,
+    ///   the state will be read as if `transaction` had been committed.
+    ///   Otherwise it will be read as previously committed to storage. Will
+    ///   eventually get returned back from [`poll`](Self::poll) upon future
+    ///   completion.
+    /// * `inode` - The inode's whose associated extents list to read.
+    /// * `inode_index_entry_extent_ptr` - The indirect [`EncodedExtentPtr`]
+    ///   from the inode's inode index entry referencing the first extent in the
+    ///   chain of extents storing the inode's extents list.
+    /// * `fs_root_key` - The filesystem's root key.
+    /// * `fs_sync_state_keys_cache` - The [filesystem instance's key
+    ///   cache](crate::fs::cocoonfs::fs::CocoonFsSyncState::keys_cache).
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
     pub fn new(
         mut transaction: Option<Box<transaction::Transaction>>,
         inode: InodeIndexKeyType,
@@ -320,6 +402,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListReadFuture<ST, 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeExtentsListReadFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// In case a [`Transaction`] had been passed to [`Self::new()`], and no
+    /// internal error causing it to get lost occured, it will get returned
+    /// back as the pair's first component.
+    ///
+    /// The operation result is returned at the pair's second component,
+    /// which, on success, is a pair of the extents storing the inode's extents
+    /// list and the decoded extents list.
     type Output = (
         Option<Box<transaction::Transaction>>,
         Result<(extents::PhysicalExtents, extents::PhysicalExtents), NvFsError>,
@@ -485,17 +576,31 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
-
-/// Read, authenticate, decrypt and decode an inodes' encoded extent list before the tree based
-/// authentication is available.
+/// Read, authenticate, decrypt and decode an inodes' encoded extent list at
+/// filesystem opening time before the tree based authentication is available.
 ///
-/// Authentication is done via preauthentication CCA protection tags stored inline to the encrypted
-/// chained extents each.
+/// Authentication is done via preauthentication CCA protection tags stored
+/// inline to the encrypted chained extents each.
 pub struct InodeExtentsListReadPreAuthFuture<C: chip::NvChip> {
     read_extents_list_extents_fut: read_preauth::ReadChainedExtentsPreAuthCcaProtectedFuture<C>,
 }
 
 impl<C: chip::NvChip> InodeExtentsListReadPreAuthFuture<C> {
+    /// Instantiate a [`InodeExtentsListReadPreAuthFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `inode` - The inode's whose associated extents list to read. Must be
+    ///   among the special inodes having their extents list inline
+    ///   authenticated, c.f. [`extents_list_is_pre_auth_cca_protected()`].
+    /// * `inode_index_entry_extent_ptr` - The indirect [`EncodedExtentPtr`]
+    ///   from the inode's inode index entry referencing the first extent in the
+    ///   chain of extents storing the inode's extents list.
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
     pub fn new<ST: sync_types::SyncTypes>(
         inode: InodeIndexKeyType,
         inode_index_entry_extent_ptr: &EncodedExtentPtr,
@@ -593,13 +698,30 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for InodeExtentsListReadPreAuthFutur
     }
 }
 
-/// Encode, encrypt and write an inode's extents list.
+/// Stage updates to an inode's extents list at a [`Transaction`] with rollback
+/// support.
+///
+/// Allocate extents for storing the extents list, reallocating preexisting
+/// storage in the course if needed, encode, encrypt and stage the updates to an
+/// inode's extents list at a [`Transaction`].
+///
+/// The updates will be staged at the [`Transaction`] so that they can still get
+/// [rolled back](InodeExtentsListPendingUpdate::rollback) to the previous
+/// state, should it be needed.
+///
+/// The `InodeExtentsListWriteFuture` assumes ownership of the [`Transaction`]
+/// to which to stage the updates to for the duration of the operation and
+/// eventually returns it back from [`poll()`](Self::poll) upon future
+/// completion. Likewise for the inode's
+/// [`PhysicalExtents`](extents::PhysicalExtents) to encode in the extents
+/// lists.
 pub struct InodeExtentsListWriteFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inode: InodeIndexKeyType,
     inode_extents: extents::PhysicalExtents,
     fut_state: InodeExtentsListWriteFutureState<ST, C>,
 }
 
+/// [`InodeExtentsListWriteFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
@@ -645,6 +767,19 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListWriteFuture<ST, C> {
+    /// Instantiate a new [`InodeExtentsListWriteFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to stage the updates at. Will get
+    ///   returned back from [`poll()`](Self::poll) upon future completion.
+    /// * `inode` - The inode whose extents list to update.
+    /// * `inode_extents` - The `inode`'s data extents to encode in the extents
+    ///   list. Will get returned back from [`poll()`](Self::poll) upon future
+    ///   completion.
+    /// * `preexisting_inode_extents_list_extents` - Preexisting extents storing
+    ///   the inode's former extents list, if any. Will get reallocated and
+    ///   reused for the new extents list as appropriate.
     pub fn new(
         transaction: Box<transaction::Transaction>,
         inode: InodeIndexKeyType,
@@ -665,6 +800,24 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListWriteFuture<ST,
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeExtentsListWriteFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level result is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] as well as the
+    ///   input [`PhysicalExtents`](extents::PhysicalExtents) are lost.
+    /// * `Ok((transaction, inode_extents, ...))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a tuple of the input [`Transaction`],
+    ///   the input [`PhysicalExtents`](extents::PhysicalExtents) and the
+    ///   operation result will get returned within:
+    ///   * `Ok((transaction, inode_extents,
+    ///     Ok(inode_extents_list_pending_update)))` - The operation was
+    ///     successful, information about the staged updated is returned in
+    ///     [`inode_extents_list_pending_update`](InodeExtentsListPendingUpdate)
+    ///     for further processing or rollback.
+    ///   * `Ok((transaction, inode_extents, Err(e))` - The operation failed
+    ///     with error `e`.
     type Output = Result<
         (
             Box<transaction::Transaction>,
@@ -1344,6 +1497,32 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 }
 
 /// Encode and encrypt an inode's extents list.
+///
+/// The encoded `inode_extents` list will get encrypted in the
+/// ["encrypted chained extents"](EncryptedChainedExtentsLayout) format, with
+/// the extents forming the chain given by `inode_extents_list_extents`. The
+/// respective resulting encrypted chained extents' data is written back to back
+/// into the `dst` [buffers iterator](crypto::CryptoMutPeekableIoSlicesMutIter).
+///
+/// # Arguments:
+///
+/// * `dst` - The destination buffers. Their total size must match the total
+///   size of the `inode_extents_list_extents` exactly.
+/// * `inode` - The inode whose extents list to encode and encrypt.
+/// * `inode_extents` - The extents to encode into the extents list.
+/// * `inode_extents_list_extents` - The extents to store the encoded extents
+///   list as encrypted with the ["encrypted chained
+///   extents"](EncryptedChainedExtentsLayout) format into. Their collectively
+///   provided total [effective
+///   payload](EncryptedChainedExtentsLayout::effective_payload_len) must match
+///   that of [`indirect_extents_list_encoded_len()`] (plus one byte for the
+///   PKCS#7 padding) and there must not be any excess extents.
+/// * `image_layout` - The filesystem's [`ImageLayout`](layout::ImageLayout).
+/// * `root_key` - The filesystem's root key.
+/// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+///   filesystem.
+/// * `rng` - The [random number generator](rng::RngCoreDispatchable) used for
+///   generating the IV and filling padding, if any.
 #[allow(clippy::too_many_arguments)]
 pub fn inode_extents_list_encrypt_into<
     'a,
@@ -1471,16 +1650,16 @@ pub fn inode_extents_list_encrypt_into<
     // And all of the destination buffers should have been filled.
     dst.is_empty().map_err(NvFsError::from).and_then(
         |is_empty| {
-            if is_empty {
-                Ok(())
-            } else {
-                Err(nvfs_err_internal!())
-            }
+            if is_empty { Ok(()) } else { Err(nvfs_err_internal!()) }
         },
     )
 }
 
-/// Info about updates to an inode's extents list needed to update the inode index or roll back.
+/// Info about updates to an inode's extents list needed to update the inode
+/// index or roll back.
+///
+/// Always associated with some inode extents list update staged via
+/// [`InodeExtentsListWriteFuture`] at a [`Transaction`].
 pub struct InodeExtentsListPendingUpdate {
     inode_index_entry_extent_ptr: extent_ptr::EncodedExtentPtr,
     new_inode_extents_list_extents: extents::PhysicalExtents,
@@ -1488,10 +1667,30 @@ pub struct InodeExtentsListPendingUpdate {
 }
 
 impl InodeExtentsListPendingUpdate {
+    /// Get the (indirect) [`EncodedExtentPtr`] referencing the inode extents
+    /// list extents chain's first extent.
+    ///
+    /// Return an [`EncodedExtentPtr`] suitable for storage in the inode's inode
+    /// index entry.
     pub fn get_inode_index_entry_extent_ptr(&self) -> extent_ptr::EncodedExtentPtr {
         self.inode_index_entry_extent_ptr
     }
 
+    /// Deallocate any preexisting excess extents list extents.
+    ///
+    /// The deallocation can get rolled back via
+    /// [`rollback_excess_preexisting_inode_extents_list_extents_free()`](Self::rollback_excess_preexisting_inode_extents_list_extents_free)
+    /// unless the [`Transaction::allocs`]'s rollback state had been
+    /// [reset](transaction::TransactionAllocations::reset_rollback) in the
+    /// meanwhile.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction_allocs` - Reference to the associated [`Transaction`]'s
+    ///   [`Transaction::allocs`] member.
+    /// * `transaction_updates_states` - Reference to the associated
+    ///   [`Transaction`]'s [`Transaction::auth_tree_data_blocks_update_states`]
+    ///   member.
     pub fn free_excess_preexisting_inode_extents_list_extents(
         &mut self,
         transaction_allocs: &mut transaction::TransactionAllocations,
@@ -1501,6 +1700,21 @@ impl InodeExtentsListPendingUpdate {
             .free_excess_preexisting_inode_extents_list_extents(transaction_allocs, transaction_updates_states)
     }
 
+    /// Rollback a prior
+    /// [`free_excess_preexisting_inode_extents_list_extents()`](Self::free_excess_preexisting_inode_extents_list_extents)
+    /// operation.
+    ///
+    /// May only get called if the [`Transaction::allocs`]'s rollback state had
+    /// not been
+    /// [reset](transaction::TransactionAllocations::reset_rollback) in the
+    /// meanwhile.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] associated with `self`. Returned
+    ///   back on success.
+    /// * `alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap)
     pub fn rollback_excess_preexisting_inode_extents_list_extents_free(
         &mut self,
         transaction: Box<transaction::Transaction>,
@@ -1510,6 +1724,23 @@ impl InodeExtentsListPendingUpdate {
             .rollback_excess_preexisting_inode_extents_list_extents_free(transaction, alloc_bitmap)
     }
 
+    /// Roll the staged inode extents list update back.
+    ///
+    /// Unstage the update to the inode's extents list staged at `transaction`
+    /// again, i.e. revert the extents list to its previous state.
+    ///
+    /// May only get called if the [`Transaction::allocs`]'s rollback state had
+    /// not been
+    /// [reset](transaction::TransactionAllocations::reset_rollback) in the
+    /// meanwhile and no further updates to the inode's extents list have
+    /// been made.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] associated with `self`. Returned
+    ///   back on success.
+    /// * `alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap)
     pub fn rollback(
         self,
         mut transaction: Box<transaction::Transaction>,
@@ -1538,19 +1769,45 @@ impl default::Default for InodeExtentsListPendingUpdate {
     }
 }
 
-/// Reallocation info about the (chained) extents storing an inode's extent list.
+/// Reallocation info about the (chained) extents storing an inode's extent
+/// list.
 enum InodeExtentsListExtentsPendingReallocation {
+    /// The preexisting inode extents list extents could be used as-is and had
+    /// not been reallocated.
     None,
+    /// The preexisting inode extents list extents need to get truncated.
     Truncation {
+        /// The excess extents to free up.
         excess_preexisting_inode_extents_list_extents: extents::PhysicalExtents,
+        /// Whether or not the excess extents have been
+        /// [deallocated](transaction::Transaction::free_extents) at the
+        /// associated [`Transaction`] already.
         freed: bool,
     },
+    /// There had been no preexisting inode extents list extents or they
+    /// have been extended in a reallocation.
     Extension {
+        /// The newly allocated extents.
         allocated_inode_extents_list_extents: extents::PhysicalExtents,
     },
 }
 
 impl InodeExtentsListExtentsPendingReallocation {
+    /// Deallocate any preexisting excess extents list extents.
+    ///
+    /// The deallocation can get rolled back via
+    /// [`rollback_excess_preexisting_inode_extents_list_extents_free()`](Self::rollback_excess_preexisting_inode_extents_list_extents_free)
+    /// unless the [`Transaction::allocs`]'s rollback state had been
+    /// [reset](transaction::TransactionAllocations::reset_rollback) in the
+    /// meanwhile.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction_allocs` - Reference to the associated [`Transaction`]'s
+    ///   [`Transaction::allocs`](transaction::Transaction::allocs) member.
+    /// * `transaction_updates_states` - Reference to the associated
+    ///   [`Transaction`]'s [`Transaction::auth_tree_data_blocks_update_states`]
+    ///   member.
     fn free_excess_preexisting_inode_extents_list_extents(
         &mut self,
         transaction_allocs: &mut transaction::TransactionAllocations,
@@ -1575,6 +1832,21 @@ impl InodeExtentsListExtentsPendingReallocation {
         Ok(())
     }
 
+    /// Rollback a prior
+    /// [`free_excess_preexisting_inode_extents_list_extents()`](Self::free_excess_preexisting_inode_extents_list_extents)
+    /// operation.
+    ///
+    /// May only get called if the [`Transaction::allocs`]'s rollback state had
+    /// not been
+    /// [reset](transaction::TransactionAllocations::reset_rollback) in the
+    /// meanwhile.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] associated with `self`. Returned
+    ///   back on success.
+    /// * `alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap)
     fn rollback_excess_preexisting_inode_extents_list_extents_free(
         &mut self,
         transaction: Box<transaction::Transaction>,
@@ -1587,13 +1859,29 @@ impl InodeExtentsListExtentsPendingReallocation {
         {
             if *freed {
                 *freed = false;
-                return transaction
-                    .rollback_extents_free(excess_preexisting_inode_extents_list_extents.iter(), alloc_bitmap, false);
+                return transaction.rollback_extents_free(
+                    excess_preexisting_inode_extents_list_extents.iter(),
+                    alloc_bitmap,
+                    false,
+                );
             }
         }
         Ok(transaction)
     }
 
+    /// Roll the reallocation back.
+    ///
+    /// May only get called if the [`Transaction::allocs`]'s rollback state had
+    /// not been
+    /// [reset](transaction::TransactionAllocations::reset_rollback) in the
+    /// meanwhile.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] associated with `self`. Returned
+    ///   back on success.
+    /// * `alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap)
     fn rollback(
         self,
         transaction: Box<transaction::Transaction>,

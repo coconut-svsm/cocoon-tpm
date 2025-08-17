@@ -2,14 +2,16 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+//! Journal staging copy disguising.
+
 extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::{
-    crypto::{rng, symcipher, CryptoError},
+    crypto::{CryptoError, rng, symcipher},
     fs::{
-        cocoonfs::{layout, CocoonFsFormatError},
         NvFsError,
+        cocoonfs::{CocoonFsFormatError, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_common::{
@@ -21,10 +23,10 @@ use crate::{
 use core::{convert::TryFrom as _, mem};
 
 /// Disguise the identity of Journal Data Copy
-/// [`IO blocks`](layout::ImageLayout::io_block_allocation_blocks_log2).
+/// [IO blocks](layout::ImageLayout::io_block_allocation_blocks_log2).
 ///
 /// The journal stages data updates in units of
-/// [`IO blocks`](layout::ImageLayout::io_block_allocation_blocks_log2)
+/// [IO blocks](layout::ImageLayout::io_block_allocation_blocks_log2)
 /// before copying the contents over to their target destination.
 /// If these journal staging copies had been made verbatim, it would enable an
 /// adversary to easily identify them as such by simply attempting to match the
@@ -36,14 +38,14 @@ use core::{convert::TryFrom as _, mem};
 /// data at rest: if an adversary was able to observe write patterns during
 /// transaction preparation, there would certainly exist more straight-forward
 /// strategies of revealing the Journal Data Copy
-/// [`IO blocks`](layout::ImageLayout::io_block_allocation_blocks_log2)'
+/// [IO blocks](layout::ImageLayout::io_block_allocation_blocks_log2)'
 /// identities. However, as those copies might potentially stay around for a
 /// long time after the original transaction and perhaps even subsequent ones
 /// have completed, the "data at rest" scenario is still of real practical
 /// relevance.
 ///
 /// To counter this sort of Journal Data Copy
-/// [`IO blocks`](layout::ImageLayout::io_block_allocation_blocks_log2)
+/// [IO blocks](layout::ImageLayout::io_block_allocation_blocks_log2)
 /// identification attack by content matching as outlined above, provide support
 /// for disguising their identity by obscuring their contents. This is achieved
 /// by unauthenticated CBC-ESSIV encryption with a one-time key generated
@@ -59,12 +61,12 @@ use core::{convert::TryFrom as _, mem};
 /// the additional countermeasures required:
 /// - As outlined above the primary interest is in the "data at rest" scenario.
 /// - To protect against attackers attempting to probe for Journal Data Copy
-///   [`IO block`](layout::ImageLayout::io_block_allocation_blocks_log2)
+///   [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
 ///   matchings by Chosen Ciphertext Attacks (CCA), another, fairly costly level
 ///   of authentication would be required.
 /// - While (legitimate) plaintexts input to the CBC-ESSIV obfuscation scheme
 ///   are ciphertexts themselves, and thus, can effectively be assumed to have
-///   unique first block cipher blocks as is sufficient for establishing
+///   unique first block cipher blocks, as is sufficient for establishing
 ///   IND-CPA-UFB (IND-CPA with "Unique First Block"), c.f. "Full Disk
 ///   Encryption: Bridging Theory and Practice", Louiza Khati, Nicky Mouha, and
 ///   Damien Vergnaud, this would have to get enforced throughout by verifying
@@ -77,15 +79,42 @@ use core::{convert::TryFrom as _, mem};
 /// against ones cabable of manipulating data before the associated transaction
 /// has started or after it has completed, it is IND-CPA-UFB secure and CCA is
 /// not relevant in this setting, to be more specific.
+///
+/// # See also:
+///
+/// * [`JournalStagingCopyUndisguise`].
 pub struct JournalStagingCopyDisguise {
+    /// Block cipher algorithm to use.
     block_cipher_alg: symcipher::SymBlockCipherAlg,
+    /// Key to use for the encryption of journal staging copies.
     encryption_key: zeroize::Zeroizing<Vec<u8>>,
+    /// Key to use for the IV generation with ESSIV.
     iv_gen_key: zeroize::Zeroizing<Vec<u8>>,
+    /// [`SymBlockCipherModeEncryptionInstance`](symcipher::SymBlockCipherModeEncryptionInstance)
+    /// for the encryption of journal staging copies.
+    ///
+    /// Instantiated in [`Cbc`](tpm2_interface::TpmiAlgCipherMode::Cbc) mode for
+    /// [`block_cipher_alg`](Self::block_cipher_alg) and
+    /// [`encryption_key`](Self::encryption_key).
     encryption_block_cipher_instance: symcipher::SymBlockCipherModeEncryptionInstance,
+    /// [`SymBlockCipherModeEncryptionInstance`](symcipher::SymBlockCipherModeEncryptionInstance)
+    /// for the IV generation with ESSIV.
+    ///
+    /// Instantiated in [`Ecb`](tpm2_interface::TpmiAlgCipherMode::Ecb) mode for
+    /// [`block_cipher_alg`](Self::block_cipher_alg) and
+    /// [`iv_gen_key`](Self::iv_gen_key).
     iv_gen_block_cipher_instance: symcipher::SymBlockCipherModeEncryptionInstance,
 }
 
 impl JournalStagingCopyDisguise {
+    /// Generate a [`JournalStagingCopyDisguise`] instance with random keys.
+    ///
+    /// # Arguments:
+    ///
+    /// * `block_cipher_alg` - The block cipher algorithm to use for the journal
+    ///   staging copy disguising.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for the key generation.
     pub fn generate(
         block_cipher_alg: symcipher::SymBlockCipherAlg,
         rng: &mut dyn rng::RngCoreDispatchable,
@@ -107,6 +136,9 @@ impl JournalStagingCopyDisguise {
         })
     }
 
+    /// Determine the encoding length of the journal log's
+    /// [`JournalStagingCopyDisguise`](super::log::JournalLogFieldTag::JournalStagingCopyDisguise)
+    /// field.
     pub fn encoded_len(&self) -> usize {
         tpm2_interface::TpmiAlgSymObject::marshalled_size() as usize
             + mem::size_of::<u16>()
@@ -114,6 +146,21 @@ impl JournalStagingCopyDisguise {
             + self.iv_gen_key.len()
     }
 
+    /// Encode in a format suitable for the journal log's
+    /// [`JournalStagingCopyDisguise`](super::log::JournalLogFieldTag::JournalStagingCopyDisguise)
+    /// field.
+    ///
+    /// Encode the information needed for undisguising into `dst` and return the
+    /// remainder of `dst`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `dst` - The buffer to encode into. Must be at least
+    ///   [`encoded_len`](Self::encoded_len) in size.
+    ///
+    /// # See also:
+    ///
+    /// * [`JournalStagingCopyUndisguise::decode()`]
     pub fn encode<'a>(&self, mut dst: &'a mut [u8]) -> Result<&'a mut [u8], NvFsError> {
         let (block_cipher_alg_id, block_cipher_key_size) =
             <(tpm2_interface::TpmiAlgSymObject, u16)>::from(&self.block_cipher_alg);
@@ -131,17 +178,35 @@ impl JournalStagingCopyDisguise {
         Ok(dst)
     }
 
+    /// Instantiate a [`JournalDataCopyDisguiseAllocationBlockProcessor`] for
+    /// running the actual journal staging copy disguising operations.
     pub fn instantiate_processor(&self) -> Result<JournalDataCopyDisguiseAllocationBlockProcessor<'_>, NvFsError> {
         let iv_buf = try_alloc_zeroizing_vec::<u8>(self.iv_len())?;
         Ok(JournalDataCopyDisguiseAllocationBlockProcessor { disguise: self, iv_buf })
     }
 
+    /// Determine the IV length.
     fn iv_len(&self) -> usize {
         let iv_len = self.iv_gen_block_cipher_instance.block_cipher_block_len();
         debug_assert_eq!(iv_len, self.encryption_block_cipher_instance.iv_len());
         iv_len
     }
 
+    /// Disguise one journal staging copy [Allocation
+    /// Block](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `journal_staging_copy_allocation_block` - Location of the journal
+    ///   staging copy on storage.
+    /// * `update_target_allocation_block` - Target location on storage the
+    ///   journal staging copy is to get written to upon journal replay.
+    /// * `dst` - The destination buffer. Its size must match the one determined
+    ///   by [ImageLayout::allocation_block_size_128b_log2](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// * `src` - The source buffer. Its size must match the one determined by
+    ///   [ImageLayout::allocation_block_size_128b_log2](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// * `iv_buf` - Scratch buffer for IV generation. Must be
+    ///   [`iv_len()`](Self::iv_len) in size.
     fn disguise_journal_staging_copy_allocation_block(
         &self,
         journal_staging_copy_allocation_block: layout::PhysicalAllocBlockIndex,
@@ -165,12 +230,33 @@ impl JournalStagingCopyDisguise {
     }
 }
 
+/// Processor for disguising journal staging copies.
+///
+/// Instantiated through
+/// [`JournalStagingCopyDisguise::instantiate_processor()`].
+///
+/// A given `JournalDataCopyDisguiseAllocationBlockProcessor` instance may be
+/// used to process any given number of [Allocation
+/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
 pub struct JournalDataCopyDisguiseAllocationBlockProcessor<'a> {
     disguise: &'a JournalStagingCopyDisguise,
     iv_buf: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl<'a> JournalDataCopyDisguiseAllocationBlockProcessor<'a> {
+    /// Disguise one journal staging copy [Allocation
+    /// Block](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `journal_staging_copy_allocation_block` - Location of the journal
+    ///   staging copy on storage.
+    /// * `update_target_allocation_block` - Target location on storage the
+    ///   journal staging copy is to get written to upon journal replay.
+    /// * `dst` - The destination buffer. Its size must match the one determined
+    ///   by [ImageLayout::allocation_block_size_128b_log2](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// * `src` - The source buffer. Its size must match the one determined by
+    ///   [ImageLayout::allocation_block_size_128b_log2](layout::ImageLayout::allocation_block_size_128b_log2).
     pub fn disguise_journal_staging_copy_allocation_block(
         &mut self,
         journal_staging_copy_allocation_block: layout::PhysicalAllocBlockIndex,
@@ -188,12 +274,37 @@ impl<'a> JournalDataCopyDisguiseAllocationBlockProcessor<'a> {
     }
 }
 
+/// Undo the journal staging copy disguising transformations.
+///
+/// # See also:
+///
+/// * [`JournalStagingCopyDisguise`].
 pub struct JournalStagingCopyUndisguise {
+    /// [`SymBlockCipherModeDecryptionInstance`](symcipher::SymBlockCipherModeDecryptionInstance)
+    /// for the encryption of journal staging copies.
+    ///
+    /// Instantiated in [`Cbc`](tpm2_interface::TpmiAlgCipherMode::Cbc) mode for
+    /// the original [`JournalStagingCopyDisguise`]'s
+    /// [`block_cipher_alg`](JournalStagingCopyDisguise::block_cipher_alg) and
+    /// [`encryption_key`](JournalStagingCopyDisguise::encryption_key).
     decryption_block_cipher_instance: symcipher::SymBlockCipherModeDecryptionInstance,
+    /// [`SymBlockCipherModeEncryptionInstance`](symcipher::SymBlockCipherModeEncryptionInstance)
+    /// for the IV generation with ESSIV.
+    ///
+    /// Instantiated in [`Ecb`](tpm2_interface::TpmiAlgCipherMode::Ecb) mode for
+    /// the original [`JournalStagingCopyDisguise`]'s
+    /// [`block_cipher_alg`](JournalStagingCopyDisguise::block_cipher_alg) and
+    /// [`iv_gen_key`](JournalStagingCopyDisguise::iv_gen_key).
     iv_gen_block_cipher_instance: symcipher::SymBlockCipherModeEncryptionInstance,
 }
 
 impl JournalStagingCopyUndisguise {
+    /// Instantiate from a [`JournalStagingCopyDisguise`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `disguise` - The [`JournalStagingCopyDisguise`] to create a
+    ///   corresponding [`JournalStagingCopyUndisguise`] instance for.
     pub fn new_from_disguise(disguise: &JournalStagingCopyDisguise) -> Result<Self, NvFsError> {
         let decryption_block_cipher_instance = symcipher::SymBlockCipherModeDecryptionInstance::new(
             tpm2_interface::TpmiAlgCipherMode::Cbc,
@@ -207,6 +318,15 @@ impl JournalStagingCopyUndisguise {
         })
     }
 
+    /// Instantiate a [`JournalStagingCopyUndisguise`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `block_cipher_alg` - The block cipher algorithm used for the journal
+    ///   staging copy disguising.
+    /// * `encryption_key` - The journal staging copy encryption key used for
+    ///   the disguising.
+    /// * `iv_gen_key` - Key to use for the IV generation with ESSIV.
     fn new(
         block_cipher_alg: symcipher::SymBlockCipherAlg,
         encryption_key: zeroize::Zeroizing<Vec<u8>>,
@@ -224,6 +344,18 @@ impl JournalStagingCopyUndisguise {
         })
     }
 
+    /// Decode from the contents of the journal log's
+    /// [`JournalStagingCopyDisguise`](super::log::JournalLogFieldTag::JournalStagingCopyDisguise)
+    /// field.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - The buffers decode from. Will get advance by the consumed
+    ///   data.
+    ///
+    /// # See also:
+    ///
+    /// * [`JournalStagingCopyDisguise::encode()`]
     pub fn decode<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = NvFsError>>(
         mut src: SI,
     ) -> Result<Self, NvFsError> {
@@ -276,6 +408,8 @@ impl JournalStagingCopyUndisguise {
         Self::new(block_cipher_alg, encryption_key, iv_gen_key)
     }
 
+    /// Instantiate a [`JournalDataCopyUndisguiseAllocationBlockProcessor`] for
+    /// running the actual journal staging copy undisguising operations.
     pub fn instantiate_processor(&self) -> Result<JournalDataCopyUndisguiseAllocationBlockProcessor<'_>, NvFsError> {
         let iv_buf = try_alloc_zeroizing_vec::<u8>(self.iv_len())?;
         Ok(JournalDataCopyUndisguiseAllocationBlockProcessor {
@@ -284,12 +418,28 @@ impl JournalStagingCopyUndisguise {
         })
     }
 
+    /// Determine the IV length.
     fn iv_len(&self) -> usize {
         let iv_len = self.iv_gen_block_cipher_instance.block_cipher_block_len();
         debug_assert_eq!(iv_len, self.decryption_block_cipher_instance.iv_len());
         iv_len
     }
 
+    /// Undisguise one journal staging copy [Allocation
+    /// Block](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `journal_staging_copy_allocation_block` - Location of the journal
+    ///   staging copy on storage.
+    /// * `update_target_allocation_block` - Target location on storage the
+    ///   journal staging copy is to get written to upon journal replay.
+    /// * `dst` - The source and destination buffer. Its size must match the one
+    ///   determined by
+    ///   [ImageLayout::allocation_block_size_128b_log2](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///   The transformation will get applied in place.
+    /// * `iv_buf` - Scratch buffer for IV generation. Must be
+    ///   [`iv_len()`](Self::iv_len) in size.
     fn undisguise_journal_staging_copy_allocation_block(
         &self,
         journal_staging_copy_allocation_block: layout::PhysicalAllocBlockIndex,
@@ -311,12 +461,33 @@ impl JournalStagingCopyUndisguise {
     }
 }
 
+/// Processor for undisguising journal staging copies.
+///
+/// Instantiated through
+/// [`JournalStagingCopyUndisguise::instantiate_processor()`].
+///
+/// A given `JournalDataCopyDisguiseAllocationBlockProcessor` instance may be
+/// used to process any given number of [Allocation
+/// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
 pub struct JournalDataCopyUndisguiseAllocationBlockProcessor<'a> {
     undisguise: &'a JournalStagingCopyUndisguise,
     iv_buf: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl<'a> JournalDataCopyUndisguiseAllocationBlockProcessor<'a> {
+    /// Unisguise one journal staging copy [Allocation
+    /// Block](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `journal_staging_copy_allocation_block` - Location of the journal
+    ///   staging copy on storage.
+    /// * `update_target_allocation_block` - Target location on storage the
+    ///   journal staging copy is to get written to upon journal replay.
+    /// * `dst` - The source and destination buffer. Its size must match the one
+    ///   determined by
+    ///   [ImageLayout::allocation_block_size_128b_log2](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///   The transformation will get applied in place.
     pub fn undisguise_journal_staging_copy_allocation_block(
         &mut self,
         journal_staging_copy_allocation_block: layout::PhysicalAllocBlockIndex,
@@ -332,6 +503,22 @@ impl<'a> JournalDataCopyUndisguiseAllocationBlockProcessor<'a> {
     }
 }
 
+/// Produce the IV for a given journal staging copy [Allocation
+/// Block](layout::ImageLayout::allocation_block_size_128b_log2).
+///
+/// # Arguments:
+///
+/// * `iv_out` - The destination buffer. Its length must match the
+///   `iv_gen_block_cipher_instance`'s [block cipher block
+///   size](symcipher::SymBlockCipherModeEncryptionInstance::block_cipher_block_len).
+/// * `iv_gen_block_cipher_instance` - The
+///   [`SymBlockCipherModeEncryptionInstance`](symcipher::SymBlockCipherModeEncryptionInstance)
+///   to use for the ESSIV IV generation. Must have been instantiated in
+///   [`Ecb`](tpm2_interface::TpmiAlgCipherMode::Ecb) mode.
+/// * `journal_staging_copy_allocation_block` - Location of the journal staging
+///   copy on storage.
+/// * `update_target_allocation_block` - Target location on storage the journal
+///   staging copy is to get written to upon journal replay.
 fn produce_iv(
     iv_out: &mut [u8],
     iv_gen_block_cipher_instance: &symcipher::SymBlockCipherModeEncryptionInstance,

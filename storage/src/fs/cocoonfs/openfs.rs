@@ -10,12 +10,12 @@ use alloc::vec::Vec;
 use crate::{
     chip,
     fs::{
-        cocoonfs::{
-            alloc_bitmap, auth_tree, extent_ptr, extents,
-            fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
-            image_header, inode_extents_list, inode_index, journal, keys, layout, read_buffer, CocoonFsFormatError,
-        },
         NvFsError,
+        cocoonfs::{
+            CocoonFsFormatError, alloc_bitmap, auth_tree, extent_ptr, extents,
+            fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
+            image_header, inode_extents_list, inode_index, journal, keys, layout, read_buffer,
+        },
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -72,6 +72,7 @@ where
     fut_state: CocoonFsOpenFsFutureState<ST, C>,
 }
 
+/// [`CocoonFsOpenFsFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum CocoonFsOpenFsFutureState<ST: sync_types::SyncTypes, C: chip::NvChip>
 where
@@ -138,6 +139,24 @@ where
     read_buffer::ReadBuffer<ST>: marker::Unpin,
     ST::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
 {
+    /// Instantiate a [`CocoonFsOpenFsFuture`].
+    ///
+    /// On error, the input `chip` and `raw_root_key` are returned directly as
+    /// part of the `Err`. On success, the [`CocoonFsOpenFsFuture`] assumes
+    /// their ownership. They will get either returned back from
+    /// [`poll()`](Self::poll) after completing with failure, or will be passed
+    /// onwards to the resulting [`CocoonFs`] instance when completing with
+    /// success.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `raw_root_key` - The filesystem's raw root key material supplied from
+    ///   extern.
+    /// * `enable_trimming` - Whether to enable the submission of [trim
+    ///   commands](chip::NvChip::trim) to the underlying storage for the [`CocoonFs`]
+    ///   instance eventually returned from [`poll()`](Self::poll) upon successful
+    ///   completion.
     pub fn new(
         chip: C,
         raw_root_key: zeroize::Zeroizing<Vec<u8>>,
@@ -173,6 +192,22 @@ where
     read_buffer::ReadBuffer<ST>: marker::Unpin,
     ST::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned from the
+    /// [`Future::poll()`](future::Future::poll):
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input [`NvChip`](chip::NvChip)
+    ///   and the raw root key are lost.
+    /// * `Ok(...)` - Otherwise the outer level [`Result`] is set to [`Ok`]:
+    ///   * `Ok(Err((chip, raw_root_key, e)))` - In case of an error, a tuple of
+    ///     the [`NvChip`](chip::NvChip) instance, `chip`, the input root key
+    ///     material `raw_root_key` and the error reason `e` is returned in an
+    ///     [`Err`].
+    ///   * `Ok(Ok(fs_instance))` - Otherwise an opened [`CocoonFs`] instance
+    ///     `fs_instance` associated with the filesystem just opened is returned
+    ///     in an [`Ok`].
     type Output = Result<Result<CocoonFsSyncRcPtrType<ST, C>, (C, zeroize::Zeroizing<Vec<u8>>, NvFsError)>, NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {

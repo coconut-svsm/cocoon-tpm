@@ -11,8 +11,8 @@ use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     crypto::hash,
     fs::{
-        cocoonfs::{extent_ptr, layout, CocoonFsFormatError},
         NvFsError, NvFsIoError,
+        cocoonfs::{CocoonFsFormatError, extent_ptr, layout},
     },
     nvfs_err_internal,
     utils_common::{
@@ -23,7 +23,13 @@ use crate::{
 };
 use core::{marker, mem, ops::Deref as _, pin, task};
 
+#[cfg(doc)]
+use layout::ImageLayout;
+
 /// Static image header of minimum possible length.
+///
+/// Used to decode the [`ImageLayout`] and salt length needed for determining
+/// the actual filesystem header size.
 #[derive(Clone)]
 struct MinStaticImageHeader {
     image_layout: layout::ImageLayout,
@@ -31,6 +37,7 @@ struct MinStaticImageHeader {
 }
 
 impl MinStaticImageHeader {
+    /// Encoded length of a [`MinStaticImageHeader`].
     const fn encoded_len() -> u8 {
         const ENCODED_LEN: u32 = {
             // Magic 'COCOONFS'.
@@ -51,6 +58,12 @@ impl MinStaticImageHeader {
         ENCODED_LEN as u8
     }
 
+    /// Decode the [`MinStaticImageHeader`] from a buffer.
+    ///
+    /// # Arguments:
+    ///
+    /// * `buf` - The source buffer. Must be at least
+    ///   [`encoded_len()`](Self::encoded_len) in length.
     fn decode(buf: &[u8]) -> Result<Self, NvFsError> {
         if buf.len() < Self::encoded_len() as usize {
             return Err(nvfs_err_internal!());
@@ -85,11 +98,23 @@ impl MinStaticImageHeader {
 
 /// Static image header.
 pub struct StaticImageHeader {
+    /// The filesystem's [`ImageLayout`] configuration parameters.
     pub image_layout: layout::ImageLayout,
+    /// The filesystem's salt value.
     pub salt: Vec<u8>,
 }
 
 impl StaticImageHeader {
+    /// Encoded length of a static image header.
+    ///
+    /// Returns the encoded length of a static image header with a salt length
+    /// of `salt_len` without any of the padding to align to the next [IO
+    /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary
+    /// included.
+    ///
+    /// # Arguments:
+    ///
+    /// * `salt_len` - Length of the salt stored in the static image header.
     fn encoded_len(salt_len: u8) -> u32 {
         // The minimal common header containing everything needed to deduce the full
         // header's length.
@@ -102,6 +127,27 @@ impl StaticImageHeader {
         encoded_len
     }
 
+    /// [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2) aligned
+    /// length of a static image header.
+    ///
+    /// The static image header gets padded to the next [IO
+    /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary so
+    /// that no writes to the filesystem image will ever affect its
+    /// contents.
+    ///
+    /// Return the length of a static image header with a salt length
+    /// of `salt_len` aligned to the next [IO
+    /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary in
+    /// units of [Allocation
+    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `salt_len` - Length of the salt stored in the static image header.
+    /// * `io_block_allocation_blocks_log2` - Verbatim copy of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim copy of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn io_block_aligned_encoded_len_allocation_blocks(
         salt_len: u8,
         io_block_allocation_blocks_log2: u32,
@@ -119,6 +165,16 @@ impl StaticImageHeader {
         )
     }
 
+    /// Encode a static image header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `dst` - The destination buffers. Their total length must be at least
+    ///   that returned by [`encoded_len()`](Self::encoded_len).
+    /// * `image_layout` - The filesystem image's [`ImageLayout`] to be stored
+    ///   in the static image header.
+    /// * `salt` - The salt to be stored in the image header. It's length must
+    ///   not exceed `u8::MAX`.
     pub fn encode<'a, DI: io_slices::IoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
         mut dst: DI,
         image_layout: &layout::ImageLayout,
@@ -166,13 +222,26 @@ impl StaticImageHeader {
 
 /// Mutable image header.
 pub struct MutableImageHeader {
+    /// The current authentication tree root digest.
     pub root_hmac_digest: Vec<u8>,
+    /// The current inode index entry leaf node preauthentication CCA protection
+    /// digest.
     pub inode_index_entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+    /// Location of the inode index entry leaf node.
     pub inode_index_entry_leaf_node_block_ptr: extent_ptr::EncodedBlockPtr,
+    /// The filesystem image size.
     pub image_size: layout::AllocBlockCount,
 }
 
 impl MutableImageHeader {
+    /// Encoded length of a mutable image header.
+    ///
+    /// Returns the encoded length of a mutable image header without any of the
+    /// padding to align to the next [Allocation
+    /// Block](layout::ImageLayout::allocation_block_size_128b_log2) boundary
+    /// included.
+    ///
+    /// # Arguments:
     pub fn encoded_len(image_layout: &layout::ImageLayout) -> u32 {
         // The root hmac.
         let mut encoded_len = hash::hash_alg_digest_len(image_layout.auth_tree_root_hmac_hash_alg) as u32;
@@ -186,6 +255,12 @@ impl MutableImageHeader {
         encoded_len
     }
 
+    /// Determine the location of the mutable image header on storage.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `salt_len` - Length of the salt stored in the static image header.
     pub fn physical_location(image_layout: &layout::ImageLayout, salt_len: u8) -> layout::PhysicalAllocBlockRange {
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
@@ -211,6 +286,22 @@ impl MutableImageHeader {
         ))
     }
 
+    /// Encode a mutable image header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `dst` - The destination buffers. Their total length must be at least
+    ///   that returned by [`encoded_len()`](Self::encoded_len).
+    /// * `root_hmac_digest` - The current authentication tree root digest. Its
+    ///   length must match that of digests produced by
+    ///   [`ImageLayout::auth_tree_root_hmac_hash_alg`] exactly.
+    /// * `inode_index_entry_leaf_node_preauth_cca_protection_digest` - The
+    ///   current inode index entry leaf node preauthentication CCA protection
+    ///   digest. Its length must match that of digests produced by
+    ///   [`ImageLayout::preauth_cca_protection_hmac_hash_alg`] exactly.
+    /// * `inode_index_entry_leaf_node_block_ptr` - Location of the inode index
+    ///   entry leaf node.
+    /// * `image_size` - The filesystem image size.
     pub fn encode<'a, DI: io_slices::IoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
         mut dst: DI,
         root_hmac_digest: &[u8],
@@ -249,6 +340,13 @@ impl MutableImageHeader {
         Ok(())
     }
 
+    /// Decode a mutable image header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - The source buffers. Their total length must be at least that
+    ///   returned by [`encoded_len()`](Self::encoded_len).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     pub fn decode<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = NvFsError>>(
         mut src: SI,
         image_layout: &layout::ImageLayout,
@@ -320,6 +418,9 @@ impl MutableImageHeader {
     }
 }
 
+/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// internally by [`ReadStaticImageHeaderFuture`] and
+/// [`ReadMutableImageHeaderFuture`] for reading parts of the image header.
 struct ReadImageHeaderPartChipRequest {
     region: ChunkedIoRegion,
     dst: Vec<u8>,
@@ -394,6 +495,7 @@ pub struct ReadStaticImageHeaderFuture<C: chip::NvChip> {
     fut_state: ReadStaticImageHeaderFutureState<C>,
 }
 
+/// [`ReadStaticImageHeaderFuture`] state-machine state.
 enum ReadStaticImageHeaderFutureState<C: chip::NvChip> {
     Init {
         _phantom: marker::PhantomData<fn() -> *const C>,
@@ -628,6 +730,7 @@ pub struct ReadMutableImageHeaderFuture<C: chip::NvChip> {
     fut_state: ReadMutableImageHeaderFutureState<C>,
 }
 
+/// [`ReadMutableImageHeaderFuture`] state-machine state.
 enum ReadMutableImageHeaderFutureState<C: chip::NvChip> {
     Init {
         _phantom: marker::PhantomData<fn() -> *const C>,

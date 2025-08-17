@@ -9,14 +9,15 @@ use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     chip,
-    crypto::{hash, rng, CryptoError},
+    crypto::{CryptoError, hash, rng},
     fs::{
         cocoonfs::{
-            alloc_bitmap, auth_tree, encryption_entities, extent_ptr, extents,
+            CocoonFsFormatError, CocoonFsImageLayout, alloc_bitmap, auth_tree, encryption_entities, extent_ptr,
+            extents,
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
             image_header, inode_extents_list, inode_index, journal, keys,
             layout::{self, BlockCount as _, BlockIndex as _},
-            read_buffer, write_blocks, CocoonFsFormatError,
+            read_buffer, write_blocks,
         },
         {NvFsError, NvFsIoError},
     },
@@ -47,6 +48,17 @@ struct CocoonFsMkFsLayout {
 }
 
 impl CocoonFsMkFsLayout {
+    /// Instantiate a [`CocoonFsMkFsLayout`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `salt` - The filsystem salt to be stored in the
+    ///   [`StaticImageHeader::salt`](image_header::StaticImageHeader::salt).
+    /// * `image_size` - The filesystem image size to get recorded in the
+    ///   [`MutableImageHeader::image_size`](image_header::MutableImageHeader::image_size).
+    /// * `root_key` - The filesystem's root key.
     pub fn new(
         image_layout: &layout::ImageLayout,
         salt: Vec<u8>,
@@ -266,19 +278,6 @@ impl CocoonFsMkFsLayout {
 }
 
 /// Format a CocoonFS filesystem instance.
-///
-/// A two-level [`Result`] is returned from the
-/// [`Future::poll()`](future::Future::poll):
-///
-/// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon encountering
-///   an internal error.
-/// * `Ok(...)` - Otherwise the outer level [`Result`] is set to [`Ok`]:
-///   * `Ok(Err((chip, e)))` - In case of an error, a pair of the
-///     [`NvChip`](chip::NvChip) instance `chip` and the error reason `e` is
-///     returned in an [`Err`].
-///   * `Ok(Ok(fs_instance))` - Otherwise an opened [`CocoonFs`] instance
-///     `fs_instance` associated with the filesystem just created is returned in
-///     an [`Ok`].
 pub struct CocoonFsMkFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
@@ -309,6 +308,11 @@ pub struct CocoonFsMkFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: CocoonFsMkFsFutureState<C>,
 }
 
+/// Part of the internal [`CocoonFsMkFsFuture`] state valid throughout the whole
+/// lifetime.
+///
+/// Various state bundled together so that only one [`Option`] needs to get
+/// examined upon each [`poll()`](CocoonFsMkFsFuture::poll) invocation.
 struct CocoonFsMkFsFutureFsInitData<ST: sync_types::SyncTypes, C: chip::NvChip> {
     chip: C,
     mkfs_layout: CocoonFsMkFsLayout,
@@ -320,6 +324,7 @@ struct CocoonFsMkFsFutureFsInitData<ST: sync_types::SyncTypes, C: chip::NvChip> 
     enable_trimming: bool,
 }
 
+/// [`CocoonFsMkFsFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum CocoonFsMkFsFutureState<C: chip::NvChip> {
     Init,
@@ -378,9 +383,39 @@ enum CocoonFsMkFsFutureState<C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
+    /// Instantiate a [`CocoonFsMkFsFuture`].
+    ///
+    /// On error, the input `chip` is returned directly as part of the `Err`.
+    /// On success, the [`CocoonFsMkFsFuture`] assumes ownership of the `chip`
+    /// for the duration of the operation. It will get either returned back
+    /// from [`poll()`](Self::poll) after completing with failure, or will be
+    /// passed onwards to the resulting [`CocoonFs`] instance when
+    /// completing with success.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The storage to create a filesystem on.
+    /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
+    /// * `salt` - The filsystem salt to be stored in the static image header.
+    /// * `image_size` - Optional filesystem image size to get recorded in the
+    ///   mutable image header. If specified, it must not exceed the undelying
+    ///   storage's size, as reported by
+    ///   [`NvChip::chip_io_blocks()`](chip::NvChip::chip_io_blocks) on `chip`.
+    ///   If not specified, the maximum possible value will be used.
+    /// * `root_key` - The filesystem's root key.
+    /// * `enable_trimming` - Whether to enable the submission of [trim
+    ///   commands](chip::NvChip::trim) to the underlying storage for the
+    ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
+    ///   upon successful completion. The setting of this value also controls
+    ///   whether whether unallocated storage will get initialized with random
+    ///   data in the course of the filesystem formatting -- unallocated storage
+    ///   will get randomized if and only if `enable_trimming` is off.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating IVs, as well as randomizing padding in data structures
+    ///   and for initializing unallocated storage if `enable_trimming` is off.
     pub fn new(
         chip: C,
-        image_layout: &layout::ImageLayout,
+        image_layout: &CocoonFsImageLayout,
         salt: Vec<u8>,
         image_size: Option<layout::AllocBlockCount>,
         root_key: &[u8],
@@ -584,6 +619,21 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for CocoonFsMkFs
 where
     <ST as sync_types::SyncTypes>::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned from the
+    /// [`Future::poll()`](future::Future::poll):
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`NvChip`](chip::NvChip) is
+    ///   lost.
+    /// * `Ok(...)` - Otherwise the outer level [`Result`] is set to [`Ok`]:
+    ///   * `Ok(Err((chip, e)))` - In case of an error, a pair of the
+    ///     [`NvChip`](chip::NvChip) instance `chip` and the error reason `e` is
+    ///     returned in an [`Err`].
+    ///   * `Ok(Ok(fs_instance))` - Otherwise an opened [`CocoonFs`] instance
+    ///     `fs_instance` associated with the filesystem just created is
+    ///     returned in an [`Ok`].
     type Output = Result<Result<CocoonFsSyncRcPtrType<ST, C>, (C, NvFsError)>, NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
@@ -1125,8 +1175,10 @@ where
                     };
                     let mutable_image_header_allocation_blocks_range =
                         image_header::MutableImageHeader::physical_location(image_layout, salt_len);
-                    debug_assert!(u64::from(mutable_image_header_allocation_blocks_range.begin())
-                        .is_aligned_pow2(io_block_allocation_blocks_log2));
+                    debug_assert!(
+                        u64::from(mutable_image_header_allocation_blocks_range.begin())
+                            .is_aligned_pow2(io_block_allocation_blocks_log2)
+                    );
                     let padded_static_image_header_end = mutable_image_header_allocation_blocks_range.begin();
                     debug_assert!(
                         u64::from(padded_static_image_header_end).is_aligned_pow2(io_block_allocation_blocks_log2)
@@ -1680,6 +1732,7 @@ struct WriteRandomDataFuture<C: chip::NvChip> {
     fut_state: WriteRandomDataFutureState<C>,
 }
 
+/// [`WriteRandomDataFuture`] state-machine state.
 enum WriteRandomDataFutureState<C: chip::NvChip> {
     Init,
     RandomDataBulkWritePrepare {
@@ -1692,6 +1745,14 @@ enum WriteRandomDataFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> WriteRandomDataFuture<C> {
+    /// Instantiate a [`WriteRandomDataFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `extent` - The storage extent to initialize with random data.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `chip` - The storage the filesystem is being created on.
     fn new(
         extent: &layout::PhysicalAllocBlockRange,
         image_layout: &layout::ImageLayout,
@@ -1724,6 +1785,15 @@ impl<C: chip::NvChip> WriteRandomDataFuture<C> {
         })
     }
 
+    /// Poll the [`WriteRandomDataFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The storage the filesystem is being created on.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for the randomization.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     fn poll(
         self: pin::Pin<&mut Self>,
         chip: &C,

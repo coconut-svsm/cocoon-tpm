@@ -11,8 +11,9 @@ use crate::{
     chip,
     crypto::{self, hash, rng, symcipher},
     fs::{
+        NvFsError,
         cocoonfs::{
-            alloc_bitmap, auth_subject_ids, auth_tree, encryption_entities,
+            CocoonFsFormatError, alloc_bitmap, auth_subject_ids, auth_tree, encryption_entities,
             extent_ptr::{self, EncodedBlockPtr, EncodedExtentPtr},
             extents,
             fs::{
@@ -30,9 +31,7 @@ use crate::{
                 read_authenticate_data::TransactionReadAuthenticateDataFuture,
             },
             write_inode_data::InodeExtentsPendingReallocation,
-            CocoonFsFormatError,
         },
-        NvFsError,
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types::{self, RwLock as _},
@@ -44,6 +43,13 @@ use crate::{
     },
 };
 use core::{array, cmp, convert, marker, mem, ops, pin, task};
+
+#[cfg(doc)]
+use crate::fs::cocoonfs::image_header::MutableImageHeader;
+#[cfg(doc)]
+use layout::ImageLayout;
+#[cfg(doc)]
+use transaction::Transaction;
 
 /// Special inodes reserved for internal filesystem use.
 #[repr(u32)]
@@ -58,26 +64,45 @@ pub enum SpecialInode {
     JournalLog = 5, // Virtual inode used for key derivation.
 }
 
+/// Maximum value allocated to [`SpecialInode`]s.
 pub const SPECIAL_INODE_MAX: u32 = SpecialInode::JournalLog as u32;
 
-/// Subdomain identifiers used for key derivation in the context of some inode.
+/// [Subdomain](keys::KeyId) identifiers used for key derivation in the context
+/// of some inode.
 #[repr(u32)]
 pub enum InodeKeySubdomain {
+    /// The key is to be used with an inode's extents list.
     InodeExtentsList = 1,
+    /// The key is to be used with an inode's data.
     InodeData = 2,
 }
 
+/// Key type for the inode index B+-tree's entries.
 pub type InodeIndexKeyType = u32;
+/// Encoded [`InodeIndexKeyType`].
 type EncodedInodeIndexKeyType = [u8; mem::size_of::<InodeIndexKeyType>()];
 
+/// Encode a [`InodeIndexKeyType`].
 fn encode_key(key: InodeIndexKeyType) -> EncodedInodeIndexKeyType {
     key.to_le_bytes()
 }
 
+/// Decode a [`InodeIndexKeyType`].
 fn decode_key(encoded_key: EncodedInodeIndexKeyType) -> InodeIndexKeyType {
     InodeIndexKeyType::from_le_bytes(encoded_key)
 }
 
+/// Load an [`EncodedInodeIndexKeyType`] entry from a byte buffer storing a
+/// sequence thereof back to back.
+///
+/// Will fail only upon an internal logic error, e.g. when `index` is out of
+/// bounds.
+///
+/// # Arguments:
+///
+/// * `index` - Index of the entry to load.
+/// * `encoded_keys` - The byte buffer containing the sequence of
+///   [`EncodedInodeIndexKeyType`] entries stored back to back.
 fn read_encoded_keys_entry(index: usize, encoded_keys: &[u8]) -> Result<EncodedInodeIndexKeyType, NvFsError> {
     let entry_begin = index * mem::size_of::<EncodedInodeIndexKeyType>();
     let entry_end = entry_begin + mem::size_of::<EncodedInodeIndexKeyType>();
@@ -92,6 +117,23 @@ fn read_encoded_keys_entry(index: usize, encoded_keys: &[u8]) -> Result<EncodedI
     )
 }
 
+/// Lookup an [`EncodedInodeIndexKeyType`] entry within a byte buffer storing a
+/// sorted sequence thereof back to back.
+///
+/// Returns the entry index wrapped in an [`Ok`] in case of an exact match, or
+/// the insertion position in an `Err`.
+///
+/// Will fail only upon an internal logic error, e.g. when the length of
+/// `encoded_keys` is inconsistent with `encoded_keys_entries`.
+///
+/// # Arguments:
+///
+/// * `key` - The key value to lookup.
+/// * `encoded_keys` - The byte buffer containing the sorted sequence of
+///   [`EncodedInodeIndexKeyType`] entries stored back to back. Must contain at
+///   least `encoded_keys_entries` entries.
+/// * `encoded_keys_entries` - The number of [`EncodedInodeIndexKeyType`] stored
+///   in `encoded_keys`.
 fn lookup_key(
     key: InodeIndexKeyType,
     encoded_keys: &[u8],
@@ -132,16 +174,30 @@ fn lookup_key(
 /// Layout information about the inode index B+-tree.
 #[derive(Clone)]
 pub struct InodeIndexTreeLayout {
+    /// The [`EncryptedBlockLayout`](encryption_entities::EncryptedBlockLayout)
+    /// to be used for the inode index nodes.
     node_encrypted_block_layout: encryption_entities::EncryptedBlockLayout,
 
+    /// Maximum number of entries (keys) in an internal node.
     max_internal_node_entries: usize,
+    /// Minimum number of entries (keys) in an internal node.
     min_internal_node_entries: usize,
+    /// Maximum number of entries in a leaf node.
     max_leaf_node_entries: usize,
+    /// Minimum number of entries in a leaf node.
     min_leaf_node_entries: usize,
+    /// A node's encoded payload length.
     encoded_node_len: usize,
 }
 
 impl InodeIndexTreeLayout {
+    /// Instantiate an [`InodeIndexTreeLayout`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_encrypted_block_layout` - The
+    ///   [`EncryptedBlockLayout`](encryption_entities::EncryptedBlockLayout) to
+    ///   be used for the inode index nodes.
     fn new(node_encrypted_block_layout: encryption_entities::EncryptedBlockLayout) -> Result<Self, NvFsError> {
         // The root node gets referenced from the InodeIndex' SpecialInode::IndexRoot
         // inode entry, with an EncodedExtentPtr which must be direct.
@@ -228,6 +284,7 @@ impl InodeIndexTreeLayout {
         })
     }
 
+    /// Get a inode index tree node's encoded payload length.
     fn encoded_node_len(&self) -> usize {
         self.encoded_node_len
     }
@@ -244,6 +301,12 @@ pub struct InodeIndexTreeLeafNode {
 }
 
 impl InodeIndexTreeLeafNode {
+    /// Create a new [`InodeIndexTreeLeafNode`] with no entries.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn new_empty(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         layout: &InodeIndexTreeLayout,
@@ -273,6 +336,14 @@ impl InodeIndexTreeLeafNode {
         Ok(n)
     }
 
+    /// Decode a [`InodeIndexTreeLeafNode`] from a buffer.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `encoded_node` - Buffer containing the encoded node. Its length must
+    ///   match [`InodeIndexTreeLayout::encoded_node_len()`].
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         encoded_node: Vec<u8>,
@@ -349,6 +420,18 @@ impl InodeIndexTreeLeafNode {
         Ok(n)
     }
 
+    /// Lookup an inode's entry index.
+    ///
+    /// Lookup inode `key` in the node and return either the entry index wrapped
+    /// in an `Ok` in case of an exact match, or the insertion position in
+    /// an `Err`.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `key` - The inode number to lookup.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     pub fn lookup(
         &self,
         key: InodeIndexKeyType,
@@ -357,6 +440,15 @@ impl InodeIndexTreeLeafNode {
         lookup_key(key, self.encoded_keys(layout), self.entries)
     }
 
+    /// Get an entry's associated inode number.
+    ///
+    /// Will fail only upon an internal logic error, e.g. when `entry_index` is
+    /// out of bounds.
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_index` - The entry's index.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn entry_inode(&self, entry_index: usize, layout: &InodeIndexTreeLayout) -> Result<InodeIndexKeyType, NvFsError> {
         Ok(decode_key(read_encoded_keys_entry(
             entry_index,
@@ -364,6 +456,15 @@ impl InodeIndexTreeLeafNode {
         )?))
     }
 
+    /// Get an entry's associated [`EncodedExtentPtr`].
+    ///
+    /// Will fail only upon an internal logic error, e.g. when `entry_index` is
+    /// out of bounds.
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_index` - The entry's index.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     pub fn entry_extent_ptr(
         &self,
         entry_index: usize,
@@ -374,6 +475,23 @@ impl InodeIndexTreeLeafNode {
         ))
     }
 
+    /// Insert a new or update an existing entry.
+    ///
+    /// Insert a new or update an existing entry for inode number `key` to point
+    /// at `extent_ptr`.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `key` - The inode number to insert an entry for or update an existing
+    ///   entry of.
+    /// * `extent_ptr` - The [`EncodedExtentPtr`] to store in the entry.
+    /// * `insertion_pos` - Optional insertion position, if known. Must be equal
+    ///   to the result of [`lookup()`](Self::lookup) if specified, i.e. either
+    ///   the index of the preexisting matching entry wrapped in an `Ok`, or the
+    ///   insertion position for a new entry in an `Err`.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn insert(
         &mut self,
         key: InodeIndexKeyType,
@@ -429,6 +547,14 @@ impl InodeIndexTreeLeafNode {
         Ok(())
     }
 
+    /// Remove an entry.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_index` - The entry's index.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn remove(&mut self, removal_pos: usize, layout: &InodeIndexTreeLayout) -> Result<(), NvFsError> {
         if self.entries == 0 {
             return Err(nvfs_err_internal!());
@@ -459,6 +585,23 @@ impl InodeIndexTreeLeafNode {
         Ok(())
     }
 
+    /// Move entries from the right sibling node into `self`.
+    ///
+    /// Move `count` entries from the beginning of `right` to the end of `self`.
+    /// Return the two siblings' new separator key to be stored at their parent.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The left node to move entries into. The number of existing
+    ///   entries plus the `count` newly added  ones must remain within the
+    ///   bounds of the [`InodeIndexTreeLayout::max_leaf_node_entries`].
+    /// * `right` - The right node to move entries from. The number of entries
+    ///   after removing `count` ones must remain within the bounds of the
+    ///   [`InodeIndexTreeLayout::min_leaf_node_entries`].
+    /// * `count` - The number of entries to move.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn spill_left(
         &mut self,
         right: &mut Self,
@@ -517,6 +660,23 @@ impl InodeIndexTreeLeafNode {
         Ok(new_parent_separator_key)
     }
 
+    /// Move entries from `self` into the right sibling node.
+    ///
+    /// Move `count` entries from the end of `self` to the beginning of `right`.
+    /// Return the two siblings' new separator key to be stored at their parent.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The left node to move entries from. The number of entries
+    ///   after removing `count` ones must remain within the bounds of the
+    ///   [`InodeIndexTreeLayout::min_leaf_node_entries`].
+    /// * `right` - The right node to move entries into. The number of existing
+    ///   entries plus the `count` newly added  ones must remain within the
+    ///   bounds of the [`InodeIndexTreeLayout::max_leaf_node_entries`].
+    /// * `count` - The number of entries to move.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn spill_right(
         &mut self,
         right: &mut Self,
@@ -580,6 +740,29 @@ impl InodeIndexTreeLeafNode {
         Ok(new_parent_separator_key)
     }
 
+    /// Split a full node and insert a new entry.
+    ///
+    /// Split the node into two and insert a new entry at `insertion_pos`,
+    /// defined relative to the node's entry sequence from before the split.
+    ///
+    /// Returns a pair of the new sibling node split off at the right and the
+    /// two siblings' separator key to be stored at their parent on success.
+    ///
+    /// `self` will remain unmodified upon failure, except for possibly upon
+    /// encountering internal logic errors.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The node to split. Will become the left sibling after the
+    ///   split.
+    /// * `key` - The new entry's inode number.
+    /// * `extent_ptr` - The new entry's [`EncodedExtentPtr`] value.
+    /// * `insertion_pos` - The insertion position for the new entry, defined
+    ///   relative to the node's entry sequence from before the split. Must be
+    ///   consistent with the value returned by [`lookup()`](Self::lookup).
+    /// * `new_node_allocation_blocks_begin` - Location on storage allocated for
+    ///   the the new sibling node to get split off.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn split_insert(
         &mut self,
         key: InodeIndexKeyType,
@@ -722,6 +905,22 @@ impl InodeIndexTreeLeafNode {
         Ok((new_node, parent_separator_key))
     }
 
+    /// Remove an entry and merge two sibling nodes.
+    ///
+    /// Remove the entry at `removal_pos_after_merge`, defined relative to the
+    /// concatenated sequence of the two entries' nodes and merge `right`
+    /// into `self`. The two nodes' combined number of entries must remain
+    /// within the   bounds of the
+    /// [`InodeIndexTreeLayout::max_leaf_node_entries`] after the removal.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The left sibling node to merge into.
+    /// * `removal_pos_after_merge` - Index of the entry to remove, defined
+    ///   relative to the concatenated sequence of the two entries' nodes.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn merge_remove(
         &mut self,
         right: &Self,
@@ -809,6 +1008,14 @@ impl InodeIndexTreeLeafNode {
         Ok(())
     }
 
+    /// Get a shared reference to the node's encoded pointer to the next leaf
+    /// node in symmetric tree order.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `_layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_next_leaf_node_ptr(
         &self,
         _layout: &InodeIndexTreeLayout,
@@ -821,6 +1028,14 @@ impl InodeIndexTreeLeafNode {
         .map_err(|_| nvfs_err_internal!())
     }
 
+    /// Get a `mut` reference to the node's encoded pointer to the next leaf
+    /// node in symmetric tree order.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `_layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_next_leaf_node_ptr_mut(
         &mut self,
         _layout: &InodeIndexTreeLayout,
@@ -833,6 +1048,18 @@ impl InodeIndexTreeLeafNode {
         .map_err(|_| nvfs_err_internal!())
     }
 
+    /// Get a shared reference to the node's encoded sequence of the inode
+    /// entries' associated [`EncodedExtentPtr`]s.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_leaf_node_entries`] entries, not only the
+    /// allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_entries_extent_ptrs(&self, layout: &InodeIndexTreeLayout) -> &[u8] {
         let encoded_entries_extent_ptrs_begin = EncodedBlockPtr::ENCODED_SIZE as usize;
         let encoded_entries_extent_ptrs_end =
@@ -840,6 +1067,18 @@ impl InodeIndexTreeLeafNode {
         &self.encoded_node[encoded_entries_extent_ptrs_begin..encoded_entries_extent_ptrs_end]
     }
 
+    /// Get a `mut` reference to the node's encoded sequence of the inode
+    /// entries' associated [`EncodedExtentPtr`]s.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_leaf_node_entries`] entries, not only the
+    /// allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_entries_extent_ptrs_mut(&mut self, layout: &InodeIndexTreeLayout) -> &mut [u8] {
         let encoded_entries_extent_ptrs_begin = EncodedBlockPtr::ENCODED_SIZE as usize;
         let encoded_entries_extent_ptrs_end =
@@ -847,6 +1086,18 @@ impl InodeIndexTreeLeafNode {
         &mut self.encoded_node[encoded_entries_extent_ptrs_begin..encoded_entries_extent_ptrs_end]
     }
 
+    /// Get a shared reference to the node's encoded sequence of the inode
+    /// entries' associated inode numbers.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_leaf_node_entries`] entries, not only the
+    /// allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_keys(&self, layout: &InodeIndexTreeLayout) -> &[u8] {
         let encoded_keys_begin = EncodedBlockPtr::ENCODED_SIZE as usize
             + layout.max_leaf_node_entries * EncodedExtentPtr::ENCODED_SIZE as usize;
@@ -855,6 +1106,18 @@ impl InodeIndexTreeLeafNode {
         &self.encoded_node[encoded_keys_begin..encoded_keys_end]
     }
 
+    /// Get a `mut` reference to the node's encoded sequence of the inode
+    /// entries' associated inode numbers.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_leaf_node_entries`] entries, not only the
+    /// allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_keys_mut(&mut self, layout: &InodeIndexTreeLayout) -> &mut [u8] {
         let encoded_keys_begin = EncodedBlockPtr::ENCODED_SIZE as usize
             + layout.max_leaf_node_entries * EncodedExtentPtr::ENCODED_SIZE as usize;
@@ -863,11 +1126,25 @@ impl InodeIndexTreeLeafNode {
         &mut self.encoded_node[encoded_keys_begin..encoded_keys_end]
     }
 
+    /// Get a shared reference to the node's encoded tree level.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_node_level(&self, layout: &InodeIndexTreeLayout) -> Result<&[u8; mem::size_of::<u32>()], NvFsError> {
         <&[u8; mem::size_of::<u32>()]>::try_from(&self.encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..])
             .map_err(|_| nvfs_err_internal!())
     }
 
+    /// Get a `mut` reference to the node's encoded tree level.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_node_level_mut(
         &mut self,
         layout: &InodeIndexTreeLayout,
@@ -878,6 +1155,15 @@ impl InodeIndexTreeLeafNode {
         .map_err(|_| nvfs_err_internal!())
     }
 
+    /// Get a shared reference to an inode entry's associated
+    /// [`EncodedExtentPtr`].
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index` - Index of the entry.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_entry_extent_ptr(
         &self,
         index: usize,
@@ -893,6 +1179,15 @@ impl InodeIndexTreeLeafNode {
             .map_err(|_| nvfs_err_internal!())
     }
 
+    /// Get a `mut` reference to an inode entry's associated
+    /// [`EncodedExtentPtr`].
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index` - Index of the entry.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_entry_extent_ptr_mut(
         &mut self,
         index: usize,
@@ -922,6 +1217,21 @@ struct InodeIndexTreeInternalNode {
 }
 
 impl InodeIndexTreeInternalNode {
+    /// Initialize an empty node to become the root.
+    ///
+    /// In order to be able to handle node splitting failures gracefully, the
+    /// root node initialization is a two-step process: the new root node is
+    /// first allocated and initialized via `new_empty_root()`, and later,
+    /// once the splitting has succeeded, populated via infallible
+    /// [`init_empty_root()`](Self::init_empty_root). Note that the latter would
+    /// fail only upon encountering an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `root_node_level` - Level of the new root node in the tree. Counted
+    ///   zero-based from the leaves.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn new_empty_root(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         root_node_level: u32,
@@ -954,6 +1264,24 @@ impl InodeIndexTreeInternalNode {
         Ok(n)
     }
 
+    /// Populate a root node created by
+    /// [`new_empty_root()`](Self::new_empty_root).
+    ///
+    /// Second half of the root node initialization to be run after the node
+    /// splitting.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `left_child_ptr` - Location of the left child node, i.e. the left
+    ///   sibling obtained from the node splitting.
+    /// * `right_child_ptr` - Location of the left child node, i.e. the left
+    ///   sibling obtained from the node splitting.
+    /// * `separator_key` - The separator key separating the left and right
+    ///   child nodes. All keys stored in the left child must compare as less,
+    ///   all in the right child as greater or equal.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn init_empty_root(
         &mut self,
         left_child_ptr: EncodedBlockPtr,
@@ -982,6 +1310,14 @@ impl InodeIndexTreeInternalNode {
         Ok(())
     }
 
+    /// Decode a [`InodeIndexTreeInternalNode`] from a buffer.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `encoded_node` - Buffer containing the encoded node. Its length must
+    ///   match [`InodeIndexTreeLayout::encoded_node_len()`].
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         encoded_node: Vec<u8>,
@@ -1058,11 +1394,34 @@ impl InodeIndexTreeInternalNode {
         Ok(n)
     }
 
+    /// Get the node's level in the tree.
+    ///
+    /// The node level is counted zero-based from the leaves.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn node_level(&self, layout: &InodeIndexTreeLayout) -> Result<u32, NvFsError> {
         // Encoded node levels are 1-based.
         Ok(u32::from_le_bytes(*self.encoded_node_level(layout)?) - 1)
     }
 
+    /// Lookup a child by inode number.
+    ///
+    /// Lookup the index of the child to follow further downwards for inode
+    /// number `key`.
+    ///
+    /// Returns the index of the child forming the root of the descendant
+    /// subtree `key` is (or is to be) stored under.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `key` - The inode number to lookup.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn lookup_child(&self, key: InodeIndexKeyType, layout: &InodeIndexTreeLayout) -> Result<usize, NvFsError> {
         Ok(match lookup_key(key, self.encoded_keys(layout), self.entries)? {
             Ok(eq_key_index) => eq_key_index + 1,
@@ -1070,12 +1429,32 @@ impl InodeIndexTreeInternalNode {
         })
     }
 
+    /// Get the location of a specified child node on storage.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `child_index` - The child's index.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn entry_child_ptr(&self, child_index: usize, layout: &InodeIndexTreeLayout) -> Result<EncodedBlockPtr, NvFsError> {
         Ok(EncodedBlockPtr::from(
             *self.encoded_entry_child_ptr(child_index, layout)?,
         ))
     }
 
+    /// Get a specified separator key.
+    ///
+    /// Get the separator key between the child identified by `left_child_index`
+    /// and its right sibling.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `left_child_index` - Index of the left child separated by the key to
+    ///   retrieve.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn get_separator_key(
         &self,
         left_child_index: usize,
@@ -1090,6 +1469,19 @@ impl InodeIndexTreeInternalNode {
         .map_err(|_| nvfs_err_internal!())?)
     }
 
+    /// Update a specified separator key.
+    ///
+    /// Get the separator key between the child identified by `left_child_index`
+    /// and its right sibling to `separator_key`.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `left_child_index` - Index of the left child separated by the key to
+    ///   update.
+    /// * `separator_key` - The new separator key value.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn update_separator_key(
         &mut self,
         left_child_index: usize,
@@ -1106,6 +1498,22 @@ impl InodeIndexTreeInternalNode {
         Ok(())
     }
 
+    /// Link a new child.
+    ///
+    /// Insert a child pointer to the right of the child node identified by
+    /// `insertion_pos_left_child_index` and separated from it by
+    /// `separator_key`.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `insertion_pos_left_child_index` - Index of the child to become the
+    ///   left sibling of the to be inserted one.
+    /// * `separator_key` - The separator key between the to be inserted child
+    ///   and its left sibling.
+    /// * `right_child_ptr` - Pointer to the child to insert.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn insert(
         &mut self,
         insertion_pos_left_child_index: usize,
@@ -1152,6 +1560,17 @@ impl InodeIndexTreeInternalNode {
         Ok(())
     }
 
+    /// Remove a child entry.
+    ///
+    /// Remove the child identified by `removal_pos_right_child_index` and the
+    /// separator key separating it from its left sibling.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `removal_pos_right_child_index` - The child entry to remove.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn remove(&mut self, removal_pos_right_child_index: usize, layout: &InodeIndexTreeLayout) -> Result<(), NvFsError> {
         if removal_pos_right_child_index == 0 {
             return Err(nvfs_err_internal!());
@@ -1184,6 +1603,25 @@ impl InodeIndexTreeInternalNode {
         Ok(())
     }
 
+    /// Move entries from the right sibling node into `self`.
+    ///
+    /// Move `count` entries from the beginning of `right` to the end of `self`.
+    /// Return the two siblings' new separator key to be stored at their parent.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The left node to move entries into. The number of existing
+    ///   entries plus the `count` newly added  ones must remain within the
+    ///   bounds of the [`InodeIndexTreeLayout::max_internal_node_entries`].
+    /// * `right` - The right node to move entries from. The number of entries
+    ///   after removing `count` ones must remain within the bounds of the
+    ///   [`InodeIndexTreeLayout::min_internal_node_entries`].
+    /// * `count` - The number of entries to move.
+    /// * `parent_separator_key` - The two siblings separator key stored at at
+    ///   the parent before the transfer.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn rotate_left(
         &mut self,
         right: &mut Self,
@@ -1258,6 +1696,25 @@ impl InodeIndexTreeInternalNode {
         Ok(new_parent_separator_key)
     }
 
+    /// Move entries from `self` into the right sibling node.
+    ///
+    /// Move `count` entries from the end of `self` to the beginning of `right`.
+    /// Return the two siblings' new separator key to be stored at their parent.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The left node to move entries from. The number of entries
+    ///   after removing `count` ones must remain within the bounds of the
+    ///   [`InodeIndexTreeLayout::min_internal_node_entries`].
+    /// * `right` - The right node to move entries into. The number of existing
+    ///   entries plus the `count` newly added  ones must remain within the
+    ///   bounds of the [`InodeIndexTreeLayout::max_internal_node_entries`].
+    /// * `count` - The number of entries to move.
+    /// * `parent_separator_key` - The two siblings separator key stored at at
+    ///   the parent before the transfer.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn rotate_right(
         &mut self,
         right: &mut Self,
@@ -1334,6 +1791,21 @@ impl InodeIndexTreeInternalNode {
         Ok(new_parent_separator_key)
     }
 
+    /// Split a full node.
+    ///
+    /// Returns a pair of the new sibling node split off at the right and the
+    /// two siblings' separator key to be stored at their parent on success.
+    ///
+    /// `self` will remain unmodified upon failure, except for possibly upon
+    /// encountering internal logic errors.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The node to split. Will become the left sibling after the
+    ///   split.
+    /// * `new_node_allocation_blocks_begin` - Location on storage allocated for
+    ///   the the new sibling node to get split off.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn split(
         &mut self,
         new_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -1407,6 +1879,23 @@ impl InodeIndexTreeInternalNode {
         Ok((new_node, parent_separator_key))
     }
 
+    /// Merge two sibling nodes.
+    ///
+    /// Merge `right` into `self`. The two nodes' combined number of entries
+    /// must remain within the bounds of the
+    /// [`InodeIndexTreeLayout::max_internal_node_entries`]. Note that the
+    /// `parent_separator_key` gets moved into the merged node, so its number of
+    /// entries will be one more than the sum of the entries from the two
+    /// merged siblings.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `self` - The left sibling node to merge into.
+    /// * `parent_separator_key` - The two siblings separator key stored at at
+    ///   the parent before the merge.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn merge(
         &mut self,
         right: &Self,
@@ -1445,6 +1934,18 @@ impl InodeIndexTreeInternalNode {
         Ok(())
     }
 
+    /// Get a shared reference to the node's encoded sequence of child node
+    /// pointers.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_internal_node_entries`] plus one entries,
+    /// not only the allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_child_ptrs(&self, layout: &InodeIndexTreeLayout) -> &[u8] {
         let encoded_child_ptrs_begin = 0;
         let encoded_child_ptrs_end =
@@ -1452,6 +1953,18 @@ impl InodeIndexTreeInternalNode {
         &self.encoded_node[encoded_child_ptrs_begin..encoded_child_ptrs_end]
     }
 
+    /// Get a `mut` reference to the node's encoded sequence of child node
+    /// pointers.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_internal_node_entries`] plus one entries,
+    /// not only the allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_child_ptrs_mut(&mut self, layout: &InodeIndexTreeLayout) -> &mut [u8] {
         let encoded_child_ptrs_begin = 0;
         let encoded_child_ptrs_end =
@@ -1459,6 +1972,18 @@ impl InodeIndexTreeInternalNode {
         &mut self.encoded_node[encoded_child_ptrs_begin..encoded_child_ptrs_end]
     }
 
+    /// Get a shared reference to the node's encoded sequence of entry separator
+    /// keys.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_internal_node_entries`] entries, not only
+    /// the allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_keys(&self, layout: &InodeIndexTreeLayout) -> &[u8] {
         let encoded_keys_begin = (layout.max_leaf_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
         let encoded_keys_end =
@@ -1466,6 +1991,18 @@ impl InodeIndexTreeInternalNode {
         &self.encoded_node[encoded_keys_begin..encoded_keys_end]
     }
 
+    /// Get a `mut` reference to the node's encoded sequence of entry separator
+    /// keys.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_internal_node_entries`] entries, not only
+    /// the allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_keys_mut(&mut self, layout: &InodeIndexTreeLayout) -> &mut [u8] {
         let encoded_keys_begin = (layout.max_leaf_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
         let encoded_keys_end =
@@ -1473,11 +2010,25 @@ impl InodeIndexTreeInternalNode {
         &mut self.encoded_node[encoded_keys_begin..encoded_keys_end]
     }
 
+    /// Get a shared reference to the node's encoded tree level.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_node_level(&self, layout: &InodeIndexTreeLayout) -> Result<&[u8; mem::size_of::<u32>()], NvFsError> {
         <&[u8; mem::size_of::<u32>()]>::try_from(&self.encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..])
             .map_err(|_| nvfs_err_internal!())
     }
 
+    /// Get a `mut` reference to the node's encoded tree level.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_node_level_mut(
         &mut self,
         layout: &InodeIndexTreeLayout,
@@ -1488,11 +2039,20 @@ impl InodeIndexTreeInternalNode {
         .map_err(|_| nvfs_err_internal!())
     }
 
+    /// Get a shared reference to a child entry's associated
+    /// [`EncodedBlockPtr`].
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `child_index` - Index of the entry.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_entry_child_ptr(
         &self,
         child_index: usize,
         layout: &InodeIndexTreeLayout,
-    ) -> Result<&[u8; EncodedExtentPtr::ENCODED_SIZE as usize], NvFsError> {
+    ) -> Result<&[u8; EncodedBlockPtr::ENCODED_SIZE as usize], NvFsError> {
         let entry_begin = child_index * EncodedBlockPtr::ENCODED_SIZE as usize;
         let entry_end = entry_begin + EncodedBlockPtr::ENCODED_SIZE as usize;
         let encoded_child_ptrs = self.encoded_child_ptrs(layout);
@@ -1504,7 +2064,8 @@ impl InodeIndexTreeInternalNode {
     }
 }
 
-/// Arbitrary node in the inode index B+-tree, i.e. either a leaf or an internal one.
+/// Arbitrary node in the inode index B+-tree, i.e. either a leaf or an internal
+/// one.
 enum InodeIndexTreeNode {
     /// Internal node.
     Internal(InodeIndexTreeInternalNode),
@@ -1513,6 +2074,15 @@ enum InodeIndexTreeNode {
 }
 
 impl InodeIndexTreeNode {
+    /// Instantiate a [`InodeIndexTreeNode`] from its encoding.
+    ///
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `encoded_node` - Buffer containing the encoded node. Its length must
+    ///   match [`InodeIndexTreeLayout::encoded_node_len()`].
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         encoded_node: Vec<u8>,
@@ -1541,6 +2111,7 @@ impl InodeIndexTreeNode {
         }
     }
 
+    /// Get the node's location on storage.
     fn node_allocation_blocks_begin(&self) -> layout::PhysicalAllocBlockIndex {
         match self {
             Self::Internal(internal_node) => internal_node.node_allocation_blocks_begin,
@@ -1548,6 +2119,13 @@ impl InodeIndexTreeNode {
         }
     }
 
+    /// Clone into a preallocated buffer.
+    ///
+    /// # Arguments:
+    ///
+    /// * `preallocated_encoded_node` - Buffer to receive the cloned node's
+    ///   encoding. Its length must match
+    ///   [`InodeIndexTreeLayout::encoded_node_len()`].
     fn clone_with_preallocated_buf(&self, mut preallocated_encoded_node: Vec<u8>) -> Self {
         match self {
             Self::Internal(InodeIndexTreeInternalNode {
@@ -1586,8 +2164,18 @@ struct InodeIndexTreeNodeCacheEntry {
 
 /// Inode index B+-tree node cache.
 pub struct InodeIndexTreeNodeCache {
+    /// The cached nodes.
+    ///
+    /// A fixed capacity of
+    /// [`cached_nodes_capacity`](Self::cached_nodes_capacity) will get reserved
+    /// once upon first use. Failure to allocate is non-fatal, but results in no
+    /// nodes getting cached.
     cached_nodes: Vec<InodeIndexTreeNodeCacheEntry>,
+    /// Fixed capacity to reserve for [`cached_nodes`](Self::cached_nodes).
     cached_nodes_capacity: usize,
+    /// Height of the associated index tree.
+    ///
+    /// Only the tree's topmost levels' nodes are eligible for caching.
     index_tree_levels: u32,
 }
 
@@ -1602,10 +2190,21 @@ impl InodeIndexTreeNodeCache {
         }
     }
 
+    /// Clear the cache.
     fn clear(&mut self) {
         self.cached_nodes = Vec::new();
     }
 
+    /// Conditionally prune cache entries according to a given predicate
+    /// callback.
+    ///
+    /// Invoke `cond` with the respective cached node's location on storage and
+    /// its tree level each, and remove the node from the cache whenever
+    /// `true` is getting returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `cond` - The predicate.
     fn prune_cond<C: FnMut(layout::PhysicalAllocBlockIndex, u32) -> bool>(&mut self, mut cond: C) {
         let mut i = 0;
         while i < self.cached_nodes.len() {
@@ -1618,12 +2217,22 @@ impl InodeIndexTreeNodeCache {
         }
     }
 
+    /// Prune a node at a specified storage location.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
     fn prune_node_at(&mut self, node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex) {
         if let Ok(entry_index) = self._lookup_entry_index(node_allocation_blocks_begin) {
             self.cached_nodes.remove(entry_index.index);
         }
     }
 
+    /// Reconfigure the cache to account for a change of the tree's dimensions.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index_tree_levels` - The new height of the tree.
     fn reconfigure(&mut self, index_tree_levels: u32) {
         if self.index_tree_levels == index_tree_levels {
             return;
@@ -1637,6 +2246,17 @@ impl InodeIndexTreeNodeCache {
         self.index_tree_levels = index_tree_levels;
     }
 
+    /// Transfer cached entries from another [`InodeIndexTreeNodeCache`] into
+    /// `self`.
+    ///
+    /// Used for transferring updated nodes cached on behalf of a transaction
+    /// into the main [`InodeIndex::tree_nodes_cache`] at transaction
+    /// commit.
+    ///
+    /// # Arguments:
+    ///
+    /// * `other` - The [`InodeIndexTreeNodeCache`] to transfer all cached node
+    ///   entries from.
     fn insert_entries_from(&mut self, other: &mut Self) {
         if self.index_tree_levels != other.index_tree_levels {
             return;
@@ -1676,6 +2296,17 @@ impl InodeIndexTreeNodeCache {
         other.cached_nodes = Vec::new();
     }
 
+    /// Attempt to insert a node into the cache.
+    ///
+    /// If the node cannot be cached, its returned back as
+    /// [`InodeIndexTreeNodeCacheInsertionResult::Uncacheable`], otherwise the
+    /// entry's [index](InodeIndexTreeNodeCacheIndex) is returned, wrapped
+    /// in [`InodeIndexTreeNodeCacheInsertionResult::Inserted`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_level` - The node's level in the tree.
+    /// * `node` - The node to cache.
     fn insert(&mut self, node_level: u32, node: InodeIndexTreeNode) -> InodeIndexTreeNodeCacheInsertionResult {
         match self.lookup_entry_index(node.node_allocation_blocks_begin(), Some(node_level)) {
             None => InodeIndexTreeNodeCacheInsertionResult::Uncacheable { node },
@@ -1696,10 +2327,29 @@ impl InodeIndexTreeNodeCache {
         }
     }
 
+    /// Remove an entry from the cache.
+    ///
+    /// Remove the entry identified by `index` from the cache and return its
+    /// associated node.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index` - The entry's index.
     fn remove(&mut self, index: InodeIndexTreeNodeCacheIndex) -> InodeIndexTreeNode {
         self.cached_nodes.remove(index.index).node
     }
 
+    /// Lookup an existing entry's [index](InodeIndexTreeNodeCacheIndex), if
+    /// any, by the node's location on storage and (optional) tree level.
+    ///
+    /// If a matching entries exists, return its index wrapped in a `Some`, or
+    /// `None` otherwise. If known, the node's `node_level` may be passed,
+    /// in order to enable early returns for nodes ineligible for caching.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `node_level` - The node's level in the tree.
     fn lookup(
         &self,
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -1708,14 +2358,28 @@ impl InodeIndexTreeNodeCache {
         self.lookup_entry_index(node_allocation_blocks_begin, node_level)?.ok()
     }
 
+    /// Access a cache entry.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index` - The entry's index.
     fn get_entry_node(&self, index: InodeIndexTreeNodeCacheIndex) -> &InodeIndexTreeNode {
         &self.cached_nodes[index.index].node
     }
 
+    /// Get a cache entry node's tree level.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index` - The entry's index.
     fn get_entry_node_level(&self, index: InodeIndexTreeNodeCacheIndex) -> u32 {
         self.cached_nodes[index.index].node_level
     }
 
+    /// Try to reserve memory for [`cached_nodes`](Self::cached_nodes).
+    ///
+    /// Memory is reserved only once upon first use. Return `true` if
+    /// memory backing [`cached_nodes`](Self::cached_nodes) is reserved.
     fn try_reserve_cached_nodes(&mut self) -> bool {
         if self.cached_nodes.capacity() != 0 {
             debug_assert!(self.cached_nodes.capacity() >= self.cached_nodes_capacity);
@@ -1726,6 +2390,19 @@ impl InodeIndexTreeNodeCache {
         }
     }
 
+    /// Lookup an entry [index](InodeIndexTreeNodeCacheIndex) by the node's
+    /// location on storage and (optional) tree level.
+    ///
+    /// If `node_level` is specified and a node at that level is not eligible
+    /// for caching, return `None`. Otherwise return a `Some`, carrying the
+    /// matching entry's index wrapped in an `Ok`, if any, or the insertion
+    /// position within [`cached_nodes`](Self::cached_nodes) in an `Err`
+    /// otherwise.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `node_level` - The node's level in the tree.
     fn lookup_entry_index(
         &self,
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -1741,6 +2418,16 @@ impl InodeIndexTreeNodeCache {
         Some(self._lookup_entry_index(node_allocation_blocks_begin))
     }
 
+    /// Lookup an entry [index](InodeIndexTreeNodeCacheIndex) by the node's
+    /// location on storage.
+    ///
+    /// Return the matching entry's index wrapped in an `Ok`, if any, or the
+    /// insertion position within [`cached_nodes`](Self::cached_nodes) in an
+    /// `Err` otherwise.
+    ///
+    /// # Arguments:
+    ///
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
     fn _lookup_entry_index(
         &self,
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -1776,27 +2463,66 @@ impl convert::From<InodeIndexTreeNodeCacheIndex> for usize {
     }
 }
 
-/// Result of inserting a node into the [`InodeIndexTreeNodeCache`].
+/// Result of [inserting](InodeIndexTreeNodeCache::insert) a node into the
+/// [`InodeIndexTreeNodeCache`].
 enum InodeIndexTreeNodeCacheInsertionResult {
     /// The node has been inserted.
     Inserted { index: InodeIndexTreeNodeCacheIndex },
-    /// The node does not qualify for caching, or a memory allocation failure has been encountered
-    /// when attempting to insert it.
+    /// The node does not qualify for caching, or a memory allocation failure
+    /// has been encountered when attempting to insert it.
     Uncacheable { node: InodeIndexTreeNode },
 }
 
-/// The inode index.
+/// The filesystem's inode index.
 pub struct InodeIndex<ST: sync_types::SyncTypes> {
+    /// The filesystem's [`InodeIndexTreeLayout`].
     layout: InodeIndexTreeLayout,
+    /// The current preauthentication CCA protection digest over the inode index
+    /// entry leaf node.
+    ///
+    /// Stored in
+    /// [`MutableImageHeader::inode_index_entry_leaf_node_preauth_cca_protection_digest`].
     entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+    /// The current inode index tree height.
     index_tree_levels: u32,
+    /// Inode index tree nodes cache.
     tree_nodes_cache: ST::RwLock<InodeIndexTreeNodeCache>,
+    /// The current root node's location storage.
     root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
+    /// [`EncryptedBlockEncryptionInstance`](encryption_entities::EncryptedBlockEncryptionInstance)
+    /// for encrypting inode index tree nodes.
     tree_node_encryption_instance: encryption_entities::EncryptedBlockEncryptionInstance,
+    /// [`EncryptedBlockDecryptionInstance`](encryption_entities::EncryptedBlockDecryptionInstance)
+    /// for decrypting inode index tree nodes.
     tree_node_decryption_instance: encryption_entities::EncryptedBlockDecryptionInstance,
 }
 
 impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
+    /// Initialize at filesystem creation ("mkfs") time.
+    ///
+    /// Encode and encrypt an initial inode index tree leaf node, return it for
+    /// write-out from the caller as well as an initial [`InodeIndex`]
+    /// instance.
+    ///
+    /// The returned buffer containing the encrypted entry leaf node will have a
+    /// size matching that given by
+    /// [`ImageLayout::index_tree_node_allocation_blocks_log2`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_leaf_node_allocation_blocks_begin` - The entry leaf node's
+    ///   storage location.
+    /// * `auth_tree_inode_entry_extent_ptr` - The [`EncodedExtentPtr`] to store
+    ///   in the [authentication tree inode's](SpecialInode::AuthTree) entry.
+    /// * `alloc_bitmap_inot_entry_extent_ptr` - The [`EncodedExtentPtr`] to
+    ///   store in the [allocation bitmap inode's](SpecialInode::AllocBitmap)
+    ///   entry.
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating the IV and filling padding, if any.
     pub fn initialize(
         entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         auth_tree_inode_entry_extent_ptr: extent_ptr::EncodedExtentPtr,
@@ -1908,10 +2634,24 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
         ))
     }
 
+    /// Get the current entry leaf node's preauthentication CCA protection
+    /// digest.
     pub fn get_entry_leaf_node_preauth_cca_protection_digest(&self) -> &[u8] {
         &self.entry_leaf_node_preauth_cca_protection_digest
     }
 
+    /// Apply staged [`TransactionInodeIndexUpdates`] to the
+    /// [`InodeIndex`'](InodeIndex) in-memory representation.
+    ///
+    /// Apply the inode index updates staged at `updates` to `self`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `updates` - The inode index updates to apply.
+    /// * `is_range_modified` - Predicate determining whether a given storage
+    ///   range's contents are modified by the [`Transaction`] associated with
+    ///   `updates`. Used for pruning superseded index tree nodes from the
+    ///   cache.
     pub fn apply_updates<IM: FnMut(&layout::PhysicalAllocBlockRange) -> bool>(
         &mut self,
         updates: &mut TransactionInodeIndexUpdates,
@@ -1951,6 +2691,7 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
             .insert_entries_from(&mut updates.updated_tree_nodes_cache);
     }
 
+    /// Clear all caches.
     pub fn clear_caches(&self) {
         self.tree_nodes_cache.write().clear();
     }
@@ -1985,24 +2726,25 @@ struct TransactionInodeIndexUpdatesStagedTreeNode {
     node: InodeIndexTreeNode,
 }
 
-/// State of a [`Transaction`](transaction::Transaction) specific to inode index updates.
+/// State of a [`Transaction`] specific to inode index updates.
 pub struct TransactionInodeIndexUpdates {
     /// Staging area for inode index node updates.
     ///
-    /// The [`Transaction`](transaction::Transaction) view of the inode index must be kept
-    /// consistent at all times, even in case of e.g. failure to encrypt some node after having
-    /// modified it.
+    /// The [`Transaction`] view of the inode index must be kept consistent at
+    /// all times, even in case of e.g. failure to encrypt some node after
+    /// having modified it.
     ///
-    /// Nodes staged in clear in the `tree_nodes_staged_updates` take precedence over any
-    /// (encrypted) data modifications recorded at the
-    /// [`Transaction::auth_tree_data_blocks_update_states`](transaction::Transaction::auth_tree_data_blocks_update_states)
-    /// for their resp. storage locations, which in turn take precedence over any data stored at
-    /// those locations, i.e.  from before the [`Transaction`](transaction::Transaction) had been
-    /// started.
+    /// Nodes staged in clear in the `tree_nodes_staged_updates` take precedence
+    /// over any (encrypted) data modifications recorded at the
+    /// [`Transaction::auth_tree_data_blocks_update_states`] for their resp.
+    /// storage locations, which in turn take precedence over any data
+    /// stored at those locations, i.e.  from before the [`Transaction`] had
+    /// been started.
     tree_nodes_staged_updates: [Option<TransactionInodeIndexUpdatesStagedTreeNode>; 5],
     /// Cache of modified nodes removed from
-    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) and succesfully encrypted to
-    /// [`Transaction::auth_tree_data_blocks_update_states`](transaction::Transaction::auth_tree_data_blocks_update_states).
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) and
+    /// succesfully encrypted to
+    /// [`Transaction::auth_tree_data_blocks_update_states`].
     updated_tree_nodes_cache: InodeIndexTreeNodeCache,
     /// Locations of removed nodes.
     removed_nodes: Vec<layout::PhysicalAllocBlockIndex>,
@@ -2010,16 +2752,24 @@ pub struct TransactionInodeIndexUpdates {
     index_tree_levels: u32,
     /// Location of th updated inode index B+-tree's root node.
     root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-    /// Whether or not the inode index inode pointing to the root node still needs to get updated.
+    /// Whether or not the inode index inode pointing to the root node still
+    /// needs to get updated.
     root_node_inode_needs_update: bool,
-    /// Updated preauthentication CCA protection digest of the inode index entry leaf node.
+    /// Updated preauthentication CCA protection digest of the inode index entry
+    /// leaf node.
     ///
-    /// Empty if the inode index entry leaf node has not changed or the update node has not been
-    /// removed from [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) yet.
+    /// Empty if the inode index entry leaf node has not changed or the update
+    /// node has not been removed from
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) yet.
     entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
 }
 
 impl TransactionInodeIndexUpdates {
+    /// Create a new [`TransactionInodeIndexUpdates`] instance.
+    ///
+    /// # Arguments:
+    ///
+    /// * `inode_index` - The filesystem's [`InodeIndex`].
     pub fn new<ST: sync_types::SyncTypes>(inode_index: &InodeIndex<ST>) -> Self {
         let index_tree_levels = inode_index.index_tree_levels;
         Self {
@@ -2033,10 +2783,37 @@ impl TransactionInodeIndexUpdates {
         }
     }
 
+    /// Apply all node update entries from
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) to
+    /// the [`Transaction::auth_tree_data_blocks_update_states`].
+    ///
+    /// Encrypt the nodes staged for update at the
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) and stage
+    /// the respective result as a "regular" data update at
+    /// `transaction_updates_states`.
+    ///
+    /// The [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) slots
+    /// are successively reset to `None` each once done.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction_allocs` - The
+    ///   [`Transaction::allocs`](transaction::Transaction::allocs).
+    /// * `transaction_updates_states` - The
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating the IVs and filling padding, if any.
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `fs_sync_state_inode_index` - The [filesystem instance's inode
+    ///   index](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index).
+    /// * `fs_sync_state_keys_cache` - The [filesystem instance's key
+    ///   cache](crate::fs::cocoonfs::fs::CocoonFsSyncState::keys_cache).
     #[allow(clippy::too_many_arguments)]
     pub fn apply_all_tree_nodes_staged_updates<ST: sync_types::SyncTypes>(
         &mut self,
-        transaction_allocs: &mut transaction::TransactionAllocations,
+        transaction_allocs: &transaction::TransactionAllocations,
         transaction_updates_states: &mut transaction::AuthTreeDataBlocksUpdateStates,
         rng: &mut dyn rng::RngCoreDispatchable,
         fs_config: &CocoonFsConfig,
@@ -2060,20 +2837,59 @@ impl TransactionInodeIndexUpdates {
         Ok(())
     }
 
+    /// Get the current entry leaf node's preauthentication CCA protection
+    /// digest.
+    ///
+    /// If the entry leaf node has been modified, and the staged update
+    /// applied via
+    /// [`apply_tree_node_staged_update()`](Self::apply_tree_node_staged_update)
+    /// already, return its updated preauthentication CCA protection digest
+    /// wrapped in a `Some`, or `None` otherwise.
     pub fn get_updated_entry_leaf_node_preauth_cca_protection_digest(&self) -> Option<&[u8]> {
         (!self.entry_leaf_node_preauth_cca_protection_digest.is_empty())
             .then_some(&self.entry_leaf_node_preauth_cca_protection_digest)
     }
 
+    /// Clear all caches.
     pub fn clear_caches(&mut self) {
         self.updated_tree_nodes_cache.clear();
     }
 
+    /// Apply one node update entry from
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) to
+    /// the [`Transaction::auth_tree_data_blocks_update_states`].
+    ///
+    /// Encrypt the node staged for update at the
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) slot
+    /// identified by the `staged_update_slot` index and stage the result as a
+    /// "regular" data update at `transaction_updates_states`.
+    ///
+    /// The [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) slot
+    /// itself is left unmodified.
+    ///
+    /// # Arguments:
+    ///
+    /// * `staged_update_slot` - Index of the entry in
+    ///   [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) to
+    ///   apply.
+    /// * `transaction_allocs` - The
+    ///   [`Transaction::allocs`](transaction::Transaction::allocs).
+    /// * `transaction_updates_states` - The
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating the IV and filling padding, if any.
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `fs_sync_state_inode_index` - The [filesystem instance's inode
+    ///   index](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index).
+    /// * `fs_sync_state_keys_cache` - The [filesystem instance's key
+    ///   cache](crate::fs::cocoonfs::fs::CocoonFsSyncState::keys_cache).
     #[allow(clippy::too_many_arguments)]
     fn apply_tree_node_staged_update<ST: sync_types::SyncTypes>(
         &mut self,
         staged_update_slot: usize,
-        transaction_allocs: &mut transaction::TransactionAllocations,
+        transaction_allocs: &transaction::TransactionAllocations,
         transaction_updates_states: &mut transaction::AuthTreeDataBlocksUpdateStates,
         rng: &mut dyn rng::RngCoreDispatchable,
         fs_config: &CocoonFsConfig,
@@ -2181,12 +2997,40 @@ impl TransactionInodeIndexUpdates {
         Ok(())
     }
 
+    /// Reserve a slot at
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates).
+    ///
+    /// Reserve a slot at
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates),
+    /// possibly [applying](Self::apply_tree_node_staged_update) and evicting an
+    /// already used one in the course if needed.
+    ///
+    /// # Arguments:
+    ///
+    /// * `tree_node_allocation_blocks_begin` - Location on storage of the node
+    ///   to reserve a slot for.
+    /// * `preserved_slots_set` - Set of nodes not to evict from
+    ///   [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) for
+    ///   freeing up a slot, as identified by their respective locations on
+    ///   storage. Entries of value `None` are ignored.
+    /// * `transaction_allocs` - The [`Transaction::allocs`].
+    /// * `transaction_updates_states` - The
+    ///   [`Transaction::auth_tree_data_blocks_update_states`].
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating the IV and filling padding, if any.
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `fs_sync_state_inode_index` - The [filesystem instance's inode
+    ///   index](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index).
+    /// * `fs_sync_state_keys_cache` - The [filesystem instance's key
+    ///   cache](crate::fs::cocoonfs::fs::CocoonFsSyncState::keys_cache).
     #[allow(clippy::too_many_arguments)]
     fn reserve_tree_node_update_staging_slot<ST: sync_types::SyncTypes>(
         &mut self,
         tree_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         preserved_slots_set: &[Option<usize>],
-        transaction_allocs: &mut transaction::TransactionAllocations,
+        transaction_allocs: &transaction::TransactionAllocations,
         transaction_updates_states: &mut transaction::AuthTreeDataBlocksUpdateStates,
         rng: &mut dyn rng::RngCoreDispatchable,
         fs_config: &CocoonFsConfig,
@@ -2274,6 +3118,18 @@ impl TransactionInodeIndexUpdates {
         Ok(staged_update_slot)
     }
 
+    /// Get a shared reference to the node stored in a given
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) slot.
+    ///
+    /// Return a reference to the updated node stored in the
+    /// `tree_nodes_staged_updates` slot identified by `index`. The slot
+    /// must be occupied or an error of [`NvFsError::Internal`] will be
+    /// returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `tree_nodes_staged_updates` - The [`Self::tree_nodes_staged_updates`].
+    /// * `index` - The slot index.
     fn get_tree_nodes_staged_updates_slot(
         tree_nodes_staged_updates: &[Option<TransactionInodeIndexUpdatesStagedTreeNode>; 5],
         index: usize,
@@ -2283,6 +3139,18 @@ impl TransactionInodeIndexUpdates {
             .ok_or_else(|| nvfs_err_internal!())
     }
 
+    /// Get `mut` references to some given
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) slots.
+    ///
+    /// Return an array of `mut` references to the
+    /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) slots
+    /// identified by `indices`. The order of the returned array corresponds to
+    /// that of `indices`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `tree_nodes_staged_updates` - The [`Self::tree_nodes_staged_updates`].
+    /// * `indices` - The slots' indices. Must all be different.
     fn get_tree_nodes_staged_updates_slots_mut<const N: usize>(
         tree_nodes_staged_updates: &mut [Option<TransactionInodeIndexUpdatesStagedTreeNode>; 5],
         mut indices: [usize; N],
@@ -2320,6 +3188,20 @@ impl TransactionInodeIndexUpdates {
         Ok(result)
     }
 
+    /// Update the index' root node inode.
+    ///
+    /// Update the inode index root inode's entry in `entry_leaf_node` to
+    /// reference the root node stored at
+    /// `root_node_allocation_blocks_begin`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_leaf_node` - The entry leaf node to update.
+    /// * `root_node_allocation_blocks_begin` - Update storage location of the
+    ///   root node.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    /// * `index_tree_node_allocation_blocks_log2` - Verbatim copy of
+    ///   [`ImageLayout::index_tree_node_allocation_blocks_log2`].
     fn update_index_root_node_inode(
         entry_leaf_node: &mut InodeIndexTreeLeafNode,
         root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -2349,6 +3231,20 @@ impl TransactionInodeIndexUpdates {
     }
 }
 
+/// Compute the inode index entry leaf node's preauthentication CCA protection
+/// digest.
+///
+/// # Arguments:
+///
+/// * `dst` - The destination buffer. Its size must match the digest length
+///   produced by [`ImageLayout::preauth_cca_protection_hmac_hash_alg`].
+/// * `encrypted_node_data` - The encrypted entry leaf node data. The buffer's
+///   length must match the node size given by
+///   [`ImageLayout::index_tree_node_allocation_blocks_log2`].
+/// * `image_layout` - The filesystem's [`ImageLayout`].
+/// * `root_key` - The filesystem's root key.
+/// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+///   filesystem.
 fn entry_leaf_node_preautch_cca_hmac<'a, ST: sync_types::SyncTypes, SI: crypto::CryptoIoSlicesIter<'a>>(
     dst: &mut [u8],
     encrypted_node_data: SI,
@@ -2405,8 +3301,8 @@ fn entry_leaf_node_preautch_cca_hmac<'a, ST: sync_types::SyncTypes, SI: crypto::
     Ok(())
 }
 
-/// Reference to an inode index tree node, possibly at the state as last modified by some pending
-/// [`Transaction`](transaction::Transaction).
+/// Reference to an inode index tree node, possibly at the state as last
+/// modified by some pending [`Transaction`].
 enum InodeIndexTreeNodeRef<'a, ST: sync_types::SyncTypes> {
     /// Owned node data.
     Owned {
@@ -2418,12 +3314,14 @@ enum InodeIndexTreeNodeRef<'a, ST: sync_types::SyncTypes> {
         cache_guard: InodeIndexTreeNodeCacheGuard<'a, ST>,
         cache_entry_index: InodeIndexTreeNodeCacheIndex,
     },
-    /// Reference to an entry in [`TransactionInodeIndexUpdates::tree_nodes_staged_updates`].
+    /// Reference to an entry in
+    /// [`TransactionInodeIndexUpdates::tree_nodes_staged_updates`].
     TransactionStagedUpdatesNodeRef {
         transaction: Box<transaction::Transaction>,
         nodes_staged_updates_slot_index: usize,
     },
-    /// Reference to an entry in [`TransactionInodeIndexUpdates::updated_tree_nodes_cache`].
+    /// Reference to an entry in
+    /// [`TransactionInodeIndexUpdates::updated_tree_nodes_cache`].
     TransactionUpdatedNodesCacheEntryRef {
         transaction: Box<transaction::Transaction>,
         cache_entry_index: InodeIndexTreeNodeCacheIndex,
@@ -2431,6 +3329,7 @@ enum InodeIndexTreeNodeRef<'a, ST: sync_types::SyncTypes> {
 }
 
 impl<'a, ST: sync_types::SyncTypes> InodeIndexTreeNodeRef<'a, ST> {
+    /// Access the referenced tree node.
     fn get_node(&self) -> Result<&InodeIndexTreeNode, NvFsError> {
         match self {
             Self::Owned {
@@ -2458,6 +3357,10 @@ impl<'a, ST: sync_types::SyncTypes> InodeIndexTreeNodeRef<'a, ST> {
         }
     }
 
+    /// Obtain the [`Transaction`], if any, back.
+    ///
+    /// In case the reference is to some (modified) node owned by a
+    /// [`Transaction`], return that back.
     fn into_transaction(self) -> Option<Box<transaction::Transaction>> {
         match self {
             Self::Owned { .. } | Self::CacheEntryRef { .. } => None,
@@ -2467,8 +3370,8 @@ impl<'a, ST: sync_types::SyncTypes> InodeIndexTreeNodeRef<'a, ST> {
     }
 }
 
-/// Read, authenticate and decrypt an inode index B+-tree node, possibly at the state as last
-/// modified by some pending [`Transaction`](transaction::Transaction).
+/// Read, authenticate and decrypt an inode index B+-tree node, possibly at the
+/// state as last modified by some pending [`Transaction`].
 struct InodeIndexReadTreeNodeFuture<C: chip::NvChip> {
     fut_state: InodeIndexReadTreeNodeFutureState<C>,
     node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -2477,6 +3380,7 @@ struct InodeIndexReadTreeNodeFuture<C: chip::NvChip> {
     read_for_update: bool,
 }
 
+/// [`InodeIndexReadTreeNodeFuture`] state-machine state.
 enum InodeIndexReadTreeNodeFutureState<C: chip::NvChip> {
     Init {
         transaction: Option<Box<transaction::Transaction>>,
@@ -2499,6 +3403,32 @@ enum InodeIndexReadTreeNodeFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
+    /// Instantiate a new [`InodeIndexReadTreeNodeFuture`].
+    ///
+    /// If the node is to be read at the state as if some [`Transaction`] had
+    /// already been committed, that may be passed wrapped in a `Some` for
+    /// `transaction`. The [`InodeIndexReadTreeNodeFuture`] assumes
+    /// ownership of the [`Transaction`] and eventually returns it back from
+    /// [`poll()`](Self::poll) upon completion, either directly or as part of
+    /// an [`InodeIndexTreeNodeRef`] owning it.
+    ///
+    /// If `read_for_update` is true, then the returned
+    /// [`InodeIndexTreeNodeRef`] will be convertible to an
+    /// [`InodeIndexTreeNodeRefForUpdate`] via
+    /// [`InodeIndexTreeNodeRefForUpdate::try_from_node_ref()`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - Optional [`Transaction`] to read through. If `Some`,
+    ///   the state will be read as if `transaction` had been committed.
+    ///   Otherwise it will be read as previously committed to storage. Will
+    ///   eventually get returned back from [`poll`](Self::poll) upon future
+    ///   completion, either directly or as part of an [`InodeIndexTreeNodeRef`]
+    ///   owning it.
+    /// * `node_allocation_blocks_begin` - Location of the node on storage.
+    /// * `expected_node_level` - The node's tree level.
+    /// * `read_for_update` - Whether to read the node in preparation of a
+    ///   subsequent modification.
     fn new(
         transaction: Option<Box<transaction::Transaction>>,
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -2514,6 +3444,32 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
         }
     }
 
+    /// Poll the [`InodeIndexReadTreeNodeFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `fs_sync_state_auth_tree` - The [filesystem instance's authentication
+    ///   tree](crate::fs::cocoonfs::fs::CocoonFsSyncState::auth_tree).
+    /// * `fs_sync_state_inode_index_tree_layout` - The [filesystem instance's
+    ///   inode index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
+    ///   [`layout` member](InodeIndex::layout).
+    /// * `fs_sync_state_inode_index_tree_nodes_cache` - The [filesystem
+    ///   instance's inode
+    ///   index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
+    ///   [`tree_nodes_cache` member](InodeIndex::tree_nodes_cache).
+    /// * `fs_sync_state_inode_index_tree_node_decryption_instance` - The
+    ///   [filesystem instance's inode
+    ///   index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
+    ///   [`tree_node_decryption_instance`
+    ///   member](InodeIndex::tree_node_decryption_instance).
+    /// * `fs_sync_state_read_buffer` - The [filesystem instance's read
+    ///   buffer](crate::fs::cocoonfs::fs::CocoonFsSyncState::read_buffer).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::type_complexity)]
     fn poll<'a, ST: sync_types::SyncTypes>(
@@ -2991,14 +3947,15 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
     }
 }
 
-/// Lookup some inode in the inode index, possibly at the state as last modified by some
-/// [`Transaction`](transaction::Transaction).
+/// Lookup some inode in the inode index, possibly at the state as last modified
+/// by some [`Transaction`].
 pub struct InodeIndexLookupFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inode: InodeIndexKeyType,
     fut_state: InodeIndexLookupFutureState<C>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
+/// [`InodeIndexLookupFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum InodeIndexLookupFutureState<C: chip::NvChip> {
     Init {
@@ -3011,6 +3968,28 @@ enum InodeIndexLookupFutureState<C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupFuture<ST, C> {
+    /// Instantiate a new [`InodeIndexReadTreeNodeFuture`].
+    ///
+    /// If the index is to be read from at the state as if some [`Transaction`]
+    /// had already been committed, that may be passed wrapped in a `Some`
+    /// for `transaction`. The [`InodeIndexLookupFuture`] assumes ownership
+    /// of the [`Transaction`] and eventually returns it back from
+    /// [`poll()`](Self::poll) upon completion.
+    ///
+    /// If `read_for_update` is true, then the returned
+    /// [`InodeIndexTreeNodeRef`] will be convertible to
+    /// an [`InodeIndexTreeNodeRefForUpdate`] via
+    /// [`InodeIndexTreeNodeRefForUpdate::try_from_node_ref()`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - Optional [`Transaction`] to read through. If `Some`,
+    ///   the state will be read as if `transaction` had been committed.
+    ///   Otherwise it will be read as previously committed to storage. Will
+    ///   eventually get returned back from [`poll`](Self::poll) upon future
+    ///   completion, either directly or as part of an [`InodeIndexTreeNodeRef`]
+    ///   owning it.
+    /// * `inode` - Inode number to lookup.
     pub fn new(transaction: Option<Box<transaction::Transaction>>, inode: InodeIndexKeyType) -> Self {
         Self {
             inode,
@@ -3021,6 +4000,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupFuture<ST, C> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C> for InodeIndexLookupFuture<ST, C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// In case a [`Transaction`] had been passed to [`Self::new()`], and no
+    /// internal error causing it to get lost occured, it will get returned
+    /// back as the pair's first component.
+    ///
+    /// The operation result is returned at the pair's second component, which,
+    /// on success, is a `Some` wrapping the inode entry's
+    /// [`EncodedExtentPtr`] or `None` if the inode has no entry.
     type Output = (
         Option<Box<transaction::Transaction>>,
         Result<Option<extent_ptr::EncodedExtentPtr>, NvFsError>,
@@ -3183,8 +4171,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
-/// Cursor for enumerating inodes within a specified range in the inode index, possibly at the state
-/// as last modified by some [`Transaction`](transaction::Transaction).
+/// Cursor for enumerating inodes within a specified range in the inode index,
+/// possibly at the state as last modified by some [`Transaction`].
+///
+/// Used for the implementation of
+/// [`NvFsEnumerateCursor`](crate::fs::NvFsEnumerateCursor).
+///
+/// # See also:
+///
+/// * [`NvFsEnumerateCursor`](crate::fs::NvFsEnumerateCursor).
 pub struct InodeIndexEnumerateCursor<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inodes_enumerate_range: ops::RangeInclusive<InodeIndexKeyType>,
     transaction: Option<Box<transaction::Transaction>>,
@@ -3194,6 +4189,20 @@ pub struct InodeIndexEnumerateCursor<ST: sync_types::SyncTypes, C: chip::NvChip>
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexEnumerateCursor<ST, C> {
+    /// Instantiate a new [`InodeIndexEnumerateCursor`].
+    ///
+    /// If the index is to be read from at the state as if some [`Transaction`]
+    /// had already been committed, that may be passed wrapped in a `Some`
+    /// for `transaction`. The [`InodeIndexEnumerateCursor`] assumes
+    /// ownership of the [`Transaction`], it may eventually be obtained back
+    /// via [`into_transaction()`](Self::into_transaction).
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - Optional [`Transaction`] to read through. If `Some`,
+    ///   the state will be read as if `transaction` had been committed.
+    ///   Otherwise it will be read as previously committed to storage.
+    /// * `inode_enumer_range` - Inode number range to enumerate.
     pub fn new(
         transaction: Option<Box<transaction::Transaction>>,
         inodes_enumer_range: ops::RangeInclusive<InodeIndexKeyType>,
@@ -3220,16 +4229,44 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexEnumerateCursor<ST, C
         Ok(cursor)
     }
 
+    /// Obtain the [`Transaction`] back, if any.
+    ///
+    /// Return the [`Transaction`] initially passed to [`new()`](Self::new)
+    /// back.
     pub fn into_transaction(self) -> Option<Box<transaction::Transaction>> {
         self.transaction
     }
 
+    /// Move the cursor to the next existing inode in the enumeration range.
+    ///
+    /// The returned [`InodeIndexEnumerateCursorNextFuture`] must get polled in
+    /// order to obtain the next inode existing in the enumeration range. It
+    /// assumes ownership of the cursor for the duration of the operation
+    /// and eventually returns it back when done.
+    ///
+    /// # See also:
+    ///
+    /// * [`NvFsEnumerateCursor::next()`](crate::fs::NvFsEnumerateCursor::next)
     pub fn next(self: Box<Self>) -> InodeIndexEnumerateCursorNextFuture<ST, C> {
         InodeIndexEnumerateCursorNextFuture {
             fut_state: InodeIndexEnumerateCursorNextFutureState::Init { cursor: Some(self) },
         }
     }
 
+    /// Read the inode at point.
+    ///
+    /// The returned [`InodeIndexEnumerateCursorReadInodeDataFuture`] must get
+    /// polled in order to obtain the inode data. It assumes ownership of
+    /// the cursor for the duration of the operation and eventually returns
+    /// it back when done.
+    ///
+    /// The cursor must currently point to some inode, i.e.
+    /// [`next()`](Self::next) must have been invoked at least once
+    /// and its most recent invocation did succeed with a result of `Some`.
+    ///
+    /// # See also:
+    ///
+    /// * [`NvFsEnumerateCursor::read_current_inode_data()`](crate::fs::NvFsEnumerateCursor::read_current_inode_data)
     pub fn read_inode_data(self: Box<Self>) -> InodeIndexEnumerateCursorReadInodeDataFuture<ST, C> {
         debug_assert!(self.tree_position.is_some());
         InodeIndexEnumerateCursorReadInodeDataFuture {
@@ -3238,12 +4275,27 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexEnumerateCursor<ST, C
     }
 }
 
+/// [`InodeIndexEnumerateCursor`]'s current tree position.
 struct InodeIndexEnumerateCursorTreePosition {
+    /// The current inode index leaf node.
+    ///
+    /// The leaf node is always owned by the cursor, and might perhaps been
+    /// temporarily stolen from the [`InodeIndex::tree_nodes_cache`] or
+    /// [`TransactionInodeIndexUpdates::updated_tree_nodes_cache`].  The node
+    /// may get returned back into an InodeIndexTreeNodeCache as appropriate
+    /// when done with it.
     leaf_node: InodeIndexTreeNodeRefForUpdate,
+    /// Current position in the [`leaf_node`](Self::leaf_node).
     entry_index_in_leaf_node: usize,
 }
 
 impl InodeIndexEnumerateCursorTreePosition {
+    /// Access the current leaf node.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The containing [`InodeIndexEnumerateCursor`]'s
+    ///   [`transaction` member](InodeIndexEnumerateCursor::transaction).
     fn get_leaf_node<'a>(
         &'a self,
         transaction: Option<&'a transaction::Transaction>,
@@ -3262,11 +4314,13 @@ impl InodeIndexEnumerateCursorTreePosition {
     }
 }
 
-/// Advance an [`InodeIndexEnumerateCursor`].
+/// [Future](CocoonFsSyncStateReadFuture) returned by
+/// [`InodeIndexEnumerateCursor::next()`].
 pub struct InodeIndexEnumerateCursorNextFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: InodeIndexEnumerateCursorNextFutureState<ST, C>,
 }
 
+/// [`InodeIndexEnumerateCursorNextFuture`] state-machine state.
 enum InodeIndexEnumerateCursorNextFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -3297,6 +4351,24 @@ enum InodeIndexEnumerateCursorNextFutureState<ST: sync_types::SyncTypes, C: chip
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexEnumerateCursorNextFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`InodeIndexEnumerateCursor`]
+    ///   is lost.
+    /// * `Ok((cursor, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [`InodeIndexEnumerateCursor`],
+    ///   `cursor`,  and the operation result will get returned within:
+    ///     * `Ok((cursor, Err(e)))` - In case of an error, the error reason `e`
+    ///       is returned in an [`Err`].
+    ///     * `Ok((cursor, Ok(...)))` - Otherwise an [`Option`] wrapped in
+    ///       [`Ok`] is returned:
+    ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
+    ///           specified enumeration range.
+    ///         * `Ok((cursor, Ok(Some(inode))))` - The next inode existing in
+    ///           the specified enumeration range has number `inode`.
     type Output = Result<
         (
             Box<InodeIndexEnumerateCursor<ST, C>>,
@@ -3375,7 +4447,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             let leaf_node = match tree_position.get_leaf_node(cursor.transaction.as_deref()) {
                                 Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                                 Ok(InodeIndexTreeNode::Internal(_)) => {
-                                    break (Some(cursor), None, nvfs_err_internal!())
+                                    break (Some(cursor), None, nvfs_err_internal!());
                                 }
                                 Err(e) => break (Some(cursor), None, e),
                             };
@@ -3566,14 +4638,14 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     entry_index_in_leaf_node
                                 }
                                 Err(e) => {
-                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e)
+                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
 
                             let inode = match leaf_node.entry_inode(entry_index_in_leaf_node, tree_layout) {
                                 Ok(inode) => inode,
                                 Err(e) => {
-                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e)
+                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
 
@@ -3780,11 +4852,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
-/// Read the data of the inode an [`InodeIndexEnumerateCursor`] currently points at.
+/// [Future](CocoonFsSyncStateReadFuture) returned by
+/// [`InodeIndexEnumerateCursor::read_inode_data()`].
 pub struct InodeIndexEnumerateCursorReadInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: InodeIndexEnumerateCursorReadInodeDataFutureState<ST, C>,
 }
 
+/// [`InodeIndexEnumerateCursorReadInodeDataFutureState`] state-machine state.
 enum InodeIndexEnumerateCursorReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -3810,6 +4884,19 @@ enum InodeIndexEnumerateCursorReadInodeDataFutureState<ST: sync_types::SyncTypes
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexEnumerateCursorReadInodeDataFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`InodeIndexEnumerateCursor`]
+    ///   is lost.
+    /// * `Ok((cursor, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [`InodeIndexEnumerateCursor`],
+    ///   `cursor`,  and the operation result will get returned within:
+    ///     * `Ok((cursor, Err(e)))` - In case of an error, the error reason `e`
+    ///       is returned in an [`Err`].
+    ///     * `Ok((cursor, Ok(data)))` - Otherwise the inode `data` is returned.
     type Output = Result<
         (
             Box<InodeIndexEnumerateCursor<ST, C>>,
@@ -3937,7 +5024,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 Ok((inode_extents_list_extents, inode_extents)),
                             )) => (returned_transaction, inode_extents_list_extents, inode_extents),
                             task::Poll::Ready((returned_transaction, Err(e))) => {
-                                break (cursor.take(), returned_transaction, e)
+                                break (cursor.take(), returned_transaction, e);
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
@@ -4007,20 +5094,28 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 }
 
 /// Reference to an inode index B+-tree node read for update on behalf of some
-/// [`Transaction`](transaction::Transaction).
+/// [`Transaction`].
+///
+/// An [`InodeIndexTreeNodeRefForUpdate`] instance is always implicitly
+/// associated with some [`Transaction`] instance and provides exclusive access
+/// to the referenced node's data.
 enum InodeIndexTreeNodeRefForUpdate {
     /// The node data is owned.
     Owned {
+        /// The node.
         node: InodeIndexTreeNode,
+        /// Whether or not the node had been modified on behalf of the
+        /// associated [`Transaction`] already.
         is_modified_by_transaction: bool,
     },
-    /// The node is already staged at [`TransactionInodeIndexUpdates::tree_nodes_staged_updates`].
-    TransactionStagedUpdatesNodeRef {
-        nodes_staged_updates_slot_index: usize,
-    },
+    /// The node is already staged at
+    /// [`TransactionInodeIndexUpdates::tree_nodes_staged_updates`].
+    TransactionStagedUpdatesNodeRef { nodes_staged_updates_slot_index: usize },
 }
 
 impl InodeIndexTreeNodeRefForUpdate {
+    /// Get the entry in the associated [`Transaction`]'s
+    /// [`TransactionInodeIndexUpdates::tree_nodes_staged_updates`], if any.
     fn get_nodes_staged_updates_slot_index(&self) -> Option<usize> {
         match self {
             Self::Owned { .. } => None,
@@ -4029,9 +5124,12 @@ impl InodeIndexTreeNodeRefForUpdate {
             } => Some(*nodes_staged_updates_slot_index),
         }
     }
-}
 
-impl InodeIndexTreeNodeRefForUpdate {
+    /// Access the node.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The associated [`Transaction`].
     fn get_node<'a>(&'a self, transaction: &'a transaction::Transaction) -> Result<&'a InodeIndexTreeNode, NvFsError> {
         match self {
             Self::Owned { node, .. } => Ok(node),
@@ -4044,6 +5142,31 @@ impl InodeIndexTreeNodeRefForUpdate {
         }
     }
 
+    /// Try to convert from an [`InodeIndexTreeNodeRef`].
+    ///
+    /// Try to convert an [`InodeIndexTreeNodeRef`], usually obtained from a
+    /// [`InodeIndexReadTreeNodeFuture`]
+    /// [initialized](InodeIndexReadTreeNodeFuture::new) with `read_for_update`
+    /// set, to an [`InodeIndexTreeNodeRefForUpdate`].
+    ///
+    /// If `r` references a (modified) node owned by a [`Transaction`], then
+    /// that transaction will get returned in the returned pair's first
+    /// component. Note the the returned transaction will be implicitly
+    /// associated with the [`InodeIndexTreeNodeRefForUpdate`] instance returned
+    /// upon success.
+    ///
+    /// The returned pair's second element will hold the conversion result,
+    /// either an `Err` of [`NvFsError::Internal`] if the `r` is not eligible
+    /// for a conversion into an [`InodeIndexTreeNodeRefForUpdate`], or the
+    /// instantiated [`InodeIndexTreeNodeRefForUpdate`] wrapped in an `Ok`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `r` - The [`InodeIndexTreeNodeRef`] to convert from.
+    ///
+    /// # See also:
+    ///
+    /// * [`InodeIndexReadTreeNodeFuture::new`]
     fn try_from_node_ref<ST: sync_types::SyncTypes>(
         r: InodeIndexTreeNodeRef<'_, ST>,
     ) -> (Option<Box<transaction::Transaction>>, Result<Self, NvFsError>) {
@@ -4075,7 +5198,12 @@ impl InodeIndexTreeNodeRefForUpdate {
     }
 }
 
-/// Result of looking up an inode for insertion.
+/// Result of looking up an inode for insertion or update.
+///
+/// # See also:
+///
+/// * [`InodeIndexLookupForInsertFuture`]
+/// * [`InodeIndexInsertEntryFuture`]
 pub struct InodeIndexLookupForInsertResult {
     inode: InodeIndexKeyType,
     preexisting_entry_extent_ptr: Option<EncodedExtentPtr>,
@@ -4089,7 +5217,7 @@ impl InodeIndexLookupForInsertResult {
     }
 }
 
-/// Look up an inode for insertion.
+/// Lookup an inode for insertion or update.
 pub struct InodeIndexLookupForInsertFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inode: InodeIndexKeyType,
     found_leaf_parent_node: Option<InodeIndexTreeNodeRefForUpdate>,
@@ -4097,6 +5225,7 @@ pub struct InodeIndexLookupForInsertFuture<ST: sync_types::SyncTypes, C: chip::N
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
+/// [`InodeIndexLookupForInsertFutureState`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum InodeIndexLookupForInsertFutureState<C: chip::NvChip> {
     Init {
@@ -4111,6 +5240,18 @@ enum InodeIndexLookupForInsertFutureState<C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupForInsertFuture<ST, C> {
+    /// Instantiate a [`InodeIndexLookupForInsertFuture`].
+    ///
+    /// [`InodeIndexLookupForInsertFuture`] assumes ownership of
+    /// the `transaction` and eventually returns it
+    /// back from [`poll()`](Self::poll) upon completion
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] on whose behalf the inode will
+    ///   subsequently get inserted or updated. Will eventually get returned
+    ///   back from [`poll`](Self::poll) upon future completion.
+    /// * `inode` - The inode that will subsequently get inserted or updated.
     pub fn new(transaction: Box<transaction::Transaction>, inode: InodeIndexKeyType) -> Self {
         Self {
             inode,
@@ -4126,6 +5267,19 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupForInsertFuture
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexLookupForInsertFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input [`Transaction`], `transaction`,  and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, Err(e)))` - In case of an error, the error
+    ///       reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, Ok(result)))` - Otherwise the
+    ///       [`InodeIndexLookupForInsertResult`] `result` is returned.
     type Output = Result<
         (
             Box<transaction::Transaction>,
@@ -4384,6 +5538,7 @@ pub struct InodeIndexInsertEntryFuture<ST: sync_types::SyncTypes, C: chip::NvChi
     fut_state: InodeIndexInsertEntryFutureState<ST, C>,
 }
 
+/// [`InodeIndexInsertEntryFuture`] state-machine state.
 enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -4431,6 +5586,57 @@ enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexInsertEntryFuture<ST, C> {
+    /// Instantiate a [`InodeIndexInsertEntryFuture`].
+    ///
+    /// [`InodeIndexInsertEntryFuture`] assumes ownership of the `transaction`
+    /// and eventually returns it back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    /// In order to enable continued use of a [`Transaction`] in case of an
+    /// error, its view of the filesystem metadata structures must be kept
+    /// consistent at all times. When writing to an inode, the metadata
+    /// changes comprise
+    /// * (Re)allocations of the inode's data extents.
+    /// * Possibly (re)allocations of and updates to the inode's extents list's
+    ///   extents.
+    /// * The inode index tree updates.
+    ///
+    /// If a failure is being encountered in any of these steps, the changes
+    /// already made by the prior ones (as well as by the current one) must get
+    /// rolled back. Insertions into the inode index tree may need to split some
+    /// nodes, and therefore need allocate some storage in particular. In order
+    /// to support rollback, these node storage allocations must not
+    /// repurpose any storage freed up by prior reallocations of any
+    /// preexisting inode data or extents list's extents. Therefore their
+    /// deallocations will be delayed. More specifically,
+    /// [`InodeIndexInsertEntryFuture`] will take care of
+    /// invoking [`InodeExtentsPendingReallocation::free_excess_preexisting_inode_extents()`] on
+    /// `pending_inode_extents_reallocation` as well as
+    /// [`InodeExtentsListPendingUpdate::free_excess_preexisting_inode_extents_list_extents()`]
+    /// on `pending_inode_extents_list_update` only once the inode index
+    /// insertion is guaranteed to succeed. In case either of these two
+    /// fails (e.g. due to a memory allocation failure), any storage
+    /// deallocations already made at this point will get rolled back and
+    /// the inode index entry won't get inserted or updated.
+    ///
+    /// In case of any failure, the input `pending_inode_extents_reallocation`
+    /// and `pending_inode_extents_list_update` will get returned back
+    /// in their original state each from [`poll()`](Self::poll) for further
+    /// rollback. Otherwise, on success, the pending changes are to be
+    /// considered effective and both will get consumed.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to which to stage the updates.
+    /// * `lookup_result` - The [`InodeIndexLookupForInsertResult`] for the
+    ///   inode to modify.
+    /// * `pending_inode_extents_reallocation` - The inode's pending data
+    ///   extents (re)allocations. Consumed on success, returned from
+    ///   [`poll`](Self::poll) upon failure.
+    /// * `pending_inode_extents_list_update` - Pending updates to the inode's
+    ///   extents list, if any. Usually obtained from
+    ///   [`InodeExtentsListWriteFuture`](crate::fs::cocoonfs::inode_extents_list::InodeExtentsListWriteFuture).
+    ///   Consumed on success, returned from [`poll`](Self::poll) upon failure.
     pub fn new(
         transaction: Box<transaction::Transaction>,
         lookup_result: InodeIndexLookupForInsertResult,
@@ -4451,6 +5657,23 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexInsertEntryFuture<ST,
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexInsertEntryFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input [`Transaction`], `transaction`,  and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, Err((pending_inode_extents_reallocation,
+    ///       pending_inode_extents_list_update, e))))` - In case of an error,
+    ///       an `Err` wrapping the error reason `e` alongside the input
+    ///       `pending_inode_extents_reallocation` and
+    ///       `pending_inode_extents_list_update` in their original state each
+    ///       will get returned.
+    ///     * `Ok((transaction, Ok(())))` - Otherwise, `Ok(())` will get
+    ///       returned for the operation result on success.
     type Output = Result<
         (
             Box<transaction::Transaction>,
@@ -4557,7 +5780,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                         .and_then(|leaf_parent_node| {
                                             leaf_parent_node.get_nodes_staged_updates_slot_index()
                                         })],
-                                    &mut transaction.allocs,
+                                    &transaction.allocs,
                                     &mut transaction.auth_tree_data_blocks_update_states,
                                     transaction.rng.as_mut(),
                                     &fs_instance.fs_config,
@@ -4706,7 +5929,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     match transaction.inode_index_updates.reserve_tree_node_update_staging_slot(
                                         leaf_parent_node.node_allocation_blocks_begin(),
                                         &[Some(nodes_staged_updates_leaf_slot_index)],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -4914,7 +6137,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             break (
                                 returned_transaction.or(sibling_child_node_ref.into_transaction()),
                                 Err(e),
-                            )
+                            );
                         }
                     } {
                         // The sibling is full, a rotation is not possible.
@@ -4941,7 +6164,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 let parent_node = match &nodes_staged_updates_parent_slot.node {
                                     InodeIndexTreeNode::Internal(internal_node) => internal_node,
                                     InodeIndexTreeNode::Leaf(_) => {
-                                        break (Some(transaction), Err(nvfs_err_internal!()))
+                                        break (Some(transaction), Err(nvfs_err_internal!()));
                                     }
                                 };
                                 let child_node_level = match parent_node.node_level(tree_layout) {
@@ -5101,7 +6324,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                         Some(*nodes_staged_updates_parent_slot_index),
                                         Some(*nodes_staged_updates_child_slot_index),
                                     ],
-                                    &mut transaction.allocs,
+                                    &transaction.allocs,
                                     &mut transaction.auth_tree_data_blocks_update_states,
                                     transaction.rng.as_mut(),
                                     &fs_instance.fs_config,
@@ -5138,18 +6361,21 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         } => nodes_staged_updates_slot_index,
                     };
 
-                    let [nodes_staged_updates_parent_slot, nodes_staged_updates_child_slot, nodes_staged_updates_sibling_child_slot] =
-                        match TransactionInodeIndexUpdates::get_tree_nodes_staged_updates_slots_mut(
-                            &mut transaction.inode_index_updates.tree_nodes_staged_updates,
-                            [
-                                *nodes_staged_updates_parent_slot_index,
-                                *nodes_staged_updates_child_slot_index,
-                                nodes_staged_updates_sibling_child_slot_index,
-                            ],
-                        ) {
-                            Ok(slots) => slots,
-                            Err(e) => break (Some(transaction), Err(e)),
-                        };
+                    let [
+                        nodes_staged_updates_parent_slot,
+                        nodes_staged_updates_child_slot,
+                        nodes_staged_updates_sibling_child_slot,
+                    ] = match TransactionInodeIndexUpdates::get_tree_nodes_staged_updates_slots_mut(
+                        &mut transaction.inode_index_updates.tree_nodes_staged_updates,
+                        [
+                            *nodes_staged_updates_parent_slot_index,
+                            *nodes_staged_updates_child_slot_index,
+                            nodes_staged_updates_sibling_child_slot_index,
+                        ],
+                    ) {
+                        Ok(slots) => slots,
+                        Err(e) => break (Some(transaction), Err(e)),
+                    };
 
                     let parent_node = match &mut nodes_staged_updates_parent_slot.node {
                         InodeIndexTreeNode::Internal(internal_node) => internal_node,
@@ -5429,7 +6655,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     }),
                                 Some(*nodes_staged_updates_old_root_slot_index),
                             ],
-                            &mut transaction.allocs,
+                            &transaction.allocs,
                             &mut transaction.auth_tree_data_blocks_update_states,
                             transaction.rng.as_mut(),
                             &fs_instance.fs_config,
@@ -5478,7 +6704,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 Some(*nodes_staged_updates_old_root_slot_index),
                                 Some(nodes_staged_updates_new_root_slot_index),
                             ],
-                            &mut transaction.allocs,
+                            &transaction.allocs,
                             &mut transaction.auth_tree_data_blocks_update_states,
                             transaction.rng.as_mut(),
                             &fs_instance.fs_config,
@@ -5783,7 +7009,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 Some(*nodes_staged_updates_parent_slot_index),
                                 Some(*nodes_staged_updates_child_slot_index),
                             ],
-                            &mut transaction.allocs,
+                            &transaction.allocs,
                             &mut transaction.auth_tree_data_blocks_update_states,
                             transaction.rng.as_mut(),
                             &fs_instance.fs_config,
@@ -6099,7 +7325,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                                     leaf_parent_node.get_nodes_staged_updates_slot_index()
                                                 }),
                                         ],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -6206,7 +7432,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     match transaction.inode_index_updates.reserve_tree_node_update_staging_slot(
                                         leaf_parent_node.node_allocation_blocks_begin(),
                                         &[this.lookup_result.leaf_node.get_nodes_staged_updates_slot_index()],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -6402,7 +7628,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                                 }),
                                             child_node_ref.get_nodes_staged_updates_slot_index(),
                                         ],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -6442,7 +7668,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                                 }),
                                             Some(nodes_staged_updates_parent_slot_index),
                                         ],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -6561,6 +7787,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 }
 
 /// Cursor for conditionally unlinking inodes in a given range.
+///
+/// Used for the implementation of
+/// [`NvFsUnlinkCursor`](crate::fs::NvFsUnlinkCursor).
+///
+/// # See also:
+///
+/// * [`NvFsUnlinkCursor`](crate::fs::NvFsUnlinkCursor).
 pub struct InodeIndexUnlinkCursor<ST: sync_types::SyncTypes, C: chip::NvChip> {
     inodes_unlink_range: ops::RangeInclusive<InodeIndexKeyType>,
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -6572,6 +7805,24 @@ pub struct InodeIndexUnlinkCursor<ST: sync_types::SyncTypes, C: chip::NvChip> {
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUnlinkCursor<ST, C> {
+    /// Instantiate a new [`InodeIndexUnlinkCursor`].
+    ///
+    /// On instantiation success, the [`InodeIndexUnlinkCursor`] assumes
+    /// ownership of the `transaction`, it may eventually be obtained back
+    /// via [`into_transaction()`](Self::into_transaction). The inode index
+    /// is read in the state as if `transaction` had been committed already,
+    /// and any modifications to it are staged at the `transaction`.
+    ///
+    /// Upon instantiation
+    /// error, the `transaction` is getting returned directly as part of the
+    /// `Err` value.
+    ///
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to read through and to stage
+    ///   modifications at.
+    /// * `inodes_unlink_range` - Inode number range to iterate over.
     pub fn new(
         transaction: Box<transaction::Transaction>,
         inodes_unlink_range: ops::RangeInclusive<InodeIndexKeyType>,
@@ -6598,61 +7849,139 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUnlinkCursor<ST, C> {
         Ok(cursor)
     }
 
+    /// Obtain the [`Transaction`] back.
+    ///
+    /// Return the [`Transaction`] initially passed to [`new()`](Self::new)
+    /// back.
     pub fn into_transaction(self) -> Result<Box<transaction::Transaction>, NvFsError> {
         self.transaction.ok_or_else(|| nvfs_err_internal!())
     }
 
+    /// Move the cursor to the next existing inode in the enumeration range.
+    ///
+    /// The returned [`InodeIndexUnlinkCursorNextFuture`] must get polled in
+    /// order to obtain the next inode existing in the enumeration range. It
+    /// assumes ownership of the cursor for the duration of the operation
+    /// and eventually returns it back when done.
+    ///
+    /// # See also:
+    ///
+    /// * [`NvFsUnlinkCursor::next()`](crate::fs::NvFsUnlinkCursor::next)
     pub fn next(self: Box<Self>) -> InodeIndexUnlinkCursorNextFuture<ST, C> {
         InodeIndexUnlinkCursorNextFuture {
             fut_state: InodeIndexUnlinkCursorNextFutureState::Init { cursor: Some(self) },
         }
     }
 
+    /// Unlink the inode at point.
+    ///
+    /// The returned [`InodeIndexUnlinkCursorUnlinkInodeFuture`] must get polled
+    /// in order to stage the unlinking operation. It assumes ownership of
+    /// the cursor for the duration of the operation and eventually returns
+    /// it back when done.
+    ///
+    /// # See also:
+    ///
+    /// * [`NvFsUnlinkCursor::unlink_current_inode()`](crate::fs::NvFsUnlinkCursor::unlink_current_inode)
     pub fn unlink_inode(self: Box<Self>) -> InodeIndexUnlinkCursorUnlinkInodeFuture<ST, C> {
-        debug_assert!(self
-            .tree_position
-            .as_ref()
-            .and_then(|tree_position| tree_position.inode.as_ref())
-            .is_some());
+        debug_assert!(
+            self.tree_position
+                .as_ref()
+                .and_then(|tree_position| tree_position.inode.as_ref())
+                .is_some()
+        );
         InodeIndexUnlinkCursorUnlinkInodeFuture {
             fut_state: InodeIndexUnlinkCursorUnlinkInodeFutureState::Init { cursor: Some(self) },
         }
     }
 
+    /// Read the inode at point.
+    ///
+    /// The returned [`InodeIndexUnlinkCursorUnlinkInodeFuture`] must get polled
+    /// in order to obtain the inode data. It assumes ownership of the
+    /// cursor for the duration of the operation and eventually returns it
+    /// back when done.
+    ///
+    /// # See also:
+    ///
+    /// * [`NvFsUnlinkCursor::read_current_inode_data()`](crate::fs::NvFsUnlinkCursor::read_current_inode_data)
     pub fn read_inode_data(self: Box<Self>) -> InodeIndexUnlinkCursorReadInodeDataFuture<ST, C> {
-        debug_assert!(self
-            .tree_position
-            .as_ref()
-            .and_then(|tree_position| tree_position.inode.as_ref())
-            .is_some());
+        debug_assert!(
+            self.tree_position
+                .as_ref()
+                .and_then(|tree_position| tree_position.inode.as_ref())
+                .is_some()
+        );
         InodeIndexUnlinkCursorReadInodeDataFuture {
             fut_state: InodeIndexUnlinkCursorReadInodeDataFutureState::Init { cursor: Some(self) },
         }
     }
 }
 
+/// [`InodeIndexUnlinkCursor`]'s current tree position.
 struct InodeIndexUnlinkCursorTreePosition {
+    /// The current inode index leaf node.
+    ///
+    /// The leaf node is always owned by the cursor, and might perhaps been
+    /// temporarily stolen from the [`InodeIndex::tree_nodes_cache`] or
+    /// [`TransactionInodeIndexUpdates::updated_tree_nodes_cache`]. The node may
+    /// eventually get returned back into [`InodeIndex::tree_nodes_cache`]
+    /// if unmodified or moved into
+    /// [`TransactionInodeIndexUpdates::tree_nodes_staged_updates`] at first
+    /// modification otherwise.
     leaf_node: InodeIndexTreeNodeRefForUpdate,
+    /// The [`leaf_node`](Self::leaf_node)'s parent if any and available.
+    ///
+    /// The leaf node's parent, if any, is always available if the the leaf node
+    /// has been reached through a tree walk down from the root, but not
+    /// when following the leaf nodes' linking chain.
+    ///
+    /// Just like the [`leaf_node`](Self::leaf_node) itself, its parent node is
+    /// always owned by the cursor, and might perhaps been temporarily
+    /// stolen from the [`InodeIndex::tree_nodes_cache`] or
+    /// [`TransactionInodeIndexUpdates::updated_tree_nodes_cache`]. The node may
+    /// eventually get returned back into [`InodeIndex::tree_nodes_cache`]
+    /// if unmodified or moved into
+    /// [`TransactionInodeIndexUpdates::tree_nodes_staged_updates`] at first
+    /// modification otherwise.
     leaf_parent_node: Option<InodeIndexTreeNodeRefForUpdate>,
+    /// Current position in the [`leaf_node`](Self::leaf_node).
     entry_index_in_leaf_node: usize,
+    /// Current inode at point, if any.
+    ///
+    /// `None` only if the cursor is in its initial state had not been advanced
+    /// yet or the inode previously at point had been unlinked.
     inode: Option<InodeIndexUnlinkCursorTreePositionInodeEntry>,
 }
 
+/// [`InodeIndexUnlinkCursorTreePosition::inode`] field.
 struct InodeIndexUnlinkCursorTreePositionInodeEntry {
+    /// The inode number.
     inode: InodeIndexKeyType,
+    /// The inode's extents list if read already.
+    ///
+    /// The inode's extents list gets read lazily when needed, either on behalf
+    /// of
+    /// [`InodeIndexUnlinkCursor::unlink_inode()`](InodeIndexUnlinkCursor::unlink_inode) or
+    /// [`InodeIndexUnlinkCursor::read_inode_data()`](InodeIndexUnlinkCursor::read_inode_data).
     inode_extents: Option<InodeIndexUnlinkCursorTreePositionInodeEntryExtents>,
 }
 
+/// [`InodeIndexUnlinkCursorTreePositionInodeEntry::inode_extents`] field.
 struct InodeIndexUnlinkCursorTreePositionInodeEntryExtents {
+    /// The extents storing the inode's extents list, if any.
     inode_extents_list_extents: Option<extents::PhysicalExtents>,
+    /// The inode's extents.
     inode_extents: extents::PhysicalExtents,
 }
 
-/// Advance an [`InodeIndexUnlinkCursor`] to the next position.
+/// [Future](CocoonFsSyncStateReadFuture) returned by
+/// [`InodeIndexUnlinkCursor::next()`].
 pub struct InodeIndexUnlinkCursorNextFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: InodeIndexUnlinkCursorNextFutureState<ST, C>,
 }
 
+/// [`InodeIndexUnlinkCursorNextFuture`] state-machine state.
 enum InodeIndexUnlinkCursorNextFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -6684,6 +8013,24 @@ enum InodeIndexUnlinkCursorNextFutureState<ST: sync_types::SyncTypes, C: chip::N
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexUnlinkCursorNextFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`InodeIndexUnlinkCursor`] is
+    ///   lost.
+    /// * `Ok((cursor, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [`InodeIndexUnlinkCursor`], `cursor`,
+    ///   and the operation result will get returned within:
+    ///     * `Ok((cursor, Err(e)))` - In case of an error, the error reason `e`
+    ///       is returned in an [`Err`].
+    ///     * `Ok((cursor, Ok(...)))` - Otherwise an [`Option`] wrapped in
+    ///       [`Ok`] is returned:
+    ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
+    ///           specified enumeration range.
+    ///         * `Ok((cursor, Ok(Some(inode))))` - The next inode existing in
+    ///           the specified enumeration range has number `inode`.
     type Output = Result<
         (
             Box<InodeIndexUnlinkCursor<ST, C>>,
@@ -6769,7 +8116,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             let leaf_node = match tree_position.leaf_node.get_node(&transaction) {
                                 Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                                 Ok(InodeIndexTreeNode::Internal(_)) => {
-                                    break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                                    break (Some(cursor), Some(transaction), nvfs_err_internal!());
                                 }
                                 Err(e) => break (Some(cursor), Some(transaction), e),
                             };
@@ -6833,7 +8180,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 let leaf_parent_node = match leaf_parent_node.get_node(&transaction) {
                                     Ok(InodeIndexTreeNode::Internal(leaf_parent_node)) => leaf_parent_node,
                                     Ok(InodeIndexTreeNode::Leaf(_)) => {
-                                        break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                                        break (Some(cursor), Some(transaction), nvfs_err_internal!());
                                     }
                                     Err(e) => break (Some(cursor), Some(transaction), e),
                                 };
@@ -6912,7 +8259,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                                 Some(cursor),
                                                 Some(transaction),
                                                 NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                                            )
+                                            );
                                         }
                                     };
 
@@ -7112,14 +8459,14 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     entry_index_in_leaf_node
                                 }
                                 Err(e) => {
-                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e)
+                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
 
                             let inode = match leaf_node.entry_inode(entry_index_in_leaf_node, tree_layout) {
                                 Ok(inode) => inode,
                                 Err(e) => {
-                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e)
+                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
 
@@ -7371,11 +8718,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
-/// Unlink the inode an [`InodeIndexUnlinkCursor`] currently points at.
+/// [Future](CocoonFsSyncStateReadFuture) returned by
+/// [`InodeIndexUnlinkCursor::unlink_inode()`].
 pub struct InodeIndexUnlinkCursorUnlinkInodeFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: InodeIndexUnlinkCursorUnlinkInodeFutureState<ST, C>,
 }
 
+/// [`InodeIndexUnlinkCursorUnlinkInodeFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum InodeIndexUnlinkCursorUnlinkInodeFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
@@ -7451,6 +8800,20 @@ enum InodeIndexUnlinkCursorUnlinkInodeFutureState<ST: sync_types::SyncTypes, C: 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexUnlinkCursorUnlinkInodeFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`InodeIndexUnlinkCursor`] is
+    ///   lost.
+    /// * `Ok((cursor, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [`InodeIndexUnlinkCursor`], `cursor`,
+    ///   and the operation result will get returned within:
+    ///     * `Ok((cursor, Err(e)))` - In case of an error, the error reason `e`
+    ///       is returned in an [`Err`].
+    ///     * `Ok((cursor, Ok(())))` - Otherwise an `Ok(())` is returned on
+    ///       success.
     type Output = Result<(Box<InodeIndexUnlinkCursor<ST, C>>, Result<(), NvFsError>), NvFsError>;
 
     type AuxPollData<'a> = ();
@@ -7511,7 +8874,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let leaf_node = match tree_position.leaf_node.get_node(&transaction) {
                         Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                         Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                            break (Some(cursor), Some(transaction), nvfs_err_internal!());
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
                     };
@@ -7576,7 +8939,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 Some(cursor),
                                 Some(transaction),
                                 NvFsError::from(CocoonFsFormatError::InvalidExtents),
-                            )
+                            );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
                     }
@@ -7597,7 +8960,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 Ok((inode_extents_list_extents, inode_extents)),
                             )) => (returned_transaction, inode_extents_list_extents, inode_extents),
                             task::Poll::Ready((returned_transaction, Err(e))) => {
-                                break (cursor.take(), returned_transaction, e)
+                                break (cursor.take(), returned_transaction, e);
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
@@ -7785,7 +9148,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     &[tree_position.leaf_parent_node.as_ref().and_then(|leaf_parent_node| {
                                         leaf_parent_node.get_nodes_staged_updates_slot_index()
                                     })],
-                                    &mut transaction.allocs,
+                                    &transaction.allocs,
                                     &mut transaction.auth_tree_data_blocks_update_states,
                                     transaction.rng.as_mut(),
                                     &fs_instance.fs_config,
@@ -7839,7 +9202,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         };
                     let staged_update_leaf_node = match &mut nodes_staged_updates_leaf_slot.node {
                         InodeIndexTreeNode::Internal(_) => {
-                            break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                            break (Some(cursor), Some(transaction), nvfs_err_internal!());
                         }
                         InodeIndexTreeNode::Leaf(leaf_node) => leaf_node,
                     };
@@ -7955,7 +9318,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     .reserve_tree_node_update_staging_slot(
                                         leaf_parent_node.node_allocation_blocks_begin(),
                                         &[Some(nodes_staged_updates_leaf_slot_index)],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -8013,7 +9376,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         let staged_update_leaf_parent_node = match &nodes_staged_updates_leaf_parent_slot.node {
                             InodeIndexTreeNode::Internal(leaf_parent_node) => leaf_parent_node,
                             InodeIndexTreeNode::Leaf(_) => {
-                                break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                                break (Some(cursor), Some(transaction), nvfs_err_internal!());
                             }
                         };
 
@@ -8179,7 +9542,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             (returned_transaction, sibling_child_node_ref)
                         }
                         task::Poll::Ready((returned_transaction, Err(e))) => {
-                            break (fut_cursor.take(), returned_transaction, e)
+                            break (fut_cursor.take(), returned_transaction, e);
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
@@ -8204,7 +9567,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     Some(cursor),
                                     returned_transaction.or(sibling_child_node_ref.into_transaction()),
                                     e,
-                                )
+                                );
                             }
                         }
                     {
@@ -8232,7 +9595,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 let parent_node = match &nodes_staged_updates_parent_slot.node {
                                     InodeIndexTreeNode::Internal(internal_node) => internal_node,
                                     InodeIndexTreeNode::Leaf(_) => {
-                                        break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                                        break (Some(cursor), Some(transaction), nvfs_err_internal!());
                                     }
                                 };
                                 let child_node_level = match parent_node.node_level(tree_layout) {
@@ -8273,7 +9636,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         let parent_node = match &nodes_staged_updates_parent_slot.node {
                             InodeIndexTreeNode::Internal(internal_node) => internal_node,
                             InodeIndexTreeNode::Leaf(_) => {
-                                break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                                break (Some(cursor), Some(transaction), nvfs_err_internal!());
                             }
                         };
                         let parent_node_level = match parent_node.node_level(tree_layout) {
@@ -8351,7 +9714,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                         Some(*nodes_staged_updates_parent_slot_index),
                                         Some(*nodes_staged_updates_child_slot_index),
                                     ],
-                                    &mut transaction.allocs,
+                                    &transaction.allocs,
                                     &mut transaction.auth_tree_data_blocks_update_states,
                                     transaction.rng.as_mut(),
                                     &fs_instance.fs_config,
@@ -8390,18 +9753,21 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     // Now either merge (preferred) or rotate the child and the sibling.
                     let index_tree_levels = transaction.inode_index_updates.index_tree_levels;
-                    let [nodes_staged_updates_parent_slot, nodes_staged_updates_child_slot, nodes_staged_updates_sibling_child_slot] =
-                        match TransactionInodeIndexUpdates::get_tree_nodes_staged_updates_slots_mut(
-                            &mut transaction.inode_index_updates.tree_nodes_staged_updates,
-                            [
-                                *nodes_staged_updates_parent_slot_index,
-                                *nodes_staged_updates_child_slot_index,
-                                nodes_staged_updates_sibling_child_slot_index,
-                            ],
-                        ) {
-                            Ok(slots) => slots,
-                            Err(e) => break (Some(cursor), Some(transaction), e),
-                        };
+                    let [
+                        nodes_staged_updates_parent_slot,
+                        nodes_staged_updates_child_slot,
+                        nodes_staged_updates_sibling_child_slot,
+                    ] = match TransactionInodeIndexUpdates::get_tree_nodes_staged_updates_slots_mut(
+                        &mut transaction.inode_index_updates.tree_nodes_staged_updates,
+                        [
+                            *nodes_staged_updates_parent_slot_index,
+                            *nodes_staged_updates_child_slot_index,
+                            nodes_staged_updates_sibling_child_slot_index,
+                        ],
+                    ) {
+                        Ok(slots) => slots,
+                        Err(e) => break (Some(cursor), Some(transaction), e),
+                    };
 
                     let parent_node = match &mut nodes_staged_updates_parent_slot.node {
                         InodeIndexTreeNode::Internal(internal_node) => internal_node,
@@ -8976,7 +10342,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             (returned_transaction, root_node_ref)
                         }
                         task::Poll::Ready((returned_transaction, Err(e))) => {
-                            break (cursor.take(), returned_transaction, e)
+                            break (cursor.take(), returned_transaction, e);
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
@@ -9112,7 +10478,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             (returned_transaction, root_node_ref)
                         }
                         task::Poll::Ready((returned_transaction, Err(e))) => {
-                            break (cursor.take(), returned_transaction, e)
+                            break (cursor.take(), returned_transaction, e);
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
@@ -9180,7 +10546,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                             }),
                                             child_node_ref.get_nodes_staged_updates_slot_index(),
                                         ],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -9230,7 +10596,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                             }),
                                             Some(nodes_staged_updates_parent_slot_index),
                                         ],
-                                        &mut transaction.allocs,
+                                        &transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         transaction.rng.as_mut(),
                                         &fs_instance.fs_config,
@@ -9315,11 +10681,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
-/// Read the data of the inode an [`InodeIndexUnlinkCursor`] currently points at.
+/// [Future](CocoonFsSyncStateReadFuture) returned by
+/// [`InodeIndexUnlinkCursor::read_inode_data()`].
 pub struct InodeIndexUnlinkCursorReadInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: InodeIndexUnlinkCursorReadInodeDataFutureState<ST, C>,
 }
 
+/// [`InodeIndexUnlinkCursorReadInodeDataFutureState`] state-machine state.
 enum InodeIndexUnlinkCursorReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -9344,6 +10712,19 @@ enum InodeIndexUnlinkCursorReadInodeDataFutureState<ST: sync_types::SyncTypes, C
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexUnlinkCursorReadInodeDataFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`InodeIndexUnlinkCursor`] is
+    ///   lost.
+    /// * `Ok((cursor, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [`InodeIndexUnlinkCursor`], `cursor`,
+    ///   and the operation result will get returned within:
+    ///     * `Ok((cursor, Err(e)))` - In case of an error, the error reason `e`
+    ///       is returned in an [`Err`].
+    ///     * `Ok((cursor, Ok(data)))` - Otherwise the inode `data` is returned.
     type Output = Result<
         (
             Box<InodeIndexUnlinkCursor<ST, C>>,
@@ -9406,7 +10787,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let leaf_node = match tree_position.leaf_node.get_node(&transaction) {
                         Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                         Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (Some(cursor), Some(transaction), nvfs_err_internal!())
+                            break (Some(cursor), Some(transaction), nvfs_err_internal!());
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
                     };
@@ -9480,7 +10861,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 Some(cursor),
                                 Some(transaction),
                                 NvFsError::from(CocoonFsFormatError::InvalidExtents),
-                            )
+                            );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
                     }
@@ -9501,7 +10882,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 Ok((inode_extents_list_extents, inode_extents)),
                             )) => (returned_transaction, inode_extents_list_extents, inode_extents),
                             task::Poll::Ready((returned_transaction, Err(e))) => {
-                                break (cursor.take(), returned_transaction, e)
+                                break (cursor.take(), returned_transaction, e);
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
@@ -9595,13 +10976,29 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
-/// Update the root inode entry in the inode index entry leaf node.
+/// Update the root inode entry in the inode index entry leaf node if needed.
+///
+/// The inode index' root inode entry is always stored in the leftmost leaf, as
+/// per the minimum leaf node fill level. In order to avoid potentially updating
+/// that node over and over again upon every tree height change staged to a
+/// given [`Transaction`], that get's done once at the end via an
+/// `InodeIndexUpdateRootNodeInodeFuture` right before the transaction commit.
 pub struct InodeIndexUpdateRootNodeInodeFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: InodeIndexUpdateRootNodeInodeFutureState<C>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUpdateRootNodeInodeFuture<ST, C> {
+    /// Instantiate a [`InodeIndexUpdateRootNodeInodeFuture`].
+    ///
+    /// [`InodeIndexUpdateRootNodeInodeFuture`] assumes ownership of the
+    /// `transaction` and eventually returns it back from
+    /// [`poll()`](Self::poll) upon completion
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to stage an update to the inode
+    ///   index root inode entry to, if needed.
     pub fn new(transaction: Box<transaction::Transaction>) -> Self {
         Self {
             fut_state: InodeIndexUpdateRootNodeInodeFutureState::Init {
@@ -9612,6 +11009,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUpdateRootNodeInodeFu
     }
 }
 
+/// [`InodeIndexUpdateRootNodeInodeFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum InodeIndexUpdateRootNodeInodeFutureState<C: chip::NvChip> {
     Init {
@@ -9628,6 +11026,19 @@ enum InodeIndexUpdateRootNodeInodeFutureState<C: chip::NvChip> {
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for InodeIndexUpdateRootNodeInodeFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input [`Transaction`], `transaction`, and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, Err(e)))` - In case of an error, the error
+    ///       reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, Ok(())))` - Otherwise an `Ok(())` is returned on
+    ///       success.
     type Output = Result<(Box<transaction::Transaction>, Result<(), NvFsError>), NvFsError>;
     type AuxPollData<'a> = ();
 
@@ -9748,7 +11159,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 match transaction.inode_index_updates.reserve_tree_node_update_staging_slot(
                                     entry_leaf_node.node_allocation_blocks_begin(),
                                     &[],
-                                    &mut transaction.allocs,
+                                    &transaction.allocs,
                                     &mut transaction.auth_tree_data_blocks_update_states,
                                     transaction.rng.as_mut(),
                                     &fs_instance.fs_config,
@@ -9819,16 +11230,21 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
-/// Read, authenticate and decrypt the inode index entry leaf node entry before the authentication
-/// tree based authentication is available.
+/// Initial read of the inode index entry leaf node at filesystem opening time.
 ///
-/// Authentication is done by means of the preauthentication CCA protection digest over the inode
-/// index entry leaf node stored in the mutable image header.
+/// Read, authenticate and decrypt the inode index entry leaf node entry before
+/// the authentication tree based authentication is available.
+///
+/// Authentication is done by means of the preauthentication CCA protection
+/// digest over the inode index entry leaf node stored in the mutable image
+/// header.
 pub struct InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C: chip::NvChip> {
     entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     fut_state: InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState<C>,
 }
 
+/// [`InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture`] state-machine
+/// state.
 enum InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState<C: chip::NvChip> {
     Init,
     ReadEntryLeafNode {
@@ -9838,6 +11254,14 @@ enum InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState<C: chip::NvCh
 }
 
 impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C> {
+    /// Instantiate a
+    /// [`InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_leaf_node_allocation_blocks_begin` - Location of the inode
+    ///   index entry leaf node on storage, as found in
+    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`].
     pub fn new(entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex) -> Self {
         Self {
             entry_leaf_node_allocation_blocks_begin,
@@ -9845,6 +11269,25 @@ impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C
         }
     }
 
+    /// Poll the [`InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture`] to
+    /// completion.
+    ///
+    /// Upon successful future completion, a pair of the read entry leaf node
+    /// and the inode index' [`InodeIndexTreeLayout`] gets returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `expected_entry_leaf_node_preauth_cca_protection_digest` - The inode
+    ///   index entry leaf node's expected preauthentication CCA protection
+    ///   digest, as found in
+    ///   [`MutableImageHeader::inode_index_entry_leaf_node_preauth_cca_protection_digest`].
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
         chip: &C,
@@ -9995,8 +11438,8 @@ impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C
     }
 }
 
-/// Bootstrap the [`InodeIndex`] at filesystem opening time, after the authentication tree based
-/// authentication has become available.
+/// Bootstrap the [`InodeIndex`] at filesystem opening time, after the
+/// authentication tree based authentication has become available.
 pub struct InodeIndexBootstrapFuture<ST: sync_types::SyncTypes, C: chip::NvChip>
 where
     ST::RwLock<InodeIndexTreeNodeCache>: marker::Unpin,
@@ -10009,6 +11452,7 @@ where
     fut_state: InodeIndexBootstrapFutureState<C>,
 }
 
+/// [`InodeIndexBootstrapFuture`] state-machine state.
 enum InodeIndexBootstrapFutureState<C: chip::NvChip> {
     Init {
         entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -10032,6 +11476,20 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexBootstrapFuture<ST, C
 where
     ST::RwLock<InodeIndexTreeNodeCache>: marker::Unpin,
 {
+    /// Instantiate a [`InodeIndexBootstrapFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_leaf_node_allocation_blocks_begin` - Location of the inode
+    ///   index entry leaf node on storage, as found in
+    ///   [`MutableImageHeader::inode_index_entry_leaf_node_block_ptr`].
+    /// * `entry_leaf_node_preauth_cca_protection_digest` - The inode index
+    ///   entry leaf node's preauthentication CCA protection digest, as found in
+    ///   [`MutableImageHeader::inode_index_entry_leaf_node_preauth_cca_protection_digest`].
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `root_key` - The filesystem's root key.
+    /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
+    ///   filesystem.
     pub fn new(
         entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
@@ -10088,6 +11546,24 @@ where
         })
     }
 
+    /// Poll the [`InodeIndexBootstrapFuture`] to completion.
+    ///
+    /// Upon successful future completion, an [`InodeIndex`] instantiated for
+    /// the filesystem gets returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `fs_config` - The [`CocoonFsConfig`] instantiated for the filesystem.
+    /// * `alloc_bitmap` - The filesystem's
+    ///   [`AllocBitmap`](alloc_bitmap::AllocBitmap), as read through
+    ///   [`AllocBitmapFileReadFuture`](alloc_bitmap::AllocBitmapFileReadFuture).
+    /// * `auth_tree` - The [`AuthTree`](auth_tree::AuthTree) instantiated for
+    ///   the filesystem.
+    /// * `read_buffer` - A [`ReadBuffer`](read_buffer::ReadBuffer) instance
+    ///   associated with the invoking filesystem opening operation.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
         chip: &C,

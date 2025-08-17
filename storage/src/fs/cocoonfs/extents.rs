@@ -114,7 +114,7 @@ impl PhysicalExtents {
     /// * `pos` - Index position to insert the extent at.
     /// * `range` - The extent to insert.
     /// * `no_merge` - Whether or not to attempt to merge `range` with its
-    ///   preexising predecessor.
+    ///   preexisting predecessor.
     pub fn push_extent(&mut self, range: &layout::PhysicalAllocBlockRange, no_merge: bool) -> Result<(), NvFsError> {
         self.insert_extent(self.len(), range, no_merge)
     }
@@ -126,7 +126,7 @@ impl PhysicalExtents {
     /// * `pos` - Index position to insert the extent at.
     /// * `range` - The extent to insert.
     /// * `no_merge` - Whether or not to attempt to merge `range` with its
-    ///   preexising predecessor.
+    ///   preexisting predecessor.
     pub fn pop_extent(&mut self) {
         self.extents.pop();
     }

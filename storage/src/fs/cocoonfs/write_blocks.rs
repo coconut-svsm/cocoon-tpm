@@ -9,16 +9,24 @@ use alloc::vec::Vec;
 
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
-    fs::{cocoonfs::layout, NvFsError, NvFsIoError},
+    fs::{NvFsError, NvFsIoError, cocoonfs::layout},
     nvfs_err_internal,
     utils_common::bitmanip::BitManip as _,
 };
 use core::{mem, pin, task};
 
+#[cfg(doc)]
+use crate::chip::NvChipFuture as _;
+
+/// Directly write an extent to storage.
+///
+/// Intended for use at filesystem creation ("mkfs") time. In particular the
+/// writes don't go through a [`Transaction`](super::transaction::Transaction).
 pub struct WriteBlocksFuture<C: chip::NvChip> {
     fut_state: WriteBlocksFutureState<C>,
 }
 
+/// [`WriteBlocksFuture`] state-machine state.
 enum WriteBlocksFutureState<C: chip::NvChip> {
     Init {
         extent: layout::PhysicalAllocBlockRange,
@@ -34,6 +42,29 @@ enum WriteBlocksFutureState<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> WriteBlocksFuture<C> {
+    /// Instantiate a [`WriteBlocksFuture`].
+    ///
+    /// The input data, `src_io_blocks`, is assumed to be partitioned into
+    /// blocks, all equal and a power of two in length. The
+    /// [`WriteBlocksFuture`] assumes ownership of the `src_io_blocks`
+    /// buffers for the duration of the operation, they will eventually get
+    /// returned from [`poll()`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `extent` - Write destination on storage.
+    /// * `src_io_blocks` - The source data. Each buffer must have a length as
+    ///   determined by `src_block_allocation_blocks_log2` and the total length
+    ///   must match that of the destination `extent`.
+    /// * `src_block_allocation_blocks_log2` - Base-2 logarithm of the
+    ///   `src_io_blocks` buffers' length each, in units of [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// * `chip_io_block_allocation_blocks_log2` - Size of one [Chip IO
+    ///   Block](chip::NvChip::chip_io_block_size_128b_log2) in units of
+    ///   [Allocation
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
     pub fn new(
         extent: &layout::PhysicalAllocBlockRange,
         src_io_blocks: Vec<Vec<u8>>,
@@ -54,6 +85,19 @@ impl<C: chip::NvChip> WriteBlocksFuture<C> {
 }
 
 impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](chip::NvChipFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input data buffers are lost.
+    /// * `Ok((src_io_blocks, ...))` - Otherwise the outer level [`Result`] is
+    ///   set to [`Ok`] and a pair of the input data buffers, `src_io_blocks`,
+    ///   and the operation result will get returned within:
+    ///     * `Ok((src_io_blocks, Err(e)))` - In case of an error, the error
+    ///       reason `e` is returned in an [`Err`].
+    ///     * `Ok((src_io_blocks, Ok(())))` -  Otherwise, `Ok(())` will get
+    ///       returned for the operation result on success.
     type Output = Result<(Vec<Vec<u8>>, Result<(), NvFsError>), NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
@@ -121,6 +165,8 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
     }
 }
 
+/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// internally by [`WriteBlocksFuture`].
 struct WriteBlocksNvChipRequest {
     region: ChunkedIoRegion,
     src_blocks: Vec<Vec<u8>>,

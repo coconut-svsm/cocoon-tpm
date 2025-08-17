@@ -8,6 +8,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use super::{
+    Transaction,
     auth_tree_data_blocks_update_states::{
         AllocationBlockUpdateNvSyncState, AllocationBlockUpdateNvSyncStateAllocated,
         AllocationBlockUpdateNvSyncStateAllocatedModified, AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
@@ -17,38 +18,49 @@ use super::{
     },
     journal,
     write_dirty_data::min_write_block_allocation_blocks_log2,
-    Transaction,
 };
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
     fs::{
-        cocoonfs::{alloc_bitmap, layout},
         NvFsError,
+        cocoonfs::{alloc_bitmap, layout},
     },
     nvfs_err_internal,
     utils_common::{alloc::try_alloc_vec, bitmanip::BitManip as _},
 };
 use core::{pin, task};
 
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::{AuthTreeDataBlockUpdateState, AuthTreeDataBlocksUpdateStates};
+#[cfg(doc)]
+use layout::ImageLayout;
+
 /// Read missing data from storage.
 ///
-/// Read a given range's [Allocation
-/// Blocks'](layout::ImageLayout::allocation_block_size_128b_log2)
-/// data from storage into the associated
-/// [`nv_sync_state`'s](AllocationBlockUpdateNvSyncState) buffers as
-/// appropriate, if missing.
+/// Read all missing data from storage within a specified [Allocation Block
+/// level index range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange)
+/// into the [`Transaction`]'s [storage tracking
+/// states](AllocationBlockUpdateNvSyncState)' buffers.
 ///
 /// Does not authenticate, see
 /// [TransactionReadAuthenticateDataFuture](super::read_authenticate_data::TransactionReadAuthenticateDataFuture)
 /// for that.
 ///
 /// Note that the data loaded for a particular [Allocation
-/// Block](layout::ImageLayout::allocation_block_size_128b_log2) might perhaps
-/// have been superseded logically by
-/// [`staged_update`s](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateState::staged_update),
-/// but could still be needed to form an authentication digest over the
-/// containing [Authentication
-/// Tree Data Block](layout::ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+/// Block](ImageLayout::allocation_block_size_128b_log2) might perhaps have been
+/// superseded logically by [staged
+/// updates](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateStagedUpdate), but
+/// could still be needed to form an authentication digest over the containing
+/// [Authentication Tree
+/// Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
+///
+/// Only
+/// [`AllocationBlockUpdateState`](super::auth_tree_data_blocks_update_states::AllocationBlockUpdateState)s
+/// existing within the requested range at the time of
+/// `TransactionReadMissingDataFuture` instantiation will be considered.
+/// Additional ones may get inserted and populated as a byproduct
+/// for [IO Block](ImageLayout::io_block_allocation_blocks_log2) alignment
+/// purposes in the course though.
 pub(super) struct TransactionReadMissingDataFuture<C: chip::NvChip> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference
     // on Self.
@@ -60,6 +72,27 @@ pub(super) struct TransactionReadMissingDataFuture<C: chip::NvChip> {
 }
 
 impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
+    /// Instantiate a [`TransactionReadMissingDataFuture`].
+    ///
+    /// The [`TransactionReadMissingDataFuture`] assumes
+    /// ownership of the `transaction` for the duration of the operation, it
+    /// will eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] whose [storage tracking
+    ///   states](AllocationBlockUpdateNvSyncState)' buffers to populate.
+    /// * `states_allocation_blocks_index_range` - The [Allocation Block level
+    ///   entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   populate the [storage tracking
+    ///   states](AllocationBlockUpdateNvSyncState)' buffers within.  Applicable
+    ///   [correction
+    ///   offsets](AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets)
+    ///   will get returned from [`poll()`](Self::poll) upon completion in case
+    ///   additional state entries had to get inserted in order to [fill
+    ///   alignment gaps](AuthTreeDataBlocksUpdateStates::fill_states_index_range_regions_alignment_gaps).
     pub fn new(
         transaction: Box<Transaction>,
         states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -87,6 +120,31 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         })
     }
 
+    /// Poll the [`TransactionReadMissingDataFuture`] to completion.
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](TransactionReadMissingDataFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, offsets, ...))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a tuple of the input [`Transaction`],
+    ///   `transaction`, correction `offsets` to apply to the input [Allocation
+    ///   Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) in
+    ///   order to account for the insertion of new state entries, if any, and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, offsets, Err(e)))` - In case of an error, the
+    ///       error reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, offsets, Ok(())))` -  Otherwise, `Ok(())` will
+    ///       get returned for the operation result on success.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The filesystem image backing storage.
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
     #[allow(clippy::type_complexity)]
     pub fn poll(
         self: pin::Pin<&mut Self>,
@@ -202,6 +260,17 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         }
     }
 
+    /// Determine the minimum IO block size.
+    ///
+    /// Return the base-2 logarithm of the minimum IO block size in units of
+    /// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip_io_block_size_128b_log2` - Value of
+    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn min_read_block_allocation_blocks_log2(
         chip_io_block_size_128b_log2: u32,
         allocation_block_size_128b_log2: u32,
@@ -211,6 +280,21 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2)
     }
 
+    /// Determine the preferred IO block size.
+    ///
+    /// Return the base-2 logarithm of the preferred IO block size in units of
+    /// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip_io_block_size_128b_log2` - Value of
+    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+    /// * `preferred_chip_io_blocks_bulk_log2` - Value of
+    ///   [`NvChip::preferred_chip_io_blocks_bulk_log2()`](chip::NvChip::preferred_chip_io_blocks_bulk_log2).
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn preferred_read_block_allocation_blocks_log2(
         chip_io_block_size_128b_log2: u32,
         preferred_chip_io_blocks_bulk_log2: u32,
@@ -226,6 +310,29 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
             .max(auth_tree_data_block_allocation_blocks_log2)
     }
 
+    /// Determine the next subrange to read.
+    ///
+    /// Return a pair with information about the next subrange to read, if any,
+    /// stored in the first component, and the remainder of
+    /// `remaining_states_allocation_blocks_index_range` to process
+    /// in a subsequent iteration in the second. The information about the next
+    /// subrange to read comprises the range itself, alongside an `bool`
+    /// specifying where to read the data from -- either from the update
+    /// states' associated [target location on
+    /// storage](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin) if true, or from
+    /// the [journal staging
+    /// copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin)
+    /// otherwise.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`].
+    /// * `remaining_states_allocation_blocks_index_range` - Remaining part of
+    ///   the `request_states_allocation_blocks_index_range` not processed yet,
+    ///   extended to cover any preexisting states within the [`minimum IO
+    ///   Block`](Self::min_read_block_allocation_blocks_log2) vicinity.
+    /// * `request_states_allocation_blocks_range` - The original input request
+    ///   range.
     fn determine_next_read_region(
         transaction: &Transaction,
         remaining_states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -637,6 +744,22 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         }
     }
 
+    /// Prepare a storage read request.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
+    ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
+    /// * `read_region_states_allocation_blocks_index_range` - [Allocation Block
+    ///   level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   read in.
+    /// * `read_from_target` - Where to read from -- either from the update
+    ///   states' associated [target location on
+    ///   storage](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin)
+    ///   if true, or from the [journal staging
+    ///   copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin)
+    ///   otherwise.
     fn prepare_read_request(
         &mut self,
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
@@ -919,6 +1042,12 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         })
     }
 
+    /// Apply the results of a completed storage read request.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`].
+    /// * `completed_read_request` - The completed storage read request.
     fn apply_read_request_result(
         transaction: &mut Transaction,
         completed_read_request: TransactionReadMissingDataFutureNvChipReadRequest,
@@ -1033,6 +1162,8 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
     }
 }
 
+/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// internally by [`TransactionReadMissingDataFuture`].
 struct TransactionReadMissingDataFutureNvChipReadRequest {
     read_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     read_from_target: bool,

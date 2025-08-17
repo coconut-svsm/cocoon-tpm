@@ -8,10 +8,11 @@
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
-use super::{auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndexRange, Transaction};
+use super::{Transaction, auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndexRange};
 use crate::{
     chip,
     fs::{
+        NvFsError,
         cocoonfs::{
             alloc_bitmap::{self, ExtentsAllocationRequest},
             extents,
@@ -21,7 +22,6 @@ use crate::{
             },
             layout,
         },
-        NvFsError,
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -29,10 +29,17 @@ use crate::{
 };
 use core::{mem, pin, task};
 
+#[cfg(doc)]
+use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
+
+/// Allocate and assign [journal staging copy
+/// blocks](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin) for a
+/// [`Transaction`]'s [`AuthTreeDataBlockUpdateState`]s.
 pub struct TransactionAllocateJournalStagingCopiesFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: TransactionAllocateJournalStagingCopiesFutureState<ST, C>,
 }
 
+/// [`TransactionAllocateJournalStagingCopiesFuture`] state-machine state.
 enum TransactionAllocateJournalStagingCopiesFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -60,6 +67,21 @@ enum TransactionAllocateJournalStagingCopiesFutureState<ST: sync_types::SyncType
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAllocateJournalStagingCopiesFuture<ST, C> {
+    /// Instantiate a [`TransactionAllocateJournalStagingCopiesFuture`].
+    ///
+    /// The [`TransactionAllocateJournalStagingCopiesFuture`] assumes ownership
+    /// of the `transaction` for the duration of the operation, it will
+    /// eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to allocate journal staging copy
+    ///   blocks for.
+    /// * `states_index_range` - The [Authentication Tree Data Block level entry
+    ///   index range](AuthTreeDataBlocksUpdateStatesIndexRange) in
+    ///   [`Transaction::auth_tree_data_blocks_update_states`] to allocate
+    ///   journal staging copy blocks for.
     pub fn new(transaction: Box<Transaction>, states_index_range: AuthTreeDataBlocksUpdateStatesIndexRange) -> Self {
         Self {
             fut_state: TransactionAllocateJournalStagingCopiesFutureState::Init {
@@ -74,6 +96,20 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     for TransactionAllocateJournalStagingCopiesFuture<ST, C>
 {
     type AuxPollData<'a> = ();
+
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input [`Transaction`], `transaction`,  and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, Err(e)))` - In case of an error, the error
+    ///       reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, Ok(())))` -  Otherwise, `Ok(())` will get
+    ///       returned for the operation result on success.
     type Output = Result<(Box<Transaction>, Result<(), NvFsError>), NvFsError>;
 
     fn poll<'a>(
@@ -143,13 +179,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     for cur_states_index in states_index_range.iter() {
                         let s = &states[cur_states_index];
                         if s.get_journal_staging_copy_allocation_blocks_begin().is_some() {
-                            debug_assert!(last_journal_block_without_staging_copy_allocation_blocks_begin
-                                .map(|last_journal_block_allocation_blocks_begin| {
-                                    last_journal_block_allocation_blocks_begin
-                                        != s.get_target_allocation_blocks_begin()
-                                            .align_down(journal_block_allocation_blocks_log2)
-                                })
-                                .unwrap_or(true));
+                            debug_assert!(
+                                last_journal_block_without_staging_copy_allocation_blocks_begin
+                                    .map(|last_journal_block_allocation_blocks_begin| {
+                                        last_journal_block_allocation_blocks_begin
+                                            != s.get_target_allocation_blocks_begin()
+                                                .align_down(journal_block_allocation_blocks_log2)
+                                    })
+                                    .unwrap_or(true)
+                            );
                             last_journal_block_without_staging_copy_allocation_blocks_begin = None;
                             continue;
                         }
@@ -448,10 +486,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     }
 }
 
+/// Allocate extents for the journal.
+///
+/// Used for allocating the non-fixed tail of the journal log's chained
+/// encrypted extents.
 pub struct TransactionAllocateJournalExtentsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: TransactionAllocateJournalExtentsFutureState<ST, C>,
 }
 
+/// [`TransactionAllocateJournalExtentsFuture`] state-machine state.
 enum TransactionAllocateJournalExtentsFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -471,6 +514,18 @@ enum TransactionAllocateJournalExtentsFutureState<ST: sync_types::SyncTypes, C: 
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAllocateJournalExtentsFuture<ST, C> {
+    /// Instantiate a [`TransactionAllocateJournalExtentsFuture`].
+    ///
+    /// The [`TransactionAllocateJournalExtentsFuture`] assumes ownership
+    /// of the `transaction` for the duration of the operation, it will
+    /// eventually get returned back from [`poll()`](Self::poll) upon
+    /// completion.
+    ///
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`] to allocate journal extents for.
+    /// * `allocation_request` - The extents allocation request to serve.
     pub fn new(transaction: Box<Transaction>, allocation_request: ExtentsAllocationRequest) -> Self {
         Self {
             fut_state: TransactionAllocateJournalExtentsFutureState::Init {
@@ -484,7 +539,22 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAllocateJournalExten
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
     for TransactionAllocateJournalExtentsFuture<ST, C>
 {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned upon
+    /// [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the [`Transaction`] is lost.
+    /// * `Ok((transaction, ...))` - Otherwise the outer level [`Result`] is set
+    ///   to [`Ok`] and a pair of the input [`Transaction`], `transaction`,  and
+    ///   the operation result will get returned within:
+    ///     * `Ok((transaction, Err(e)))` - In case of an error, the error
+    ///       reason `e` is returned in an [`Err`].
+    ///     * `Ok((transaction, Ok(extents)))` -  Otherwise, the allocated
+    ///       `extents` wrapped in an `Ok` are returned for the operation result
+    ///       on success.
     type Output = Result<(Box<Transaction>, Result<extents::PhysicalExtents, NvFsError>), NvFsError>;
+
     type AuxPollData<'a> = ();
 
     fn poll<'a>(
