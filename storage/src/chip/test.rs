@@ -5,7 +5,6 @@
 //! Implementation of [`TestNvChip`].
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::chip::{self, ChunkedIoRegion, NvChipIoError};
@@ -13,12 +12,13 @@ use crate::utils_async::{
     sync_types::{Lock as _, SyncTypes},
     test::TestNopSyncTypes,
 };
+use crate::utils_common::fixed_vec::FixedVec;
 use core::{mem, ops, pin, task};
 use ops::{Deref as _, DerefMut as _};
 
 /// In-memory [`NvChip`](chip::NvChip) emulation for use with testing.
 pub struct TestNvChip {
-    chip_io_blocks: <TestNopSyncTypes as SyncTypes>::Lock<Vec<Option<Vec<u8>>>>,
+    chip_io_blocks: <TestNopSyncTypes as SyncTypes>::Lock<Vec<Option<FixedVec<u8, 7>>>>,
     chip_io_block_size_128b_log2: u32,
     preferred_chip_io_blocks_bulk_log2: u32,
 }
@@ -186,7 +186,7 @@ impl TestNvChip {
                     }
 
                     if chip_io_blocks[chip_io_block_index].is_none() {
-                        let block_buf = vec![0; chip_io_block_size];
+                        let block_buf = FixedVec::new_with_default(chip_io_block_size).unwrap();
                         chip_io_blocks[chip_io_block_index] = Some(block_buf);
                     }
                     let chip_io_block = chip_io_blocks[chip_io_block_index].as_mut().unwrap();
@@ -511,7 +511,7 @@ fn test_nv_chip_rw() {
         region: ChunkedIoRegion,
         level0_child_count_log2: u32,
         level1_child_count_log2: u32,
-        buffers: Vec<Vec<Vec<Vec<u8>>>>,
+        buffers: FixedVec<FixedVec<FixedVec<FixedVec<u8, 7>, 0>, 0>, 0>,
     }
 
     impl TestRwRequest {
@@ -522,26 +522,22 @@ fn test_nv_chip_rw() {
             level2_child_count: usize,
             physical_begin_chunk: u64,
         ) -> Self {
-            // For vec![].
-            use alloc::vec;
-
             let physical_begin_128b = physical_begin_chunk << chunk_size_128b_log2;
             let region_size_128b =
                 level2_child_count << (chunk_size_128b_log2 + level0_child_count_log2 + level1_child_count_log2);
             let physical_end_128b = physical_begin_128b + region_size_128b as u64;
             let region = ChunkedIoRegion::new(physical_begin_128b, physical_end_128b, chunk_size_128b_log2).unwrap();
-            let mut buffers = Vec::new();
-            for _l2 in 0..level2_child_count {
-                let mut level1_childs = Vec::new();
-                for _l1 in 0..(1usize << level1_child_count_log2) {
-                    let mut level0_childs = Vec::new();
-                    for _l0 in 0..(1usize << level0_child_count_log2) {
-                        let chunk = vec![0; 1usize << (chunk_size_128b_log2 + 7)];
-                        level0_childs.push(chunk);
+            let mut buffers = FixedVec::new_with_default(level2_child_count).unwrap();
+            for l2_child in buffers.iter_mut() {
+                let mut level1_childs = FixedVec::new_with_default(1usize << level1_child_count_log2).unwrap();
+                for l1_child in level1_childs.iter_mut() {
+                    let mut level0_childs = FixedVec::new_with_default(1usize << level0_child_count_log2).unwrap();
+                    for l0_child in level0_childs.iter_mut() {
+                        *l0_child = FixedVec::new_with_default(1usize << (chunk_size_128b_log2 + 7)).unwrap();
                     }
-                    level1_childs.push(level0_childs);
+                    *l1_child = level0_childs;
                 }
-                buffers.push(level1_childs);
+                *l2_child = level1_childs;
             }
 
             Self {
