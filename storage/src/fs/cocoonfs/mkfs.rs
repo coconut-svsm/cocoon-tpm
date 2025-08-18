@@ -5,7 +5,7 @@
 //! Implementation of [`CocoonFsMkFsFuture`].
 
 extern crate alloc;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 
 use crate::{
     chip,
@@ -24,8 +24,8 @@ use crate::{
     nvfs_err_internal,
     utils_async::sync_types,
     utils_common::{
-        alloc::try_alloc_vec,
         bitmanip::BitManip as _,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _, IoSlicesMutIter as _},
     },
 };
@@ -34,7 +34,7 @@ use core::{future, iter, marker, mem, pin, task};
 /// Filesystem layout description internal to [`CocoonFsMkFsFuture`].
 struct CocoonFsMkFsLayout {
     image_layout: layout::ImageLayout,
-    salt: Vec<u8>,
+    salt: FixedVec<u8, 4>,
     image_header_end: layout::PhysicalAllocBlockIndex,
     image_size: layout::AllocBlockCount,
     allocated_image_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
@@ -61,7 +61,7 @@ impl CocoonFsMkFsLayout {
     /// * `root_key` - The filesystem's root key.
     pub fn new(
         image_layout: &layout::ImageLayout,
-        salt: Vec<u8>,
+        salt: FixedVec<u8, 4>,
         image_size: layout::AllocBlockCount,
         root_key: keys::RootKey,
     ) -> Result<Self, NvFsError> {
@@ -287,21 +287,21 @@ pub struct CocoonFsMkFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     // Self.
     auth_tree_initialization_cursor: Option<Box<auth_tree::AuthTreeInitializationCursor>>,
 
-    encrypted_inode_index_entry_leaf_node: Vec<u8>,
+    encrypted_inode_index_entry_leaf_node: FixedVec<u8, 7>,
 
     // Initialized when the Allocation Bitmap File has been written out.
     alloc_bitmap_file: Option<alloc_bitmap::AllocBitmapFile>,
 
     // Initialized after the Authentication Tree has been initialized and the
     // final root digest computed.
-    root_hmac_digest: Vec<u8>,
+    root_hmac_digest: FixedVec<u8, 5>,
 
     // Initialized after the Authentication Tree has been initialized and nodes from the
     // initialization might first get added to the cache.
     auth_tree_node_cache: Option<auth_tree::AuthTreeNodeCache>,
 
     // Initialized after the header data to write out has been setup.
-    first_static_image_header_chip_io_block: Vec<Vec<u8>>,
+    first_static_image_header_chip_io_block: FixedVec<FixedVec<u8, 7>, 0>,
 
     rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
 
@@ -345,7 +345,7 @@ enum CocoonFsMkFsFutureState<C: chip::NvChip> {
         tail_data_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         tail_data_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
         aligned_tail_data_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
-        tail_data_allocation_blocks: Vec<Vec<u8>>,
+        tail_data_allocation_blocks: FixedVec<FixedVec<u8, 7>, 0>,
         next_allocation_block_in_tail_data: usize,
         auth_tree_write_part_fut: Option<auth_tree::AuthTreeInitializationCursorWritePartFuture<C>>,
     },
@@ -416,7 +416,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
     pub fn new(
         chip: C,
         image_layout: &CocoonFsImageLayout,
-        salt: Vec<u8>,
+        salt: FixedVec<u8, 4>,
         image_size: Option<layout::AllocBlockCount>,
         root_key: &[u8],
         enable_trimming: bool,
@@ -606,9 +606,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             auth_tree_initialization_cursor: Some(auth_tree_initialization_cursor),
             encrypted_inode_index_entry_leaf_node,
             alloc_bitmap_file: None,
-            root_hmac_digest: Vec::new(),
+            root_hmac_digest: FixedVec::new_empty(),
             auth_tree_node_cache: None,
-            first_static_image_header_chip_io_block: Vec::new(),
+            first_static_image_header_chip_io_block: FixedVec::new_empty(),
             rng,
             fut_state: CocoonFsMkFsFutureState::Init,
         })
@@ -880,13 +880,13 @@ where
                         Err(_) => break NvFsError::DimensionsNotSupported,
                     };
                     let mut tail_data_allocation_blocks =
-                        match try_alloc_vec::<Vec<u8>>(tail_data_allocation_blocks_count) {
+                        match FixedVec::new_with_default(tail_data_allocation_blocks_count) {
                             Ok(tail_data_allocation_blocks) => tail_data_allocation_blocks,
                             Err(e) => break NvFsError::from(e),
                         };
                     let allocation_block_size = 1usize << (allocation_block_size_128b_log2 + 7);
                     for tail_data_allocation_block in tail_data_allocation_blocks.iter_mut() {
-                        *tail_data_allocation_block = match try_alloc_vec(allocation_block_size) {
+                        *tail_data_allocation_block = match FixedVec::new_with_default(allocation_block_size) {
                             Ok(tail_data_allocation_block) => tail_data_allocation_block,
                             Err(e) => break 'outer NvFsError::from(e),
                         };
@@ -934,7 +934,7 @@ where
                                 io_slices::IoSlicesIterError::BackendIteratorError(e) => match e {},
                             }
                         }
-                        this.encrypted_inode_index_entry_leaf_node = Vec::new();
+                        this.encrypted_inode_index_entry_leaf_node = FixedVec::new_empty();
                     } else {
                         debug_assert!(
                             mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin
@@ -1151,7 +1151,7 @@ where
                     let auth_tree_node_cache = this.auth_tree_node_cache.insert(auth_tree_node_cache);
                     let root_hmac_digest_len =
                         hash::hash_alg_digest_len(image_layout.auth_tree_root_hmac_hash_alg) as usize;
-                    let mut root_hmac_digest = match try_alloc_vec(root_hmac_digest_len) {
+                    let mut root_hmac_digest = match FixedVec::new_with_default(root_hmac_digest_len) {
                         Ok(root_hmac_digest) => root_hmac_digest,
                         Err(e) => break NvFsError::from(e),
                     };
@@ -1221,14 +1221,14 @@ where
                         1usize << (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7);
 
                     // The first Chip IO BLock of the image header will get written separately at
-                    // the very end, after a write barrier.
-                    // Make the first Chip IO Block buffer a trivial Vec of a an u8 Vec, so that
-                    // WriteBlocksFuture can be used to write that out as well.
-                    let mut first_static_image_header_chip_io_block = match try_alloc_vec::<Vec<u8>>(1) {
+                    // the very end, after a write barrier.  Make the first Chip IO Block buffer a
+                    // trivial FixedVec of a an u8 FixedVec, so that WriteBlocksFuture can be used
+                    // to write that out as well.
+                    let mut first_static_image_header_chip_io_block = match FixedVec::new_with_default(1) {
                         Ok(first_static_image_header_chip_io_block) => first_static_image_header_chip_io_block,
                         Err(e) => break NvFsError::from(e),
                     };
-                    first_static_image_header_chip_io_block[0] = match try_alloc_vec(chip_io_block_size) {
+                    first_static_image_header_chip_io_block[0] = match FixedVec::new_with_default(chip_io_block_size) {
                         Ok(first_static_image_header_chip_io_block) => first_static_image_header_chip_io_block,
                         Err(e) => break NvFsError::from(e),
                     };
@@ -1244,12 +1244,12 @@ where
                         Err(_) => break NvFsError::DimensionsNotSupported,
                     };
                     let mut head_tail_data_chip_io_blocks =
-                        match try_alloc_vec::<Vec<u8>>(head_tail_data_chip_io_blocks_count) {
+                        match FixedVec::new_with_default(head_tail_data_chip_io_blocks_count) {
                             Ok(head_tail_data_chip_io_blocks) => head_tail_data_chip_io_blocks,
                             Err(e) => break NvFsError::from(e),
                         };
                     for head_tail_data_chip_io_block in head_tail_data_chip_io_blocks.iter_mut() {
-                        *head_tail_data_chip_io_block = match try_alloc_vec(chip_io_block_size) {
+                        *head_tail_data_chip_io_block = match FixedVec::new_with_default(chip_io_block_size) {
                             Ok(head_tail_data_chip_io_block) => head_tail_data_chip_io_block,
                             Err(e) => break 'outer NvFsError::from(e),
                         };
@@ -1344,7 +1344,7 @@ where
                                 io_slices::IoSlicesIterError::BackendIteratorError(e) => break e,
                             }
                         }
-                        this.encrypted_inode_index_entry_leaf_node = Vec::new();
+                        this.encrypted_inode_index_entry_leaf_node = FixedVec::new_empty();
                     }
 
                     // And fill the last IO Block's remainder, if any, with random data.
@@ -1393,14 +1393,14 @@ where
                         Err(_) => break NvFsError::DimensionsNotSupported,
                     };
                     let mut journal_log_head_io_blocks =
-                        match try_alloc_vec::<Vec<u8>>(journal_log_head_io_blocks_count) {
+                        match FixedVec::new_with_default(journal_log_head_io_blocks_count) {
                             Ok(journal_log_head_io_blocks) => journal_log_head_io_blocks,
                             Err(e) => break NvFsError::from(e),
                         };
                     let io_block_size =
                         1usize << (io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7);
                     for journal_log_head_io_block in journal_log_head_io_blocks.iter_mut() {
-                        *journal_log_head_io_block = match try_alloc_vec(io_block_size) {
+                        *journal_log_head_io_block = match FixedVec::new_with_default(io_block_size) {
                             Ok(journal_log_head_io_block) => journal_log_head_io_block,
                             Err(e) => break 'outer NvFsError::from(e),
                         };
@@ -1736,7 +1736,7 @@ struct WriteRandomDataFuture<C: chip::NvChip> {
 enum WriteRandomDataFutureState<C: chip::NvChip> {
     Init,
     RandomDataBulkWritePrepare {
-        bulk_io_blocks: Vec<Vec<u8>>,
+        bulk_io_blocks: FixedVec<FixedVec<u8, 7>, 0>,
     },
     WriteRandomDataBulk {
         write_fut: write_blocks::WriteBlocksFuture<C>,
@@ -1811,7 +1811,7 @@ impl<C: chip::NvChip> WriteRandomDataFuture<C> {
                     let bulk_io_blocks_count = (1u64 << this.preferred_bulk_io_blocks_log2)
                         .min(u64::from(this.extent.block_count()) >> (this.io_block_allocation_blocks_log2))
                         as usize;
-                    let mut bulk_io_blocks = match try_alloc_vec::<Vec<u8>>(bulk_io_blocks_count) {
+                    let mut bulk_io_blocks = match FixedVec::new_with_default(bulk_io_blocks_count) {
                         Ok(bulk_io_blocks) => bulk_io_blocks,
                         Err(e) => {
                             this.fut_state = WriteRandomDataFutureState::Done;
@@ -1823,7 +1823,7 @@ impl<C: chip::NvChip> WriteRandomDataFuture<C> {
                             + this.allocation_block_size_128b_log2 as u32
                             + 7);
                     for bulk_io_block in bulk_io_blocks.iter_mut() {
-                        *bulk_io_block = match try_alloc_vec(io_block_size) {
+                        *bulk_io_block = match FixedVec::new_with_default(io_block_size) {
                             Ok(bulk_io_block) => bulk_io_block,
                             Err(e) => {
                                 this.fut_state = WriteRandomDataFutureState::Done;

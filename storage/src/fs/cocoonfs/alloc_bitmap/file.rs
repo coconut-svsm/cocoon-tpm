@@ -29,10 +29,11 @@ use crate::{
     utils_common::{
         alloc::try_alloc_vec,
         bitmanip::{BitManip as _, UBitManip as _},
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _},
     },
 };
-use core::{mem, pin, task};
+use core::{convert, mem, pin, task};
 
 #[cfg(doc)]
 use transaction::Transaction;
@@ -381,8 +382,9 @@ impl AllocBitmapFile {
 
         // Does not overflow, a block's total payload length has been verified to fit an
         // usize in Self::new().
-        let mut file_block_buf =
-            try_alloc_vec(self.bitmap_words_per_file_block as usize * mem::size_of::<BitmapWord>())?;
+        let mut file_block_buf = FixedVec::<u8, 0>::new_with_default(
+            self.bitmap_words_per_file_block as usize * mem::size_of::<BitmapWord>(),
+        )?;
 
         let file_block_encryption_layout = encryption_entities::EncryptedBlockLayout::new(
             image_layout.block_cipher_alg,
@@ -542,7 +544,7 @@ pub struct AllocBitmapFileReadFuture<C: chip::NvChip> {
     file_block_in_extent_index: u64,
 
     file_block_decryption_instance: encryption_entities::EncryptedBlockDecryptionInstance,
-    file_block_decryption_buf: Vec<u8>,
+    file_block_decryption_buf: FixedVec<u8, 0>,
 
     fut_state: AllocBitmapFileReadFutureState<C>,
 }
@@ -613,7 +615,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
         // Does not overflow, c.f. AllocBitmapFile::new().
         let file_block_decrypted_len: usize =
             (file.bitmap_words_per_file_block as usize) * mem::size_of::<BitmapWord>();
-        let file_block_decryption_buf = try_alloc_vec(file_block_decrypted_len)?;
+        let file_block_decryption_buf = FixedVec::new_with_default(file_block_decrypted_len)?;
 
         Ok(Self {
             bitmap: Some(bitmap),
@@ -789,8 +791,8 @@ pub struct AllocBitmapFileInitializeFuture<C: chip::NvChip> {
     // Self.
     file: Option<AllocBitmapFile>,
     file_extent: layout::PhysicalAllocBlockRange,
-    file_block_encode_buf: Vec<u8>,
-    encrypted_file_blocks: Vec<Vec<u8>>,
+    file_block_encode_buf: FixedVec<u8, 0>,
+    encrypted_file_blocks: FixedVec<FixedVec<u8, 7>, 0>,
     next_file_extent_allocation_block_index: layout::PhysicalAllocBlockIndex,
     next_bitmap_word_index: usize,
     chip_io_block_allocation_blocks_log2: u8,
@@ -884,7 +886,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
         // Does not overflow, a block's total payload length has been verified to fit an
         // usize in AllocBitmapFile::new().
         let file_block_used_payload_len = file.bitmap_words_per_file_block as usize * mem::size_of::<BitmapWord>();
-        let file_block_encode_buf = match try_alloc_vec(file_block_used_payload_len) {
+        let file_block_encode_buf = match FixedVec::new_with_default(file_block_used_payload_len) {
             Ok(file_block_encode_buf) => file_block_encode_buf,
             Err(e) => return Err((auth_tree_initialization_cursor, NvFsError::from(e))),
         };
@@ -944,7 +946,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
 
         let preferred_bulk_file_blocks_log2 =
             preferred_bulk_allocation_blocks_log2 as u32 - file_block_allocation_blocks_log2;
-        let mut encrypted_file_blocks = match try_alloc_vec(1usize << preferred_bulk_file_blocks_log2) {
+        let mut encrypted_file_blocks = match FixedVec::new_with_default(1usize << preferred_bulk_file_blocks_log2) {
             Ok(encrypted_file_blocks) => encrypted_file_blocks,
             Err(e) => return Err((auth_tree_initialization_cursor, NvFsError::from(e))),
         };
@@ -952,7 +954,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
         // fit an usize in AllocBitmapFile::new().
         let file_block_size = 1usize << (file_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7);
         for encrypted_file_block in encrypted_file_blocks.iter_mut() {
-            *encrypted_file_block = match try_alloc_vec(file_block_size) {
+            *encrypted_file_block = match FixedVec::new_with_default(file_block_size) {
                 Ok(encrypted_file_block) => encrypted_file_block,
                 Err(e) => return Err((auth_tree_initialization_cursor, NvFsError::from(e))),
             };
@@ -1025,7 +1027,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
         Result<
             (
                 AllocBitmapFile,
-                Vec<Vec<u8>>,
+                FixedVec<FixedVec<u8, 7>, 0>,
                 Box<auth_tree::AuthTreeInitializationCursor>,
             ),
             NvFsError,
@@ -1067,7 +1069,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                             }
                         };
                         this.fut_state = AllocBitmapFileInitializeFutureState::Done;
-                        return task::Poll::Ready(Ok((file, Vec::new(), auth_tree_initialization_cursor)));
+                        return task::Poll::Ready(Ok((file, FixedVec::new_empty(), auth_tree_initialization_cursor)));
                     }
 
                     let cur_file_extent_range_allocation_blocks_end = (this.next_file_extent_allocation_block_index
@@ -1167,8 +1169,18 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                             }
                         };
 
-                        let mut remainder_encrypted_file_blocks = mem::take(&mut this.encrypted_file_blocks);
-                        remainder_encrypted_file_blocks.truncate(cur_file_extent_range_file_blocks);
+                        let remainder_encrypted_file_blocks = match FixedVec::new_from_fn(
+                            cur_file_extent_range_file_blocks,
+                            |i| -> Result<FixedVec<u8, 7>, convert::Infallible> {
+                                Ok(mem::take(&mut this.encrypted_file_blocks[i]))
+                            },
+                        ) {
+                            Ok(remainder_encrypted_file_blocks) => remainder_encrypted_file_blocks,
+                            Err(e) => {
+                                this.fut_state = AllocBitmapFileInitializeFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
 
                         this.fut_state = AllocBitmapFileInitializeFutureState::Done;
                         return task::Poll::Ready(Ok((
@@ -1322,20 +1334,27 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                             }
                         };
 
-                        let mut remainder_encrypted_file_blocks = mem::take(&mut this.encrypted_file_blocks);
-                        // Move the not yet written File blocks to the front and truncate after that.
-                        remainder_encrypted_file_blocks.truncate(u64::from(
-                            *cur_file_extent_range_allocation_blocks_end
-                                - *cur_file_extent_range_allocation_blocks_begin,
-                        ) as usize);
-                        remainder_encrypted_file_blocks.rotate_left(u64::from(
-                            *cur_file_extent_range_write_allocation_blocks_end
-                                - *cur_file_extent_range_allocation_blocks_begin,
-                        ) as usize);
-                        remainder_encrypted_file_blocks.truncate(u64::from(
-                            *cur_file_extent_range_allocation_blocks_end
-                                - *cur_file_extent_range_write_allocation_blocks_end,
-                        ) as usize);
+                        let remainder_encrypted_file_blocks = match FixedVec::new_from_fn(
+                            u64::from(
+                                *cur_file_extent_range_allocation_blocks_end
+                                    - *cur_file_extent_range_write_allocation_blocks_end,
+                            ) as usize,
+                            |i| -> Result<FixedVec<u8, 7>, convert::Infallible> {
+                                Ok(mem::take(
+                                    &mut this.encrypted_file_blocks[u64::from(
+                                        *cur_file_extent_range_write_allocation_blocks_end
+                                            - *cur_file_extent_range_allocation_blocks_begin,
+                                    ) as usize
+                                        + i],
+                                ))
+                            },
+                        ) {
+                            Ok(remainder_encrypted_file_blocks) => remainder_encrypted_file_blocks,
+                            Err(e) => {
+                                this.fut_state = AllocBitmapFileInitializeFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
 
                         this.fut_state = AllocBitmapFileInitializeFutureState::Done;
                         return task::Poll::Ready(Ok((
@@ -1381,8 +1400,8 @@ pub struct AllocBitmapFileReadJournalFragmentsFuture<C: chip::NvChip> {
     // Self.
     bitmap: Option<AllocBitmap>,
     file_block_decryption_instance: encryption_entities::EncryptedBlockDecryptionInstance,
-    file_block_decryption_buf: Vec<u8>,
-    read_buffers: Vec<Vec<u8>>,
+    file_block_decryption_buf: FixedVec<u8, 0>,
+    read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
     fragments_auth_digests_index: usize,
     ordered_file_extents_index: usize,
     apply_writes_script_index: usize,
@@ -1557,7 +1576,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
         // Does not overflow, c.f. AllocBitmapFile::new().
         let file_block_decrypted_len: usize =
             (file.bitmap_words_per_file_block as usize) * mem::size_of::<BitmapWord>();
-        let file_block_decryption_buf = try_alloc_vec(file_block_decrypted_len)?;
+        let file_block_decryption_buf = FixedVec::new_with_default(file_block_decrypted_len)?;
 
         // Unit of authentication + decryption, a "fragment", is the larger of the
         // Allocation Bitmap File Block and Authentication Tree Data Block size:
@@ -1589,13 +1608,14 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
             .max(fragment_allocation_blocks_log2)
             .min(usize::BITS - 1) as u8;
 
-        let mut read_buffers = try_alloc_vec(
+        let mut read_buffers = FixedVec::new_with_default(
             1usize << (read_buffers_total_allocation_blocks_log2 as u32 - fragment_allocation_blocks_log2),
         )?;
         for read_buffer in read_buffers.iter_mut() {
             // Does not overflow the usize, c.f. AllocBitmapFile::new().
-            *read_buffer =
-                try_alloc_vec(1usize << (fragment_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7))?;
+            *read_buffer = FixedVec::new_with_default(
+                1usize << (fragment_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7),
+            )?;
         }
 
         Ok(Self {
@@ -2373,7 +2393,7 @@ struct AllocBitmapFileReadJournalFragmentsNvChipReadRequest {
     region: ChunkedIoRegion,
     read_buffers_base_target_allocation_block_index: layout::PhysicalAllocBlockIndex,
     read_region_target_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-    read_buffers: Vec<Vec<u8>>,
+    read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
     read_buffer_allocation_blocks_log2: u8,
     allocation_block_size_128b_log2: u8,
     chip_io_block_allocation_blocks_log2: u8,

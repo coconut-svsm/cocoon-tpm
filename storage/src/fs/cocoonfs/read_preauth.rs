@@ -18,7 +18,8 @@ use crate::{
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
     utils_common::{
-        alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
+        alloc::try_alloc_zeroizing_vec,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _},
         zeroize,
     },
@@ -67,7 +68,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<
     /// Output type of [`poll()`](Self::poll).
     ///
     /// On success, the extent's data read from storage is returned.
-    type Output = Result<Vec<u8>, NvFsError>;
+    type Output = Result<FixedVec<u8, 7>, NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -122,7 +123,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<
 /// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
 /// internally by [`ReadExtentUnauthenticatedFuture`].
 struct ReadExtentUnauthenticatedNvChipReadRequest {
-    dst_buf: Vec<u8>,
+    dst_buf: FixedVec<u8, 7>,
     extent_range: layout::PhysicalAllocBlockRange,
     read_request_io_region: ChunkedIoRegion,
     chip_io_block_size_128b_log2: u32,
@@ -148,7 +149,7 @@ impl ReadExtentUnauthenticatedNvChipReadRequest {
         let extent_size =
             usize::try_from(u64::from(extent_allocation_blocks) << (allocation_block_size_128b_log2 as u32 + 7))
                 .map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let dst_buf = try_alloc_vec(extent_size)?;
+        let dst_buf = FixedVec::new_with_default(extent_size)?;
 
         let chip_io_block_allocation_blocks_log2 =
             chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2 as u32);
@@ -347,7 +348,6 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadChainedExtentsPreAuthCcaProt
     /// one or more buffers, possibly of different sizes each, is being
     /// returned.
     type Output = Result<Vec<zeroize::Zeroizing<Vec<u8>>>, NvFsError>;
-
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
 

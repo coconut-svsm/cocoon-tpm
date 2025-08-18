@@ -39,11 +39,12 @@ use crate::{
     nvfs_err_internal,
     utils_async::sync_types,
     utils_common::{
-        alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _, PeekableIoSlicesIter as _},
+        zeroize,
     },
 };
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 use core::{mem, pin, task};
 
 #[cfg(doc)]
@@ -54,7 +55,7 @@ use journal::extents_covering_auth_digests::ExtentsCoveringAuthDigests;
 /// Write the journal for a to be committed [`Transaction`].
 pub struct TransactionWriteJournalFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     fut_state: TransactionWriteJournalFutureState<ST, C>,
-    encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction: Vec<u8>,
+    encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction: FixedVec<u8, 0>,
     issue_sync: bool,
 }
 
@@ -109,8 +110,8 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvCh
         // reference on Self.
         transaction: Option<Box<Transaction>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
-        journal_log_head_extent_buf: Vec<u8>,
-        journal_log_tail_extents_bufs: Vec<Vec<u8>>,
+        journal_log_head_extent_buf: FixedVec<u8, 7>,
+        journal_log_tail_extents_bufs: FixedVec<FixedVec<u8, 7>, 0>,
         next_tail_extent_index: usize,
     },
     WriteJournalLogTailExtent {
@@ -118,8 +119,8 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvCh
         // reference on Self.
         transaction: Option<Box<Transaction>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
-        journal_log_head_extent_buf: Vec<u8>,
-        journal_log_tail_extents_bufs: Vec<Vec<u8>>,
+        journal_log_head_extent_buf: FixedVec<u8, 7>,
+        journal_log_tail_extents_bufs: FixedVec<FixedVec<u8, 7>, 0>,
         cur_tail_extent_index: usize,
         write_extent_fut: C::WriteFuture<WriteJournalLogExtentChipRequest>,
     },
@@ -128,7 +129,7 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvCh
         // reference on Self.
         transaction: Option<Box<Transaction>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
-        journal_log_head_extent_buf: Vec<u8>,
+        journal_log_head_extent_buf: FixedVec<u8, 7>,
         write_barrier_fut: C::WriteBarrierFuture,
     },
     WriteJournalLogHeadExtent {
@@ -200,7 +201,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
             fut_state: TransactionWriteJournalFutureState::Init {
                 transaction: Some(transaction),
             },
-            encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction: Vec::new(),
+            encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction: FixedVec::new_empty(),
             issue_sync,
         })
     }
@@ -593,7 +594,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                             Err(e) => break (false, Some(transaction), e),
                         };
                     let encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction =
-                        match try_alloc_vec(encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction_len) {
+                        match FixedVec::new_with_default(
+                            encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction_len,
+                        ) {
                             Ok(encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction) => {
                                 encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction
                             }
@@ -922,10 +925,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
 
                     // Encode the journal log in plain, and encrypt it as chained extents.
                     let journal_log_total_encoded_len = journal_log_encode_buf_layout.get_encoded_total_len();
-                    let mut journal_log_encode_buf = match try_alloc_zeroizing_vec(journal_log_total_encoded_len) {
-                        Ok(journal_log_encode_buf) => journal_log_encode_buf,
-                        Err(e) => break (false, Some(transaction), NvFsError::from(e)),
-                    };
+                    let journal_log_encode_buf =
+                        match FixedVec::<u8, 0>::new_with_default(journal_log_total_encoded_len) {
+                            Ok(journal_log_encode_buf) => journal_log_encode_buf,
+                            Err(e) => break (false, Some(transaction), NvFsError::from(e)),
+                        };
+                    let mut journal_log_encode_buf = zeroize::Zeroizing::new(journal_log_encode_buf);
 
                     let mut fs_instance_sync_state = CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state);
                     let (
@@ -965,7 +970,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     let journal_log_head_extent_len = (u64::from(journal_log_head_extent.block_count())
                         << (allocation_block_size_128b_log2 + 7))
                         as usize;
-                    let mut journal_log_head_extent_buf = match try_alloc_vec(journal_log_head_extent_len) {
+                    let mut journal_log_head_extent_buf = match FixedVec::new_with_default(journal_log_head_extent_len)
+                    {
                         Ok(journal_log_head_extent_buf) => journal_log_head_extent_buf,
                         Err(e) => break (false, Some(transaction), NvFsError::from(e)),
                     };
@@ -978,22 +984,21 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     } = *b"CCFSJRNL";
 
                     let journal_log_tail_extents = &transaction.journal_log_tail_extents;
-                    let mut journal_log_tail_extents_bufs = Vec::new();
-                    if let Err(e) = journal_log_tail_extents_bufs
-                        .try_reserve_exact(journal_log_tail_extents.len())
-                        .map_err(NvFsError::from)
-                    {
-                        break (false, Some(transaction), e);
-                    }
-                    for journal_log_tail_extent in journal_log_tail_extents.iter() {
+                    let mut journal_log_tail_extents_bufs =
+                        match FixedVec::new_with_default(journal_log_tail_extents.len()) {
+                            Ok(journal_log_tail_extents_bufs) => journal_log_tail_extents_bufs,
+                            Err(e) => break (false, Some(transaction), NvFsError::from(e)),
+                        };
+                    for (i, journal_log_tail_extent) in journal_log_tail_extents.iter().enumerate() {
                         let journal_log_tail_extent_len = (u64::from(journal_log_tail_extent.block_count())
                             << (allocation_block_size_128b_log2 + 7))
                             as usize;
-                        let journal_log_tail_extent_buf = match try_alloc_vec(journal_log_tail_extent_len) {
+                        let journal_log_tail_extent_buf = match FixedVec::new_with_default(journal_log_tail_extent_len)
+                        {
                             Ok(journal_log_tail_extent_buf) => journal_log_tail_extent_buf,
                             Err(e) => break 'outer (false, Some(transaction), NvFsError::from(e)),
                         };
-                        journal_log_tail_extents_bufs.push(journal_log_tail_extent_buf);
+                        journal_log_tail_extents_bufs[i] = journal_log_tail_extent_buf;
                     }
 
                     let mut journal_log_extents_encryption_instance =
@@ -1254,7 +1259,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
         // could in principle be retried.
         let transaction = match transaction {
             Some(mut transaction) => {
-                transaction.pending_auth_tree_updates.updated_root_hmac_digest.clear();
+                transaction.pending_auth_tree_updates.updated_root_hmac_digest = FixedVec::new_empty();
                 let auth_tree_config = fs_instance_sync_state.auth_tree.get_config();
                 let fs_instance = fs_instance_sync_state.get_fs_ref();
                 let fs_config = &fs_instance.fs_config;
@@ -1292,7 +1297,7 @@ struct TransactionCollectExtentsCoveringAuthDigestsFuture<C: chip::NvChip> {
     covered_extents: extents::PhysicalExtents,
     next_covered_extents_index: usize,
     last_auth_tree_data_block_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
-    out_buffer: Vec<u8>,
+    out_buffer: FixedVec<u8, 0>,
     out_buffer_pos: usize,
     fut_state: TransactionCollectExtentsCoveringAuthDigestsFutureState<C>,
 }
@@ -1332,7 +1337,7 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
     fn new(
         transaction: Box<Transaction>,
         covered_extents: extents::PhysicalExtents,
-        out_buffer: Vec<u8>,
+        out_buffer: FixedVec<u8, 0>,
         out_buffer_destination_offset: usize,
     ) -> Self {
         Self {
@@ -1370,7 +1375,7 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
         mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<(
-        Vec<u8>,
+        FixedVec<u8, 0>,
         Result<(Box<Transaction>, usize), (Option<Box<Transaction>>, NvFsError)>,
     )> {
         let this = pin::Pin::into_inner(self);
@@ -1841,14 +1846,14 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
 /// internally by [`TransactionWriteJournalFuture`].
 struct WriteJournalLogExtentChipRequest {
     region: ChunkedIoRegion,
-    src: Vec<u8>,
+    src: FixedVec<u8, 7>,
     allocation_block_size_128b_log2: u8,
 }
 
 impl WriteJournalLogExtentChipRequest {
     pub fn new(
         extent: &layout::PhysicalAllocBlockRange,
-        src: Vec<u8>,
+        src: FixedVec<u8, 7>,
         allocation_block_size_128b_log2: u8,
     ) -> Result<Self, NvFsError> {
         let physical_begin_128b = u64::from(extent.begin()) << (allocation_block_size_128b_log2 as u32);

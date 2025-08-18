@@ -16,6 +16,7 @@ use crate::{
     nvfs_err_internal, tpm2_interface,
     utils_common::{
         alloc::try_alloc_zeroizing_vec,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _, IoSlicesMutIter as _},
         zeroize,
     },
@@ -60,10 +61,10 @@ use core::{convert::TryFrom as _, mem};
 /// trade-off decision, as the gains would not outweigh the costs of
 /// the additional countermeasures required:
 /// - As outlined above the primary interest is in the "data at rest" scenario.
-/// - To protect against attackers attempting to probe for Journal Data Copy
-///   [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
-///   matchings by Chosen Ciphertext Attacks (CCA), another, fairly costly level
-///   of authentication would be required.
+/// - To protect against attackers attempting to probe for Journal Data Copy [IO
+///   Block](layout::ImageLayout::io_block_allocation_blocks_log2) matchings by
+///   Chosen Ciphertext Attacks (CCA), another, fairly costly level of
+///   authentication would be required.
 /// - While (legitimate) plaintexts input to the CBC-ESSIV obfuscation scheme
 ///   are ciphertexts themselves, and thus, can effectively be assumed to have
 ///   unique first block cipher blocks, as is sufficient for establishing
@@ -181,7 +182,7 @@ impl JournalStagingCopyDisguise {
     /// Instantiate a [`JournalDataCopyDisguiseAllocationBlockProcessor`] for
     /// running the actual journal staging copy disguising operations.
     pub fn instantiate_processor(&self) -> Result<JournalDataCopyDisguiseAllocationBlockProcessor<'_>, NvFsError> {
-        let iv_buf = try_alloc_zeroizing_vec::<u8>(self.iv_len())?;
+        let iv_buf = zeroize::Zeroizing::new(FixedVec::new_with_default(self.iv_len())?);
         Ok(JournalDataCopyDisguiseAllocationBlockProcessor { disguise: self, iv_buf })
     }
 
@@ -240,7 +241,7 @@ impl JournalStagingCopyDisguise {
 /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
 pub struct JournalDataCopyDisguiseAllocationBlockProcessor<'a> {
     disguise: &'a JournalStagingCopyDisguise,
-    iv_buf: zeroize::Zeroizing<Vec<u8>>,
+    iv_buf: zeroize::Zeroizing<FixedVec<u8, 4>>,
 }
 
 impl<'a> JournalDataCopyDisguiseAllocationBlockProcessor<'a> {
@@ -411,7 +412,7 @@ impl JournalStagingCopyUndisguise {
     /// Instantiate a [`JournalDataCopyUndisguiseAllocationBlockProcessor`] for
     /// running the actual journal staging copy undisguising operations.
     pub fn instantiate_processor(&self) -> Result<JournalDataCopyUndisguiseAllocationBlockProcessor<'_>, NvFsError> {
-        let iv_buf = try_alloc_zeroizing_vec::<u8>(self.iv_len())?;
+        let iv_buf = zeroize::Zeroizing::new(FixedVec::new_with_default(self.iv_len())?);
         Ok(JournalDataCopyUndisguiseAllocationBlockProcessor {
             undisguise: self,
             iv_buf,
@@ -471,7 +472,7 @@ impl JournalStagingCopyUndisguise {
 /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
 pub struct JournalDataCopyUndisguiseAllocationBlockProcessor<'a> {
     undisguise: &'a JournalStagingCopyUndisguise,
-    iv_buf: zeroize::Zeroizing<Vec<u8>>,
+    iv_buf: zeroize::Zeroizing<FixedVec<u8, 4>>,
 }
 
 impl<'a> JournalDataCopyUndisguiseAllocationBlockProcessor<'a> {

@@ -5,7 +5,7 @@
 //! Implementation of [`TransactionWriteDirtyDataFuture`].
 
 extern crate alloc;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 
 use super::{
     Transaction,
@@ -32,7 +32,7 @@ use crate::{
     nvfs_err_internal,
     utils_async::sync_types,
     utils_common::{
-        alloc::try_alloc_vec,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _},
     },
 };
@@ -854,14 +854,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
             .as_ref()
             .map(|d| {
                 let disguise_processor = d.0.instantiate_processor()?;
-                let mut disguised_src_allocation_block_buffers = Vec::new();
                 // The regions returned by Self::determine_next_write_range() at a time are
                 // guaranteed to not exceed usize::MAX in length as specified in
                 // units of Allocation Blocks.
                 let region_allocation_blocks_count = u64::from(region_allocation_blocks_count) as usize;
-                disguised_src_allocation_block_buffers
-                    .try_reserve_exact(region_allocation_blocks_count)
-                    .map_err(|_| NvFsError::MemoryAllocationFailure)?;
+                let disguised_src_allocation_block_buffers =
+                    FixedVec::new_with_default(region_allocation_blocks_count)?;
                 Ok((disguise_processor, disguised_src_allocation_block_buffers))
             })
             .transpose()
@@ -870,71 +868,74 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
             Err(e) => return Err((transaction, e)),
         };
 
-        // Walk thorugh all Allocation Blocks in the range, fill uninitialized ones with
+        // Walk through all Allocation Blocks in the range, fill uninitialized ones with
         // random data, and disguise all buffers if enabled.
-        for i in
-            aligned_write_region_states_allocation_blocks_index_range.iter(auth_tree_data_block_allocation_blocks_log2)
+        for (i, update_states_allocation_block_index) in aligned_write_region_states_allocation_blocks_index_range
+            .iter(auth_tree_data_block_allocation_blocks_log2)
+            .enumerate()
         {
             // Save away before the mut borrow in states[] below.
-            let target_allocation_block = states.get_allocation_block_target(&i);
-            let journal_staging_copy_allocation_block = match states.get_allocation_block_journal_staging_copy(&i) {
-                Some(journal_staging_copy_allocation_block) => journal_staging_copy_allocation_block,
-                None => return Err((transaction, nvfs_err_internal!())),
-            };
+            let target_allocation_block = states.get_allocation_block_target(&update_states_allocation_block_index);
+            let journal_staging_copy_allocation_block =
+                match states.get_allocation_block_journal_staging_copy(&update_states_allocation_block_index) {
+                    Some(journal_staging_copy_allocation_block) => journal_staging_copy_allocation_block,
+                    None => return Err((transaction, nvfs_err_internal!())),
+                };
 
-            let src_allocation_block_buffer: &[u8] = match &mut states[i].nv_sync_state {
-                AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => {
-                    match &unallocated_state.random_fillup {
-                        None => {
-                            // Fill any uninitialized Allocation Blocks in the range with random bytes.
-                            debug_assert!(!unallocated_state.target_state.is_initialized());
-                            debug_assert!(!unallocated_state.copied_to_journal);
-                            let mut random_fillup = match try_alloc_vec(allocation_block_size) {
-                                Ok(random_fillup) => random_fillup,
-                                Err(e) => return Err((transaction, NvFsError::from(e))),
-                            };
-                            if let Err(e) = rng::rng_dyn_dispatch_generate(
-                                transaction.rng.as_mut(),
-                                io_slices::SingletonIoSliceMut::new(&mut random_fillup).map_infallible_err(),
-                                None,
-                            ) {
-                                return Err((transaction, NvFsError::from(e)));
+            let src_allocation_block_buffer: &[u8] =
+                match &mut states[update_states_allocation_block_index].nv_sync_state {
+                    AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => {
+                        match &unallocated_state.random_fillup {
+                            None => {
+                                // Fill any uninitialized Allocation Blocks in the range with random bytes.
+                                debug_assert!(!unallocated_state.target_state.is_initialized());
+                                debug_assert!(!unallocated_state.copied_to_journal);
+                                let mut random_fillup = match FixedVec::new_with_default(allocation_block_size) {
+                                    Ok(random_fillup) => random_fillup,
+                                    Err(e) => return Err((transaction, NvFsError::from(e))),
+                                };
+                                if let Err(e) = rng::rng_dyn_dispatch_generate(
+                                    transaction.rng.as_mut(),
+                                    io_slices::SingletonIoSliceMut::new(&mut random_fillup).map_infallible_err(),
+                                    None,
+                                ) {
+                                    return Err((transaction, NvFsError::from(e)));
+                                }
+                                unallocated_state.random_fillup.insert(random_fillup)
                             }
-                            unallocated_state.random_fillup.insert(random_fillup)
+                            Some(random_fillup) => random_fillup,
                         }
-                        Some(random_fillup) => random_fillup,
                     }
-                }
-                AllocationBlockUpdateNvSyncState::Allocated(allocated_state) => {
-                    match allocated_state {
-                        AllocationBlockUpdateNvSyncStateAllocated::Unmodified(unmodified_state) => {
-                            // Any missing Allocation Block data should have been read in before the
-                            // write-out by now.
-                            match unmodified_state.cached_encrypted_data.as_ref() {
-                                Some(cached_encrypted_data) => cached_encrypted_data.get_encrypted_data(),
-                                None => return Err((transaction, nvfs_err_internal!())),
+                    AllocationBlockUpdateNvSyncState::Allocated(allocated_state) => {
+                        match allocated_state {
+                            AllocationBlockUpdateNvSyncStateAllocated::Unmodified(unmodified_state) => {
+                                // Any missing Allocation Block data should have been read in before the
+                                // write-out by now.
+                                match unmodified_state.cached_encrypted_data.as_ref() {
+                                    Some(cached_encrypted_data) => cached_encrypted_data.get_encrypted_data(),
+                                    None => return Err((transaction, nvfs_err_internal!())),
+                                }
                             }
-                        }
-                        AllocationBlockUpdateNvSyncStateAllocated::Modified(modified_state) => {
-                            match modified_state {
-                                AllocationBlockUpdateNvSyncStateAllocatedModified::JournalDirty {
-                                    authenticated_encrypted_data,
-                                } => authenticated_encrypted_data,
-                                AllocationBlockUpdateNvSyncStateAllocatedModified::JournalClean {
-                                    cached_encrypted_data,
-                                } => {
-                                    // Any missing Allocation Block data should have been read in before the
-                                    // write-out.
-                                    match cached_encrypted_data.as_ref() {
-                                        Some(cached_encrypted_data) => cached_encrypted_data.get_encrypted_data(),
-                                        None => return Err((transaction, nvfs_err_internal!())),
+                            AllocationBlockUpdateNvSyncStateAllocated::Modified(modified_state) => {
+                                match modified_state {
+                                    AllocationBlockUpdateNvSyncStateAllocatedModified::JournalDirty {
+                                        authenticated_encrypted_data,
+                                    } => authenticated_encrypted_data,
+                                    AllocationBlockUpdateNvSyncStateAllocatedModified::JournalClean {
+                                        cached_encrypted_data,
+                                    } => {
+                                        // Any missing Allocation Block data should have been read in before the
+                                        // write-out.
+                                        match cached_encrypted_data.as_ref() {
+                                            Some(cached_encrypted_data) => cached_encrypted_data.get_encrypted_data(),
+                                            None => return Err((transaction, nvfs_err_internal!())),
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-            };
+                };
 
             if let Some((disguise_processor, disguised_src_allocation_block_buffers)) =
                 &mut disguise_processor_and_buffers
@@ -943,10 +944,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
                 // but refers to a freshly initialized target IO block to be
                 // populated in place by the transaction.
                 if target_allocation_block != journal_staging_copy_allocation_block {
-                    let mut disguised_src_allocation_block_buffer = match try_alloc_vec(allocation_block_size) {
-                        Ok(disguised_src_allocation_block_buffer) => disguised_src_allocation_block_buffer,
-                        Err(e) => return Err((transaction, NvFsError::from(e))),
-                    };
+                    let mut disguised_src_allocation_block_buffer =
+                        match FixedVec::new_with_default(allocation_block_size) {
+                            Ok(disguised_src_allocation_block_buffer) => disguised_src_allocation_block_buffer,
+                            Err(e) => return Err((transaction, NvFsError::from(e))),
+                        };
                     if let Err(e) = disguise_processor.disguise_journal_staging_copy_allocation_block(
                         journal_staging_copy_allocation_block,
                         target_allocation_block,
@@ -955,9 +957,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
                     ) {
                         return Err((transaction, e));
                     }
-                    disguised_src_allocation_block_buffers.push(Some(disguised_src_allocation_block_buffer));
-                } else {
-                    disguised_src_allocation_block_buffers.push(None);
+                    disguised_src_allocation_block_buffers[i] = Some(disguised_src_allocation_block_buffer);
                 }
             }
         }
@@ -1281,7 +1281,7 @@ struct TransactionWriteDirtyDataNvChipWriteRequest {
     transaction: Box<Transaction>,
     aligned_write_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_io_region: ChunkedIoRegion,
-    disguised_src_allocation_block_buffers: Option<Vec<Option<Vec<u8>>>>,
+    disguised_src_allocation_block_buffers: Option<FixedVec<Option<FixedVec<u8, 7>>, 0>>,
 }
 
 impl chip::NvChipWriteRequest for TransactionWriteDirtyDataNvChipWriteRequest {

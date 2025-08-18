@@ -6,7 +6,6 @@
 //! [`BufferedReadAuthenticateDataFuture`].
 
 extern crate alloc;
-use alloc::vec::Vec;
 
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
@@ -16,7 +15,7 @@ use crate::{
     },
     nvfs_err_internal,
     utils_async::sync_types::{self, ConstructibleLock as _, Lock as _},
-    utils_common::{alloc::try_alloc_vec, bitmanip::BitManip as _},
+    utils_common::{bitmanip::BitManip as _, fixed_vec::FixedVec},
 };
 use core::{mem, pin, sync::atomic, task};
 
@@ -42,7 +41,7 @@ pub enum ReadBufferAllocationBlockUpdate {
         ///
         /// Must match the size as determined by
         /// [`ImageLayout::allocation_block_size_128b_log2`].
-        data: Vec<u8>,
+        data: FixedVec<u8, 7>,
     },
 }
 
@@ -60,9 +59,9 @@ struct BlockAllocationBlocksReadBuffer {
     /// Buffered Allocation Blocks.
     ///
     /// - `None` means the Allocation Block has been consumed,
-    /// - an empty `Vec` means the Allocation Block has not been consumed, but
-    ///   is unallocated.
-    buffered_allocation_blocks: Vec<Option<Vec<u8>>>,
+    /// - an empty `FixedVec` means the Allocation Block has not been consumed,
+    ///   but is unallocated.
+    buffered_allocation_blocks: FixedVec<Option<FixedVec<u8, 7>>, 0>,
 }
 
 impl BlockAllocationBlocksReadBuffer {
@@ -78,7 +77,7 @@ impl BlockAllocationBlocksReadBuffer {
             return Err(NvFsError::DimensionsNotSupported);
         }
 
-        let buffered_allocation_blocks = try_alloc_vec(1usize << block_allocation_blocks_log2)?;
+        let buffered_allocation_blocks = FixedVec::new_with_default(1usize << block_allocation_blocks_log2)?;
         Ok(Self {
             buffered_block_allocation_blocks_begin: None,
             buffered_allocation_blocks,
@@ -92,7 +91,7 @@ impl BlockAllocationBlocksReadBuffer {
     /// Blocks](ImageLayout::allocation_block_size_128b_log2) starting
     /// at index `take_begin` to the corresponding entry from
     /// `dst_allocation_blocks_bufs`. For any Allocation Block
-    /// buffered as unallocated, the `Vec` from the corresponding
+    /// buffered as unallocated, the `FixedVec` from the corresponding
     /// `dst_allocation_blocks_bufs` entry will get reset to zero length.
     /// Any entry from `dst_allocation_blocks_bufs`, for which no [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2) is
@@ -109,10 +108,10 @@ impl BlockAllocationBlocksReadBuffer {
     /// * `take_begin` - Index of the first [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) in the buffered
     ///   block to transfer (if present).
-    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut Vec` items to
+    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut FixedVec` items to
     ///   transfer the respective [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to.
-    fn take_buffers<'a, DI: Iterator<Item = &'a mut Vec<u8>>>(
+    fn take_buffers<'a, DI: Iterator<Item = &'a mut FixedVec<u8, 7>>>(
         &mut self,
         take_begin: usize,
         dst_allocation_blocks_bufs: DI,
@@ -170,10 +169,10 @@ impl BlockAllocationBlocksReadBuffer {
     ///
     /// If an entry from `src_allocation_blocks_bufs` is `None`, then the
     /// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
-    /// will get tracked as unavailable. Otherwise, if the `Vec` is empty,
+    /// will get tracked as unavailable. Otherwise, if the `FixedVec` is empty,
     /// it get buffered as unallocated. Otherwise the [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2) will
-    /// get buffered with the data from the `Vec` taken.
+    /// get buffered with the data from the `FixedVec` taken.
     ///
     /// On success, the location of the buffer's first buffered [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2) will get
@@ -186,7 +185,7 @@ impl BlockAllocationBlocksReadBuffer {
     /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to
     ///   insert.
-    fn insert_buffers<'a, SI: Iterator<Item = Option<&'a mut Vec<u8>>>>(
+    fn insert_buffers<'a, SI: Iterator<Item = Option<&'a mut FixedVec<u8, 7>>>>(
         &mut self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         src_allocation_blocks_bufs: SI,
@@ -283,8 +282,8 @@ impl BlockAllocationBlocksReadBuffer {
         for allocation_block_update in src_allocation_blocks_bufs.take(self.buffered_allocation_blocks.len() - i) {
             match allocation_block_update {
                 ReadBufferAllocationBlockUpdate::Unallocated => {
-                    // An empty Vec represents an unallocated Allocation Block.
-                    self.buffered_allocation_blocks[j] = Some(Vec::new());
+                    // An empty FixedVec represents an unallocated Allocation Block.
+                    self.buffered_allocation_blocks[j] = Some(FixedVec::new_empty());
                     any_remaining = true;
                 }
                 ReadBufferAllocationBlockUpdate::Invalidate => {
@@ -455,7 +454,7 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     /// Transfer any of the buffered authenticated [Allocation
     /// Blocks](ImageLayout::allocation_block_size_128b_log2) to the
     /// corresponding entry from `dst_allocation_blocks_bufs`. For any
-    /// Allocation Block buffered as unallocated, the `Vec`
+    /// Allocation Block buffered as unallocated, the `FixedVec`
     /// from the corresponding `dst_allocation_blocks_bufs` entry will get reset
     /// to zero length. Any entry from `dst_allocation_blocks_bufs`, for
     /// which no [Allocation
@@ -471,11 +470,11 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     /// # Arguments:
     ///
     /// * `range`  - The requested storage range.
-    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut Vec` items to
+    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut FixedVec` items to
     ///   transfer the respective [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to. Must
     ///   yield one entry for each Allocation Block in `range`.
-    fn take_authenticated_buffers<'a, DI: Iterator<Item = &'a mut Vec<u8>>>(
+    fn take_authenticated_buffers<'a, DI: Iterator<Item = &'a mut FixedVec<u8, 7>>>(
         &self,
         range: &layout::PhysicalAllocBlockRange,
         dst_allocation_blocks_bufs: DI,
@@ -546,7 +545,7 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     /// Transfer any of the buffered unauthenticated [Allocation
     /// Blocks](ImageLayout::allocation_block_size_128b_log2) to the
     /// corresponding entry from `dst_allocation_blocks_bufs`. For any
-    /// Allocation Block buffered as unallocated, the `Vec`
+    /// Allocation Block buffered as unallocated, the `FixedVec`
     /// from the corresponding `dst_allocation_blocks_bufs` entry will get reset
     /// to zero length. Any entry from `dst_allocation_blocks_bufs`, for
     /// which no [Allocation
@@ -562,11 +561,11 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     /// # Arguments:
     ///
     /// * `range`  - The requested storage range.
-    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut Vec` items to
+    /// * `dst_allocation_blocks_bufs` - Iterator over `&mut FixedVec` items to
     ///   transfer the respective [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to. Must
     ///   yield one entry for each Allocation Block in `range`.
-    fn take_unauthenticated_buffers<'a, DI: Iterator<Item = &'a mut Vec<u8>>>(
+    fn take_unauthenticated_buffers<'a, DI: Iterator<Item = &'a mut FixedVec<u8, 7>>>(
         &self,
         range: &layout::PhysicalAllocBlockRange,
         dst_allocation_blocks_bufs: DI,
@@ -642,10 +641,10 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     ///
     /// If an entry from `src_allocation_blocks_bufs` is `None`, then the
     /// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
-    /// will get tracked as unavailable. Otherwise, if the `Vec` is empty,
+    /// will get tracked as unavailable. Otherwise, if the `FixedVec` is empty,
     /// it get buffered as unallocated. Otherwise the [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2) will get buffered
-    /// with the data from the `Vec` taken.
+    /// with the data from the `FixedVec` taken.
     ///
     /// # Arguments:
     ///
@@ -654,7 +653,7 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to
     ///   insert. The buffers must all have been authenticated!
-    fn insert_authenticated_buffers<'a, SI: Iterator<Item = Option<&'a mut Vec<u8>>>>(
+    fn insert_authenticated_buffers<'a, SI: Iterator<Item = Option<&'a mut FixedVec<u8, 7>>>>(
         &self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         src_allocation_blocks_bufs: SI,
@@ -685,10 +684,10 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     ///
     /// If an entry from `src_allocation_blocks_bufs` is `None`, then the
     /// [Allocation Block](ImageLayout::allocation_block_size_128b_log2)
-    /// will get tracked as unavailable. Otherwise, if the `Vec` is empty,
+    /// will get tracked as unavailable. Otherwise, if the `FixedVec` is empty,
     /// it get buffered as unallocated. Otherwise the [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2) will get buffered
-    /// with the data from the `Vec` taken.
+    /// with the data from the `FixedVec` taken.
     ///
     /// # Arguments:
     ///
@@ -697,7 +696,7 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     /// * `src_allocation_blocks_bufs` - Iterator over the [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) buffers to
     ///   insert.
-    fn insert_unauthenticated_buffers<'a, SI: Iterator<Item = Option<&'a mut Vec<u8>>>>(
+    fn insert_unauthenticated_buffers<'a, SI: Iterator<Item = Option<&'a mut FixedVec<u8, 7>>>>(
         &self,
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         src_allocation_blocks_bufs: SI,
@@ -972,13 +971,13 @@ struct BufferedReadAuthenticatedDataFutureData {
 
     /// Destination buffers for the `request_range`, one for each [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2).
-    dst_allocation_blocks_bufs: Vec<Vec<u8>>,
+    dst_allocation_blocks_bufs: FixedVec<FixedVec<u8, 7>, 0>,
 
     /// Head and tail portions of the scratch Allocation Block buffers needed to
     /// fill up the [`request_range`](Self::request_range) to
     /// [`aligned_request_range`](Self::aligned_request_range) fused together in
     /// a single array.
-    alignment_scratch_allocation_blocks_bufs: Vec<Vec<u8>>,
+    alignment_scratch_allocation_blocks_bufs: FixedVec<FixedVec<u8, 7>, 0>,
 
     /// Subrange of [`request_range`](Self::request_range) for which
     /// authenticated data has been obtained from the [`ReadBuffer`].
@@ -1080,10 +1079,10 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
             return Err(NvFsError::DimensionsNotSupported);
         }
 
-        let dst_allocation_blocks_bufs = try_alloc_vec(request_range_allocation_blocks)?;
+        let dst_allocation_blocks_bufs = FixedVec::new_with_default(request_range_allocation_blocks)?;
 
         // Will get allocated lazily if needed.
-        let alignment_scratch_allocation_blocks_bufs = Vec::new();
+        let alignment_scratch_allocation_blocks_bufs = FixedVec::new_empty();
 
         Ok(Self {
             d: BufferedReadAuthenticatedDataFutureData {
@@ -1107,8 +1106,8 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
 
     /// Poll the [`BufferedReadAuthenticateDataFuture`] to completion.
     ///
-    /// On successful completion, a `Vec` of buffers is being returned, one for
-    /// each [Allocation
+    /// On successful completion, a `FixedVec` of buffers is being returned, one
+    /// for each [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2) in the requested
     /// read range.
     ///
@@ -1136,7 +1135,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
         fs_sync_state_auth_tree: &mut auth_tree::AuthTreeRef<'_, ST>,
         fs_sync_state_read_buffer: &ReadBuffer<ST>,
         cx: &mut task::Context<'_>,
-    ) -> task::Poll<Result<Vec<Vec<u8>>, NvFsError>> {
+    ) -> task::Poll<Result<FixedVec<FixedVec<u8, 7>, 0>, NvFsError>> {
         let this = pin::Pin::into_inner(self);
         {
             debug_assert_eq!(
@@ -1175,7 +1174,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                                 found_subrange.begin() - this.d.request_range.begin(),
                             ) as usize
                                 ..u64::from(found_subrange.end() - this.d.request_range.begin()) as usize]
-                                .fill(Vec::new());
+                                .fill(FixedVec::new_empty());
                         } else {
                             if found_subrange == this.d.request_range {
                                 // All found authenticated in the read buffer -> done.
@@ -1187,8 +1186,8 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                     }
 
                     // Now it is known that the alignment scratch buffers will probably be
-                    // needed. Allocate them (not the buffers themselves yet, but the Vec holding
-                    // the buffer Vecs).
+                    // needed. Allocate them (not the buffers themselves yet, but the FixedVec
+                    // holding the buffer FixedVecs).
                     this.d.allocate_alignment_scratch_allocation_blocks_buf()?;
 
                     // Try to obtain unauthenticated data overlapping with the request range from
@@ -1233,8 +1232,10 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                             // needs to get re-read anyway, and what has just been obtained from the
                             // read buffer will be of no value. Clear that out again in order to
                             // simplify the logic.
-                            this.d.alignment_scratch_allocation_blocks_bufs.fill(Vec::new());
-                            this.d.dst_allocation_blocks_bufs.fill(Vec::new());
+                            this.d
+                                .alignment_scratch_allocation_blocks_bufs
+                                .fill(FixedVec::new_empty());
+                            this.d.dst_allocation_blocks_bufs.fill(FixedVec::new_empty());
                         } else {
                             this.d.unauthenticated_subrange_from_read_buf = Some(found_subrange);
                         }
@@ -1328,7 +1329,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                                 || allocation_block_is_allocated
                         );
                         if allocation_block_is_allocated && allocation_block_buf.is_empty() {
-                            *allocation_block_buf = match try_alloc_vec(allocation_block_size) {
+                            *allocation_block_buf = match FixedVec::new_with_default(allocation_block_size) {
                                 Ok(allocation_block_buf) => allocation_block_buf,
                                 Err(e) => {
                                     this.fut_state = BufferedReadAuthenticateDataFutureState::Done;
@@ -1952,7 +1953,8 @@ impl BufferedReadAuthenticatedDataFutureData {
             u64::from(self.aligned_request_range.end() - self.request_range.end()) as usize;
         let alignment_scratch_allocation_blocks =
             head_alignment_scratch_allocation_blocks + tail_alignment_scratch_allocation_blocks;
-        self.alignment_scratch_allocation_blocks_bufs = try_alloc_vec(alignment_scratch_allocation_blocks)?;
+        self.alignment_scratch_allocation_blocks_bufs =
+            FixedVec::new_with_default(alignment_scratch_allocation_blocks)?;
         Ok(())
     }
 
@@ -1970,10 +1972,10 @@ impl BufferedReadAuthenticatedDataFutureData {
     /// * `aligned_request_range` - Reference to
     ///   [`Self::aligned_request_range`].
     fn get_alignment_scratch_allocation_blocks_bufs<'a>(
-        alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
+        alignment_scratch_allocation_blocks_bufs: &'a mut [FixedVec<u8, 7>],
         request_range: &layout::PhysicalAllocBlockRange,
         aligned_request_range: &layout::PhysicalAllocBlockRange,
-    ) -> (&'a mut [Vec<u8>], &'a mut [Vec<u8>]) {
+    ) -> (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]) {
         // The aligned_request_range is the request_range aligned to the larger of the
         // Chip IO Block and the Authentication Tree Data Block size. Return the
         // head and tail scratch buffer portions needed for aligning to the
@@ -2023,16 +2025,16 @@ impl BufferedReadAuthenticatedDataFutureData {
     ///   [`Self::min_io_block_allocation_blocks_log2`].
     #[allow(clippy::type_complexity)]
     fn split_off_unused_alignment_scratch_allocation_blocks_bufs<'a>(
-        head_alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
-        tail_alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
+        head_alignment_scratch_allocation_blocks_bufs: &'a mut [FixedVec<u8, 7>],
+        tail_alignment_scratch_allocation_blocks_bufs: &'a mut [FixedVec<u8, 7>],
         request_range: &layout::PhysicalAllocBlockRange,
         auth_tree_data_block_aligned_request_range: &layout::PhysicalAllocBlockRange,
         authenticated_subrange_from_read_buf: Option<&layout::PhysicalAllocBlockRange>,
         unauthenticated_subrange_from_read_buf: Option<&layout::PhysicalAllocBlockRange>,
         min_io_block_allocation_blocks_log2: u32,
     ) -> (
-        (&'a mut [Vec<u8>], &'a mut [Vec<u8>]),
-        (&'a mut [Vec<u8>], &'a mut [Vec<u8>]),
+        (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]),
+        (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]),
     ) {
         debug_assert!(
             authenticated_subrange_from_read_buf
@@ -2127,11 +2129,11 @@ impl BufferedReadAuthenticatedDataFutureData {
     /// * `aligned_request_range` - Reference to
     ///   [`Self::aligned_request_range`].
     fn get_auth_tree_data_block_alignment_scratch_allocation_blocks_bufs<'a>(
-        alignment_scratch_allocation_blocks_bufs: &'a mut [Vec<u8>],
+        alignment_scratch_allocation_blocks_bufs: &'a mut [FixedVec<u8, 7>],
         request_range: &layout::PhysicalAllocBlockRange,
         auth_tree_data_block_aligned_request_range: &layout::PhysicalAllocBlockRange,
         aligned_request_range: &layout::PhysicalAllocBlockRange,
-    ) -> (&'a mut [Vec<u8>], &'a mut [Vec<u8>]) {
+    ) -> (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]) {
         // The aligned_request_range is the request_range aligned to the larger of the
         // Chip IO Block and the Authentication Tree Data Block size. Obtain
         // only the head and tail portions needed to align the request_range to
@@ -2558,8 +2560,8 @@ enum BufferedReadAuthenticateDataFutureAuthenticateState<C: chip::NvChip> {
 /// internally by [`BufferedReadAuthenticateDataFuture`].
 struct BufferedReadAuthenticateDataFutureNvChipReadRequest {
     aligned_request_range_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-    dst_allocation_blocks_bufs: Vec<Vec<u8>>,
-    alignment_scratch_allocation_blocks_bufs: Vec<Vec<u8>>,
+    dst_allocation_blocks_bufs: FixedVec<FixedVec<u8, 7>, 0>,
+    alignment_scratch_allocation_blocks_bufs: FixedVec<FixedVec<u8, 7>, 0>,
     head_alignment_scratch_allocation_blocks: usize,
     authenticated_subrange_from_read_buf: Option<layout::PhysicalAllocBlockRange>,
 

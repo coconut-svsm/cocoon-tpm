@@ -16,8 +16,8 @@ use crate::{
     },
     nvfs_err_internal,
     utils_common::{
-        alloc::try_alloc_vec,
         bitmanip::{BitManip as _, UBitManip as _},
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIter as _, IoSlicesMutIter as _},
     },
 };
@@ -38,7 +38,7 @@ use layout::ImageLayout;
 pub(super) struct CachedEncryptedAllocationBlockData {
     /// The [Allocation Block's](ImageLayout::allocation_block_size_128b_log2)
     /// encrypted data.
-    encrypted_data: Vec<u8>,
+    encrypted_data: FixedVec<u8, 7>,
     /// Whether or not `encrypted_data` is authenticated.
     authenticated: bool,
 }
@@ -52,7 +52,7 @@ impl CachedEncryptedAllocationBlockData {
     ///
     /// * `encrypted_data` - The [Allocation
     ///   Block](ImageLayout::allocation_block_size_128b_log2) data to cache.
-    pub fn new(encrypted_data: Vec<u8>) -> Self {
+    pub fn new(encrypted_data: FixedVec<u8, 7>) -> Self {
         debug_assert!(!encrypted_data.is_empty());
         Self {
             encrypted_data,
@@ -76,7 +76,7 @@ impl CachedEncryptedAllocationBlockData {
     }
 
     /// Obtain the cached data back.
-    pub fn into_encrypted_data(self) -> Vec<u8> {
+    pub fn into_encrypted_data(self) -> FixedVec<u8, 7> {
         self.encrypted_data
     }
 }
@@ -124,7 +124,7 @@ pub(super) enum AllocationBlockUpdateNvSyncStateAllocatedModified {
         ///
         /// As the data is not coming from extern storage, it's always
         /// considered genuine.
-        authenticated_encrypted_data: Vec<u8>,
+        authenticated_encrypted_data: FixedVec<u8, 7>,
     },
 
     /// The most recently applied [staged
@@ -195,7 +195,7 @@ impl AllocationBlockUpdateNvSyncStateUnallocatedTargetState {
 pub(super) struct AllocationBlockUpdateNvSyncStateUnallocated {
     /// (Essentially) random data to write to the unallocated [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2).
-    pub(super) random_fillup: Option<Vec<u8>>,
+    pub(super) random_fillup: Option<FixedVec<u8, 7>>,
 
     /// Whether or not some essentially random data has been writen to the
     /// [Journal Staging
@@ -231,7 +231,7 @@ pub(super) enum AllocationBlockUpdateStagedUpdate {
 
     /// The [Allocation Block's](ImageLayout::allocation_block_size_128b_log2)
     /// contents are to get overwritten with `encrypted_data`.
-    Update { encrypted_data: Vec<u8> },
+    Update { encrypted_data: FixedVec<u8, 7> },
 
     /// A previous update to either the [Allocation
     /// Block](ImageLayout::allocation_block_size_128b_log2) itself or some
@@ -415,7 +415,7 @@ pub struct AuthTreeDataBlockUpdateState {
     /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// individual [Allocation
     /// Blocks](ImageLayout::allocation_block_size_128b_log2).
-    allocation_blocks_states: Vec<AllocationBlockUpdateState>,
+    allocation_blocks_states: FixedVec<AllocationBlockUpdateState, 0>,
 
     /// The updated authentication digest, if any.
     ///
@@ -440,7 +440,7 @@ pub struct AuthTreeDataBlockUpdateState {
     /// Blocks](ImageLayout::allocation_block_size_128b_log2) all happened to be
     /// unmodified, but this case is currently not supported as it's
     /// probably not worth the extra complexity.
-    auth_digest: Option<Vec<u8>>,
+    auth_digest: Option<FixedVec<u8, 5>>,
 }
 
 impl AuthTreeDataBlockUpdateState {
@@ -508,14 +508,14 @@ impl AuthTreeDataBlockUpdateState {
     /// Steal the [Authentication Tree Data
     /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// updated authentication digest, if any.
-    pub fn steal_auth_digest(&mut self) -> Option<Vec<u8>> {
+    pub fn steal_auth_digest(&mut self) -> Option<FixedVec<u8, 5>> {
         self.auth_digest.take()
     }
 
     /// Set the [Authentication Tree Data
     /// Block's](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// updated authentication digest, if any.
-    pub fn set_auth_digest(&mut self, auth_digest: Vec<u8>) {
+    pub fn set_auth_digest(&mut self, auth_digest: FixedVec<u8, 5>) {
         self.auth_digest = Some(auth_digest);
     }
 
@@ -1180,7 +1180,7 @@ impl AuthTreeDataBlocksUpdateStates {
                     self.states.push(AuthTreeDataBlockUpdateState {
                         target_allocation_blocks_begin: cur_target_allocation_blocks_begin,
                         journal_staging_copy_allocation_blocks_begin: cur_journal_staging_copy_allocation_blocks_begin,
-                        allocation_blocks_states: Vec::new(),
+                        allocation_blocks_states: FixedVec::new_empty(),
                         auth_digest: None,
                     });
                     let states_len = self.states.len();
@@ -1192,7 +1192,7 @@ impl AuthTreeDataBlocksUpdateStates {
                             target_allocation_blocks_begin: cur_target_allocation_blocks_begin,
                             journal_staging_copy_allocation_blocks_begin:
                                 cur_journal_staging_copy_allocation_blocks_begin,
-                            allocation_blocks_states: Vec::new(),
+                            allocation_blocks_states: FixedVec::new_empty(),
                             auth_digest: None,
                         },
                     );
@@ -1201,130 +1201,139 @@ impl AuthTreeDataBlocksUpdateStates {
                 cur_gap_inserted_states_count += 1;
 
                 let mut cur_target_allocation_block_index = cur_target_allocation_blocks_begin;
-                if let Err(e) = s
-                    .allocation_blocks_states
-                    .try_reserve_exact(1usize << auth_tree_data_block_allocation_blocks_log2)
-                    .map_err(|_| NvFsError::MemoryAllocationFailure)
-                {
-                    // Rollback the partial insertions to leave the states in a clean state.
-                    if cur_gap_auth_tree_data_blocks_count != 1 {
-                        let states_len = self.states.len();
-                        self.states.truncate(states_len - cur_gap_inserted_states_count);
-                    } else {
-                        self.states.remove(cur_states_insertion_index);
-                    }
-                    return Err((e, total_inserted_states_count));
-                }
-                // Initialize the individual Authentication Tree Data Block's Allocation Blocks'
-                // states according to whether the containing IO Block indicates they had been
-                // initialized with something before and also, to whether they'll get freed by
-                // the transaction.
-                for _ in 0..1usize << auth_tree_data_block_allocation_blocks_log2 {
-                    let cur_allocation_block_in_io_block_index = u64::from(cur_target_allocation_block_index)
-                        & u64::trailing_bits_mask(io_block_allocation_blocks_log2);
-                    if (cur_io_block_alloc_bitmap >> cur_allocation_block_in_io_block_index) & 1 != 0 {
-                        // The Allocation Block had been allocated before the transaction started.
-                        // If a free is pending for the current Allocation Block, then record that
-                        // fact at its state accordingly.
-                        let is_free_pending = match &cur_pending_frees {
-                            Some((cur_pending_frees_target_allocation_blocks_begin, cur_pending_frees_bitmap)) => {
-                                if *cur_pending_frees_target_allocation_blocks_begin > cur_target_allocation_block_index
-                                {
-                                    // The current pending frees entry is ahead, so this is not one.
-                                    false
-                                } else {
-                                    // The current pending frees entry is at or before the current
-                                    // position. If the former, examine,
-                                    // if the latter, advance the pending frees to
-                                    // the next one.
-                                    if cur_target_allocation_block_index
-                                        - *cur_pending_frees_target_allocation_blocks_begin
-                                        < layout::AllocBlockCount::from(alloc_bitmap::BitmapWord::BITS as u64)
+                s.allocation_blocks_states = match FixedVec::new_from_fn(
+                    1usize << auth_tree_data_block_allocation_blocks_log2,
+                    |_| -> Result<AllocationBlockUpdateState, convert::Infallible> {
+                        // Initialize the individual Authentication Tree Data Block's Allocation Blocks'
+                        // states according to whether the containing IO Block indicates they had been
+                        // initialized with something before and also, to whether they'll get freed by
+                        // the transaction.
+                        let cur_allocation_block_in_io_block_index = u64::from(cur_target_allocation_block_index)
+                            & u64::trailing_bits_mask(io_block_allocation_blocks_log2);
+                        let allocation_block_state = if (cur_io_block_alloc_bitmap
+                            >> cur_allocation_block_in_io_block_index)
+                            & 1
+                            != 0
+                        {
+                            // The Allocation Block had been allocated before the transaction started.
+                            // If a free is pending for the current Allocation Block, then record that
+                            // fact at its state accordingly.
+                            let is_free_pending = match &cur_pending_frees {
+                                Some((cur_pending_frees_target_allocation_blocks_begin, cur_pending_frees_bitmap)) => {
+                                    if *cur_pending_frees_target_allocation_blocks_begin
+                                        > cur_target_allocation_block_index
                                     {
-                                        (*cur_pending_frees_bitmap
-                                            >> u64::from(
-                                                cur_target_allocation_block_index
-                                                    - *cur_pending_frees_target_allocation_blocks_begin,
-                                            ))
-                                            & 1
-                                            != 0
+                                        // The current pending frees entry is ahead, so this is not one.
+                                        false
                                     } else {
-                                        // Advance to the next pending frees entry and examine if
-                                        // now in range.
-                                        pending_frees_iter.skip_to(cur_target_allocation_block_index);
-                                        cur_pending_frees = pending_frees_iter.next();
-                                        cur_pending_frees
-                                            .as_ref()
-                                            .map(
-                                                |(
-                                                    cur_pending_frees_target_allocation_blocks_begin,
-                                                    cur_pending_frees_bitmap,
-                                                )| {
-                                                    if *cur_pending_frees_target_allocation_blocks_begin
-                                                        <= cur_target_allocation_block_index
-                                                    {
-                                                        (*cur_pending_frees_bitmap
+                                        // The current pending frees entry is at or before the current
+                                        // position. If the former, examine,
+                                        // if the latter, advance the pending frees to
+                                        // the next one.
+                                        if cur_target_allocation_block_index
+                                            - *cur_pending_frees_target_allocation_blocks_begin
+                                            < layout::AllocBlockCount::from(alloc_bitmap::BitmapWord::BITS as u64)
+                                        {
+                                            (*cur_pending_frees_bitmap
+                                                >> u64::from(
+                                                    cur_target_allocation_block_index
+                                                        - *cur_pending_frees_target_allocation_blocks_begin,
+                                                ))
+                                                & 1
+                                                != 0
+                                        } else {
+                                            // Advance to the next pending frees entry and examine if
+                                            // now in range.
+                                            pending_frees_iter.skip_to(cur_target_allocation_block_index);
+                                            cur_pending_frees = pending_frees_iter.next();
+                                            cur_pending_frees
+                                                .as_ref()
+                                                .map(
+                                                    |(
+                                                        cur_pending_frees_target_allocation_blocks_begin,
+                                                        cur_pending_frees_bitmap,
+                                                    )| {
+                                                        if *cur_pending_frees_target_allocation_blocks_begin
+                                                            <= cur_target_allocation_block_index
+                                                        {
+                                                            (*cur_pending_frees_bitmap
                                                             >> u64::from(
                                                                 cur_target_allocation_block_index
                                                                     - *cur_pending_frees_target_allocation_blocks_begin,
                                                             ))
                                                             & 1
                                                             != 0
-                                                    } else {
-                                                        false
-                                                    }
-                                                },
-                                            )
-                                            .unwrap_or(false)
+                                                        } else {
+                                                            false
+                                                        }
+                                                    },
+                                                )
+                                                .unwrap_or(false)
+                                        }
                                     }
                                 }
-                            }
-                            None => false,
-                        };
-                        let staged_update = if is_free_pending {
-                            AllocationBlockUpdateStagedUpdate::Deallocate
-                        } else {
-                            AllocationBlockUpdateStagedUpdate::None
-                        };
+                                None => false,
+                            };
+                            let staged_update = if is_free_pending {
+                                AllocationBlockUpdateStagedUpdate::Deallocate
+                            } else {
+                                AllocationBlockUpdateStagedUpdate::None
+                            };
 
-                        s.allocation_blocks_states.push(AllocationBlockUpdateState {
-                            nv_sync_state: AllocationBlockUpdateNvSyncState::Allocated(
-                                AllocationBlockUpdateNvSyncStateAllocated::Unmodified(
-                                    AllocationBlockUpdateNvSyncStateAllocatedUnmodified {
-                                        cached_encrypted_data: None,
+                            AllocationBlockUpdateState {
+                                nv_sync_state: AllocationBlockUpdateNvSyncState::Allocated(
+                                    AllocationBlockUpdateNvSyncStateAllocated::Unmodified(
+                                        AllocationBlockUpdateNvSyncStateAllocatedUnmodified {
+                                            cached_encrypted_data: None,
+                                            copied_to_journal: false,
+                                        },
+                                    ),
+                                ),
+                                staged_update,
+                            }
+                        } else {
+                            // The Allocation Block had been unallocated before the transaction.
+                            // If any Allocation Block from the containing IO Block, if any, had been
+                            // allocated by a previous transaction already, then all the remaining
+                            // unallocated ones will have been initialized alongside.
+                            let target_is_initialized = cur_io_block_alloc_bitmap != 0;
+                            AllocationBlockUpdateState {
+                                nv_sync_state: AllocationBlockUpdateNvSyncState::Unallocated(
+                                    AllocationBlockUpdateNvSyncStateUnallocated {
+                                        random_fillup: None,
                                         copied_to_journal: false,
+                                        target_state:
+                                            AllocationBlockUpdateNvSyncStateUnallocatedTargetState::Unallocated {
+                                                is_initialized: target_is_initialized,
+                                            },
                                     },
                                 ),
-                            ),
-                            staged_update,
-                        });
-                    } else {
-                        // The Allocation Block had been unallocated before the transaction.
-                        // If any Allocation Block from the containing IO Block, if any, had been
-                        // allocated by a previous transaction already, then all the remaining
-                        // unallocated ones will have been initialized alongside.
-                        let target_is_initialized = cur_io_block_alloc_bitmap != 0;
-                        s.allocation_blocks_states.push(AllocationBlockUpdateState {
-                            nv_sync_state: AllocationBlockUpdateNvSyncState::Unallocated(
-                                AllocationBlockUpdateNvSyncStateUnallocated {
-                                    random_fillup: None,
-                                    copied_to_journal: false,
-                                    target_state: AllocationBlockUpdateNvSyncStateUnallocatedTargetState::Unallocated {
-                                        is_initialized: target_is_initialized,
-                                    },
-                                },
-                            ),
-                            staged_update: AllocationBlockUpdateStagedUpdate::None,
-                        });
-                    }
+                                staged_update: AllocationBlockUpdateStagedUpdate::None,
+                            }
+                        };
 
-                    cur_target_allocation_block_index += layout::AllocBlockCount::from(1);
-                    if cur_target_allocation_block_index.align_down(io_block_allocation_blocks_log2)
-                        == cur_target_allocation_block_index
-                    {
-                        cur_io_block_alloc_bitmap = io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
+                        cur_target_allocation_block_index += layout::AllocBlockCount::from(1);
+                        if cur_target_allocation_block_index.align_down(io_block_allocation_blocks_log2)
+                            == cur_target_allocation_block_index
+                        {
+                            cur_io_block_alloc_bitmap = io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
+                        }
+
+                        Ok(allocation_block_state)
+                    },
+                ) {
+                    Ok(allocation_blocks_states) => allocation_blocks_states,
+                    Err(e) => {
+                        // Rollback the partial insertions to leave the states in a clean state.
+                        if cur_gap_auth_tree_data_blocks_count != 1 {
+                            let states_len = self.states.len();
+                            self.states.truncate(states_len - cur_gap_inserted_states_count);
+                        } else {
+                            self.states.remove(cur_states_insertion_index);
+                        }
+                        return Err((NvFsError::from(e), total_inserted_states_count));
                     }
-                }
+                };
 
                 cur_target_allocation_blocks_begin = cur_target_allocation_block_index;
             }
@@ -2442,7 +2451,7 @@ impl AuthTreeDataBlocksUpdateStates {
                 }
             }
             let allocation_block_size = 1usize << (allocation_block_size_128b_log2 + 7);
-            let encrypted_data = try_alloc_vec(allocation_block_size)?;
+            let encrypted_data = FixedVec::new_with_default(allocation_block_size)?;
             allocation_block_update_state.staged_update = AllocationBlockUpdateStagedUpdate::Update { encrypted_data }
         }
         Ok(())

@@ -19,6 +19,7 @@ use crate::{
         },
     },
     utils_async::sync_types,
+    utils_common::fixed_vec::FixedVec,
 };
 
 use core::marker;
@@ -643,7 +644,7 @@ impl TransactionAllocations {
 /// Populated only at [`Transaction`] commit.
 pub(super) struct TransactionPendingAuthTreeUpdates {
     /// The updated authentication tree root HMAC.
-    updated_root_hmac_digest: Vec<u8>,
+    updated_root_hmac_digest: FixedVec<u8, 5>,
     /// Updates to the authentication tree's nodes.
     pending_nodes_updates: auth_tree::AuthTreePendingNodesUpdates,
 }
@@ -652,7 +653,7 @@ impl TransactionPendingAuthTreeUpdates {
     /// Instantiate a new, empty [`TransactionPendingAuthTreeUpdates`].
     fn new() -> Self {
         Self {
-            updated_root_hmac_digest: Vec::new(),
+            updated_root_hmac_digest: FixedVec::new_empty(),
             pending_nodes_updates: auth_tree::AuthTreePendingNodesUpdates::new(),
         }
     }

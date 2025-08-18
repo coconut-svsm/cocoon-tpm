@@ -10,14 +10,14 @@ use crate::{
     crypto::{hash, rng, symcipher},
     fs::{
         self,
-        cocoonfs::{layout, CocoonFs, CocoonFsMkFsFuture, CocoonFsOpenFsFuture},
+        cocoonfs::{CocoonFs, CocoonFsMkFsFuture, CocoonFsOpenFsFuture, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::{
         sync_types,
         test::{TestAsyncExecutor, TestNopSyncTypes},
     },
-    utils_common::{alloc::try_alloc_vec, zeroize},
+    utils_common::{fixed_vec::FixedVec, zeroize},
 };
 use core::{marker, ops, pin, slice, task};
 
@@ -128,7 +128,7 @@ struct CocoonFsTestConfig<'a> {
 }
 
 impl<'a> CocoonFsTestConfig<'a> {
-    fn instantiate(&self, image_size: usize) -> (TestNvChip, layout::ImageLayout, Vec<u8>) {
+    fn instantiate(&self, image_size: usize) -> (TestNvChip, layout::ImageLayout, FixedVec<u8, 4>) {
         let image_layout = layout::ImageLayout::new(
             self.layout.allocation_block_size_128b_log2,
             self.layout.io_block_allocation_blocks_log2,
@@ -153,7 +153,7 @@ impl<'a> CocoonFsTestConfig<'a> {
             self.layout.preferred_chip_io_blocks_bulk_log2 as u32,
         );
 
-        let mut salt = try_alloc_vec(self.layout.salt_len as usize).unwrap();
+        let mut salt = FixedVec::new_with_default(self.layout.salt_len as usize).unwrap();
         let mut salt_chunks = salt.chunks_exact_mut(4);
         while let Some(salt_chunk) = salt_chunks.next() {
             salt_chunk.copy_from_slice(b"SALT");

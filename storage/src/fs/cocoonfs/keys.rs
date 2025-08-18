@@ -4,9 +4,6 @@
 
 //! Functionality related to root- and subkey derivations.
 
-extern crate alloc;
-use alloc::vec::Vec;
-
 use crate::{
     crypto::{
         hash,
@@ -17,7 +14,7 @@ use crate::{
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types::{self, RwLock as _},
     utils_common::{
-        alloc::try_alloc_zeroizing_vec,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _},
         murmurhash3, zeroize,
     },
@@ -103,30 +100,28 @@ impl KeyId {
 ///
 /// </div>
 pub struct KeyCache {
-    cache: set_assoc_cache::SetAssocCache<KeyId, zeroize::Zeroizing<Vec<u8>>, KeyCacheMapKeyIdToSetAssocCacheSet>,
+    cache:
+        set_assoc_cache::SetAssocCache<KeyId, zeroize::Zeroizing<FixedVec<u8, 4>>, KeyCacheMapKeyIdToSetAssocCacheSet>,
 }
 
 impl KeyCache {
     /// Instantiate a [`KeyCache`].
     pub fn new() -> Result<Self, NvFsError> {
         // Create a cache of two full sets, i.e. 16 slots in total.
-        let cache =
-            set_assoc_cache::SetAssocCache::new(
-                KeyCacheMapKeyIdToSetAssocCacheSet { cache_sets_count: 2 },
-                iter::repeat_n(
-                    set_assoc_cache::SetAssocCache::<
-                        KeyId,
-                        zeroize::Zeroizing<Vec<u8>>,
-                        KeyCacheMapKeyIdToSetAssocCacheSet,
-                    >::MAX_SET_ASSOCIATIVITY,
-                    2,
-                ),
-            )
-            .map_err(|e| match e {
-                set_assoc_cache::SetAssocCacheConfigureError::MemoryAllocationFailure => {
-                    NvFsError::MemoryAllocationFailure
-                }
-            })?;
+        let cache = set_assoc_cache::SetAssocCache::new(
+            KeyCacheMapKeyIdToSetAssocCacheSet { cache_sets_count: 2 },
+            iter::repeat_n(
+                set_assoc_cache::SetAssocCache::<
+                    KeyId,
+                    zeroize::Zeroizing<FixedVec<u8, 4>>,
+                    KeyCacheMapKeyIdToSetAssocCacheSet,
+                >::MAX_SET_ASSOCIATIVITY,
+                2,
+            ),
+        )
+        .map_err(|e| match e {
+            set_assoc_cache::SetAssocCacheConfigureError::MemoryAllocationFailure => NvFsError::MemoryAllocationFailure,
+        })?;
 
         Ok(Self { cache })
     }
@@ -386,7 +381,7 @@ impl set_assoc_cache::SetAssocCacheMapKeyToSet<KeyId> for KeyCacheMapKeyIdToSetA
 pub struct RootKey {
     /// [`TcgTpm2KdfA`](kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA) input parent key
     /// material to be used for subkey derivation.
-    root_key: zeroize::Zeroizing<Vec<u8>>,
+    root_key: zeroize::Zeroizing<FixedVec<u8, 4>>,
 
     /// The hash algorithm to use with
     /// [`TcgTpm2KdfA`](kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA).
@@ -498,7 +493,7 @@ impl RootKey {
         debug_assert!(buf.is_empty());
 
         let root_key_len = hash::hash_alg_digest_len(kdf_hash_alg);
-        let mut root_key = try_alloc_zeroizing_vec::<u8>(root_key_len as usize)?;
+        let mut root_key = zeroize::Zeroizing::new(FixedVec::new_with_default(root_key_len as usize)?);
         kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA::new(
             tpm2_interface::TpmiAlgHash::Sha512,
             key,
@@ -531,7 +526,7 @@ impl RootKey {
     /// # Arguments:
     ///
     /// * `key_id` - [`KeyId`] of the subkey to derive.
-    pub fn derive_key(&self, key_id: &KeyId) -> Result<zeroize::Zeroizing<Vec<u8>>, NvFsError> {
+    pub fn derive_key(&self, key_id: &KeyId) -> Result<zeroize::Zeroizing<FixedVec<u8, 4>>, NvFsError> {
         let key_len = match key_id.purpose {
             KeyPurpose::Derivation => hash::hash_alg_digest_len(self.kdf_hash_alg) as usize,
             KeyPurpose::AuthenticationRoot => self.auth_tree_root_hmac_key_len,
@@ -539,7 +534,7 @@ impl RootKey {
             KeyPurpose::PreAuthCcaProtectionAuthentication => self.preauth_cca_protection_hmac_key_len,
             KeyPurpose::Encryption => self.block_cipher_key_len,
         };
-        let mut key = try_alloc_zeroizing_vec(key_len)?;
+        let mut key = zeroize::Zeroizing::new(FixedVec::new_with_default(key_len)?);
         let mut full_domain = [0u8; 2 * mem::size_of::<u32>()];
         // split_array_mut() is unstable.
         *<&mut [u8; mem::size_of::<u32>()]>::try_from(&mut full_domain[..mem::size_of::<u32>()])

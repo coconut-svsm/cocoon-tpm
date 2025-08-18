@@ -5,7 +5,7 @@
 //! Implementation of [`JournalReplayFuture`].
 
 extern crate alloc;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 
 use super::{
     apply_script::{JournalApplyWritesScript, JournalTrimsScript, JournalUpdateAuthDigestsScript},
@@ -25,8 +25,8 @@ use crate::{
     nvfs_err_internal,
     utils_async::sync_types,
     utils_common::{
-        alloc::try_alloc_vec,
         bitmanip::BitManip as _,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _},
     },
 };
@@ -470,7 +470,7 @@ struct JournalReadMutableImageHeaderFuture<C: chip::NvChip> {
     mutable_image_header_allocation_blocks_range: layout::PhysicalAllocBlockRange,
     cur_target_allocation_block_index: layout::PhysicalAllocBlockIndex,
     apply_writes_script_index: usize,
-    buffer: Vec<u8>,
+    buffer: FixedVec<u8, 7>,
     fut_state: JournalReadMutableImageHeaderFutureState<C>,
 }
 
@@ -528,7 +528,7 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
                 << (allocation_block_size_128b_log2 + 7),
         )
         .map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let buffer = try_alloc_vec(buffer_len)?;
+        let buffer = FixedVec::new_with_default(buffer_len)?;
 
         Ok(Self {
             mutable_image_header_allocation_blocks_range,
@@ -751,7 +751,7 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
 /// internally by [`JournalReadMutableImageHeaderFuture`].
 struct JournalReadMutableImageHeaderPartNvChipRequest {
     region: ChunkedIoRegion,
-    buffer: Vec<u8>,
+    buffer: FixedVec<u8, 7>,
     chip_io_block_index_offset: usize,
 }
 
@@ -782,7 +782,7 @@ struct JournalReplayWritesFuture<C: chip::NvChip> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     auth_tree_updates_replay_cursor: Option<Box<auth_tree::AuthTreeReplayJournalUpdateScriptCursor>>,
-    buffers: Vec<Vec<u8>>,
+    buffers: FixedVec<FixedVec<u8, 7>, 0>,
     fut_state: JournalReplayWritesFutureState<C>,
     allocation_block_size_128b_log2: u8,
     chip_io_block_allocation_blocks_log2: u8,
@@ -873,12 +873,13 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
             .max(io_block_allocation_blocks_log2)
             .max(auth_tree_data_block_allocation_blocks_log2);
 
-        let mut buffers = try_alloc_vec(
+        let mut buffers = FixedVec::new_with_default(
             1usize << (preferred_chip_io_bulk_allocation_blocks_log2 - chip_io_block_allocation_blocks_log2),
         )?;
         for buffer in buffers.iter_mut() {
-            *buffer =
-                try_alloc_vec(1usize << (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7))?;
+            *buffer = FixedVec::new_with_default(
+                1usize << (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7),
+            )?;
         }
 
         Ok(Self {
@@ -1352,7 +1353,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
 /// internally by [`JournalReplayWritesFuture`].
 struct ReadJournalStagingCopyNvChipRequest {
     region: ChunkedIoRegion,
-    buffers: Vec<Vec<u8>>,
+    buffers: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
 impl chip::NvChipReadRequest for ReadJournalStagingCopyNvChipRequest {
@@ -1375,7 +1376,7 @@ impl chip::NvChipReadRequest for ReadJournalStagingCopyNvChipRequest {
 /// internally by [`JournalReplayWritesFuture`].
 struct WriteTargetNvChipRequest {
     region: chip::ChunkedIoRegion,
-    buffers: Vec<Vec<u8>>,
+    buffers: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
 impl chip::NvChipWriteRequest for WriteTargetNvChipRequest {

@@ -5,13 +5,12 @@
 //! Implementation of [`WriteBlocksFuture`].
 
 extern crate alloc;
-use alloc::vec::Vec;
 
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     fs::{NvFsError, NvFsIoError, cocoonfs::layout},
     nvfs_err_internal,
-    utils_common::bitmanip::BitManip as _,
+    utils_common::{bitmanip::BitManip as _, fixed_vec::FixedVec},
 };
 use core::{mem, pin, task};
 
@@ -30,7 +29,7 @@ pub struct WriteBlocksFuture<C: chip::NvChip> {
 enum WriteBlocksFutureState<C: chip::NvChip> {
     Init {
         extent: layout::PhysicalAllocBlockRange,
-        src_io_blocks: Vec<Vec<u8>>,
+        src_io_blocks: FixedVec<FixedVec<u8, 7>, 0>,
         src_block_allocation_blocks_log2: u8,
         chip_io_block_allocation_blocks_log2: u8,
         allocation_block_size_128b_log2: u8,
@@ -67,7 +66,7 @@ impl<C: chip::NvChip> WriteBlocksFuture<C> {
     ///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
     pub fn new(
         extent: &layout::PhysicalAllocBlockRange,
-        src_io_blocks: Vec<Vec<u8>>,
+        src_io_blocks: FixedVec<FixedVec<u8, 7>, 0>,
         src_block_allocation_blocks_log2: u8,
         chip_io_block_allocation_blocks_log2: u8,
         allocation_block_size_128b_log2: u8,
@@ -98,7 +97,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
     ///       reason `e` is returned in an [`Err`].
     ///     * `Ok((src_io_blocks, Ok(())))` -  Otherwise, `Ok(())` will get
     ///       returned for the operation result on success.
-    type Output = Result<(Vec<Vec<u8>>, Result<(), NvFsError>), NvFsError>;
+    type Output = Result<(FixedVec<FixedVec<u8, 7>, 0>, Result<(), NvFsError>), NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -169,17 +168,17 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
 /// internally by [`WriteBlocksFuture`].
 struct WriteBlocksNvChipRequest {
     region: ChunkedIoRegion,
-    src_blocks: Vec<Vec<u8>>,
+    src_blocks: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
 impl WriteBlocksNvChipRequest {
     fn new(
         extent: &layout::PhysicalAllocBlockRange,
-        src_blocks: Vec<Vec<u8>>,
+        src_blocks: FixedVec<FixedVec<u8, 7>, 0>,
         src_block_allocation_blocks_log2: u32,
         chip_io_block_allocation_blocks_log2: u32,
         allocation_block_size_128b_log2: u32,
-    ) -> Result<Self, (Vec<Vec<u8>>, NvFsError)> {
+    ) -> Result<Self, (FixedVec<FixedVec<u8, 7>, 0>, NvFsError)> {
         // The target range must be aligned to the Chip IO block size and its length
         // must be a multiple of the source block size.
         if !(u64::from(extent.begin()) | u64::from(extent.end())).is_aligned_pow2(chip_io_block_allocation_blocks_log2)
@@ -195,8 +194,8 @@ impl WriteBlocksNvChipRequest {
                 Err(_) => return Err((src_blocks, NvFsError::DimensionsNotSupported)),
             };
         // Unused excess buffers in src_io_blocks are explicitly allowed: this enabled
-        // callers to allocate the Vec of source block buffers only once with maximum
-        // needed length and resuse for different write requests.
+        // callers to allocate the FixedVec of source block buffers only once
+        // with maximum needed length and resuse for different write requests.
         if extent_src_blocks_count > src_blocks.len() {
             return Err((src_blocks, nvfs_err_internal!()));
         }

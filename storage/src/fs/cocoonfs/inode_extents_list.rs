@@ -35,6 +35,7 @@ use crate::{
     utils_async::sync_types,
     utils_common::{
         alloc::try_alloc_vec,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _, PeekableIoSlicesIter as _},
     },
 };
@@ -161,12 +162,12 @@ pub fn indirect_extents_list_encode_into<EI: Iterator<Item = layout::PhysicalAll
 pub fn indirect_extents_list_encode<EI: Clone + Iterator<Item = layout::PhysicalAllocBlockRange>>(
     extents: EI,
     encoded_len: Option<usize>,
-) -> Result<Vec<u8>, NvFsError> {
+) -> Result<FixedVec<u8, 0>, NvFsError> {
     let encoded_len = match encoded_len {
         Some(encoded_len) => encoded_len,
         None => indirect_extents_list_encoded_len(extents.clone())?,
     };
-    let mut encoded = try_alloc_vec(encoded_len)?;
+    let mut encoded = FixedVec::new_with_default(encoded_len)?;
     indirect_extents_list_encode_into(&mut encoded, extents);
 
     Ok(encoded)

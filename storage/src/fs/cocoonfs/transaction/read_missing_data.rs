@@ -5,7 +5,8 @@
 //! Implementation of [`TransactionReadMissingDataFuture`].
 
 extern crate alloc;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
+use cocoon_tpm_utils_common::fixed_vec::FixedVec;
 
 use super::{
     Transaction,
@@ -26,7 +27,7 @@ use crate::{
         cocoonfs::{alloc_bitmap, layout},
     },
     nvfs_err_internal,
-    utils_common::{alloc::try_alloc_vec, bitmanip::BitManip as _},
+    utils_common::bitmanip::BitManip as _,
 };
 use core::{pin, task};
 
@@ -991,15 +992,12 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         // count will fit an usize.
         let allocation_blocks_count =
             usize::try_from(u64::from(src_allocation_blocks_range.block_count())).map_err(|_| nvfs_err_internal!())?;
-        let mut dst_allocation_block_buffers = Vec::new();
-        dst_allocation_block_buffers
-            .try_reserve_exact(allocation_blocks_count)
-            .map_err(|_| NvFsError::MemoryAllocationFailure)?;
-
-        for i in
-            aligned_read_region_states_allocation_blocks_index_range.iter(auth_tree_data_block_allocation_blocks_log2)
+        let mut dst_allocation_block_buffers = FixedVec::new_with_default(allocation_blocks_count)?;
+        for (i, update_states_allocation_block_index) in aligned_read_region_states_allocation_blocks_index_range
+            .iter(auth_tree_data_block_allocation_blocks_log2)
+            .enumerate()
         {
-            let needs_read = match &states[i].nv_sync_state {
+            let needs_read = match &states[update_states_allocation_block_index].nv_sync_state {
                 AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => {
                     // Completely uninitialized Chip IO Blocks would have been filtered by
                     // Self::determine_next_read_range().
@@ -1022,10 +1020,8 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
             };
 
             if needs_read {
-                let dst_allocation_block_buffer = try_alloc_vec(allocation_block_size)?;
-                dst_allocation_block_buffers.push(Some(dst_allocation_block_buffer));
-            } else {
-                dst_allocation_block_buffers.push(None);
+                let dst_allocation_block_buffer = FixedVec::new_with_default(allocation_block_size)?;
+                dst_allocation_block_buffers[i] = Some(dst_allocation_block_buffer);
             }
         }
 
@@ -1168,7 +1164,7 @@ struct TransactionReadMissingDataFutureNvChipReadRequest {
     read_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     read_from_target: bool,
     request_io_region: ChunkedIoRegion,
-    dst_allocation_block_buffers: Vec<Option<Vec<u8>>>,
+    dst_allocation_block_buffers: FixedVec<Option<FixedVec<u8, 7>>, 0>,
 }
 
 impl chip::NvChipReadRequest for TransactionReadMissingDataFutureNvChipReadRequest {

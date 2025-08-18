@@ -29,13 +29,14 @@ use crate::{
     },
     nvfs_err_internal,
     utils_async::sync_types,
+    utils_common::fixed_vec::FixedVec,
 };
 use core::{iter, mem, pin, task};
 
 #[cfg(doc)]
-use layout::ImageLayout;
-#[cfg(doc)]
 use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
+#[cfg(doc)]
+use layout::ImageLayout;
 
 /// Apply a committing [`Transaction`]'s journal online.
 ///
@@ -875,7 +876,7 @@ fn transaction_drop_data_buffers(
                                 // At this point, the transaction should have been applied and there
                                 // better ought to be no more dirty Allocation Blocks.
                                 debug_assert!(false);
-                                *authenticated_encrypted_data = Vec::new();
+                                *authenticated_encrypted_data = FixedVec::new_empty();
                             }
                             AllocationBlockUpdateNvSyncStateAllocatedModified::JournalClean {
                                 cached_encrypted_data,
@@ -1197,8 +1198,8 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
     /// * `remaining_states_allocation_blocks_index_range` - Remaining part of
     ///   the initial request range not processed yet, extended to cover any
     ///   preexisting states within the vicinity of a [IO
-    ///   Block](ImageLayout::io_block_allocation_blocks_log2) size as
-    ///   specified by `io_block_allocation_blocks_log2`.
+    ///   Block](ImageLayout::io_block_allocation_blocks_log2) size as specified
+    ///   by `io_block_allocation_blocks_log2`.
     /// * `low_memory` - Whether the system is in a low memory condition.
     /// * `io_block_allocation_blocks_log2` - Verbatim value of
     ///   [`ImageLayout::io_block_allocation_blocks_log2`].

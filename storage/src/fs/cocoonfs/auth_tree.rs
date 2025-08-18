@@ -28,9 +28,10 @@ use crate::{
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types::{self, RwLock as _},
     utils_common::{
-        alloc::{box_try_new, try_alloc_vec, try_alloc_zeroizing_vec},
+        alloc::box_try_new,
         bitmanip::{BitManip as _, UBitManip as _},
         ct_cmp,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _},
         zeroize,
     },
@@ -471,7 +472,7 @@ impl cmp::Ord for AuthTreeNodeId {
 
 /// An authentication tree node's data.
 pub struct AuthTreeNode {
-    data: Vec<u8>,
+    data: FixedVec<u8, 7>,
 }
 
 impl AuthTreeNode {
@@ -1367,7 +1368,7 @@ pub struct AuthTreeConfig {
     /// HMAC key used for forming digests over [Authentication Tree Data
     /// Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) with
     /// [`data_hmac_hash_alg`](Self::data_hmac_hash_alg)
-    data_hmac_key: zeroize::Zeroizing<Vec<u8>>,
+    data_hmac_key: zeroize::Zeroizing<FixedVec<u8, 4>>,
     /// Length of a digest of type
     /// [`data_hmac_hash_alg`](Self::data_hmac_hash_alg).
     data_digest_len: u8,
@@ -1376,7 +1377,7 @@ pub struct AuthTreeConfig {
     root_hmac_hash_alg: tpm2_interface::TpmiAlgHash,
     /// HMAC key used for forming authentication tree root digests with
     /// [`root_hmac_hash_alg`](Self::root_hmac_hash_alg).
-    root_hmac_key: zeroize::Zeroizing<Vec<u8>>,
+    root_hmac_key: zeroize::Zeroizing<FixedVec<u8, 4>>,
 
     /// Copied verbatim from [`ImageLayout::allocation_block_size_128b_log2`].
     allocation_block_size_128b_log2: u8,
@@ -1387,7 +1388,7 @@ pub struct AuthTreeConfig {
     data_block_allocation_blocks_log2: u8,
 
     /// Digest over image context data to be included in the final root digest.
-    image_context_digest: Vec<u8>,
+    image_context_digest: FixedVec<u8, 5>,
 }
 
 impl AuthTreeConfig {
@@ -1524,7 +1525,7 @@ impl AuthTreeConfig {
         ))?;
 
         let image_context_digest_len = hash::hash_alg_digest_len(root_hmac_hash_alg) as usize;
-        let mut image_context_digest = try_alloc_vec(image_context_digest_len)?;
+        let mut image_context_digest = FixedVec::new_with_default(image_context_digest_len)?;
         Self::digest_image_context_into(
             &mut image_context_digest,
             root_hmac_hash_alg,
@@ -1976,9 +1977,9 @@ impl AuthTreeConfig {
         &self,
         root_node_id: &AuthTreeNodeId,
         digest_entries_iterator: DEI,
-    ) -> Result<zeroize::Zeroizing<Vec<u8>>, NvFsError> {
+    ) -> Result<zeroize::Zeroizing<FixedVec<u8, 5>>, NvFsError> {
         let root_hmac_digest_len = hash::hash_alg_digest_len(self.root_hmac_hash_alg) as usize;
-        let mut root_hmac_digest = try_alloc_zeroizing_vec(root_hmac_digest_len)?;
+        let mut root_hmac_digest = zeroize::Zeroizing::new(FixedVec::new_with_default(root_hmac_digest_len)?);
         self.hmac_root_node_into(&mut root_hmac_digest, root_node_id, digest_entries_iterator)?;
         Ok(root_hmac_digest)
     }
@@ -2078,9 +2079,9 @@ impl AuthTreeConfig {
         &self,
         node_id: &AuthTreeNodeId,
         digest_entries_iterator: DEI,
-    ) -> Result<Vec<u8>, NvFsError> {
+    ) -> Result<FixedVec<u8, 5>, NvFsError> {
         let node_digest_len = self.node_digest_len as usize;
-        let mut node_digest = try_alloc_vec(node_digest_len)?;
+        let mut node_digest = FixedVec::new_with_default(node_digest_len)?;
         self.digest_descendant_node_into(&mut node_digest, node_id, digest_entries_iterator)?;
         Ok(node_digest)
     }
@@ -2164,9 +2165,9 @@ impl AuthTreeConfig {
         data_block_index: AuthTreeDataBlockIndex,
         mut data_block_allocation_blocks_iter: ABI,
         image_header_end: layout::PhysicalAllocBlockIndex,
-    ) -> Result<Vec<u8>, NvFsError> {
+    ) -> Result<FixedVec<u8, 5>, NvFsError> {
         let data_digest_len = self.data_digest_len as usize;
-        let mut data_block_digest = try_alloc_vec(data_digest_len)?;
+        let mut data_block_digest = FixedVec::new_with_default(data_digest_len)?;
 
         let mut digest_data_block_context = AuthTreeDigestDataBlockContext::new(
             hash::HmacInstance::new(self.data_hmac_hash_alg, &self.data_hmac_key)?,
@@ -2525,7 +2526,7 @@ impl AuthTreeDigestDataBlockContext {
 /// A filesystem's fully operational authentication tree.
 pub struct AuthTree<ST: sync_types::SyncTypes> {
     config: AuthTreeConfig,
-    root_hmac_digest: Vec<u8>,
+    root_hmac_digest: FixedVec<u8, 5>,
     node_cache: ST::RwLock<AuthTreeNodeCache>,
 }
 
@@ -2553,7 +2554,7 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
         image_size: layout::AllocBlockCount,
         auth_tree_extents: extents::LogicalExtents,
         allocation_bitmap_extents: &extents::PhysicalExtents,
-        root_hmac_digest: Vec<u8>,
+        root_hmac_digest: FixedVec<u8, 5>,
     ) -> Result<Self, NvFsError> {
         let config = AuthTreeConfig::new(
             root_key,
@@ -2585,7 +2586,11 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
     ///   [`MutableImageHeader::root_hmac_digest`].
     /// * `node_cache` - The authentication tree node cached, possibly
     ///   containing some (authenticated) nodes already.
-    pub fn new_from_parts(config: AuthTreeConfig, root_hmac_digest: Vec<u8>, node_cache: AuthTreeNodeCache) -> Self {
+    pub fn new_from_parts(
+        config: AuthTreeConfig,
+        root_hmac_digest: FixedVec<u8, 5>,
+        node_cache: AuthTreeNodeCache,
+    ) -> Self {
         Self {
             config,
             root_hmac_digest,
@@ -2751,7 +2756,7 @@ impl<C: chip::NvChip> AuthTreeNodeReadFuture<C> {
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to read.
     fn new(chip: &C, tree_config: &AuthTreeConfig, node_id: &AuthTreeNodeId) -> Result<Self, NvFsError> {
-        Self::new_with_buf(chip, tree_config, node_id, Vec::new())
+        Self::new_with_buf(chip, tree_config, node_id, FixedVec::new_empty())
     }
 
     /// Instantiate an [`AuthTreeNodeReadFuture`] with destination buffer
@@ -2770,11 +2775,12 @@ impl<C: chip::NvChip> AuthTreeNodeReadFuture<C> {
         chip: &C,
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
-        mut dst_buf: Vec<u8>,
+        mut dst_buf: FixedVec<u8, 7>,
     ) -> Result<Self, NvFsError> {
         let node_size = tree_config.node_size();
-        dst_buf.try_reserve_exact(node_size.saturating_sub(dst_buf.len()))?;
-        dst_buf.resize(node_size, 0);
+        if dst_buf.len() != node_size {
+            dst_buf = FixedVec::new_with_default(node_size)?;
+        }
 
         let io_region = tree_config.node_io_region(node_id)?;
         let request = AuthTreeNodeReadNvChipRequest { dst_buf, io_region };
@@ -2787,7 +2793,7 @@ impl<C: chip::NvChip> AuthTreeNodeReadFuture<C> {
 }
 
 impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeReadFuture<C> {
-    type Output = Result<Vec<u8>, NvFsError>;
+    type Output = Result<FixedVec<u8, 7>, NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -2805,7 +2811,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeReadFuture<C> {
 /// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
 /// internally by [`AuthTreeNodeReadFuture`].
 struct AuthTreeNodeReadNvChipRequest {
-    dst_buf: Vec<u8>,
+    dst_buf: FixedVec<u8, 7>,
     io_region: chip::ChunkedIoRegion,
 }
 
@@ -2847,8 +2853,8 @@ impl<C: chip::NvChip> AuthTreeNodeWriteFuture<C> {
         chip: &C,
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
-        src_buf: Vec<u8>,
-    ) -> Result<Result<Self, (Vec<u8>, NvFsError)>, NvFsError> {
+        src_buf: FixedVec<u8, 7>,
+    ) -> Result<Result<Self, (FixedVec<u8, 7>, NvFsError)>, NvFsError> {
         if src_buf.len() != tree_config.node_size() {
             return Err(nvfs_err_internal!());
         }
@@ -2877,7 +2883,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeWriteFuture<C> {
     ///       `e` is returned in an [`Err`].
     ///     * `Ok((`src_buf`, Ok(())))` - Otherwise, `Ok(())` will get returned
     ///       for the operation result on success.
-    type Output = Result<(Vec<u8>, Result<(), NvFsError>), NvFsError>;
+    type Output = Result<(FixedVec<u8, 7>, Result<(), NvFsError>), NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -2895,7 +2901,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeWriteFuture<C> {
 /// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
 /// internally by [`AuthTreeNodeWriteFuture`].
 struct AuthTreeNodeWriteNvChipRequest {
-    src_buf: Vec<u8>,
+    src_buf: FixedVec<u8, 7>,
     io_region: chip::ChunkedIoRegion,
 }
 
@@ -2931,12 +2937,12 @@ enum AuthTreeNodeLoadFutureState<C: chip::NvChip> {
     LoadRootPathNodePrepare {
         request_node_id: AuthTreeNodeId,
         cur_node_id: AuthTreeNodeId,
-        cur_node_expected_digest: Vec<u8>,
+        cur_node_expected_digest: FixedVec<u8, 5>,
     },
     LoadRootPathNode {
         request_node_id: AuthTreeNodeId,
         cur_node_id: AuthTreeNodeId,
-        cur_node_expected_digest: Vec<u8>,
+        cur_node_expected_digest: FixedVec<u8, 5>,
         node_read_fut: AuthTreeNodeReadFuture<C>,
     },
     Done,
@@ -2984,13 +2990,14 @@ impl<C: chip::NvChip> AuthTreeNodeLoadFuture<C> {
                     // any, or the root node.
                     // First, allocate the digest buffer outside the lock, even though
                     // it would not be needed on a cache hit.
-                    let mut child_node_expected_digest = match try_alloc_vec(tree_config.node_digest_len as usize) {
-                        Ok(child_node_expected_digest) => child_node_expected_digest,
-                        Err(e) => {
-                            this.fut_state = AuthTreeNodeLoadFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let mut child_node_expected_digest =
+                        match FixedVec::new_with_default(tree_config.node_digest_len as usize) {
+                            Ok(child_node_expected_digest) => child_node_expected_digest,
+                            Err(e) => {
+                                this.fut_state = AuthTreeNodeLoadFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
 
                     let root_path = AuthTreeRootPath::new(*request_node_id, tree_config);
                     let node_cache_guard = AuthTreeNodeCacheReadGuard::from(node_cache);
@@ -3182,7 +3189,7 @@ struct AuthTreePendingNodeEntryUpdate {
     /// Index of the to be updated digest entry within the node.
     entry_index_in_node: usize,
     /// Updated digest entry value.
-    updated_digest: Vec<u8>,
+    updated_digest: FixedVec<u8, 5>,
 }
 
 /// Pending updates to an authentication tree node.
@@ -3422,7 +3429,7 @@ struct LogicalAuthTreeDataBlockUpdate {
     /// The updated [Authentication Tree Data
     /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digest.
-    data_block_digest: Vec<u8>,
+    data_block_digest: FixedVec<u8, 5>,
 }
 
 /// [Authentication Tree Data
@@ -3438,7 +3445,7 @@ pub struct PhysicalAuthTreeDataBlockUpdate {
     /// The updated [Authentication Tree Data
     /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// digest.
-    pub data_block_digest: Vec<u8>,
+    pub data_block_digest: FixedVec<u8, 5>,
 }
 
 /// Pollable iterator trait supplying [Authentication Tree Data
@@ -3547,7 +3554,7 @@ enum AuthTreePrepareUpdatesFutureState<C: chip::NvChip> {
     LoadAuthTreeNode {
         load_original_node_fut: AuthTreeNodeLoadFuture<C>,
         next_updated_data_block: Option<LogicalAuthTreeDataBlockUpdate>,
-        node_digest_dst: Vec<u8>,
+        node_digest_dst: FixedVec<u8, 5>,
     },
     Done,
 }
@@ -3625,10 +3632,10 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
     fn pending_bottom_node_updates_push(
         &mut self,
         child_covered_data_blocks_begin: AuthTreeDataBlockIndex,
-        mut child_digest: Vec<u8>,
+        mut child_digest: FixedVec<u8, 5>,
         node_digests_per_node_log2: u8,
         data_digests_per_node_log2: u8,
-    ) -> Result<(), (NvFsError, Vec<u8>)> {
+    ) -> Result<(), (NvFsError, FixedVec<u8, 5>)> {
         let bottom = self.cursor.last().unwrap();
         let bottom_node_pending_updates = &mut self.pending_nodes_updates.nodes_updates[*bottom];
         debug_assert!(bottom_node_pending_updates.node_id.covered_data_blocks_begin <= child_covered_data_blocks_begin);
@@ -3675,7 +3682,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
     ///       pending_nodes_updates))))` - Otherwise, a pair of the updated root
     ///       digest and the [`AuthTreePendingNodesUpdates`] instance will get
     ///       returned wrapped in an `Ok`.
-    type Output = Result<(DUI, Result<(Vec<u8>, AuthTreePendingNodesUpdates), NvFsError>), NvFsError>;
+    type Output = Result<(DUI, Result<(FixedVec<u8, 5>, AuthTreePendingNodesUpdates), NvFsError>), NvFsError>;
     type AuxPollData<'a> = ();
 
     fn poll<'a>(
@@ -3746,7 +3753,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
                                 // There is no change at all, copy the existing root hmac and
                                 // return.
                                 let root_hmac_digest = &fs_instance_sync_state.auth_tree.root_hmac_digest;
-                                let mut root_hmac_copy = match try_alloc_vec(root_hmac_digest.len()) {
+                                let mut root_hmac_copy = match FixedVec::new_with_default(root_hmac_digest.len()) {
                                     Ok(root_hmac_copy) => root_hmac_copy,
                                     Err(e) => break Err((NvFsError::from(e), None)),
                                 };
@@ -3860,7 +3867,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
                                         popped_node_updated_digests,
                                     ) {
                                         Ok(mut root_hmac) => {
-                                            break 'outer Ok(mem::take(root_hmac.as_mut()));
+                                            break 'outer Ok(mem::take(&mut root_hmac));
                                         }
                                         Err(e) => {
                                             break 'outer Err((e, next_updated_data_block));
@@ -3884,7 +3891,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
                                         // The root node.
                                         hash::hash_alg_digest_len(tree_config.root_hmac_hash_alg) as usize
                                     };
-                                let node_digest_dst = match try_alloc_vec(node_digest_len) {
+                                let node_digest_dst = match FixedVec::new_with_default(node_digest_len) {
                                     Ok(node_digest_dst) => node_digest_dst,
                                     Err(e) => break 'outer Err((NvFsError::from(e), next_updated_data_block)),
                                 };
@@ -4134,9 +4141,9 @@ pub struct AuthTreeApplyUpdatesFuture<C: chip::NvChip> {
 
 /// Internal [`AuthTreeApplyUpdatesFuture::poll()`] state-machine state.
 enum AuthTreeApplyUpdatesFutureState<C: chip::NvChip> {
-    Init { node_data_buf: Vec<u8> },
+    Init { node_data_buf: FixedVec<u8, 7> },
     ReadUnmodifiedNode { read_node_fut: AuthTreeNodeReadFuture<C> },
-    WriteUpdatedNodePrepare { updated_node_data: Vec<u8> },
+    WriteUpdatedNodePrepare { updated_node_data: FixedVec<u8, 7> },
     WriteUpdatedNode { write_node_fut: AuthTreeNodeWriteFuture<C> },
     Done,
 }
@@ -4152,7 +4159,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
             pending_nodes_updates,
             cur_pending_nodes_updates_index: 0,
             fut_state: AuthTreeApplyUpdatesFutureState::Init {
-                node_data_buf: Vec::new(),
+                node_data_buf: FixedVec::new_empty(),
             },
         }
     }
@@ -4188,7 +4195,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
                     }
 
                     if node_data_buf.is_empty() {
-                        *node_data_buf = match try_alloc_vec(tree.config.node_size()) {
+                        *node_data_buf = match FixedVec::new_with_default(tree.config.node_size()) {
                             Ok(node_data_buf) => node_data_buf,
                             Err(e) => break Err(NvFsError::from(e)),
                         };
@@ -5386,7 +5393,7 @@ impl AuthTreeInitializationCursor {
         root_path_nodes.try_reserve_exact(tree_config.auth_tree_levels as usize)?;
         let node_size = tree_config.node_size();
         for _ in 0..tree_config.auth_tree_levels {
-            let data = try_alloc_vec(node_size)?;
+            let data = FixedVec::new_with_default(node_size)?;
             root_path_nodes.push(AuthTreeNode { data });
         }
 
@@ -6234,7 +6241,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
 
         // Push missing nodes all the way to the bottom.
         while self.root_path_nodes.len() != tree_config.auth_tree_levels as usize {
-            let node = try_alloc_vec(tree_config.node_size())?;
+            let node = FixedVec::new_with_default(tree_config.node_size())?;
             self.root_path_nodes.push(AuthTreeNode { data: node });
             debug_assert!(u64::from(self.cur_data_allocation_block_index).is_aligned_pow2(
                 AuthTreeNodeId::level_covered_data_block_index_bits(
@@ -6386,7 +6393,7 @@ pub struct AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C: chip::NvChip>
     fut_state: AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState<C>,
     to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
     to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
-    node_read_buf: Vec<u8>,
+    node_read_buf: FixedVec<u8, 7>,
 }
 
 /// Internal [`AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::poll()`]
@@ -6453,7 +6460,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
             fut_state: AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState::Init,
             to_physical_allocation_block_index,
             to_data_allocation_block_index,
-            node_read_buf: Vec::new(),
+            node_read_buf: FixedVec::new_empty(),
         })
     }
 
@@ -6536,7 +6543,9 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                         let root_path_nodes_len = cursor.root_path_nodes.len();
                         let AuthTreeNode { data: node } = mem::replace(
                             &mut cursor.root_path_nodes[root_path_nodes_len - 1],
-                            AuthTreeNode { data: Vec::new() },
+                            AuthTreeNode {
+                                data: FixedVec::new_empty(),
+                            },
                         );
                         cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
                         let write_fut = match AuthTreeNodeWriteFuture::new(chip, tree_config, &node_id, node) {
@@ -6779,7 +6788,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                                                         )),
                                             ));
                                     while cursor.root_path_nodes.len() != tree_config.auth_tree_levels as usize {
-                                        let node = match try_alloc_vec(tree_config.node_size()) {
+                                        let node = match FixedVec::new_with_default(tree_config.node_size()) {
                                             Ok(node) => node,
                                             Err(e) => break 'outer Err(NvFsError::from(e)),
                                         };
@@ -6894,7 +6903,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                     // process if necessary.
                     if cursor.root_path_nodes.is_empty() {
                         debug_assert_eq!(u64::from(cursor.cur_data_allocation_block_index), 0);
-                        let root_node = match try_alloc_vec(tree_config.node_size()) {
+                        let root_node = match FixedVec::new_with_default(tree_config.node_size()) {
                             Ok(root_node) => root_node,
                             Err(e) => break Err(NvFsError::from(e)),
                         };
@@ -6928,7 +6937,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                             break;
                         }
 
-                        let node = match try_alloc_vec(tree_config.node_size()) {
+                        let node = match FixedVec::new_with_default(tree_config.node_size()) {
                             Ok(node) => node,
                             Err(e) => break 'outer Err(NvFsError::from(e)),
                         };
@@ -7088,7 +7097,7 @@ struct AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<C: ch
     cursor: Option<Box<AuthTreeReplayJournalUpdateScriptCursor>>,
     fut_state: AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState<C>,
     to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
-    read_buffers: Vec<Vec<u8>>,
+    read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
     preferred_chip_io_bulk_allocation_blocks_log2: u8,
 }
 
@@ -7199,10 +7208,11 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                 )
                 .unwrap_or(usize::MAX),
             );
-        let mut read_buffers = try_alloc_vec(read_buffers_len)?;
+        let mut read_buffers = FixedVec::new_with_default(read_buffers_len)?;
         for read_buffer in read_buffers.iter_mut() {
-            *read_buffer =
-                try_alloc_vec(1usize << (chip_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2 + 7))?;
+            *read_buffer = FixedVec::new_with_default(
+                1usize << (chip_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2 + 7),
+            )?;
         }
 
         Ok(Self {
@@ -7605,7 +7615,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
 /// [`AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture`].
 struct AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
     region: chip::ChunkedIoRegion,
-    read_buffers: Vec<Vec<u8>>,
+    read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
 impl chip::NvChipReadRequest for AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
@@ -7633,7 +7643,7 @@ struct AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture<C
     cursor: Option<Box<AuthTreeReplayJournalUpdateScriptCursor>>,
     fut_state: AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFutureState<C>,
     to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
-    node_read_buf: Vec<u8>,
+    node_read_buf: FixedVec<u8, 7>,
 }
 
 /// Internal [`AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture::poll()`] state-machine state.
@@ -7664,7 +7674,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructInternal
     fn new(
         cursor: Box<AuthTreeReplayJournalUpdateScriptCursor>,
         to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
-        node_read_buf: Vec<u8>,
+        node_read_buf: FixedVec<u8, 7>,
         tree_config: &AuthTreeConfig,
     ) -> Self {
         debug_assert!(!cursor.root_path_nodes.is_empty());
@@ -7752,7 +7762,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructInternal
         chip: &C,
         tree_config: &AuthTreeConfig,
         cx: &mut task::Context<'_>,
-    ) -> task::Poll<Result<(Box<AuthTreeReplayJournalUpdateScriptCursor>, Vec<u8>), NvFsError>> {
+    ) -> task::Poll<Result<(Box<AuthTreeReplayJournalUpdateScriptCursor>, FixedVec<u8, 7>), NvFsError>> {
         let this = pin::Pin::into_inner(self);
 
         let cursor = match this.cursor.as_mut() {
@@ -8000,7 +8010,9 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C> 
                     let root_path_nodes_len = cursor.root_path_nodes.len();
                     let AuthTreeNode { data: node } = mem::replace(
                         &mut cursor.root_path_nodes[root_path_nodes_len - 1],
-                        AuthTreeNode { data: Vec::new() },
+                        AuthTreeNode {
+                            data: FixedVec::new_empty(),
+                        },
                     );
                     cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
                     let write_fut = match AuthTreeNodeWriteFuture::new(chip, tree_config, &node_id, node) {

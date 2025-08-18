@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 
 use super::{
     Transaction,
@@ -25,9 +25,9 @@ use crate::{
     },
     nvfs_err_internal,
     utils_async::sync_types,
-    utils_common::{alloc::try_alloc_vec, bitmanip::BitManip as _},
+    utils_common::{bitmanip::BitManip as _, fixed_vec::FixedVec},
 };
-use core::{marker, pin, task};
+use core::{marker, mem, pin, task};
 
 #[cfg(doc)]
 use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
@@ -40,7 +40,7 @@ use layout::ImageLayout;
 struct RedigestAuthTreeDataBlockFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     auth_tree_data_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     updated_auth_tree_data_block_alloc_bitmap: alloc_bitmap::BitmapWord,
-    auth_tree_data_block_allocation_blocks_bufs: Vec<Option<Vec<u8>>>,
+    auth_tree_data_block_allocation_blocks_bufs: FixedVec<Option<FixedVec<u8, 7>>, 0>,
     fut_state: RedigestAuthTreeDataBlockFutureState<C>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
@@ -91,7 +91,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> RedigestAuthTreeDataBlockFuture
 
         let auth_tree_data_block_allocation_blocks =
             1usize << (fs_config.image_layout.auth_tree_data_block_allocation_blocks_log2 as u32);
-        let auth_tree_data_block_allocation_blocks_bufs = try_alloc_vec(auth_tree_data_block_allocation_blocks)?;
+        let auth_tree_data_block_allocation_blocks_bufs =
+            FixedVec::new_with_default(auth_tree_data_block_allocation_blocks)?;
         Ok(Self {
             auth_tree_data_block_allocation_blocks_begin,
             updated_auth_tree_data_block_alloc_bitmap,
@@ -113,7 +114,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     /// Tree Data
     /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) is
     /// returned.
-    type Output = Result<Vec<u8>, NvFsError>;
+    type Output = Result<FixedVec<u8, 5>, NvFsError>;
     type AuxPollData<'a> = ();
 
     fn poll<'a>(
@@ -234,9 +235,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     );
                     let offset_in_auth_tree_data_block =
                         u64::from(subrange.begin() - this.auth_tree_data_block_allocation_blocks_begin) as usize;
-                    for (i, allocation_block_buf) in subrange_allocation_blocks_bufs.drain(..).enumerate() {
+                    for (i, allocation_block_buf) in subrange_allocation_blocks_bufs.iter_mut().enumerate() {
                         this.auth_tree_data_block_allocation_blocks_bufs[offset_in_auth_tree_data_block + i] =
-                            Some(allocation_block_buf);
+                            Some(mem::take(allocation_block_buf));
                     }
 
                     let next_allocation_block_index = subrange.end();

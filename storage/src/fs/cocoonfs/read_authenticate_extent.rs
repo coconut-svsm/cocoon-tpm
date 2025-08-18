@@ -5,7 +5,7 @@
 //! Implementation of [`ReadAuthenticateExtentFuture`].
 
 extern crate alloc;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 
 use crate::{
     chip,
@@ -28,6 +28,7 @@ use crate::{
     },
     nvfs_err_internal,
     utils_async::sync_types,
+    utils_common::fixed_vec::FixedVec,
 };
 use core::{marker, pin, slice, task};
 
@@ -59,7 +60,7 @@ pub enum ReadAuthenticateExtentFutureResult {
         returned_transaction: Option<Box<Transaction>>,
         /// Authenticated extent contents, provided in units of Allocation
         /// Blocks.
-        allocation_blocks_bufs: Vec<Vec<u8>>,
+        allocation_blocks_bufs: FixedVec<FixedVec<u8, 7>, 0>,
     },
     /// Reference to data modified by the [`Transaction`] initially passed to
     /// [`ReadAuthenticateExtentFuture::new()`].
@@ -116,7 +117,7 @@ impl ReadAuthenticateExtentFutureResult {
 #[derive(Clone)]
 pub enum ReadAuthenticateExtentFutureResultAllocationBlocksBufsIter<'a> {
     /// Iterator for the [`ReadAuthenticateExtentFutureResult::Owned`] case.
-    Owned { iter: slice::Iter<'a, Vec<u8>> },
+    Owned { iter: slice::Iter<'a, FixedVec<u8, 7>> },
     /// Iterator for the
     /// [`ReadAuthenticateExtentFutureResult::PendingTransactionUpdatesRef`]
     /// case.

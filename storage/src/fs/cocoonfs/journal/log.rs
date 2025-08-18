@@ -35,8 +35,9 @@ use crate::{
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
     utils_common::{
-        alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
+        alloc::try_alloc_zeroizing_vec,
         bitmanip::BitManip as _,
+        fixed_vec::FixedVec,
         io_slices::{
             self, IoSlicesIter as _, IoSlicesIterCommon as _, IoSlicesMutIter as _, WalkableIoSlicesIter as _,
         },
@@ -671,8 +672,8 @@ impl JournalLog {
     /// * `alloc_bitmap_file_extents` - The [allocation bitmap file's
     ///   extents](alloc_bitmap::AllocBitmapFile::get_extents).
     /// * `encoded_alloc_bitmap_file_fragments_auth_digests` - [Encoded
-    ///   `ExtentsCoveringAuthDigests`](ExtentsCoveringAuthDigests) for
-    ///   the [allocation bitmap file fragments needed for authentication tree
+    ///   `ExtentsCoveringAuthDigests`](ExtentsCoveringAuthDigests) for the
+    ///   [allocation bitmap file fragments needed for authentication tree
     ///   reconstruction during journal
     ///   replay](super::auth_tree_updates::collect_alloc_bitmap_blocks_for_auth_tree_reconstruction).
     #[allow(clippy::too_many_arguments)]
@@ -1065,7 +1066,7 @@ impl JournalLog {
         alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_hmac_instance
             .update(io_slices::SingletonIoSlice::new(&auth_context_subject_id_suffix).map_infallible_err())?;
         let mut alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_digest =
-            try_alloc_zeroizing_vec(preauth_cca_protection_digest_len)?;
+            zeroize::Zeroizing::new(FixedVec::<u8, 5>::new_with_default(preauth_cca_protection_digest_len)?);
         alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_hmac_instance
             .finalize_into(&mut alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_digest)?;
         if io_slices::SingletonIoSlice::new(&alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_digest)
@@ -1368,7 +1369,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
 /// internally by [`JournalLogInvalidateFuture`].
 struct JournalLogInvalidateNvChipWriteRequest {
     region: ChunkedIoRegion,
-    overwrite_buf: Vec<u8>,
+    overwrite_buf: FixedVec<u8, 7>,
 }
 
 impl JournalLogInvalidateNvChipWriteRequest {
@@ -1379,7 +1380,7 @@ impl JournalLogInvalidateNvChipWriteRequest {
     ) -> Result<Self, NvFsError> {
         // Allocate a buffer of the minimum length filled with zeroes. 128 Bytes is the
         // minimum chunk size.
-        let overwrite_buf = try_alloc_vec(128)?;
+        let overwrite_buf = FixedVec::new_with_value(128, 0u8)?;
 
         let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
         let journal_log_head_extent_begin_128b =
@@ -1430,13 +1431,13 @@ enum JournalLogReadFutureState<C: chip::NvChip> {
     },
     ReadJournalLogHeadExtentTail {
         read_fut: C::ReadFuture<JournalLogReadExtentNvChipReadRequest>,
-        journal_log_head_extent_head: Vec<u8>,
+        journal_log_head_extent_head: FixedVec<u8, 7>,
         journal_log_head_extent_allocation_blocks: layout::AllocBlockCount,
         journal_log_head_extent_effective_payload_len: usize,
     },
     DecryptJournalLogHeadExtent {
-        journal_log_head_extent_head: Vec<u8>,
-        journal_log_head_extent_tail: Vec<u8>,
+        journal_log_head_extent_head: FixedVec<u8, 7>,
+        journal_log_head_extent_tail: FixedVec<u8, 7>,
         journal_log_head_extent_allocation_blocks: layout::AllocBlockCount,
         journal_log_head_extent_effective_payload_len: usize,
     },
@@ -1587,7 +1588,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                     if journal_log_head_extent_tail_begin_128b == journal_log_head_extent_end_128b {
                         this.fut_state = JournalLogReadFutureState::DecryptJournalLogHeadExtent {
                             journal_log_head_extent_head,
-                            journal_log_head_extent_tail: Vec::new(),
+                            journal_log_head_extent_tail: FixedVec::new_empty(),
                             journal_log_head_extent_allocation_blocks: journal_log_head_extent.block_count(),
                             journal_log_head_extent_effective_payload_len:
                                 *journal_log_head_extent_effective_payload_len,
@@ -1926,7 +1927,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
 /// internally by [`JournalLogReadFuture`].
 struct JournalLogReadExtentNvChipReadRequest {
     region: ChunkedIoRegion,
-    dst: Vec<u8>,
+    dst: FixedVec<u8, 7>,
 }
 
 impl JournalLogReadExtentNvChipReadRequest {
@@ -1938,7 +1939,7 @@ impl JournalLogReadExtentNvChipReadRequest {
             return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
         }
         let region_len = usize::try_from(region_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let dst = try_alloc_vec(region_len)?;
+        let dst = FixedVec::new_with_default(region_len)?;
         let region =
             chip::ChunkedIoRegion::new(physical_begin_128b, physical_end_128b, chunk_size_128b_log2).map_err(|e| {
                 match e {
@@ -1953,7 +1954,7 @@ impl JournalLogReadExtentNvChipReadRequest {
         Ok(Self { region, dst })
     }
 
-    pub fn into_dst_buf(self) -> Vec<u8> {
+    pub fn into_dst_buf(self) -> FixedVec<u8, 7> {
         let Self { region: _, dst } = self;
         dst
     }

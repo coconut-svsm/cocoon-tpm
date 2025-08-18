@@ -11,7 +11,7 @@ use crate::{
     fs::cocoonfs::{CocoonFsFormatError, NvFsError, extents, layout, leb128},
     nvfs_err_internal,
     utils_common::{
-        alloc::try_alloc_zeroizing_vec,
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIterCommon as _, IoSlicesMutIter as _, WalkableIoSlicesIter as _},
         zeroize,
     },
@@ -34,7 +34,7 @@ pub struct ExtentsCoveringAuthDigests {
     /// location on storage and associated digest.
     ///
     /// Sorted by location on storage.
-    auth_digests: Vec<(layout::PhysicalAllocBlockIndex, zeroize::Zeroizing<Vec<u8>>)>,
+    auth_digests: Vec<(layout::PhysicalAllocBlockIndex, zeroize::Zeroizing<FixedVec<u8, 5>>)>,
 }
 
 impl ExtentsCoveringAuthDigests {
@@ -179,7 +179,7 @@ impl ExtentsCoveringAuthDigests {
             last_auth_tree_data_block_allocation_blocks_end =
                 cur_auth_tree_data_block_allocation_blocks_begin + auth_tree_data_blocks_allocation_blocks;
 
-            let mut cur_auth_digest = try_alloc_zeroizing_vec(auth_digest_len)?;
+            let mut cur_auth_digest = zeroize::Zeroizing::new(FixedVec::new_with_default(auth_digest_len)?);
             io_slices::SingletonIoSliceMut::new(&mut cur_auth_digest)
                 .map_infallible_err()
                 .copy_from_iter(&mut (&mut src).take_exact(auth_digest_len))
@@ -210,7 +210,7 @@ impl ExtentsCoveringAuthDigests {
 }
 
 impl ops::Index<usize> for ExtentsCoveringAuthDigests {
-    type Output = (layout::PhysicalAllocBlockIndex, zeroize::Zeroizing<Vec<u8>>);
+    type Output = (layout::PhysicalAllocBlockIndex, zeroize::Zeroizing<FixedVec<u8, 5>>);
     fn index(&self, index: usize) -> &Self::Output {
         &self.auth_digests[index]
     }

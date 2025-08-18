@@ -37,7 +37,9 @@ use crate::{
     utils_async::sync_types::{self, RwLock as _},
     utils_common::{
         alloc::{box_try_new, try_alloc_vec},
-        ct_cmp, index_permutation,
+        ct_cmp,
+        fixed_vec::FixedVec,
+        index_permutation,
         io_slices::{self, IoSlicesIterCommon as _},
         zeroize,
     },
@@ -293,7 +295,7 @@ impl InodeIndexTreeLayout {
 /// Inode index B+-tree leaf node.
 pub struct InodeIndexTreeLeafNode {
     /// Encoded node in plaintext.
-    encoded_node: Vec<u8>,
+    encoded_node: FixedVec<u8, 7>,
     /// Number of entries used in the node.
     entries: usize,
     /// Location of the node on storage.
@@ -311,9 +313,9 @@ impl InodeIndexTreeLeafNode {
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         layout: &InodeIndexTreeLayout,
     ) -> Result<Self, NvFsError> {
-        // By initializing the Vec with zeroes, the ->encoded_keys[] are is implicitly
-        // initialized to SpecialInode::NoInode, as it should be.
-        let encoded_node = try_alloc_vec(layout.encoded_node_len)?;
+        // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is
+        // implicitly initialized to SpecialInode::NoInode, as it should be.
+        let encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
         let mut n = Self {
             encoded_node,
             entries: 0,
@@ -346,7 +348,7 @@ impl InodeIndexTreeLeafNode {
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        encoded_node: Vec<u8>,
+        encoded_node: FixedVec<u8, 7>,
         layout: &InodeIndexTreeLayout,
     ) -> Result<Self, NvFsError> {
         if encoded_node.len() != layout.encoded_node_len {
@@ -782,7 +784,7 @@ impl InodeIndexTreeLeafNode {
             return Err(nvfs_err_internal!());
         }
 
-        let new_encoded_node = try_alloc_vec(layout.encoded_node_len)?;
+        let new_encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
         let mut new_node = Self {
             encoded_node: new_encoded_node,
             entries: spill_count + (1 - insert_in_left as usize),
@@ -868,8 +870,8 @@ impl InodeIndexTreeLeafNode {
         }
 
         // The remainder of dst_keys is initialized to all-zeroes, i.e. to
-        // SpecialInode::NoInode, by the Vec allocation above already. Take care
-        // of the keys removed from self.
+        // SpecialInode::NoInode, by the FixedVec allocation above already. Take
+        // care of the keys removed from self.
         let src_keys_clear_begin = self.entries * mem::size_of::<EncodedInodeIndexKeyType>();
         let src_keys_clear_end = original_src_entries * mem::size_of::<EncodedInodeIndexKeyType>();
         let src_keys = self.encoded_keys_mut(layout);
@@ -1207,7 +1209,7 @@ impl InodeIndexTreeLeafNode {
 /// Inode index B+-tree internal node.
 struct InodeIndexTreeInternalNode {
     /// Encoded node in plaintext.
-    encoded_node: Vec<u8>,
+    encoded_node: FixedVec<u8, 7>,
     /// Number of separator keys in the node.
     ///
     /// The number of children is always one more.
@@ -1241,9 +1243,9 @@ impl InodeIndexTreeInternalNode {
             return Err(nvfs_err_internal!());
         }
 
-        // By initializing the Vec with zeroes, the ->encoded_keys[] are is implicitly
-        // initialized to SpecialInode::NoInode, as it should be.
-        let encoded_node = try_alloc_vec(layout.encoded_node_len)?;
+        // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is
+        // implicitly initialized to SpecialInode::NoInode, as it should be.
+        let encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
         let mut n = Self {
             encoded_node,
             entries: 0,
@@ -1320,7 +1322,7 @@ impl InodeIndexTreeInternalNode {
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        encoded_node: Vec<u8>,
+        encoded_node: FixedVec<u8, 7>,
         layout: &InodeIndexTreeLayout,
     ) -> Result<Self, NvFsError> {
         if encoded_node.len() != layout.encoded_node_len {
@@ -1823,7 +1825,7 @@ impl InodeIndexTreeInternalNode {
             return Err(nvfs_err_internal!());
         }
 
-        let new_encoded_node = try_alloc_vec(layout.encoded_node_len)?;
+        let new_encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
         let mut new_node = Self {
             encoded_node: new_encoded_node,
             entries: new_node_entries,
@@ -1840,8 +1842,8 @@ impl InodeIndexTreeInternalNode {
         let src_keys = self.encoded_keys_mut(layout);
         dst_keys[..dst_keys_spill_end].copy_from_slice(&src_keys[src_keys_spill_begin..src_keys_spill_end]);
         // The remainder of dst_keys is initialized to all-zeroes, i.e. to
-        // SpecialInode::NoInode, by the Vec allocation above already. Take care
-        // of the keys removed from self.
+        // SpecialInode::NoInode, by the FixedVec allocation above already. Take
+        // care of the keys removed from self.
         src_keys[src_keys_spill_begin..src_keys_spill_end].fill(0u8);
         // Extract the new separator key to insert at the parent and zeroize that as
         // well.
@@ -2085,7 +2087,7 @@ impl InodeIndexTreeNode {
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        encoded_node: Vec<u8>,
+        encoded_node: FixedVec<u8, 7>,
         layout: &InodeIndexTreeLayout,
     ) -> Result<Self, NvFsError> {
         if encoded_node.len() != layout.encoded_node_len {
@@ -2126,7 +2128,7 @@ impl InodeIndexTreeNode {
     /// * `preallocated_encoded_node` - Buffer to receive the cloned node's
     ///   encoding. Its length must match
     ///   [`InodeIndexTreeLayout::encoded_node_len()`].
-    fn clone_with_preallocated_buf(&self, mut preallocated_encoded_node: Vec<u8>) -> Self {
+    fn clone_with_preallocated_buf(&self, mut preallocated_encoded_node: FixedVec<u8, 7>) -> Self {
         match self {
             Self::Internal(InodeIndexTreeInternalNode {
                 encoded_node,
@@ -2482,7 +2484,7 @@ pub struct InodeIndex<ST: sync_types::SyncTypes> {
     ///
     /// Stored in
     /// [`MutableImageHeader::inode_index_entry_leaf_node_preauth_cca_protection_digest`].
-    entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+    entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
     /// The current inode index tree height.
     index_tree_levels: u32,
     /// Inode index tree nodes cache.
@@ -2531,7 +2533,7 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<ST>,
         rng: &mut dyn rng::RngCoreDispatchable,
-    ) -> Result<(Self, Vec<u8>), NvFsError> {
+    ) -> Result<(Self, FixedVec<u8, 7>), NvFsError> {
         let tree_node_encrypted_block_layout = encryption_entities::EncryptedBlockLayout::new(
             image_layout.block_cipher_alg,
             image_layout.index_tree_node_allocation_blocks_log2,
@@ -2599,7 +2601,7 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
             << (image_layout.index_tree_node_allocation_blocks_log2 as u32
                 + image_layout.allocation_block_size_128b_log2 as u32
                 + 7);
-        let mut encrypted_entry_leaf_node = try_alloc_vec(tree_node_block_size)?;
+        let mut encrypted_entry_leaf_node = FixedVec::new_with_default(tree_node_block_size)?;
         tree_node_encryption_instance.encrypt_one_block(
             io_slices::SingletonIoSliceMut::new(&mut encrypted_entry_leaf_node).map_infallible_err(),
             io_slices::SingletonIoSlice::new(&entry_leaf_node.encoded_node).map_infallible_err(),
@@ -2608,7 +2610,8 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
 
         let preauth_cca_protection_hmac_digest_len =
             hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as usize;
-        let mut entry_leaf_node_preauth_cca_protection_digest = try_alloc_vec(preauth_cca_protection_hmac_digest_len)?;
+        let mut entry_leaf_node_preauth_cca_protection_digest =
+            FixedVec::new_with_default(preauth_cca_protection_hmac_digest_len)?;
         entry_leaf_node_preautch_cca_hmac(
             &mut entry_leaf_node_preauth_cca_protection_digest,
             io_slices::SingletonIoSlice::new(&encrypted_entry_leaf_node).map_infallible_err(),
@@ -2761,7 +2764,7 @@ pub struct TransactionInodeIndexUpdates {
     /// Empty if the inode index entry leaf node has not changed or the update
     /// node has not been removed from
     /// [`tree_nodes_staged_updates`](Self::tree_nodes_staged_updates) yet.
-    entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+    entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
 }
 
 impl TransactionInodeIndexUpdates {
@@ -2779,7 +2782,7 @@ impl TransactionInodeIndexUpdates {
             index_tree_levels,
             root_node_allocation_blocks_begin: inode_index.root_node_allocation_blocks_begin,
             root_node_inode_needs_update: false,
-            entry_leaf_node_preauth_cca_protection_digest: Vec::new(),
+            entry_leaf_node_preauth_cca_protection_digest: FixedVec::new_empty(),
         }
     }
 
@@ -2980,8 +2983,9 @@ impl TransactionInodeIndexUpdates {
         if is_entry_leaf_node {
             let preauth_cca_protection_hmac_hash_alg = fs_config.image_layout.preauth_cca_protection_hmac_hash_alg;
             if self.entry_leaf_node_preauth_cca_protection_digest.is_empty() {
-                self.entry_leaf_node_preauth_cca_protection_digest =
-                    try_alloc_vec(hash::hash_alg_digest_len(preauth_cca_protection_hmac_hash_alg) as usize)?;
+                self.entry_leaf_node_preauth_cca_protection_digest = FixedVec::new_with_default(
+                    hash::hash_alg_digest_len(preauth_cca_protection_hmac_hash_alg) as usize,
+                )?;
             }
 
             entry_leaf_node_preautch_cca_hmac(
@@ -3376,7 +3380,7 @@ struct InodeIndexReadTreeNodeFuture<C: chip::NvChip> {
     fut_state: InodeIndexReadTreeNodeFutureState<C>,
     node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     expected_node_level: Option<u32>,
-    encoded_node_buf: Vec<u8>,
+    encoded_node_buf: FixedVec<u8, 7>,
     read_for_update: bool,
 }
 
@@ -3439,7 +3443,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
             fut_state: InodeIndexReadTreeNodeFutureState::Init { transaction },
             node_allocation_blocks_begin,
             expected_node_level,
-            encoded_node_buf: Vec::new(),
+            encoded_node_buf: FixedVec::new_empty(),
             read_for_update,
         }
     }
@@ -3657,7 +3661,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                     // cache lock.
                     if this.read_for_update {
                         let tree_layout = fs_sync_state_inode_index_tree_layout;
-                        this.encoded_node_buf = match try_alloc_vec(tree_layout.encoded_node_len) {
+                        this.encoded_node_buf = match FixedVec::new_with_default(tree_layout.encoded_node_len) {
                             Ok(encoded_node_buf) => encoded_node_buf,
                             Err(e) => {
                                 let transaction = fut_transaction.take();
@@ -3837,7 +3841,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                     let tree_layout = fs_sync_state_inode_index_tree_layout;
                     let mut encoded_node_buf = mem::take(&mut this.encoded_node_buf);
                     if encoded_node_buf.is_empty() {
-                        encoded_node_buf = match try_alloc_vec(tree_layout.encoded_node_len) {
+                        encoded_node_buf = match FixedVec::new_with_default(tree_layout.encoded_node_len) {
                             Ok(encoded_node_buf) => encoded_node_buf,
                             Err(e) => {
                                 let transaction = encrypted_node.into_transaction();
@@ -11404,7 +11408,7 @@ impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C
                         Err(e) => break Err(e),
                     };
                     let tree_node_encoded_len = tree_layout.encoded_node_len();
-                    let mut decrypted_entry_leaf_node = match try_alloc_vec(tree_node_encoded_len) {
+                    let mut decrypted_entry_leaf_node = match FixedVec::new_with_default(tree_node_encoded_len) {
                         Ok(decrypted_entry_leaf_node) => decrypted_entry_leaf_node,
                         Err(e) => break Err(NvFsError::from(e)),
                     };
@@ -11444,7 +11448,7 @@ pub struct InodeIndexBootstrapFuture<ST: sync_types::SyncTypes, C: chip::NvChip>
 where
     ST::RwLock<InodeIndexTreeNodeCache>: marker::Unpin,
 {
-    entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+    entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
     tree_layout: InodeIndexTreeLayout,
     tree_node_encryption_instance: Option<encryption_entities::EncryptedBlockEncryptionInstance>,
     tree_node_decryption_instance: Option<encryption_entities::EncryptedBlockDecryptionInstance>,
@@ -11492,7 +11496,7 @@ where
     ///   filesystem.
     pub fn new(
         entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+        entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
         image_layout: &layout::ImageLayout,
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<ST>,

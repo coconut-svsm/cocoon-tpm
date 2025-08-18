@@ -5,7 +5,6 @@
 //! Encrypt to and decrypt from the various defined encryption entity formats.
 
 extern crate alloc;
-use alloc::vec::Vec;
 
 use crate::{
     crypto::{
@@ -21,8 +20,8 @@ use crate::{
     },
     nvfs_err_internal, tpm2_interface,
     utils_common::{
-        alloc::try_alloc_vec,
         bitmanip::BitManip as _,
+        fixed_vec::FixedVec,
         io_slices::{
             self, IoSlicesIter as _, IoSlicesIterCommon as _, IoSlicesMutIter as _, WalkableIoSlicesIter as _,
         },
@@ -486,11 +485,7 @@ impl EncryptedBlockDecryptionInstance {
         // block length, provide a scratch buffer to receive the padding.
         let dst_padding_len =
             align_len_up_to_block_cipher_alg_block_len(dst_len, self.block_cipher_instance.block_cipher_block_len())?.1;
-        let mut dst_padding_scratch = if dst_padding_len != 0 {
-            try_alloc_vec(dst_padding_len)?
-        } else {
-            Vec::<u8>::new()
-        };
+        let mut dst_padding_scratch = FixedVec::<u8, 0>::new_with_default(dst_padding_len)?;
 
         self.block_cipher_instance.decrypt(
             src_iv,
@@ -600,7 +595,7 @@ pub struct EncryptedExtentsEncryptionInstance {
     block_cipher_instance: symcipher::SymBlockCipherModeEncryptionInstance,
     /// The "carry-over" CBC extent to be used for the next extent in the
     /// sequence.
-    next_iv: Vec<u8>,
+    next_iv: FixedVec<u8, 4>,
 }
 
 impl EncryptedExtentsEncryptionInstance {
@@ -628,7 +623,7 @@ impl EncryptedExtentsEncryptionInstance {
         Ok(Self {
             layout: layout.clone(),
             block_cipher_instance,
-            next_iv: Vec::new(),
+            next_iv: FixedVec::new_empty(),
         })
     }
 
@@ -693,15 +688,11 @@ impl EncryptedExtentsEncryptionInstance {
         } else {
             (effective_payload_len, 0)
         };
-        let mut src_padding = Vec::<u8>::new();
-        if src_padding_len != 0 {
-            src_padding.try_reserve_exact(src_padding_len)?;
-            src_padding.resize(src_padding_len, src_padding_len as u8);
-        }
+        let src_padding = FixedVec::<u8, 0>::new_with_value(src_padding_len, src_padding_len as u8)?;
 
         let iv_len = self.layout.block_cipher_alg.cbc_iv_len;
         if is_first {
-            self.next_iv = try_alloc_vec(iv_len)?;
+            self.next_iv = FixedVec::new_with_default(iv_len)?;
             rng::rng_dyn_dispatch_generate(
                 rng,
                 io_slices::SingletonIoSliceMut::new(&mut self.next_iv).map_infallible_err(),
@@ -740,7 +731,7 @@ impl EncryptedExtentsEncryptionInstance {
         }
         debug_assert_eq!(dst.total_len()?, effective_payload_len);
 
-        let mut iv_out = try_alloc_vec(iv_len)?;
+        let mut iv_out = FixedVec::new_with_default(iv_len)?;
         self.block_cipher_instance.encrypt(
             &self.next_iv,
             dst,
@@ -774,7 +765,7 @@ pub struct EncryptedExtentsDecryptionInstance {
     block_cipher_instance: symcipher::SymBlockCipherModeDecryptionInstance,
     /// The "carry-over" CBC extent to be used for the next extent in the
     /// sequence.
-    next_iv: Vec<u8>,
+    next_iv: FixedVec<u8, 4>,
 }
 
 impl EncryptedExtentsDecryptionInstance {
@@ -802,7 +793,7 @@ impl EncryptedExtentsDecryptionInstance {
         Ok(Self {
             layout,
             block_cipher_instance,
-            next_iv: Vec::new(),
+            next_iv: FixedVec::new_empty(),
         })
     }
 
@@ -912,7 +903,7 @@ impl EncryptedExtentsDecryptionInstance {
         let iv_len = self.layout.block_cipher_alg.cbc_iv_len;
         if is_first {
             // Copy the IV from the source.
-            self.next_iv = try_alloc_vec(iv_len)?;
+            self.next_iv = FixedVec::new_with_default(iv_len)?;
             io_slices::SingletonIoSliceMut::new(&mut self.next_iv)
                 .map_infallible_err()
                 .copy_from_iter_exhaustive(src.as_ref().take_exact(iv_len))
@@ -932,7 +923,7 @@ impl EncryptedExtentsDecryptionInstance {
         }
         debug_assert_eq!(src.total_len()?, effective_payload_len);
 
-        let mut iv_out = try_alloc_vec(iv_len)?;
+        let mut iv_out = FixedVec::new_with_default(iv_len)?;
         self.block_cipher_instance.decrypt(
             &self.next_iv,
             dst.as_ref()
@@ -1122,11 +1113,11 @@ pub struct EncryptedChainedExtentsEncryptionInstance {
     block_cipher_instance: symcipher::SymBlockCipherModeEncryptionInstance,
     /// The "carry-over" CBC extent to be used for the next extent in the
     /// sequence.
-    next_iv: Vec<u8>,
+    next_iv: FixedVec<u8, 4>,
     /// If inline authentication is enabled: a pair of a
     /// [`HmacInstance`](hash::HmacInstance) in its initial state and the
     /// entity's previous extents' associated digest, if any.
-    inline_authentication: Option<(hash::HmacInstance, Vec<u8>)>,
+    inline_authentication: Option<(hash::HmacInstance, FixedVec<u8, 5>)>,
 }
 
 impl EncryptedChainedExtentsEncryptionInstance {
@@ -1187,9 +1178,10 @@ impl EncryptedChainedExtentsEncryptionInstance {
         Ok(Self {
             layout: layout.clone(),
             block_cipher_instance,
-            next_iv: Vec::new(),
-            inline_authentication: inline_authentication_hmac_instance
-                .map(|inline_authentication_hmac_instance| (inline_authentication_hmac_instance, Vec::<u8>::new())),
+            next_iv: FixedVec::new_empty(),
+            inline_authentication: inline_authentication_hmac_instance.map(|inline_authentication_hmac_instance| {
+                (inline_authentication_hmac_instance, FixedVec::new_empty())
+            }),
         })
     }
 
@@ -1288,11 +1280,7 @@ impl EncryptedChainedExtentsEncryptionInstance {
             }
             (available_effective_payload_len, 0)
         };
-        let mut src_padding = Vec::<u8>::new();
-        if src_padding_len != 0 {
-            src_padding.try_reserve_exact(src_padding_len)?;
-            src_padding.resize(src_padding_len, src_padding_len as u8);
-        }
+        let src_padding = FixedVec::<u8, 0>::new_with_value(src_padding_len, src_padding_len as u8)?;
 
         let inline_authentication_digest_len = self
             .inline_authentication
@@ -1314,7 +1302,7 @@ impl EncryptedChainedExtentsEncryptionInstance {
 
         let iv_len = self.layout.block_cipher_alg.cbc_iv_len;
         if is_first {
-            self.next_iv = try_alloc_vec(iv_len)?;
+            self.next_iv = FixedVec::new_with_default(iv_len)?;
             rng::rng_dyn_dispatch_generate(
                 rng,
                 io_slices::SingletonIoSliceMut::new(&mut self.next_iv).map_infallible_err(),
@@ -1360,7 +1348,7 @@ impl EncryptedChainedExtentsEncryptionInstance {
 
         let encoded_extent_ptr = EncodedExtentPtr::encode(next_chained_extent, false)?;
 
-        let mut iv_out = try_alloc_vec(iv_len)?;
+        let mut iv_out = FixedVec::new_with_default(iv_len)?;
         self.block_cipher_instance.encrypt(
             &self.next_iv,
             dst_encrypt,
@@ -1472,7 +1460,8 @@ impl EncryptedChainedExtentsEncryptionInstance {
             )?;
 
             if prev_extent_inline_authentication_digest.is_empty() {
-                *prev_extent_inline_authentication_digest = try_alloc_vec(inline_authentication_digest_len)?;
+                *prev_extent_inline_authentication_digest =
+                    FixedVec::new_with_default(inline_authentication_digest_len)?;
             }
             // Produce the digest and copy it to the destination.
             inline_authentication_hmac_instance
@@ -1529,8 +1518,8 @@ impl EncryptedChainedExtentsEncryptionInstance {
 pub struct EncryptedChainedExtentsDecryptionInstance {
     layout: EncryptedChainedExtentsLayout,
     block_cipher_instance: symcipher::SymBlockCipherModeDecryptionInstance,
-    next_iv: Vec<u8>,
-    inline_authentication: Option<(hash::HmacInstance, Vec<u8>)>,
+    next_iv: FixedVec<u8, 4>,
+    inline_authentication: Option<(hash::HmacInstance, FixedVec<u8, 5>)>,
 }
 
 impl EncryptedChainedExtentsDecryptionInstance {
@@ -1586,9 +1575,10 @@ impl EncryptedChainedExtentsDecryptionInstance {
         Ok(Self {
             layout: layout.clone(),
             block_cipher_instance,
-            next_iv: Vec::new(),
-            inline_authentication: inline_authentication_hmac_instance
-                .map(|inline_authentication_hmac_instance| (inline_authentication_hmac_instance, Vec::<u8>::new())),
+            next_iv: FixedVec::new_empty(),
+            inline_authentication: inline_authentication_hmac_instance.map(|inline_authentication_hmac_instance| {
+                (inline_authentication_hmac_instance, FixedVec::new_empty())
+            }),
         })
     }
 
@@ -1792,7 +1782,8 @@ impl EncryptedChainedExtentsDecryptionInstance {
             )?;
 
             if prev_extent_inline_authentication_digest.is_empty() {
-                *prev_extent_inline_authentication_digest = try_alloc_vec(inline_authentication_digest_len)?;
+                *prev_extent_inline_authentication_digest =
+                    FixedVec::new_with_default(inline_authentication_digest_len)?;
             }
             // Produce the digest and compare with what's expected.
             inline_authentication_hmac_instance
@@ -1837,7 +1828,7 @@ impl EncryptedChainedExtentsDecryptionInstance {
         let iv_len = self.layout.block_cipher_alg.cbc_iv_len;
         if is_first {
             // Copy the IV out from the first source extent.
-            self.next_iv = try_alloc_vec(iv_len)?;
+            self.next_iv = FixedVec::new_with_default(iv_len)?;
             io_slices::SingletonIoSliceMut::new(&mut self.next_iv)
                 .map_infallible_err()
                 .copy_from_iter_exhaustive(src.as_ref().take_exact(iv_len).map_err(CryptoError::from))
@@ -1861,7 +1852,7 @@ impl EncryptedChainedExtentsDecryptionInstance {
         // And decrypt.
         let mut encoded_next_chained_extent = [0u8; EncodedExtentPtr::ENCODED_SIZE as usize];
 
-        let mut iv_out = try_alloc_vec(iv_len)?;
+        let mut iv_out = FixedVec::new_with_default(iv_len)?;
         self.block_cipher_instance.decrypt(
             &self.next_iv,
             io_slices::SingletonIoSliceMut::new(&mut encoded_next_chained_extent)

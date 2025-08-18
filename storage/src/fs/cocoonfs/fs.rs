@@ -22,7 +22,7 @@ use crate::{
         self, asynchronous,
         sync_types::{self, Lock as _, RwLock as _, SyncRcPtrRef as _},
     },
-    utils_common::{alloc::box_try_new, bitmanip::UBitManip as _, zeroize},
+    utils_common::{alloc::box_try_new, bitmanip::UBitManip as _, fixed_vec::FixedVec, zeroize},
 };
 use core::{
     convert, future, marker, mem, ops,
@@ -114,7 +114,7 @@ pub struct CocoonFs<ST: sync_types::SyncTypes, C: chip::NvChip> {
 /// Static [`CocoonFs`] filesystem parameters.
 pub(super) struct CocoonFsConfig {
     pub image_layout: layout::ImageLayout,
-    pub salt: Vec<u8>,
+    pub salt: FixedVec<u8, 4>,
     pub inode_index_entry_leaf_node_block_ptr: extent_ptr::EncodedBlockPtr,
     pub enable_trimming: bool,
     pub root_key: keys::RootKey,

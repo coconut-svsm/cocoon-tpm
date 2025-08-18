@@ -4,9 +4,6 @@
 
 //! Functionality related to the filesystem image header.
 
-extern crate alloc;
-use alloc::vec::Vec;
-
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     crypto::hash,
@@ -16,8 +13,8 @@ use crate::{
     },
     nvfs_err_internal,
     utils_common::{
-        alloc::try_alloc_vec,
         bitmanip::{BitManip as _, UBitManip as _},
+        fixed_vec::FixedVec,
         io_slices::{self, IoSlicesIter as _, IoSlicesIterCommon as _, IoSlicesMutIter as _},
     },
 };
@@ -101,7 +98,7 @@ pub struct StaticImageHeader {
     /// The filesystem's [`ImageLayout`] configuration parameters.
     pub image_layout: layout::ImageLayout,
     /// The filesystem's salt value.
-    pub salt: Vec<u8>,
+    pub salt: FixedVec<u8, 4>,
 }
 
 impl StaticImageHeader {
@@ -223,10 +220,10 @@ impl StaticImageHeader {
 /// Mutable image header.
 pub struct MutableImageHeader {
     /// The current authentication tree root digest.
-    pub root_hmac_digest: Vec<u8>,
+    pub root_hmac_digest: FixedVec<u8, 5>,
     /// The current inode index entry leaf node preauthentication CCA protection
     /// digest.
-    pub inode_index_entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+    pub inode_index_entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
     /// Location of the inode index entry leaf node.
     pub inode_index_entry_leaf_node_block_ptr: extent_ptr::EncodedBlockPtr,
     /// The filesystem image size.
@@ -353,7 +350,7 @@ impl MutableImageHeader {
     ) -> Result<Self, NvFsError> {
         // And the root HMAC.
         let root_hmac_digest_len = hash::hash_alg_digest_len(image_layout.auth_tree_root_hmac_hash_alg) as usize;
-        let mut root_hmac_digest = try_alloc_vec(root_hmac_digest_len)?;
+        let mut root_hmac_digest = FixedVec::new_with_default(root_hmac_digest_len)?;
         let mut root_hmac_digest_io_slice =
             io_slices::SingletonIoSliceMut::new(&mut root_hmac_digest).map_infallible_err();
         root_hmac_digest_io_slice.copy_from_iter(&mut src)?;
@@ -366,7 +363,7 @@ impl MutableImageHeader {
         let inode_index_entry_leaf_node_preauth_cca_protection_digest_len =
             hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as usize;
         let mut inode_index_entry_leaf_node_preauth_cca_protection_digest =
-            try_alloc_vec(inode_index_entry_leaf_node_preauth_cca_protection_digest_len)?;
+            FixedVec::new_with_default(inode_index_entry_leaf_node_preauth_cca_protection_digest_len)?;
         let mut inode_index_entry_leaf_node_preauth_cca_protection_digest_io_slice =
             io_slices::SingletonIoSliceMut::new(&mut inode_index_entry_leaf_node_preauth_cca_protection_digest)
                 .map_infallible_err();
@@ -423,7 +420,7 @@ impl MutableImageHeader {
 /// [`ReadMutableImageHeaderFuture`] for reading parts of the image header.
 struct ReadImageHeaderPartChipRequest {
     region: ChunkedIoRegion,
-    dst: Vec<u8>,
+    dst: FixedVec<u8, 7>,
 }
 
 impl ReadImageHeaderPartChipRequest {
@@ -465,7 +462,7 @@ impl ReadImageHeaderPartChipRequest {
             return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
         }
         let read_region_len = usize::try_from(read_region_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let dst = try_alloc_vec(read_region_len)?;
+        let dst = FixedVec::new_with_default(read_region_len)?;
 
         Ok(Self {
             region: read_region,
@@ -506,12 +503,12 @@ enum ReadStaticImageHeaderFutureState<C: chip::NvChip> {
     ReadHeaderRemainder {
         read_fut: C::ReadFuture<ReadImageHeaderPartChipRequest>,
         min_header: MinStaticImageHeader,
-        first_header_part: Vec<u8>,
+        first_header_part: FixedVec<u8, 7>,
     },
     DecodeHeaderRemainder {
         min_header: MinStaticImageHeader,
-        first_header_part: Vec<u8>,
-        second_header_part: Vec<u8>,
+        first_header_part: FixedVec<u8, 7>,
+        second_header_part: FixedVec<u8, 7>,
     },
     Done,
 }
@@ -606,7 +603,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                         this.fut_state = ReadStaticImageHeaderFutureState::DecodeHeaderRemainder {
                             min_header,
                             first_header_part,
-                            second_header_part: Vec::new(),
+                            second_header_part: FixedVec::new_empty(),
                         };
                         continue;
                     }
@@ -690,7 +687,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
 
                     // Decode the remainder of the image header.
                     // The salt.
-                    let mut salt = match try_alloc_vec(min_header.salt_len as usize) {
+                    let mut salt = match FixedVec::new_with_default(min_header.salt_len as usize) {
                         Ok(salt) => salt,
                         Err(e) => {
                             this.fut_state = ReadStaticImageHeaderFutureState::Done;

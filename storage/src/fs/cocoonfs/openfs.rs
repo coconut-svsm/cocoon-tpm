@@ -19,7 +19,7 @@ use crate::{
     },
     nvfs_err_internal,
     utils_async::sync_types,
-    utils_common::zeroize,
+    utils_common::{fixed_vec::FixedVec, zeroize},
 };
 use core::{future, marker, mem, pin, task};
 
@@ -43,11 +43,11 @@ where
 
     // Initialized after the static + mutable image headers have been read.
     // Gets moved into the AuthTree once constructed.
-    root_hmac_digest: Vec<u8>,
+    root_hmac_digest: FixedVec<u8, 5>,
 
     // Initialized after the static + mutable image headers have been read.
     // Gets moved into the InodeIndex once constructed.
-    inode_index_entry_leaf_node_preauth_cca_protection_digest: Vec<u8>,
+    inode_index_entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
 
     // Initialized after the static + mutable image headers have been read.
     image_size: layout::AllocBlockCount,
@@ -154,9 +154,9 @@ where
     /// * `raw_root_key` - The filesystem's raw root key material supplied from
     ///   extern.
     /// * `enable_trimming` - Whether to enable the submission of [trim
-    ///   commands](chip::NvChip::trim) to the underlying storage for the [`CocoonFs`]
-    ///   instance eventually returned from [`poll()`](Self::poll) upon successful
-    ///   completion.
+    ///   commands](chip::NvChip::trim) to the underlying storage for the
+    ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
+    ///   upon successful completion.
     pub fn new(
         chip: C,
         raw_root_key: zeroize::Zeroizing<Vec<u8>>,
@@ -173,8 +173,8 @@ where
             chip: Some(chip),
             raw_root_key: Some(raw_root_key),
             fs_config: None,
-            root_hmac_digest: Vec::new(),
-            inode_index_entry_leaf_node_preauth_cca_protection_digest: Vec::new(),
+            root_hmac_digest: FixedVec::new_empty(),
+            inode_index_entry_leaf_node_preauth_cca_protection_digest: FixedVec::new_empty(),
             image_size: layout::AllocBlockCount::from(0u64),
             auth_tree: None,
             alloc_bitmap_file: None,
