@@ -29,7 +29,7 @@ use layout::ImageLayout;
 /// the actual filesystem header size.
 #[derive(Clone)]
 struct MinStaticImageHeader {
-    image_layout: layout::ImageLayout,
+    encoded_image_layout: [u8; layout::ImageLayout::encoded_len() as usize],
     salt_len: u8,
 }
 
@@ -81,7 +81,8 @@ impl MinStaticImageHeader {
         }
 
         let (encoded_image_layout, buf) = buf.split_at(layout::ImageLayout::encoded_len() as usize);
-        let image_layout = layout::ImageLayout::decode(encoded_image_layout)?;
+        let encoded_image_layout = <&[u8; layout::ImageLayout::encoded_len() as usize]>::try_from(encoded_image_layout)
+            .map_err(|_| nvfs_err_internal!())?;
 
         let (salt_len, _) = buf.split_at(mem::size_of::<u8>());
         // The from_le_bytes() is a nop for an u8, as is the usize::try_from()
@@ -89,7 +90,10 @@ impl MinStaticImageHeader {
         let salt_len =
             u8::from_le_bytes(*<&[u8; mem::size_of::<u8>()]>::try_from(salt_len).map_err(|_| nvfs_err_internal!())?);
 
-        Ok(Self { image_layout, salt_len })
+        Ok(Self {
+            encoded_image_layout: *encoded_image_layout,
+            salt_len,
+        })
     }
 }
 
@@ -505,7 +509,7 @@ enum ReadStaticImageHeaderFutureState<C: chip::NvChip> {
         min_header: MinStaticImageHeader,
         first_header_part: FixedVec<u8, 7>,
     },
-    DecodeHeaderRemainder {
+    DecodeHeader {
         min_header: MinStaticImageHeader,
         first_header_part: FixedVec<u8, 7>,
         second_header_part: FixedVec<u8, 7>,
@@ -576,31 +580,17 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                         }
                     };
 
-                    // Verify at this point that the backend storage's minimum IO size is <= the one
-                    // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
-                    // an usize as well), this will henceforth apply to the Chip IO Block size as
-                    // well then.
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                    if (min_header.image_layout.io_block_allocation_blocks_log2 as u32
-                        + min_header.image_layout.allocation_block_size_128b_log2 as u32)
-                        < chip_io_block_size_128b_log2
-                    {
-                        this.fut_state = ReadStaticImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(
-                            CocoonFsFormatError::IoBlockSizeNotSupportedByDevice,
-                        )));
-                    }
-
                     // Now that the MinStaticImageHeader has been read and decoded, deduce the total
                     // header length from it, read the remainder, if any, and continue with the
                     // decoding.
-                    let static_header_len = StaticImageHeader::encoded_len(min_header.salt_len) as u64;
+                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
                     debug_assert_eq!(first_header_part.len(), 1usize << (chip_io_block_size_128b_log2 + 7));
+                    let static_header_len = StaticImageHeader::encoded_len(min_header.salt_len) as u64;
                     // Remember from above: it is known by now that the Chip IO Block size fits an
                     // u64.
                     let remaining_static_header_len = static_header_len.saturating_sub(first_header_part.len() as u64);
                     if remaining_static_header_len == 0 {
-                        this.fut_state = ReadStaticImageHeaderFutureState::DecodeHeaderRemainder {
+                        this.fut_state = ReadStaticImageHeaderFutureState::DecodeHeader {
                             min_header,
                             first_header_part,
                             second_header_part: FixedVec::new_empty(),
@@ -658,13 +648,13 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                     };
 
                     let first_header_part = mem::take(first_header_part);
-                    this.fut_state = ReadStaticImageHeaderFutureState::DecodeHeaderRemainder {
+                    this.fut_state = ReadStaticImageHeaderFutureState::DecodeHeader {
                         min_header: min_header.clone(),
                         first_header_part,
                         second_header_part,
                     };
                 }
-                ReadStaticImageHeaderFutureState::DecodeHeaderRemainder {
+                ReadStaticImageHeaderFutureState::DecodeHeader {
                     min_header,
                     first_header_part,
                     second_header_part,
@@ -683,6 +673,30 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                         };
                         this.fut_state = ReadStaticImageHeaderFutureState::Done;
                         return task::Poll::Ready(Err(e));
+                    }
+
+                    // Decode the ImageLayout. This validates the configuration.
+                    let image_layout = match layout::ImageLayout::decode(&min_header.encoded_image_layout) {
+                        Ok(image_layout) => image_layout,
+                        Err(e) => {
+                            this.fut_state = ReadStaticImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+
+                    // Verify at this point that the backend storage's minimum IO size is <= the one
+                    // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
+                    // an usize as well), this will henceforth apply to the Chip IO Block size as
+                    // well then.
+                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    if (image_layout.io_block_allocation_blocks_log2 as u32
+                        + image_layout.allocation_block_size_128b_log2 as u32)
+                        < chip_io_block_size_128b_log2
+                    {
+                        this.fut_state = ReadStaticImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::from(
+                            CocoonFsFormatError::IoBlockSizeNotSupportedByDevice,
+                        )));
                     }
 
                     // Decode the remainder of the image header.
@@ -711,7 +725,6 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                         }
                     }
 
-                    let image_layout = min_header.image_layout.clone();
                     this.fut_state = ReadStaticImageHeaderFutureState::Done;
                     return task::Poll::Ready(Ok(StaticImageHeader { image_layout, salt }));
                 }
@@ -723,7 +736,8 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
 
 /// Read the [`MutableImageHeader`].
 pub struct ReadMutableImageHeaderFuture<C: chip::NvChip> {
-    min_static_image_header: MinStaticImageHeader,
+    image_layout: layout::ImageLayout,
+    salt_len: u8,
     fut_state: ReadMutableImageHeaderFutureState<C>,
 }
 
@@ -744,10 +758,8 @@ impl<C: chip::NvChip> ReadMutableImageHeaderFuture<C> {
             .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?;
 
         Ok(Self {
-            min_static_image_header: MinStaticImageHeader {
-                image_layout: static_image_header.image_layout.clone(),
-                salt_len,
-            },
+            image_layout: static_image_header.image_layout.clone(),
+            salt_len,
             fut_state: ReadMutableImageHeaderFutureState::Init {
                 _phantom: marker::PhantomData,
             },
@@ -764,10 +776,9 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadMutableImageHeaderFuture<C> 
         loop {
             match &mut this.fut_state {
                 ReadMutableImageHeaderFutureState::Init { _phantom } => {
-                    let min_header = &this.min_static_image_header;
-                    let image_layout = &min_header.image_layout;
+                    let image_layout = &this.image_layout;
                     let mutable_header_allocation_blocks_range =
-                        MutableImageHeader::physical_location(image_layout, min_header.salt_len);
+                        MutableImageHeader::physical_location(image_layout, this.salt_len);
                     // The mutable header's beginning is aligned to an IO Block boundary, which
                     // means it's also aligned to a Chip IO block boundary.
                     debug_assert_eq!(
@@ -835,7 +846,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadMutableImageHeaderFuture<C> 
                     this.fut_state = ReadMutableImageHeaderFutureState::Done;
                     return task::Poll::Ready(MutableImageHeader::decode(
                         io_slices::SingletonIoSlice::new(&encoded_header).map_infallible_err(),
-                        &this.min_static_image_header.image_layout,
+                        &this.image_layout,
                     ));
                 }
                 ReadMutableImageHeaderFutureState::Done => unreachable!(),
