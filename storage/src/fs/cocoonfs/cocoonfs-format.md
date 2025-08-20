@@ -153,7 +153,7 @@ For example, upon update, the filesystem implementation could
 2. Send the new authentication root digest to the remote trusted party.
 4. Wait for an ACK reply. In the common case that an ACK is received, apply the journal. If no ACK is being received,
    retry to reach the remote party until it answers.
-   
+
 For handling any power cuts encountered after the new root digest has been sent, but before a reply has been received
 back, make the filesystem open code to query the remote trusted party for the latest root authentication digest at
 filesystem opening time, depending on the answer either apply or cancel the pending journal.
@@ -267,7 +267,7 @@ An encoded extent pointer is formed as follows:
   left by 1 bit.
 * Or the two values together, set the least significant bit if the referenced extent's type is "indirect", encode the
   resulting integer in little-endian format.
-  
+
 The value of all-zeros denotes a special "NIL" value -- as the static image header is located at the filesystem image's
 beginning, no extent can ever start at position 0.
 
@@ -342,7 +342,7 @@ There are three different encryption entity formats defined:
   by some means external to the encrypted entity and
 * one for a linked list of extents, where only the head extent's locations is determined by some external means while
   the tail is to be found by traversing the linked list.
-  
+
 For example, the block encryption format is used for nodes in the inode index B+-tree, the encrypted extents for inode
 data, and chained encrypted extents for storing [inode extents lists](#sec-enc-extents-list) as well as the journal log.
 
@@ -435,19 +435,23 @@ tree root hash.
 #### [Static image header]{#sec-static-image-header}
 The static image header starts at offset zero, it's format is:
 
-+----------------+------------------------------------------------------------------+
-|Length in bytes |Description                                                       |
-+================+==================================================================+
-|8               |Magic string `'COCOONFS'` (without a terminating zero byte).      |
-+----------------+------------------------------------------------------------------+
-|1               |The filesystem format version. Fixed to 0.                        |
-+----------------+------------------------------------------------------------------+
-|20              |The set of filesystem image layout parameters, c.f. further below.|
-+----------------+------------------------------------------------------------------+
-|1               |The salt length.                                                  |
-+----------------+------------------------------------------------------------------+
-|variable        |The salt.                                                         |
-+----------------+------------------------------------------------------------------+
++----------------+----------------------------------------------------------------------------------+
+|Length in bytes |Description                                                                       |
++================+==================================================================================+
+|8               |Magic string `'COCOONFS'` (without a terminating zero byte).                      |
++----------------+----------------------------------------------------------------------------------+
+|1               |The filesystem format version. Fixed to 0.                                        |
++----------------+----------------------------------------------------------------------------------+
+|20              |The set of filesystem image layout parameters, c.f. further below.                |
++----------------+----------------------------------------------------------------------------------+
+|1               |The salt length.                                                                  |
++----------------+----------------------------------------------------------------------------------+
+|variable        |The salt.                                                                         |
++----------------+----------------------------------------------------------------------------------+
+|4               |Cyclic redundancy checksum over the header.                                       |
++----------------+----------------------------------------------------------------------------------+
+|4               |Cyclic redundancy checksum over the header with any two neighboring bits swapped. |
++----------------+----------------------------------------------------------------------------------+
 
 After the static image header, some padding is inserted up to the next [IO Block](#def-io-block) alignment
 boundary. None of the IO Blocks overlapping with the static image header, including that padding, may ever get written
@@ -522,6 +526,49 @@ follows:
 |       |                                                     |encryption. Encoded as a pair of two 16 bit integers in |
 |       |                                                     |big-endian format each.                                 |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
+
+##### [Cyclic redundancy checksum (CRC) computation]{#sec-crc}
+The static image header is integrity protected by a pair two CRC-32s: one over the plain header data from the magic to
+the salt, both inclusive, and another one over the same data but with any two neighboring bits swapped.
+
+The CRC polynomial used in either case is the standard CRC-32 one, with a corresponding 32 bit integer representation of
+`0x04c11db71`, where the arithmetically most significant bit specifies the coefficient to the term of degree $31$, and
+the least signigicant bit the constant term. A string of $32$ $1$-bits is prepended to the data before the CRC
+computation starts. Successive bytes in the data correspond to terms of decreasing degree in the to be reduced data
+polynomial, and within each byte, bits of decreasing arithmetic significance correspond to terms of increasing
+polynomial degree. The final residual polynomial's coefficient are inverted and serialized with the same association
+between polynomial terms and bits on storage as just described for the data.
+
+The distribution of the CRC algorithm output over uniformly distributed data is again uniform, so in this idealized case
+the probability of not detecting random errors with a single CRC-32 is $1:2^{32}$. One of the checksum's primary
+purposes is to detect incomplete writes issued from an interrupted filesystem creation operation -- the only point in
+time the static image header is getting actively written to. A chance of $1:2^{32}$ for missing header corruptions may
+well be considered too unreliable, and a 64 bit checksum should be used instead. The most straightforward solution would
+be to use a CRC-64 variant. However, in practice, this would double the size of a CRC implementation's internal lookup
+tables, which is undesirable. So a different approach is taken instead: a 64 bit checksum is formed by combining one
+CRC-32 over the header's data with another over the same data, but with any two neighboring bits swapped. Because the
+CRC-32 polynomial is irreducible -- hence the ring of its residue classes is a field, this is equivalent to computing
+two independent CRC-32 values over the bits at odd and even positions in the input data each. Therefore, the probability
+of missing uniformly random corruptions is $1:2^{64}$.
+
+The well-known feature of CRC-64 that burst errors of length up to 64 bits are detected reliably also applies to this
+method of combining the two CRC-32 checksums. To see this, consider the polynomial ring $\mathbb{F}_2[X]$ with
+coefficients in the binary field $\mathbb{F}_2$. Denote the CRC polynomial in this ring by $\mathcal{c}$. The ability to
+detect burst errors up to a length of 64 bits translates to requiring that the only polynomial of degree less than 64
+with its terms of odd degree all zero and a residue $\mathrm{mod}\mathcal{c}$ of zero is the zero polynomial. Note that
+$\mathrm{char}(\mathbb{F}_2)=2$, and $\phi: p\mapsto p^2$ is a ring endomorphism on $\mathbb{F}_2[X]$. In particular
+$\phi(X)=X^2$. The image of $\phi$ is exactly the set of polynomials with their terms of odd degree all zero. Observe
+that $\phi(\mathcal{c})=\mathcal{c}^2$ yields such a polynomial with a residue $\mathrm{mod}\mathcal{c}$ of $0$. It has
+degree $64$ though, and it remains to be shown that this is the polynomial of least degree with these
+properties. Consider the composition of maps $\psi\circ\phi$, where $\psi$ denotes the canonical map
+$\mathbb{F}_2[X]\rightarrow \mathbb{F}_2[X]/(\mathcal{c})$ into the residue class ring.  The
+$\mathrm{kern}(\psi\circ\phi)$ is an ideal in $\mathbb{F}_2[X]$, and is prinicipal, because $\mathbb{F}_2[X]$ is a
+principal ideal ring. That is, $\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$ for some
+$\bar{\mathcal{c}}\in\mathbb{F}_2[X]$, and $\phi(\bar{\mathcal{c}})$ is a polynomial of minimum degree in
+$\mathrm{kern}(\psi)$ with its terms of odd degree all zero. By what has been said above, it is already known that
+$\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$. Finally, because $\mathcal{c}$ is irreducible (and
+$\mathbb{F}_2$'s only unit is $1$), it follows that $\mathcal{\bar{c}}=\mathcal{c}$.
+
 
 #### [Mutable image header]{#sec-mutable-image-header}
 The mutable image header is located at the first [IO Block](#def-io-block) aligned boundary following the static image
@@ -656,7 +703,7 @@ invoking `KDFa()` with its parameters set to:
 
   Note that it is assumed here that the relevant property for the security strength of a HMAC is the preimage
   resistance of the underlying hash function, which is commonly estimated to equal its digest length.
-  
+
 
 ## [Allocation bitmap]{#sec-allocation-bitmap}
 The allocation bitmap tracks the filesystem image's [Allocation Blocks'](#def-allocation-block) allocation status in an
@@ -800,7 +847,8 @@ number, a subdomain value of 0, and a key purpose of [`KEY_PURPOSE_AUTH_ROOT`](#
    4. An authentication context subject identifier byte of constant
       [`AUTH_SUBJECT_ID_AUTH_TREE_ROOT_NODE`](#def-auth-subject-id) identifying the authenticated subject.
 
-The image context digest is produced by forming a HMAC with same hash algorithm and subkey as for the root node above over
+The image context digest is produced by forming a HMAC with same hash algorithm and subkey as for the root node above
+over
 
 1. The magic `'COCOONFS'`, without a terminating zero byte.
 2. A single byte filesystem format version identifier of constant 0.

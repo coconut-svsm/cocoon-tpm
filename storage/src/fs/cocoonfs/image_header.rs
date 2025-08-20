@@ -9,7 +9,7 @@ use crate::{
     crypto::hash,
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{CocoonFsFormatError, extent_ptr, layout},
+        cocoonfs::{CocoonFsFormatError, crc32, extent_ptr, layout},
     },
     nvfs_err_internal,
     utils_common::{
@@ -125,6 +125,10 @@ impl StaticImageHeader {
         // Verify that the salt length can get encoded in an u8.
         encoded_len += salt_len as u32;
 
+        // The length of two CRCs -- one on the plain image header data, one with all
+        // neighboring bits swapped each.
+        encoded_len += 2 * (mem::size_of::<u32>() as u32);
+
         encoded_len
     }
 
@@ -181,7 +185,14 @@ impl StaticImageHeader {
         image_layout: &layout::ImageLayout,
         salt: &[u8],
     ) -> Result<(), NvFsError> {
+        // CRC of the header data.
+        let mut crc = crc32::crc32le_init();
+        // CRC of the header data with all neighboring bits swapped each.
+        let mut crc_snb = crc32::crc32le_init();
+
         let magic = b"COCOONFS";
+        crc = crc32::crc32le_update_data(crc, magic.as_slice());
+        crc_snb = crc32::crc32le_update_data_snb(crc_snb, magic.as_slice());
         let mut magic = io_slices::SingletonIoSlice::new(magic.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut magic)?;
         if !magic.is_empty()? {
@@ -189,6 +200,8 @@ impl StaticImageHeader {
         }
 
         let version = 0u8.to_le_bytes();
+        crc = crc32::crc32le_update_data(crc, &version);
+        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &version);
         let mut version = io_slices::SingletonIoSlice::new(version.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut version)?;
         if !version.is_empty()? {
@@ -196,6 +209,8 @@ impl StaticImageHeader {
         }
 
         let encoded_image_layout = image_layout.encode()?;
+        crc = crc32::crc32le_update_data(crc, &encoded_image_layout);
+        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &encoded_image_layout);
         let mut encoded_image_layout =
             io_slices::SingletonIoSlice::new(encoded_image_layout.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut encoded_image_layout)?;
@@ -206,14 +221,32 @@ impl StaticImageHeader {
         let salt_len = u8::try_from(salt.len())
             .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?
             .to_le_bytes();
+        crc = crc32::crc32le_update_data(crc, &salt_len);
+        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &salt_len);
         let mut salt_len = io_slices::SingletonIoSlice::new(salt_len.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut salt_len)?;
         if !salt_len.is_empty()? {
             return Err(nvfs_err_internal!());
         }
+        crc = crc32::crc32le_update_data(crc, salt);
+        crc_snb = crc32::crc32le_update_data_snb(crc_snb, salt);
         let mut salt = io_slices::SingletonIoSlice::new(salt).map_infallible_err();
         dst.copy_from_iter(&mut salt)?;
         if !salt.is_empty()? {
+            return Err(nvfs_err_internal!());
+        }
+
+        let crc = crc32::crc32le_finish_send(crc).to_le_bytes();
+        let mut crc = io_slices::SingletonIoSlice::new(&crc).map_infallible_err();
+        dst.copy_from_iter(&mut crc)?;
+        if !crc.is_empty()? {
+            return Err(nvfs_err_internal!());
+        }
+
+        let crc_snb = crc32::crc32le_finish_send(crc_snb).to_le_bytes();
+        let mut crc_snb = io_slices::SingletonIoSlice::new(&crc_snb).map_infallible_err();
+        dst.copy_from_iter(&mut crc_snb)?;
+        if !crc_snb.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
@@ -507,11 +540,13 @@ enum ReadStaticImageHeaderFutureState<C: chip::NvChip> {
     ReadHeaderRemainder {
         read_fut: C::ReadFuture<ReadImageHeaderPartChipRequest>,
         min_header: MinStaticImageHeader,
+        static_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
     },
     DecodeHeader {
         min_header: MinStaticImageHeader,
         first_header_part: FixedVec<u8, 7>,
+        static_header_len: usize,
         second_header_part: FixedVec<u8, 7>,
     },
     Done,
@@ -585,13 +620,15 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                     // decoding.
                     let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
                     debug_assert_eq!(first_header_part.len(), 1usize << (chip_io_block_size_128b_log2 + 7));
-                    let static_header_len = StaticImageHeader::encoded_len(min_header.salt_len) as u64;
+                    let static_header_len = StaticImageHeader::encoded_len(min_header.salt_len);
                     // Remember from above: it is known by now that the Chip IO Block size fits an
                     // u64.
-                    let remaining_static_header_len = static_header_len.saturating_sub(first_header_part.len() as u64);
+                    let remaining_static_header_len =
+                        (static_header_len as u64).saturating_sub(first_header_part.len() as u64);
                     if remaining_static_header_len == 0 {
                         this.fut_state = ReadStaticImageHeaderFutureState::DecodeHeader {
                             min_header,
+                            static_header_len: static_header_len as usize,
                             first_header_part,
                             second_header_part: FixedVec::new_empty(),
                         };
@@ -627,12 +664,14 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                     this.fut_state = ReadStaticImageHeaderFutureState::ReadHeaderRemainder {
                         read_fut,
                         min_header,
+                        static_header_len: static_header_len as usize,
                         first_header_part,
                     };
                 }
                 ReadStaticImageHeaderFutureState::ReadHeaderRemainder {
                     read_fut,
                     min_header,
+                    static_header_len,
                     first_header_part,
                 } => {
                     let second_header_part = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
@@ -650,17 +689,97 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadStaticImageHeaderFuture<C> {
                     let first_header_part = mem::take(first_header_part);
                     this.fut_state = ReadStaticImageHeaderFutureState::DecodeHeader {
                         min_header: min_header.clone(),
+                        static_header_len: *static_header_len,
                         first_header_part,
                         second_header_part,
                     };
                 }
                 ReadStaticImageHeaderFutureState::DecodeHeader {
                     min_header,
+                    static_header_len,
                     first_header_part,
                     second_header_part,
                 } => {
+                    // Verify the checksums.
                     let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
                         .chain(io_slices::SingletonIoSlice::new(second_header_part));
+                    // CRC of the header data.
+                    let mut crc = crc32::crc32le_init();
+                    // CRC of the header data with all neighboring bits swapped each.
+                    let mut crc_snb = crc32::crc32le_init();
+
+                    let mut checksummed_header_io_slice = header_io_slice.as_ref().take_exact(*static_header_len - 8);
+                    while let Some(checksummed_header_part) = match checksummed_header_io_slice.next_slice(None) {
+                        Ok(checksummed_header_part) => checksummed_header_part,
+                        Err(e) => {
+                            // Infallible.
+                            match e {
+                                io_slices::IoSlicesIterError::BackendIteratorError(e) => {
+                                    // Infallible.
+                                    match e {}
+                                }
+                                io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                                    io_slices::IoSlicesError::BuffersExhausted => {
+                                        this.fut_state = ReadStaticImageHeaderFutureState::Done;
+                                        return task::Poll::Ready(Err(nvfs_err_internal!()));
+                                    }
+                                },
+                            }
+                        }
+                    } {
+                        crc = crc32::crc32le_update_data(crc, checksummed_header_part);
+                        crc_snb = crc32::crc32le_update_data_snb(crc_snb, checksummed_header_part);
+                    }
+
+                    let mut expected_crc = [0u8; mem::size_of::<u32>()];
+                    let mut expected_crc_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_crc);
+                    if let Err(e) = expected_crc_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
+                        // Infallible.
+                        match e {}
+                    }
+                    if !match expected_crc_io_slice.is_empty() {
+                        Ok(is_empty) => is_empty,
+                        Err(e) => {
+                            // Infallible.
+                            match e {}
+                        }
+                    } {
+                        this.fut_state = ReadStaticImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(nvfs_err_internal!()));
+                    }
+                    let expected_crc = u32::from_le_bytes(expected_crc);
+
+                    let mut expected_crc_snb = [0u8; mem::size_of::<u32>()];
+                    let mut expected_crc_snb_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_crc_snb);
+                    if let Err(e) = expected_crc_snb_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
+                        // Infallible.
+                        match e {}
+                    }
+                    if !match expected_crc_snb_io_slice.is_empty() {
+                        Ok(is_empty) => is_empty,
+                        Err(e) => {
+                            // Infallible.
+                            match e {}
+                        }
+                    } {
+                        this.fut_state = ReadStaticImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(nvfs_err_internal!()));
+                    }
+                    let expected_crc_snb = u32::from_le_bytes(expected_crc_snb);
+
+                    if !crc32::crc32le_finish_receive(crc, expected_crc)
+                        || !crc32::crc32le_finish_receive(crc_snb, expected_crc_snb)
+                    {
+                        this.fut_state = ReadStaticImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::from(
+                            CocoonFsFormatError::InvalidImageHeaderChecksum,
+                        )));
+                    }
+
+                    // Decode the static image header.
+                    let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
+                        .chain(io_slices::SingletonIoSlice::new(second_header_part));
+
                     if let Err(e) = header_io_slice.skip(MinStaticImageHeader::encoded_len() as usize) {
                         let e = match e {
                             io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
