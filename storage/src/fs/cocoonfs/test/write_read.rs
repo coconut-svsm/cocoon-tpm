@@ -6,9 +6,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{
-    cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_fs_instance_into_chip_helper,
+    CocoonFsTestConfigs, cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_fs_instance_into_chip_helper,
     cocoonfs_test_mkfs_op_helper, cocoonfs_test_openfs_op_helper, cocoonfs_test_read_inode_op_helper,
-    cocoonfs_test_start_transaction_op_helper, cocoonfs_test_write_inode_op_helper, CocoonFsTestConfigs,
+    cocoonfs_test_start_transaction_op_helper, cocoonfs_test_write_inode_op_helper,
 };
 use crate::fs::{self, cocoonfs::extent_ptr};
 

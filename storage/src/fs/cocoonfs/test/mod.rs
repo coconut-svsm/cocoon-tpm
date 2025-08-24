@@ -10,7 +10,7 @@ use crate::{
     crypto::{hash, rng, symcipher},
     fs::{
         self,
-        cocoonfs::{CocoonFs, CocoonFsMkFsFuture, CocoonFsOpenFsFuture, layout},
+        cocoonfs::{CocoonFs, CocoonFsMkFsFuture, CocoonFsOpenFsFuture, CocoonFsWriteMkfsInfoHeaderFuture, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::{
@@ -232,26 +232,77 @@ fn cocoonfs_test_mkfs_op_helper(
         enable_trimming,
         rng,
     )
-    .map_err(|(_chip, e)| e)
+    .map_err(|(_chip, _rng, e)| e)
     .unwrap();
 
     let executor = TestAsyncExecutor::new();
     let mkfs_waiter = TestAsyncExecutor::spawn(&executor, mkfs_fut);
     TestAsyncExecutor::run_to_completion(&executor);
     let mkfs_result = mkfs_waiter.take().unwrap();
-    mkfs_result.unwrap().map_err(|(_chip, e)| e)
+    let (_rng, mkfs_result) = mkfs_result.unwrap();
+    mkfs_result.map_err(|(_chip, e)| e)
+}
+
+fn cocoonfs_test_write_mkfsinfo_header_op_helper(
+    test_config: &CocoonFsTestConfig,
+    image_size: usize,
+) -> Result<TestNvChip, fs::NvFsError> {
+    let (chip, image_layout, salt) = test_config.instantiate(0);
+    let image_size = layout::AllocBlockCount::from(
+        u64::try_from(image_size).unwrap() >> (image_layout.allocation_block_size_128b_log2 as u32 + 7),
+    );
+    let write_mkfsinfo_header_fut =
+        CocoonFsWriteMkfsInfoHeaderFuture::new(chip, &image_layout, salt, Some(image_size)).map_err(|(_chip, e)| e)?;
+
+    let executor = TestAsyncExecutor::new();
+    let write_mkfsinfo_header_waiter = TestAsyncExecutor::spawn(&executor, write_mkfsinfo_header_fut);
+    TestAsyncExecutor::run_to_completion(&executor);
+    let write_mkfsinfo_header_result = write_mkfsinfo_header_waiter.take().unwrap();
+    let (chip, result) = write_mkfsinfo_header_result.unwrap();
+    match result {
+        Ok(()) => Ok(chip),
+        Err(e) => Err(e),
+    }
 }
 
 fn cocoonfs_test_openfs_op_helper(chip: TestNvChip) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
-    let openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(chip, root_key, false)
-        .map_err(|(_chip, _root_key, e)| e)
+    let openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(chip, root_key, false, rng)
+        .map_err(|(_chip, _root_key, _rng, e)| e)
         .unwrap();
     let executor = TestAsyncExecutor::new();
     let openfs_waiter = TestAsyncExecutor::spawn(&executor, openfs_fut);
     TestAsyncExecutor::run_to_completion(&executor);
     let openfs_result = openfs_waiter.take().unwrap();
-    openfs_result.unwrap().map_err(|(_chip, _root_key, e)| e)
+    let (_rng, openfs_result) = openfs_result.unwrap();
+    openfs_result.map_err(|(_chip, _root_key, e)| e)
+}
+
+fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
+    chip: TestNvChip,
+) -> Result<TestNvChip, fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
+    let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
+    let mut openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(chip, root_key, false, rng)
+        .map_err(|(_chip, _root_key, _rng, e)| e)
+        .unwrap();
+    // Simulate IO failure when writing the regular static image header.
+    openfs_fut.test_fail_apply_mkfsinfo_header = true;
+    let executor = TestAsyncExecutor::new();
+    let openfs_waiter = TestAsyncExecutor::spawn(&executor, openfs_fut);
+    TestAsyncExecutor::run_to_completion(&executor);
+    let openfs_result = openfs_waiter.take().unwrap();
+    let (_rng, openfs_result) = openfs_result.unwrap();
+    match openfs_result {
+        Ok(_fs_instance) => {
+            // The test is supposed to fail application of the mkfsinfo header. But there
+            // was none, presumably because the test is buggy.
+            Err(nvfs_err_internal!())
+        }
+        Err((chip, _root_key, fs::NvFsError::IoError(fs::NvFsIoError::IoFailure))) => Ok(chip),
+        Err((_chip, _root_key, e)) => Err(e),
+    }
 }
 
 #[allow(unused)]

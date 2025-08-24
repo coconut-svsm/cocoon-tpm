@@ -100,5 +100,5 @@ impl convert::From<CocoonFsFormatError> for NvFsError {
 
 pub use fs::CocoonFs;
 pub use layout::ImageLayout as CocoonFsImageLayout;
-pub use mkfs::CocoonFsMkFsFuture;
+pub use mkfs::{CocoonFsMkFsFuture, CocoonFsWriteMkfsInfoHeaderFuture};
 pub use openfs::CocoonFsOpenFsFuture;

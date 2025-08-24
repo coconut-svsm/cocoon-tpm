@@ -269,7 +269,7 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
 
     /// `NvChip` implementation specific [future](NvChipFuture) type
     /// instantiated through [`resize()`](Self::resize).
-    type ResizeFuture: NvChipFuture<Self, Output = Result<(), NvChipIoError>>;
+    type ResizeFuture: NvChipFuture<Self, Output = Result<(), NvChipIoError>> + marker::Unpin;
 
     /// Attempt to resize, i.e. grow or shrink, the backing storage.
     ///

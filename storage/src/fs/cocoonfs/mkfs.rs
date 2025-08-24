@@ -8,9 +8,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use crate::{
-    chip,
+    chip::{self, NvChipIoError},
     crypto::{CryptoError, hash, rng},
     fs::{
+        NvFsError, NvFsIoError,
         cocoonfs::{
             CocoonFsFormatError, CocoonFsImageLayout, alloc_bitmap, auth_tree, encryption_entities, extent_ptr,
             extents,
@@ -19,7 +20,6 @@ use crate::{
             layout::{self, BlockCount as _, BlockIndex as _},
             read_buffer, write_blocks,
         },
-        {NvFsError, NvFsIoError},
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -31,14 +31,117 @@ use crate::{
 };
 use core::{future, iter, marker, mem, pin, task};
 
-/// Filesystem layout description internal to [`CocoonFsMkFsFuture`].
-struct CocoonFsMkFsLayout {
+/// Format a CocoonFS filesystem instance.
+///
+/// Directly format a filesystem instance, without considering any
+/// filesystem creation info header existing on storage, if any.
+///
+/// # See also:
+///
+/// * [`CocoonFsWriteMkfsInfoHeaderFuture`] for a way to provision a storage
+///   volume for CocoonFs usage without access to the root key.
+pub struct CocoonFsMkFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+    mkfs_fut: MkFsFuture<ST, C>,
+}
+
+impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
+    /// Instantiate a [`CocoonFsMkFsFuture`].
+    ///
+    /// On error, the input `chip` and `rng` are returned directly as part of
+    /// the `Err`. On success, the [`CocoonFsMkFsFuture`] assumes ownership
+    /// of the `chip` and `rng` for the duration of the operation. They will get
+    /// either returned back from [`poll()`](Self::poll) at completion, or
+    /// will be passed onwards to the resulting [`CocoonFs`] instance as
+    /// appropriate.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The storage to create a filesystem on.
+    /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
+    /// * `salt` - The filsystem salt to be stored in the static image header.
+    ///   Its length must not exceed [`u8::MAX`].
+    /// * `image_size` - Optional desired filesystem image size to get recorded
+    ///   in the mutable image header. If not specified, the maximum possible
+    ///   value within the backing storage's
+    ///   [dimensions](chip::NvChip::chip_io_blocks) will be used.
+    /// * `raw_root_key` - The filesystem's raw root key material supplied from
+    ///   extern.
+    /// * `enable_trimming` - Whether to enable the submission of [trim
+    ///   commands](chip::NvChip::trim) to the underlying storage for the
+    ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
+    ///   upon successful completion. The setting of this value also controls
+    ///   whether whether unallocated storage will get initialized with random
+    ///   data in the course of the filesystem formatting -- unallocated storage
+    ///   will get randomized if and only if `enable_trimming` is off.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating IVs, as well as randomizing padding in data structures
+    ///   and for initializing unallocated storage if `enable_trimming` is off.
+    pub fn new(
+        chip: C,
+        image_layout: &CocoonFsImageLayout,
+        salt: FixedVec<u8, 4>,
+        image_size: Option<layout::AllocBlockCount>,
+        raw_root_key: &[u8],
+        enable_trimming: bool,
+        rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
+    ) -> Result<Self, (C, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
+        Ok(Self {
+            mkfs_fut: MkFsFuture::new(
+                chip,
+                image_layout,
+                salt,
+                image_size,
+                raw_root_key,
+                None,
+                enable_trimming,
+                rng,
+            )?,
+        })
+    }
+}
+
+impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for CocoonFsMkFsFuture<ST, C>
+where
+    <ST as sync_types::SyncTypes>::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
+{
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned from the
+    /// [`Future::poll()`](future::Future::poll):
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input [`NvChip`](chip::NvChip)
+    ///   as and  [random number generator](rng::RngCoreDispatchable) lost.
+    /// * `Ok((rng, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [random number
+    ///   generator](rng::RngCoreDispatchable), `rng`, and the operation result
+    ///   will get returned within:
+    ///   * `Ok((rng, Err((chip, e))))` - In case of an error, a pair of the
+    ///     [`NvChip`](chip::NvChip) instance `chip` and the error reason `e` is
+    ///     returned in an [`Err`].
+    ///   * `Ok((rng, Ok(fs_instance)))` - Otherwise an opened [`CocoonFs`]
+    ///     instance `fs_instance` associated with the filesystem just created
+    ///     is returned in an [`Ok`].
+    type Output = Result<
+        (
+            Box<dyn rng::RngCoreDispatchable + marker::Send>,
+            Result<CocoonFsSyncRcPtrType<ST, C>, (C, NvFsError)>,
+        ),
+        NvFsError,
+    >;
+
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        future::Future::poll(pin::Pin::new(&mut pin::Pin::into_inner(self).mkfs_fut), cx)
+    }
+}
+
+/// Filesystem layout description internal to [`MkFsFuture`].
+struct MkFsLayout {
     image_layout: layout::ImageLayout,
     salt: FixedVec<u8, 4>,
     image_header_end: layout::PhysicalAllocBlockIndex,
     image_size: layout::AllocBlockCount,
     allocated_image_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
-    root_key: keys::RootKey,
     inode_index_entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     journal_log_head_extent: layout::PhysicalAllocBlockRange,
     auth_tree_extent: layout::PhysicalAllocBlockRange,
@@ -47,8 +150,8 @@ struct CocoonFsMkFsLayout {
     alloc_bitmap_inode_extents_list_extents: Option<extents::PhysicalExtents>,
 }
 
-impl CocoonFsMkFsLayout {
-    /// Instantiate a [`CocoonFsMkFsLayout`].
+impl MkFsLayout {
+    /// Instantiate a [`MkFsLayout`].
     ///
     /// # Arguments:
     ///
@@ -58,12 +161,10 @@ impl CocoonFsMkFsLayout {
     ///   [`StaticImageHeader::salt`](image_header::StaticImageHeader::salt).
     /// * `image_size` - The filesystem image size to get recorded in the
     ///   [`MutableImageHeader::image_size`](image_header::MutableImageHeader::image_size).
-    /// * `root_key` - The filesystem's root key.
     pub fn new(
         image_layout: &layout::ImageLayout,
         salt: FixedVec<u8, 4>,
         image_size: layout::AllocBlockCount,
-        root_key: keys::RootKey,
     ) -> Result<Self, NvFsError> {
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
@@ -219,7 +320,6 @@ impl CocoonFsMkFsLayout {
             image_header_end,
             image_size,
             allocated_image_allocation_blocks_end,
-            root_key,
             inode_index_entry_leaf_node_allocation_blocks_begin,
             journal_log_head_extent,
             auth_tree_extent,
@@ -277,11 +377,20 @@ impl CocoonFsMkFsLayout {
     }
 }
 
-/// Format a CocoonFS filesystem instance.
-pub struct CocoonFsMkFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MkFsFutureBackupMkfsInfoHeaderWriteControl {
+    Write,
+    RetainExisting,
+}
+
+/// Internal filesystem creation ("mkfs") primitive.
+pub struct MkFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
-    fs_init_data: Option<CocoonFsMkFsFutureFsInitData<ST, C>>,
+    fs_init_data: Option<MkFsFutureFsInitData<ST, C>>,
+
+    // Always valid, initialized from Self::new().
+    backup_mkfsinfo_header_write_control: Option<MkFsFutureBackupMkfsInfoHeaderWriteControl>,
 
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
@@ -303,19 +412,22 @@ pub struct CocoonFsMkFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
     // Initialized after the header data to write out has been setup.
     first_static_image_header_chip_io_block: FixedVec<FixedVec<u8, 7>, 0>,
 
-    rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
+    #[cfg(test)]
+    pub(super) test_fail_write_static_image_header: bool,
 
-    fut_state: CocoonFsMkFsFutureState<C>,
+    fut_state: MkFsFutureState<C>,
 }
 
-/// Part of the internal [`CocoonFsMkFsFuture`] state valid throughout the whole
+/// Part of the internal [`MkFsFuture`] state valid throughout the whole
 /// lifetime.
 ///
 /// Various state bundled together so that only one [`Option`] needs to get
-/// examined upon each [`poll()`](CocoonFsMkFsFuture::poll) invocation.
-struct CocoonFsMkFsFutureFsInitData<ST: sync_types::SyncTypes, C: chip::NvChip> {
+/// examined upon each [`poll()`](MkFsFuture::poll) invocation.
+struct MkFsFutureFsInitData<ST: sync_types::SyncTypes, C: chip::NvChip> {
     chip: C,
-    mkfs_layout: CocoonFsMkFsLayout,
+    rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
+    mkfs_layout: MkFsLayout,
+    root_key: keys::RootKey,
     alloc_bitmap: alloc_bitmap::AllocBitmap,
     auth_tree_config: auth_tree::AuthTreeConfig,
     keys_cache: keys::KeyCache,
@@ -324,10 +436,20 @@ struct CocoonFsMkFsFutureFsInitData<ST: sync_types::SyncTypes, C: chip::NvChip> 
     enable_trimming: bool,
 }
 
-/// [`CocoonFsMkFsFuture`] state-machine state.
+/// [`MkFsFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum CocoonFsMkFsFutureState<C: chip::NvChip> {
+enum MkFsFutureState<C: chip::NvChip> {
     Init,
+    ResizeChip {
+        resize_fut: C::ResizeFuture,
+    },
+    WriteBackupMkFsInfoHeader {
+        write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture<C>,
+    },
+    WriteBarrierAfterBackupMkFsInfoHeaderWrite {
+        write_barrier_fut: C::WriteBarrierFuture,
+    },
+    PrepareAdvanceAuthTreeCursorToInitPos,
     AdvanceAuthTreeCursorToInodeIndexEntryLeafNode {
         advance_fut: auth_tree::AuthTreeInitializationCursorAdvanceFuture<C>,
     },
@@ -368,6 +490,7 @@ enum CocoonFsMkFsFutureState<C: chip::NvChip> {
     RandomizeImageRemainderPrepare,
     RandomizeImageRemainder {
         write_fut: WriteRandomDataFuture<C>,
+        remaining_randomization_range: Option<layout::PhysicalAllocBlockRange>,
     },
     WriteBarrierBeforeStaticImageHeaderWritePrepare,
     WriteBarrierBeforeStaticImageHeaderWrite {
@@ -376,21 +499,25 @@ enum CocoonFsMkFsFutureState<C: chip::NvChip> {
     WriteStaticImageHeader {
         write_fut: write_blocks::WriteBlocksFuture<C>,
     },
-    WriteSyncAfterStaticImageHaderWrite {
+    WriteSyncAfterStaticImageHeaderWrite {
         write_sync_fut: C::WriteSyncFuture,
     },
+    InvalidateBackupMkFsInfoHeader {
+        invalidate_backup_mkfsinfo_header_fut: InvalidateBackupMkFsInfoHeaderFuture<C>,
+    },
+    Finalize,
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
-    /// Instantiate a [`CocoonFsMkFsFuture`].
+impl<ST: sync_types::SyncTypes, C: chip::NvChip> MkFsFuture<ST, C> {
+    /// Instantiate a [`MkFsFuture`].
     ///
-    /// On error, the input `chip` is returned directly as part of the `Err`.
-    /// On success, the [`CocoonFsMkFsFuture`] assumes ownership of the `chip`
-    /// for the duration of the operation. It will get either returned back
-    /// from [`poll()`](Self::poll) after completing with failure, or will be
-    /// passed onwards to the resulting [`CocoonFs`] instance when
-    /// completing with success.
+    /// On error, the input `chip` and `rng` are returned directly as part of
+    /// the `Err`. On success, the [`MkFsFuture`] assumes ownership of the
+    /// `chip` and `rng` for the duration of the operation. It will get either
+    /// returned back from [`poll()`](Self::poll) at completion, or will be
+    /// passed onwards to the resulting [`CocoonFs`] instance as
+    /// appropriate.
     ///
     /// # Arguments:
     ///
@@ -402,7 +529,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
     ///   storage's size, as reported by
     ///   [`NvChip::chip_io_blocks()`](chip::NvChip::chip_io_blocks) on `chip`.
     ///   If not specified, the maximum possible value will be used.
-    /// * `root_key` - The filesystem's root key.
+    /// * `raw_root_key` - The filesystem's raw root key material supplied from
+    ///   extern.
     /// * `enable_trimming` - Whether to enable the submission of [trim
     ///   commands](chip::NvChip::trim) to the underlying storage for the
     ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
@@ -413,17 +541,19 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
     /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
     ///   for generating IVs, as well as randomizing padding in data structures
     ///   and for initializing unallocated storage if `enable_trimming` is off.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chip: C,
         image_layout: &CocoonFsImageLayout,
         salt: FixedVec<u8, 4>,
         image_size: Option<layout::AllocBlockCount>,
-        root_key: &[u8],
+        raw_root_key: &[u8],
+        backup_mkfsinfo_header_write_control: Option<MkFsFutureBackupMkfsInfoHeaderWriteControl>,
         enable_trimming: bool,
         mut rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
-    ) -> Result<Self, (C, NvFsError)> {
+    ) -> Result<Self, (C, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
         let root_key = match keys::RootKey::new(
-            root_key,
+            raw_root_key,
             &salt,
             image_layout.kdf_hash_alg,
             image_layout.auth_tree_root_hmac_hash_alg,
@@ -433,7 +563,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             &image_layout.block_cipher_alg,
         ) {
             Ok(root_key) => root_key,
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
 
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
@@ -443,6 +573,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
         if chip_io_block_allocation_blocks_log2 > image_layout.io_block_allocation_blocks_log2 as u32 {
             return Err((
                 chip,
+                rng,
                 NvFsError::from(CocoonFsFormatError::IoBlockSizeNotSupportedByDevice),
             ));
         }
@@ -452,26 +583,61 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
         let chip_allocation_blocks = layout::AllocBlockCount::from(
             chip_io_blocks << chip_io_block_allocation_blocks_log2 >> allocation_block_chip_io_blocks_log2,
         );
-        let image_size = match image_size {
-            Some(image_size) => {
-                if image_size > chip_allocation_blocks {
-                    return Err((chip, NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
-                }
-                image_size
-            }
-            None => chip_allocation_blocks,
+        let image_size = image_size.unwrap_or(chip_allocation_blocks);
+        let mkfs_layout = match MkFsLayout::new(image_layout, salt, image_size) {
+            Ok(mkfs_layout) => mkfs_layout,
+            Err(e) => return Err((chip, rng, e)),
         };
 
-        let mkfs_layout = match CocoonFsMkFsLayout::new(image_layout, salt, image_size, root_key) {
-            Ok(mkfs_layout) => mkfs_layout,
-            Err(e) => return Err((chip, e)),
-        };
+        if let Some(backup_mkfsinfo_header_write_control) = backup_mkfsinfo_header_write_control {
+            if backup_mkfsinfo_header_write_control == MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting
+                && mkfs_layout.image_size > chip_allocation_blocks
+            {
+                // If the backup MkFsInfoHeader is to be retained, the storage resizing
+                // operation is assumed to have taken place already. In either
+                // case it cannot be attempted once more, because the backup
+                // MkFsInfoHeader location is determined by the storage size.
+                return Err((chip, rng, NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+            }
+
+            // Verify that the desired image size is valid (large enough) for writing the
+            // backup mkfsinfo header.
+            // MkfsLayout::new() verifies that the salt length fits an u8.
+            let salt_len = mkfs_layout.salt.len() as u8;
+            let backup_mkfsinfo_header_location = match image_header::MkFsInfoHeader::physical_backup_location(
+                salt_len,
+                match backup_mkfsinfo_header_write_control {
+                    MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting => {
+                        // No attempt to resize will be made, see above.
+                        chip_io_blocks
+                    }
+                    MkFsFutureBackupMkfsInfoHeaderWriteControl::Write => {
+                        // An attempt to resize will be made. In either case the storage will be >=
+                        // the image_size in the end.
+                        u64::from(mkfs_layout.image_size) << allocation_block_chip_io_blocks_log2
+                            >> chip_io_block_allocation_blocks_log2
+                    }
+                },
+                chip_io_block_size_128b_log2,
+                image_layout.io_block_allocation_blocks_log2 as u32,
+                allocation_block_size_128b_log2,
+            ) {
+                Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                Err(e) => return Err((chip, rng, e)),
+            };
+
+            // Check that the storage allocated to the initial metadata structures does not
+            // extend into the backup MkFsInfoHeader.
+            if backup_mkfsinfo_header_location.begin() < mkfs_layout.allocated_image_allocation_blocks_end {
+                return Err((chip, rng, NvFsError::NoSpace));
+            }
+        }
 
         let mut alloc_bitmap = match alloc_bitmap::AllocBitmap::new(
             mkfs_layout.allocated_image_allocation_blocks_end - layout::PhysicalAllocBlockIndex::from(0u64),
         ) {
             Ok(alloc_bitmap) => alloc_bitmap,
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
         if let Err(e) = alloc_bitmap.set_in_range(
             &layout::PhysicalAllocBlockRange::new(
@@ -480,7 +646,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             ),
             true,
         ) {
-            return Err((chip, e));
+            return Err((chip, rng, e));
         }
         if let Err(e) = alloc_bitmap.set_in_range(
             &layout::PhysicalAllocBlockRange::from((
@@ -489,21 +655,21 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             )),
             true,
         ) {
-            return Err((chip, e));
+            return Err((chip, rng, e));
         }
         if let Err(e) = alloc_bitmap.set_in_range(&mkfs_layout.journal_log_head_extent, true) {
-            return Err((chip, e));
+            return Err((chip, rng, e));
         }
         if let Err(e) = alloc_bitmap.set_in_range(&mkfs_layout.auth_tree_extent, true) {
-            return Err((chip, e));
+            return Err((chip, rng, e));
         }
         if let Err(e) = alloc_bitmap.set_in_range(&mkfs_layout.alloc_bitmap_file_extent, true) {
-            return Err((chip, e));
+            return Err((chip, rng, e));
         }
         if let Some(auth_tree_inode_extents_list_extents) = mkfs_layout.auth_tree_inode_extents_list_extents.as_ref() {
             for auth_tree_inode_extents_list_extent in auth_tree_inode_extents_list_extents.iter() {
                 if let Err(e) = alloc_bitmap.set_in_range(&auth_tree_inode_extents_list_extent, true) {
-                    return Err((chip, e));
+                    return Err((chip, rng, e));
                 }
             }
         }
@@ -512,7 +678,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
         {
             for alloc_bitmap_file_inode_extents_list_extent in alloc_bitmap_file_inode_extents_list_extents.iter() {
                 if let Err(e) = alloc_bitmap.set_in_range(&alloc_bitmap_file_inode_extents_list_extent, true) {
-                    return Err((chip, e));
+                    return Err((chip, rng, e));
                 }
             }
         }
@@ -521,19 +687,19 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin,
         )) {
             Ok(inode_index_entry_leaf_node_block_ptr) => inode_index_entry_leaf_node_block_ptr,
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
         let mut auth_tree_extents = extents::PhysicalExtents::new();
         if let Err(e) = auth_tree_extents.push_extent(&mkfs_layout.auth_tree_extent, true) {
-            return Err((chip, e));
+            return Err((chip, rng, e));
         }
         let auth_tree_extents = extents::LogicalExtents::from(auth_tree_extents);
         let mut alloc_bitmap_file_extents = extents::PhysicalExtents::new();
         if let Err(e) = alloc_bitmap_file_extents.push_extent(&mkfs_layout.alloc_bitmap_file_extent, true) {
-            return Err((chip, e));
+            return Err((chip, rng, e));
         }
         let auth_tree_config = match auth_tree::AuthTreeConfig::new(
-            &mkfs_layout.root_key,
+            &root_key,
             &mkfs_layout.image_layout,
             &inode_index_entry_leaf_node_block_ptr,
             mkfs_layout.image_size,
@@ -541,7 +707,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             &alloc_bitmap_file_extents,
         ) {
             Ok(auth_tree_config) => auth_tree_config,
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
         let auth_tree_initialization_cursor = match auth_tree::AuthTreeInitializationCursor::new(
             &auth_tree_config,
@@ -549,12 +715,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             mkfs_layout.image_size,
         ) {
             Ok(auth_tree_initialization_cursor) => auth_tree_initialization_cursor,
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
 
         let mut keys_cache = match keys::KeyCache::new() {
             Ok(keys_cache) => keys_cache,
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
 
         let auth_tree_inode_entry_extent_ptr = match match mkfs_layout.auth_tree_inode_extents_list_extents.as_ref() {
@@ -565,7 +731,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
             None => extent_ptr::EncodedExtentPtr::encode(Some(&mkfs_layout.auth_tree_extent), false),
         } {
             Ok(auth_tree_inode_entry_extent_ptr) => auth_tree_inode_entry_extent_ptr,
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
         let alloc_bitmap_inode_entry_extent_ptr =
             match match mkfs_layout.alloc_bitmap_inode_extents_list_extents.as_ref() {
@@ -576,46 +742,49 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
                 None => extent_ptr::EncodedExtentPtr::encode(Some(&mkfs_layout.alloc_bitmap_file_extent), false),
             } {
                 Ok(alloc_bitmap_file_inode_entry_extent_ptr) => alloc_bitmap_file_inode_entry_extent_ptr,
-                Err(e) => return Err((chip, e)),
+                Err(e) => return Err((chip, rng, e)),
             };
         let (inode_index, encrypted_inode_index_entry_leaf_node) = match inode_index::InodeIndex::initialize(
             mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin,
             auth_tree_inode_entry_extent_ptr,
             alloc_bitmap_inode_entry_extent_ptr,
             image_layout,
-            &mkfs_layout.root_key,
+            &root_key,
             &mut keys::KeyCacheRef::MutRef { cache: &mut keys_cache },
             &mut *rng,
         ) {
             Ok((inode_index, encrypted_inode_index_entry_leaf_node)) => {
                 (inode_index, encrypted_inode_index_entry_leaf_node)
             }
-            Err(e) => return Err((chip, e)),
+            Err(e) => return Err((chip, rng, e)),
         };
 
         Ok(Self {
-            fs_init_data: Some(CocoonFsMkFsFutureFsInitData {
+            fs_init_data: Some(MkFsFutureFsInitData {
                 chip,
+                rng,
                 mkfs_layout,
+                root_key,
                 alloc_bitmap,
                 auth_tree_config,
                 keys_cache,
                 inode_index,
                 enable_trimming,
             }),
+            backup_mkfsinfo_header_write_control,
             auth_tree_initialization_cursor: Some(auth_tree_initialization_cursor),
             encrypted_inode_index_entry_leaf_node,
             alloc_bitmap_file: None,
             root_hmac_digest: FixedVec::new_empty(),
             auth_tree_node_cache: None,
             first_static_image_header_chip_io_block: FixedVec::new_empty(),
-            rng,
-            fut_state: CocoonFsMkFsFutureState::Init,
+            #[cfg(test)]
+            test_fail_write_static_image_header: false,
+            fut_state: MkFsFutureState::Init,
         })
     }
 }
-
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for CocoonFsMkFsFuture<ST, C>
+impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for MkFsFuture<ST, C>
 where
     <ST as sync_types::SyncTypes>::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
 {
@@ -625,16 +794,25 @@ where
     /// [`Future::poll()`](future::Future::poll):
     ///
     /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
-    ///   encountering an internal error and the [`NvChip`](chip::NvChip) is
-    ///   lost.
-    /// * `Ok(...)` - Otherwise the outer level [`Result`] is set to [`Ok`]:
-    ///   * `Ok(Err((chip, e)))` - In case of an error, a pair of the
+    ///   encountering an internal error and the input [`NvChip`](chip::NvChip)
+    ///   and  [random number generator](rng::RngCoreDispatchable) are lost.
+    /// * `Ok((rng, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [random number
+    ///   generator](rng::RngCoreDispatchable), `rng`, and the operation result
+    ///   will get returned within:
+    ///   * `Ok((rng, Err((chip, e))))` - In case of an error, a pair of the
     ///     [`NvChip`](chip::NvChip) instance `chip` and the error reason `e` is
     ///     returned in an [`Err`].
-    ///   * `Ok(Ok(fs_instance))` - Otherwise an opened [`CocoonFs`] instance
-    ///     `fs_instance` associated with the filesystem just created is
-    ///     returned in an [`Ok`].
-    type Output = Result<Result<CocoonFsSyncRcPtrType<ST, C>, (C, NvFsError)>, NvFsError>;
+    ///   * `Ok((rng, Ok(fs_instance)))` - Otherwise an opened [`CocoonFs`]
+    ///     instance `fs_instance` associated with the filesystem just created
+    ///     is returned in an [`Ok`].
+    type Output = Result<
+        (
+            Box<dyn rng::RngCoreDispatchable + marker::Send>,
+            Result<CocoonFsSyncRcPtrType<ST, C>, (C, NvFsError)>,
+        ),
+        NvFsError,
+    >;
 
     fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -642,19 +820,155 @@ where
         let fs_init_data = match this.fs_init_data.as_mut() {
             Some(fs_init_data) => fs_init_data,
             None => {
-                this.fut_state = CocoonFsMkFsFutureState::Done;
+                this.fut_state = MkFsFutureState::Done;
                 return task::Poll::Ready(Err(nvfs_err_internal!()));
             }
         };
 
         let e = 'outer: loop {
             match &mut this.fut_state {
-                CocoonFsMkFsFutureState::Init => {
-                    // Advance the auth_tree_initialization_cursor. See CocoonFsMkFsLayout::new():
-                    // the inode index tree node might perhaps come first (if there's enough space),
-                    // followed by Journal Log Head and the Authentication Tree, which are
-                    // themselves not authenticated, and in turned followed by the Allocation Bitmap
-                    // File, which is.
+                MkFsFutureState::Init => {
+                    let image_layout = &fs_init_data.mkfs_layout.image_layout;
+                    let chip = &fs_init_data.chip;
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let chip_io_block_allocation_blocks_log2 =
+                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_chip_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+                    let chip_io_blocks = chip.chip_io_blocks();
+                    let chip_allocation_blocks = layout::AllocBlockCount::from(
+                        chip_io_blocks << chip_io_block_allocation_blocks_log2 >> allocation_block_chip_io_blocks_log2,
+                    );
+
+                    if this.backup_mkfsinfo_header_write_control
+                        == Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting)
+                    {
+                        // It's been checked from Self::new() that the storage size is >= the desired
+                        // image size.
+                        debug_assert!(chip_allocation_blocks >= fs_init_data.mkfs_layout.image_size);
+                        this.fut_state = MkFsFutureState::PrepareAdvanceAuthTreeCursorToInitPos;
+                        continue;
+                    }
+
+                    if fs_init_data.mkfs_layout.image_size != chip_allocation_blocks {
+                        match chip.resize(
+                            u64::from(fs_init_data.mkfs_layout.image_size) << allocation_block_chip_io_blocks_log2
+                                >> chip_io_block_allocation_blocks_log2,
+                        ) {
+                            Ok(resize_fut) => {
+                                this.fut_state = MkFsFutureState::ResizeChip { resize_fut };
+                                continue;
+                            }
+                            Err(e) => {
+                                // Only consider failures to shrink as fatal.
+                                if fs_init_data.mkfs_layout.image_size > chip_allocation_blocks {
+                                    break NvFsError::from(match e {
+                                        NvChipIoError::OperationNotSupported => NvChipIoError::IoBlockOutOfRange,
+                                        _ => e,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    match this.backup_mkfsinfo_header_write_control {
+                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting) => {
+                            // Handled above, so is unreachable, but for the sake of
+                            // completeness, handle it here as well
+                            this.fut_state = MkFsFutureState::PrepareAdvanceAuthTreeCursorToInitPos;
+                        }
+                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::Write) => {
+                            this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
+                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(true),
+                            };
+                        }
+                        None => {
+                            this.fut_state = MkFsFutureState::PrepareAdvanceAuthTreeCursorToInitPos;
+                        }
+                    }
+                }
+                MkFsFutureState::ResizeChip { resize_fut } => {
+                    match chip::NvChipFuture::poll(pin::Pin::new(resize_fut), &fs_init_data.chip, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            // Only consider failures to shrink as fatal.
+                            let image_layout = &fs_init_data.mkfs_layout.image_layout;
+                            let chip = &fs_init_data.chip;
+                            let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                            let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                            let chip_io_block_allocation_blocks_log2 =
+                                chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                            let allocation_block_chip_io_blocks_log2 =
+                                allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+                            let chip_io_blocks = chip.chip_io_blocks();
+                            let chip_allocation_blocks = layout::AllocBlockCount::from(
+                                chip_io_blocks << chip_io_block_allocation_blocks_log2
+                                    >> allocation_block_chip_io_blocks_log2,
+                            );
+                            if chip_allocation_blocks < fs_init_data.mkfs_layout.image_size {
+                                break NvFsError::from(match e {
+                                    NvChipIoError::OperationNotSupported => NvChipIoError::IoBlockOutOfRange,
+                                    _ => e,
+                                });
+                            }
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    match this.backup_mkfsinfo_header_write_control {
+                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting) => {
+                            // If there's already a backup MkFsInfoHeader to retain, a storage resizing
+                            // operation wouldn't have been attempted in the first place.
+                            break nvfs_err_internal!();
+                        }
+                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::Write) => {
+                            this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
+                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(true),
+                            };
+                        }
+                        None => {
+                            this.fut_state = MkFsFutureState::PrepareAdvanceAuthTreeCursorToInitPos;
+                        }
+                    }
+                }
+                MkFsFutureState::WriteBackupMkFsInfoHeader {
+                    write_backup_mkfsinfo_header_fut,
+                } => {
+                    let chip = &fs_init_data.chip;
+                    match WriteMkFsInfoHeaderFuture::poll(
+                        pin::Pin::new(write_backup_mkfsinfo_header_fut),
+                        chip,
+                        &fs_init_data.mkfs_layout.image_layout,
+                        &fs_init_data.mkfs_layout.salt,
+                        fs_init_data.mkfs_layout.image_size,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break e,
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let write_barrier_fut = match chip.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => break NvFsError::from(e),
+                    };
+                    this.fut_state = MkFsFutureState::WriteBarrierAfterBackupMkFsInfoHeaderWrite { write_barrier_fut };
+                }
+                MkFsFutureState::WriteBarrierAfterBackupMkFsInfoHeaderWrite { write_barrier_fut } => {
+                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), &fs_init_data.chip, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break NvFsError::from(e),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+                    this.fut_state = MkFsFutureState::PrepareAdvanceAuthTreeCursorToInitPos;
+                }
+                MkFsFutureState::PrepareAdvanceAuthTreeCursorToInitPos => {
+                    // Advance the auth_tree_initialization_cursor. See MkFsLayout::new(): the inode
+                    // index tree node might perhaps come first (if there's enough space), followed
+                    // by Journal Log Head and the Authentication Tree, which are themselves not
+                    // authenticated, and in turn followed by the Allocation Bitmap File, which
+                    // is.
                     let auth_tree_initialization_cursor = match this.auth_tree_initialization_cursor.take() {
                         Some(auth_tree_initialization_cursor) => auth_tree_initialization_cursor,
                         None => break nvfs_err_internal!(),
@@ -670,7 +984,7 @@ where
                             Err((_, e)) => break e,
                         };
                         this.fut_state =
-                            CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToInodeIndexEntryLeafNode { advance_fut };
+                            MkFsFutureState::AdvanceAuthTreeCursorToInodeIndexEntryLeafNode { advance_fut };
                     } else {
                         let advance_fut = match auth_tree_initialization_cursor
                             .advance_to(mkfs_layout.alloc_bitmap_file_extent.begin())
@@ -678,11 +992,10 @@ where
                             Ok(advance_fut) => advance_fut,
                             Err((_, e)) => break e,
                         };
-                        this.fut_state =
-                            CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToAllocBitmapFile { advance_fut };
+                        this.fut_state = MkFsFutureState::AdvanceAuthTreeCursorToAllocBitmapFile { advance_fut };
                     }
                 }
-                CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToInodeIndexEntryLeafNode { advance_fut } => {
+                MkFsFutureState::AdvanceAuthTreeCursorToInodeIndexEntryLeafNode { advance_fut } => {
                     let auth_tree_initialization_cursor =
                         match auth_tree::AuthTreeInitializationCursorAdvanceFuture::poll(
                             pin::Pin::new(advance_fut),
@@ -696,12 +1009,12 @@ where
                         };
                     this.auth_tree_initialization_cursor = Some(auth_tree_initialization_cursor);
 
-                    this.fut_state = CocoonFsMkFsFutureState::AuthTreeUpdateInodeIndexEntryLeafNodeRange {
+                    this.fut_state = MkFsFutureState::AuthTreeUpdateInodeIndexEntryLeafNodeRange {
                         next_allocation_block_in_inode_index_entry_leaf_node: 0,
                         auth_tree_write_part_fut: None,
                     };
                 }
-                CocoonFsMkFsFutureState::AuthTreeUpdateInodeIndexEntryLeafNodeRange {
+                MkFsFutureState::AuthTreeUpdateInodeIndexEntryLeafNodeRange {
                     next_allocation_block_in_inode_index_entry_leaf_node,
                     auth_tree_write_part_fut,
                 } => {
@@ -765,9 +1078,9 @@ where
                         Ok(advance_fut) => advance_fut,
                         Err((_, e)) => break e,
                     };
-                    this.fut_state = CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToAllocBitmapFile { advance_fut };
+                    this.fut_state = MkFsFutureState::AdvanceAuthTreeCursorToAllocBitmapFile { advance_fut };
                 }
-                CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToAllocBitmapFile { advance_fut } => {
+                MkFsFutureState::AdvanceAuthTreeCursorToAllocBitmapFile { advance_fut } => {
                     let auth_tree_initialization_cursor =
                         match auth_tree::AuthTreeInitializationCursorAdvanceFuture::poll(
                             pin::Pin::new(advance_fut),
@@ -787,7 +1100,7 @@ where
                             &fs_init_data.chip,
                             auth_tree_initialization_cursor,
                             &mkfs_layout.image_layout,
-                            &mkfs_layout.root_key,
+                            &fs_init_data.root_key,
                             &mut keys::KeyCacheRef::MutRef {
                                 cache: &mut fs_init_data.keys_cache,
                             },
@@ -795,11 +1108,11 @@ where
                             Ok(initialize_alloc_bitmap_file_fut) => initialize_alloc_bitmap_file_fut,
                             Err((_, e)) => break e,
                         };
-                    this.fut_state = CocoonFsMkFsFutureState::InitializeAllocBitmapFile {
+                    this.fut_state = MkFsFutureState::InitializeAllocBitmapFile {
                         initialize_fut: initialize_alloc_bitmap_file_fut,
                     };
                 }
-                CocoonFsMkFsFutureState::InitializeAllocBitmapFile { initialize_fut } => {
+                MkFsFutureState::InitializeAllocBitmapFile { initialize_fut } => {
                     let mkfs_layout = &fs_init_data.mkfs_layout;
                     let (
                         alloc_bitmap_file,
@@ -811,7 +1124,7 @@ where
                         &fs_init_data.alloc_bitmap,
                         &mkfs_layout.image_layout,
                         &fs_init_data.auth_tree_config,
-                        &mut *this.rng,
+                        &mut *fs_init_data.rng,
                         cx,
                     ) {
                         task::Poll::Ready(Ok((
@@ -870,7 +1183,7 @@ where
                     }
                     if aligned_tail_data_allocation_blocks_end == tail_data_allocation_blocks_begin {
                         // No tail data to write, skip this part.
-                        this.fut_state = CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToImageEndPrepare;
+                        this.fut_state = MkFsFutureState::AdvanceAuthTreeCursorToImageEndPrepare;
                         continue;
                     }
                     let tail_data_allocation_blocks_count = match usize::try_from(u64::from(
@@ -962,11 +1275,11 @@ where
                             iter::once(mkfs_layout.auth_tree_extent),
                             auth_tree_inode_extents_list_extents.iter(),
                             image_layout,
-                            &mkfs_layout.root_key,
+                            &fs_init_data.root_key,
                             &mut keys::KeyCacheRef::MutRef {
                                 cache: &mut fs_init_data.keys_cache,
                             },
-                            &mut *this.rng,
+                            &mut *fs_init_data.rng,
                         ) {
                             break e;
                         }
@@ -992,11 +1305,11 @@ where
                             iter::once(mkfs_layout.alloc_bitmap_file_extent),
                             alloc_bitmap_inode_extents_list_extents.iter(),
                             image_layout,
-                            &mkfs_layout.root_key,
+                            &fs_init_data.root_key,
                             &mut keys::KeyCacheRef::MutRef {
                                 cache: &mut fs_init_data.keys_cache,
                             },
-                            &mut *this.rng,
+                            &mut *fs_init_data.rng,
                         ) {
                             break e;
                         }
@@ -1008,7 +1321,7 @@ where
                     );
                     // Fill up the remainder up to the next IO Block boundary with random bytes.
                     if let Err(e) = rng::rng_dyn_dispatch_generate(
-                        this.rng.as_mut(),
+                        &mut *fs_init_data.rng,
                         io_slices::BuffersSliceIoSlicesMutIter::new(
                             &mut tail_data_allocation_blocks[next_tail_data_allocation_block_index..],
                         )
@@ -1020,7 +1333,7 @@ where
                         break e;
                     }
 
-                    this.fut_state = CocoonFsMkFsFutureState::AuthTreeUpdateTailDataRange {
+                    this.fut_state = MkFsFutureState::AuthTreeUpdateTailDataRange {
                         tail_data_allocation_blocks_begin,
                         tail_data_allocation_blocks_end,
                         aligned_tail_data_allocation_blocks_end,
@@ -1029,7 +1342,7 @@ where
                         auth_tree_write_part_fut: None,
                     };
                 }
-                CocoonFsMkFsFutureState::AuthTreeUpdateTailDataRange {
+                MkFsFutureState::AuthTreeUpdateTailDataRange {
                     tail_data_allocation_blocks_begin,
                     tail_data_allocation_blocks_end,
                     aligned_tail_data_allocation_blocks_end,
@@ -1102,18 +1415,18 @@ where
                         chip_io_block_allocation_blocks_log2,
                         image_layout.allocation_block_size_128b_log2,
                     );
-                    this.fut_state = CocoonFsMkFsFutureState::WriteTailData { write_fut };
+                    this.fut_state = MkFsFutureState::WriteTailData { write_fut };
                 }
-                CocoonFsMkFsFutureState::WriteTailData { write_fut } => {
+                MkFsFutureState::WriteTailData { write_fut } => {
                     match chip::NvChipFuture::poll(pin::Pin::new(write_fut), &fs_init_data.chip, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    this.fut_state = CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToImageEndPrepare;
+                    this.fut_state = MkFsFutureState::AdvanceAuthTreeCursorToImageEndPrepare;
                 }
-                CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToImageEndPrepare => {
+                MkFsFutureState::AdvanceAuthTreeCursorToImageEndPrepare => {
                     // Move the auth_tree_initialization_cursor all the way to the end,
                     // digesting all of the image remainder as unallocated, and thereby completing
                     // the Authentication Tree initialization.
@@ -1127,9 +1440,9 @@ where
                         Ok(advance_fut) => advance_fut,
                         Err((_, e)) => break e,
                     };
-                    this.fut_state = CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToImageEnd { advance_fut };
+                    this.fut_state = MkFsFutureState::AdvanceAuthTreeCursorToImageEnd { advance_fut };
                 }
-                CocoonFsMkFsFutureState::AdvanceAuthTreeCursorToImageEnd { advance_fut } => {
+                MkFsFutureState::AdvanceAuthTreeCursorToImageEnd { advance_fut } => {
                     let auth_tree_initialization_cursor =
                         match auth_tree::AuthTreeInitializationCursorAdvanceFuture::poll(
                             pin::Pin::new(advance_fut),
@@ -1349,7 +1662,7 @@ where
 
                     // And fill the last IO Block's remainder, if any, with random data.
                     if let Err(e) = rng::rng_dyn_dispatch_generate(
-                        this.rng.as_mut(),
+                        &mut *fs_init_data.rng,
                         head_tail_data_chip_io_blocks_io_slices_iter.map_infallible_err(),
                         None,
                     )
@@ -1372,9 +1685,9 @@ where
                         chip_io_block_allocation_blocks_log2,
                         image_layout.allocation_block_size_128b_log2,
                     );
-                    this.fut_state = CocoonFsMkFsFutureState::WriteHeadData { write_fut };
+                    this.fut_state = MkFsFutureState::WriteHeadData { write_fut };
                 }
-                CocoonFsMkFsFutureState::WriteHeadData { write_fut } => {
+                MkFsFutureState::WriteHeadData { write_fut } => {
                     match chip::NvChipFuture::poll(pin::Pin::new(write_fut), &fs_init_data.chip, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
@@ -1419,9 +1732,9 @@ where
                         chip_io_block_allocation_blocks_log2,
                         image_layout.allocation_block_size_128b_log2,
                     );
-                    this.fut_state = CocoonFsMkFsFutureState::ClearJournalLogHead { write_fut };
+                    this.fut_state = MkFsFutureState::ClearJournalLogHead { write_fut };
                 }
-                CocoonFsMkFsFutureState::ClearJournalLogHead { write_fut } => {
+                MkFsFutureState::ClearJournalLogHead { write_fut } => {
                     match chip::NvChipFuture::poll(pin::Pin::new(write_fut), &fs_init_data.chip, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
@@ -1431,7 +1744,7 @@ where
                     if fs_init_data.enable_trimming {
                         // No data randomization of fully unallocated IO blocks. Proceed directly to
                         // the final static header write.
-                        this.fut_state = CocoonFsMkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare;
+                        this.fut_state = MkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare;
                     } else {
                         // Randomize the unused region after the head data, i.e. the mutable header
                         // or possibly the Inode Index entry leaf node and the Journal Log head
@@ -1472,7 +1785,7 @@ where
                         if head_data_padding_allocation_blocks_begin == head_data_padding_allocation_blocks_end {
                             // There's no padding between the head data and the Journal Log head
                             // extent. Proceed to randomizing all IO Blocks at the image's tail.
-                            this.fut_state = CocoonFsMkFsFutureState::RandomizeImageRemainderPrepare;
+                            this.fut_state = MkFsFutureState::RandomizeImageRemainderPrepare;
                         } else {
                             let write_fut = match WriteRandomDataFuture::new(
                                 &layout::PhysicalAllocBlockRange::new(
@@ -1485,20 +1798,24 @@ where
                                 Ok(write_fut) => write_fut,
                                 Err(e) => break e,
                             };
-                            this.fut_state = CocoonFsMkFsFutureState::RandomizeHeadDataPadding { write_fut };
+                            this.fut_state = MkFsFutureState::RandomizeHeadDataPadding { write_fut };
                         }
                     }
                 }
-                CocoonFsMkFsFutureState::RandomizeHeadDataPadding { write_fut } => {
-                    match WriteRandomDataFuture::poll(pin::Pin::new(write_fut), &fs_init_data.chip, &mut *this.rng, cx)
-                    {
+                MkFsFutureState::RandomizeHeadDataPadding { write_fut } => {
+                    match WriteRandomDataFuture::poll(
+                        pin::Pin::new(write_fut),
+                        &fs_init_data.chip,
+                        &mut *fs_init_data.rng,
+                        cx,
+                    ) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break e,
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    this.fut_state = CocoonFsMkFsFutureState::RandomizeImageRemainderPrepare;
+                    this.fut_state = MkFsFutureState::RandomizeImageRemainderPrepare;
                 }
-                CocoonFsMkFsFutureState::RandomizeImageRemainderPrepare => {
+                MkFsFutureState::RandomizeImageRemainderPrepare => {
                     let mkfs_layout = &fs_init_data.mkfs_layout;
                     let image_layout = &mkfs_layout.image_layout;
                     let tail_data_allocation_blocks_end = mkfs_layout.allocated_image_allocation_blocks_end;
@@ -1515,41 +1832,138 @@ where
                     let image_remainder_allocation_blocks_begin = aligned_tail_data_allocation_blocks_end;
                     let image_remainder_allocation_blocks_end =
                         layout::PhysicalAllocBlockIndex::from(0u64) + mkfs_layout.image_size;
-                    if image_remainder_allocation_blocks_begin != image_remainder_allocation_blocks_end {
-                        let write_fut = match WriteRandomDataFuture::new(
-                            &layout::PhysicalAllocBlockRange::new(
+                    // If there's a backup MkFsInfoHeader, then be careful not to overwrite it.
+                    // Split the image remainder to randomize in (up to two) regions then: one
+                    // before it and/or another one subsequent to it.
+                    let randomization_ranges = if this.backup_mkfsinfo_header_write_control.is_some() {
+                        // MkfsLayout::new() verifies that the salt length fits an u8.
+                        let salt_len = mkfs_layout.salt.len() as u8;
+                        let chip = &fs_init_data.chip;
+                        let chip_io_blocks = chip.chip_io_blocks();
+                        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                        let backup_mkfsinfo_header_location =
+                            match image_header::MkFsInfoHeader::physical_backup_location(
+                                salt_len,
+                                chip_io_blocks,
+                                chip_io_block_size_128b_log2,
+                                image_layout.io_block_allocation_blocks_log2 as u32,
+                                image_layout.allocation_block_size_128b_log2 as u32,
+                            ) {
+                                Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                                Err(e) => break e,
+                            };
+                        debug_assert!(
+                            backup_mkfsinfo_header_location.begin() >= image_remainder_allocation_blocks_begin
+                        );
+
+                        if backup_mkfsinfo_header_location.end() >= image_remainder_allocation_blocks_end {
+                            let randomization_range_end =
+                                image_remainder_allocation_blocks_end.min(backup_mkfsinfo_header_location.begin());
+                            if image_remainder_allocation_blocks_begin != randomization_range_end {
+                                Some((
+                                    layout::PhysicalAllocBlockRange::new(
+                                        image_remainder_allocation_blocks_begin,
+                                        randomization_range_end,
+                                    ),
+                                    None,
+                                ))
+                            } else {
+                                None
+                            }
+                        } else if backup_mkfsinfo_header_location.begin() == image_remainder_allocation_blocks_begin {
+                            debug_assert!(
+                                backup_mkfsinfo_header_location.end() < image_remainder_allocation_blocks_end
+                            );
+                            Some((
+                                layout::PhysicalAllocBlockRange::new(
+                                    backup_mkfsinfo_header_location.end(),
+                                    image_remainder_allocation_blocks_end,
+                                ),
+                                None,
+                            ))
+                        } else {
+                            debug_assert!(
+                                backup_mkfsinfo_header_location.begin() > image_remainder_allocation_blocks_begin
+                            );
+                            debug_assert!(
+                                backup_mkfsinfo_header_location.end() < image_remainder_allocation_blocks_end
+                            );
+                            Some((
+                                layout::PhysicalAllocBlockRange::new(
+                                    image_remainder_allocation_blocks_begin,
+                                    backup_mkfsinfo_header_location.begin(),
+                                ),
+                                Some(layout::PhysicalAllocBlockRange::new(
+                                    backup_mkfsinfo_header_location.end(),
+                                    image_remainder_allocation_blocks_end,
+                                )),
+                            ))
+                        }
+                    } else if image_remainder_allocation_blocks_begin != image_remainder_allocation_blocks_end {
+                        Some((
+                            layout::PhysicalAllocBlockRange::new(
                                 image_remainder_allocation_blocks_begin,
                                 image_remainder_allocation_blocks_end,
                             ),
+                            None,
+                        ))
+                    } else {
+                        None
+                    };
+
+                    if let Some((first_randomization_range, remaining_randomization_range)) = randomization_ranges {
+                        let write_fut = match WriteRandomDataFuture::new(
+                            &first_randomization_range,
                             image_layout,
                             &fs_init_data.chip,
                         ) {
                             Ok(write_fut) => write_fut,
                             Err(e) => break e,
                         };
-                        this.fut_state = CocoonFsMkFsFutureState::RandomizeImageRemainder { write_fut };
+                        this.fut_state = MkFsFutureState::RandomizeImageRemainder {
+                            write_fut,
+                            remaining_randomization_range,
+                        };
                     } else {
-                        this.fut_state = CocoonFsMkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare;
+                        this.fut_state = MkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare;
                     }
                 }
-                CocoonFsMkFsFutureState::RandomizeImageRemainder { write_fut } => {
-                    match WriteRandomDataFuture::poll(pin::Pin::new(write_fut), &fs_init_data.chip, &mut *this.rng, cx)
-                    {
+                MkFsFutureState::RandomizeImageRemainder {
+                    write_fut,
+                    remaining_randomization_range,
+                } => {
+                    match WriteRandomDataFuture::poll(
+                        pin::Pin::new(write_fut),
+                        &fs_init_data.chip,
+                        &mut *fs_init_data.rng,
+                        cx,
+                    ) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break e,
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    this.fut_state = CocoonFsMkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare;
+
+                    if let Some(remaining_randomization_range) = remaining_randomization_range.take() {
+                        *write_fut = match WriteRandomDataFuture::new(
+                            &remaining_randomization_range,
+                            &fs_init_data.mkfs_layout.image_layout,
+                            &fs_init_data.chip,
+                        ) {
+                            Ok(write_fut) => write_fut,
+                            Err(e) => break e,
+                        };
+                    } else {
+                        this.fut_state = MkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare;
+                    }
                 }
-                CocoonFsMkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare => {
+                MkFsFutureState::WriteBarrierBeforeStaticImageHeaderWritePrepare => {
                     let write_barrier_fut = match fs_init_data.chip.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(e) => break NvFsError::from(e),
                     };
-                    this.fut_state =
-                        CocoonFsMkFsFutureState::WriteBarrierBeforeStaticImageHeaderWrite { write_barrier_fut };
+                    this.fut_state = MkFsFutureState::WriteBarrierBeforeStaticImageHeaderWrite { write_barrier_fut };
                 }
-                CocoonFsMkFsFutureState::WriteBarrierBeforeStaticImageHeaderWrite { write_barrier_fut } => {
+                MkFsFutureState::WriteBarrierBeforeStaticImageHeaderWrite { write_barrier_fut } => {
                     match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), &fs_init_data.chip, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break NvFsError::from(e),
@@ -1567,6 +1981,14 @@ where
                         .saturating_sub(allocation_block_size_128b_log2 as u32)
                         as u8;
 
+                    // If the static image header write is supposed to fail for testing,
+                    // mangle its contents so that the checksums will fail to validate it.
+                    #[cfg(test)]
+                    if this.test_fail_write_static_image_header {
+                        // The byte right after the version field.
+                        this.first_static_image_header_chip_io_block[0][10] ^= 0xffu8;
+                    }
+
                     let first_static_image_header_chip_io_block_allocation_blocks_end =
                         layout::PhysicalAllocBlockIndex::from(1u64 << (chip_io_block_allocation_blocks_log2 as u32));
                     let write_fut = write_blocks::WriteBlocksFuture::new(
@@ -1579,50 +2001,94 @@ where
                         chip_io_block_allocation_blocks_log2,
                         allocation_block_size_128b_log2,
                     );
-                    this.fut_state = CocoonFsMkFsFutureState::WriteStaticImageHeader { write_fut };
+                    this.fut_state = MkFsFutureState::WriteStaticImageHeader { write_fut };
                 }
-                CocoonFsMkFsFutureState::WriteStaticImageHeader { write_fut } => {
+                MkFsFutureState::WriteStaticImageHeader { write_fut } => {
                     match chip::NvChipFuture::poll(pin::Pin::new(write_fut), &fs_init_data.chip, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    #[cfg(test)]
+                    if this.test_fail_write_static_image_header {
+                        // See above, a header failing checksum validation has been written.
+                        // Actually return a failure now.
+                        break NvFsError::IoError(NvFsIoError::IoFailure);
+                    }
+
                     let write_sync_fut = match fs_init_data.chip.write_sync() {
                         Ok(write_sync_fut) => write_sync_fut,
                         Err(e) => break NvFsError::from(e),
                     };
-                    this.fut_state = CocoonFsMkFsFutureState::WriteSyncAfterStaticImageHaderWrite { write_sync_fut };
+                    this.fut_state = MkFsFutureState::WriteSyncAfterStaticImageHeaderWrite { write_sync_fut };
                 }
-                CocoonFsMkFsFutureState::WriteSyncAfterStaticImageHaderWrite { write_sync_fut } => {
+                MkFsFutureState::WriteSyncAfterStaticImageHeaderWrite { write_sync_fut } => {
                     match chip::NvChipFuture::poll(pin::Pin::new(write_sync_fut), &fs_init_data.chip, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break NvFsError::from(e),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    if this.backup_mkfsinfo_header_write_control.is_some() {
+                        let invalidate_backup_mkfsinfo_header_fut = match InvalidateBackupMkFsInfoHeaderFuture::new(
+                            &fs_init_data.chip,
+                            &fs_init_data.mkfs_layout.image_layout,
+                            fs_init_data.mkfs_layout.salt.len() as u8,
+                            fs_init_data.mkfs_layout.image_size,
+                            fs_init_data.enable_trimming,
+                        ) {
+                            Ok(invalidate_backup_mkfsinfo_header_fut) => invalidate_backup_mkfsinfo_header_fut,
+                            Err(e) => break e,
+                        };
+                        this.fut_state = MkFsFutureState::InvalidateBackupMkFsInfoHeader {
+                            invalidate_backup_mkfsinfo_header_fut,
+                        };
+                    } else {
+                        this.fut_state = MkFsFutureState::Finalize;
+                    }
+                }
+                MkFsFutureState::InvalidateBackupMkFsInfoHeader {
+                    invalidate_backup_mkfsinfo_header_fut,
+                } => {
+                    match InvalidateBackupMkFsInfoHeaderFuture::poll(
+                        pin::Pin::new(invalidate_backup_mkfsinfo_header_fut),
+                        &fs_init_data.chip,
+                        &fs_init_data.mkfs_layout.image_layout,
+                        &mut *fs_init_data.rng,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break e,
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    this.fut_state = MkFsFutureState::Finalize;
+                }
+                MkFsFutureState::Finalize => {
                     // And, finally, create a CocoonFs instance.
-                    this.fut_state = CocoonFsMkFsFutureState::Done;
+                    this.fut_state = MkFsFutureState::Done;
                     let fs_init_data = match this.fs_init_data.take() {
                         Some(fs_init_data) => fs_init_data,
                         None => break nvfs_err_internal!(),
                     };
-                    let CocoonFsMkFsFutureFsInitData {
+                    let MkFsFutureFsInitData {
                         chip,
+                        rng,
                         mkfs_layout,
+                        root_key,
                         mut alloc_bitmap,
                         auth_tree_config,
                         keys_cache,
                         inode_index,
                         enable_trimming,
                     } = fs_init_data;
-                    let CocoonFsMkFsLayout {
+                    let MkFsLayout {
                         image_layout,
                         salt,
                         image_header_end,
                         image_size,
                         allocated_image_allocation_blocks_end: _,
-                        root_key,
                         inode_index_entry_leaf_node_allocation_blocks_begin,
                         journal_log_head_extent: _,
                         auth_tree_extent: _,
@@ -1632,19 +2098,19 @@ where
                     } = mkfs_layout;
                     let alloc_bitmap_file = match this.alloc_bitmap_file.take() {
                         Some(alloc_bitmap_file) => alloc_bitmap_file,
-                        None => return task::Poll::Ready(Ok(Err((chip, nvfs_err_internal!())))),
+                        None => return task::Poll::Ready(Ok((rng, Err((chip, nvfs_err_internal!()))))),
                     };
                     let root_hmac_digest = mem::take(&mut this.root_hmac_digest);
                     let auth_tree_node_cache = match this.auth_tree_node_cache.take() {
                         Some(auth_tree_node_cache) => auth_tree_node_cache,
-                        None => return task::Poll::Ready(Ok(Err((chip, nvfs_err_internal!())))),
+                        None => return task::Poll::Ready(Ok((rng, Err((chip, nvfs_err_internal!()))))),
                     };
 
                     let inode_index_entry_leaf_node_block_ptr = match extent_ptr::EncodedBlockPtr::encode(Some(
                         inode_index_entry_leaf_node_allocation_blocks_begin,
                     )) {
                         Ok(inode_index_entry_leaf_node_block_ptr) => inode_index_entry_leaf_node_block_ptr,
-                        Err(e) => return task::Poll::Ready(Ok(Err((chip, e)))),
+                        Err(e) => return task::Poll::Ready(Ok((rng, Err((chip, e))))),
                     };
                     let fs_config = CocoonFsConfig {
                         image_layout: image_layout.clone(),
@@ -1658,7 +2124,7 @@ where
                     // Up to know, the alloc_bitmap had been just large enough to cover everything
                     // allocated only. Extend to the full image size.
                     if let Err(e) = alloc_bitmap.resize(mkfs_layout.image_size) {
-                        return task::Poll::Ready(Ok(Err((chip, e))));
+                        return task::Poll::Ready(Ok((rng, Err((chip, e)))));
                     }
                     let auth_tree = auth_tree::AuthTree::<ST>::new_from_parts(
                         auth_tree_config,
@@ -1667,7 +2133,7 @@ where
                     );
                     let read_buffer = match read_buffer::ReadBuffer::new(&image_layout, &chip) {
                         Ok(read_buffer) => read_buffer,
-                        Err(e) => return task::Poll::Ready(Ok(Err((chip, e)))),
+                        Err(e) => return task::Poll::Ready(Ok((rng, Err((chip, e))))),
                     };
                     let fs_sync_state = CocoonFsSyncState {
                         image_size,
@@ -1701,28 +2167,27 @@ where
                                 },
                                 sync_types::SyncRcPtrTryNewWithError::WithError(e) => e,
                             };
-                            return task::Poll::Ready(Ok(Err((chip, e))));
+                            return task::Poll::Ready(Ok((rng, Err((chip, e)))));
                         }
                     };
 
                     // Safety: the fs is new and never moved out from again.
                     let fs = unsafe { pin::Pin::new_unchecked(fs) };
-                    return task::Poll::Ready(Ok(Ok(fs)));
+                    return task::Poll::Ready(Ok((rng, Ok(fs))));
                 }
-                CocoonFsMkFsFutureState::Done => unreachable!(),
+                MkFsFutureState::Done => unreachable!(),
             }
         };
 
-        this.fut_state = CocoonFsMkFsFutureState::Done;
+        this.fut_state = MkFsFutureState::Done;
         match this.fs_init_data.take() {
-            Some(CocoonFsMkFsFutureFsInitData { chip, .. }) => task::Poll::Ready(Ok(Err((chip, e)))),
+            Some(MkFsFutureFsInitData { chip, rng, .. }) => task::Poll::Ready(Ok((rng, Err((chip, e))))),
             None => task::Poll::Ready(Err(e)),
         }
     }
 }
 
-/// Helper for [`CocoonFsMkFsFuture`] for filling unallocated blocks with random
-/// data.
+/// Helper for [`MkFsFuture`] for filling unallocated blocks with random data.
 struct WriteRandomDataFuture<C: chip::NvChip> {
     extent: layout::PhysicalAllocBlockRange,
     next_allocation_block_index: layout::PhysicalAllocBlockIndex,
@@ -1861,8 +2326,8 @@ impl<C: chip::NvChip> WriteRandomDataFuture<C> {
                         return task::Poll::Ready(Err(NvFsError::from(e)));
                     }
 
-                    // It's been checked in CocoonFsMkFsFuture::new() that the Chip IO block size <=
-                    // the FS' IO block size, in particular the cast to u8 won't overflow.
+                    // It's been checked in MkFsFuture::new() that the Chip IO block size <= the FS'
+                    // IO block size, in particular the cast to u8 won't overflow.
                     let chip_io_block_allocation_blocks_log2 =
                         chip.chip_io_block_size_128b_log2()
                             .saturating_sub(this.allocation_block_size_128b_log2 as u32) as u8;
@@ -1892,5 +2357,705 @@ impl<C: chip::NvChip> WriteRandomDataFuture<C> {
                 WriteRandomDataFutureState::Done => unreachable!(),
             }
         }
+    }
+}
+
+/// Helper for [`MkFsFuture`] for invalidating the backup
+/// [`MkFsInfoHeader`](image_header::MkFsInfoHeader) when done.
+struct InvalidateBackupMkFsInfoHeaderFuture<C: chip::NvChip> {
+    fut_state: InvalidateBackupMkFsInfoHeaderFutureState<C>,
+    backup_mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
+    image_size: layout::AllocBlockCount,
+    enable_trimming: bool,
+}
+
+/// [`InvalidateBackupMkFsInfoHeaderFuture`] state-machine state.
+enum InvalidateBackupMkFsInfoHeaderFutureState<C: chip::NvChip> {
+    Init,
+    Randomize {
+        write_fut: WriteRandomDataFuture<C>,
+    },
+    PrepareWriteZeroes {
+        extent: layout::PhysicalAllocBlockRange,
+    },
+    WriteZeroes {
+        write_fut: write_blocks::WriteBlocksFuture<C>,
+        extent: layout::PhysicalAllocBlockRange,
+    },
+    Trim {
+        trim_fut: C::TrimFuture,
+    },
+    PrepareWriteBarrierAfterInvalidate,
+    WriteBarrierAfterInvalidate {
+        write_barrier_fut: C::WriteBarrierFuture,
+    },
+    Done,
+}
+
+impl<C: chip::NvChip> InvalidateBackupMkFsInfoHeaderFuture<C> {
+    /// Instantiate a [`InvalidateBackupMkFsInfoHeaderFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The storage the filsystem is being created on.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `salt_len`- The filesystem salt's length.
+    /// * `image_size` - The created filesystem image's size.
+    /// * `enable_trimming` - Whether to enable the submission of [trim
+    ///   commands](chip::NvChip::trim) to the underlying storage. When off, the
+    ///   backup [`MkFsInfoHeader`](image_header::MkFsInfoHeader)'s backing
+    ///   storage region will get overwritten with random data. Trimming of
+    ///   backup [`MkFsInfoHeader`](image_header::MkFsInfoHeader) regions beyond
+    ///   the filesystem's `image_size` will always be attempted.
+    fn new(
+        chip: &C,
+        image_layout: &layout::ImageLayout,
+        salt_len: u8,
+        image_size: layout::AllocBlockCount,
+        enable_trimming: bool,
+    ) -> Result<Self, NvFsError> {
+        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+        let chip_io_blocks = chip.chip_io_blocks();
+
+        let backup_mkfsinfo_header_location = image_header::MkFsInfoHeader::physical_backup_location(
+            salt_len,
+            chip_io_blocks,
+            chip_io_block_size_128b_log2,
+            image_layout.io_block_allocation_blocks_log2 as u32,
+            image_layout.allocation_block_size_128b_log2 as u32,
+        )?;
+
+        Ok(Self {
+            fut_state: InvalidateBackupMkFsInfoHeaderFutureState::Init,
+            backup_mkfsinfo_header_location,
+            image_size,
+            enable_trimming,
+        })
+    }
+
+    /// Poll the [`InvalidateBackupMkFsInfoHeaderFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The storage the filesystem is being created on.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for the randomizing the backup
+    ///   [`MkFsInfoHeader`](image_header::MkFsInfoHeader)'s backing storage
+    ///   region.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        chip: &C,
+        image_layout: &layout::ImageLayout,
+        rng: &mut dyn rng::RngCoreDispatchable,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Result<(), NvFsError>> {
+        let this = pin::Pin::into_inner(self);
+        loop {
+            match &mut this.fut_state {
+                InvalidateBackupMkFsInfoHeaderFutureState::Init => {
+                    if this.enable_trimming
+                        || this.backup_mkfsinfo_header_location.begin()
+                            >= layout::PhysicalAllocBlockIndex::from(0u64) + this.image_size
+                    {
+                        // Still overwrite with zeroes before the trimming.
+                        this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::PrepareWriteZeroes {
+                            extent: this.backup_mkfsinfo_header_location,
+                        };
+                        continue;
+                    }
+
+                    // Randomize the parts in range of image_size.
+                    let write_fut = match WriteRandomDataFuture::new(
+                        &layout::PhysicalAllocBlockRange::new(
+                            this.backup_mkfsinfo_header_location.begin(),
+                            this.backup_mkfsinfo_header_location
+                                .end()
+                                .min(layout::PhysicalAllocBlockIndex::from(0u64) + this.image_size),
+                        ),
+                        image_layout,
+                        chip,
+                    ) {
+                        Ok(write_fut) => write_fut,
+                        Err(e) => {
+                            this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+                    this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Randomize { write_fut };
+                }
+                InvalidateBackupMkFsInfoHeaderFutureState::Randomize { write_fut } => {
+                    match WriteRandomDataFuture::poll(pin::Pin::new(write_fut), chip, rng, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    if this.backup_mkfsinfo_header_location.end()
+                        > layout::PhysicalAllocBlockIndex::from(0u64) + this.image_size
+                    {
+                        // Zeroize and trim the range beyond the image_size.
+                        this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::PrepareWriteZeroes {
+                            extent: layout::PhysicalAllocBlockRange::new(
+                                layout::PhysicalAllocBlockIndex::from(0u64) + this.image_size,
+                                this.backup_mkfsinfo_header_location.end(),
+                            ),
+                        };
+                    } else {
+                        this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::PrepareWriteBarrierAfterInvalidate;
+                    }
+                }
+                InvalidateBackupMkFsInfoHeaderFutureState::PrepareWriteZeroes { extent } => {
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let chip_io_block_allocation_blocks_log2 =
+                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    debug_assert!(
+                        (u64::from(extent.begin()) | u64::from(extent.end()))
+                            .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                    );
+                    let extent_chip_io_blocks =
+                        (u64::from(extent.block_count())) >> chip_io_block_allocation_blocks_log2;
+                    // Does not overflow: the total encoded mkfsinfo header length never
+                    // exceeds 3 * 128 Bytes.
+                    debug_assert!(extent_chip_io_blocks <= 3);
+                    let mut chip_io_block_buffers = match FixedVec::new_with_default(extent_chip_io_blocks as usize) {
+                        Ok(buffers) => buffers,
+                        Err(e) => {
+                            this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    for chip_io_block_buffer in chip_io_block_buffers.iter_mut() {
+                        *chip_io_block_buffer = match FixedVec::new_with_default(
+                            1usize << (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7),
+                        ) {
+                            Ok(chip_io_block_buffer) => chip_io_block_buffer,
+                            Err(e) => {
+                                this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+                    }
+
+                    let write_fut = write_blocks::WriteBlocksFuture::new(
+                        extent,
+                        chip_io_block_buffers,
+                        chip_io_block_allocation_blocks_log2 as u8,
+                        chip_io_block_allocation_blocks_log2 as u8,
+                        image_layout.allocation_block_size_128b_log2,
+                    );
+                    this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::WriteZeroes {
+                        write_fut,
+                        extent: *extent,
+                    };
+                }
+                InvalidateBackupMkFsInfoHeaderFutureState::WriteZeroes { write_fut, extent } => {
+                    match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
+                        task::Poll::Ready(Ok((_, Ok(())))) => (),
+                        task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
+                            this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let chip_io_block_allocation_blocks_log2 =
+                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_chip_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+                    debug_assert!(
+                        (u64::from(extent.begin()) | u64::from(extent.end()))
+                            .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                    );
+                    let trim_fut = match chip.trim(
+                        u64::from(extent.begin()) << allocation_block_chip_io_blocks_log2
+                            >> chip_io_block_allocation_blocks_log2,
+                        u64::from(extent.block_count()) << allocation_block_chip_io_blocks_log2
+                            >> chip_io_block_allocation_blocks_log2,
+                    ) {
+                        Ok(trim_fut) => trim_fut,
+                        Err(_) => {
+                            // Failure to trim is considered non-fatal.
+                            this.fut_state =
+                                InvalidateBackupMkFsInfoHeaderFutureState::PrepareWriteBarrierAfterInvalidate;
+                            continue;
+                        }
+                    };
+                    this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Trim { trim_fut };
+                }
+                InvalidateBackupMkFsInfoHeaderFutureState::Trim { trim_fut } => {
+                    // Failure to trim is considered non-fatal.
+                    match chip::NvChipFuture::poll(pin::Pin::new(trim_fut), chip, cx) {
+                        task::Poll::Ready(Ok(()) | Err(_)) => (),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+                    this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::PrepareWriteBarrierAfterInvalidate;
+                }
+                InvalidateBackupMkFsInfoHeaderFutureState::PrepareWriteBarrierAfterInvalidate => {
+                    let write_barrier_fut = match chip.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
+                            this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    this.fut_state =
+                        InvalidateBackupMkFsInfoHeaderFutureState::WriteBarrierAfterInvalidate { write_barrier_fut };
+                }
+                InvalidateBackupMkFsInfoHeaderFutureState::WriteBarrierAfterInvalidate { write_barrier_fut } => {
+                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), chip, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
+                    return task::Poll::Ready(Ok(()));
+                }
+                InvalidateBackupMkFsInfoHeaderFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Internal [`MkFsInfoHeader`](image_header::MkFsInfoHeader) writing primitive.
+struct WriteMkFsInfoHeaderFuture<C: chip::NvChip> {
+    fut_state: WriteMkFsInfoHeaderFutureState<C>,
+}
+
+/// [`WriteMkFsInfoHeaderFuture`] state-machine state.
+enum WriteMkFsInfoHeaderFutureState<C: chip::NvChip> {
+    Init {
+        to_backup_location: bool,
+    },
+    Write {
+        write_fut: write_blocks::WriteBlocksFuture<C>,
+    },
+    Done,
+}
+
+impl<C: chip::NvChip> WriteMkFsInfoHeaderFuture<C> {
+    /// Instantiate a [`WriteMkFsInfoHeaderFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `to_backup_location` - If `true`, the
+    ///   [`MkFsInfoHeader`](image_header::MkFsInfoHeader) is to be written to
+    ///   the backup location, to the storage's beginning otherwise.
+    fn new(to_backup_location: bool) -> Self {
+        Self {
+            fut_state: WriteMkFsInfoHeaderFutureState::Init { to_backup_location },
+        }
+    }
+
+    /// Poll the [`WriteMkFsInfoHeaderFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The storage the filesystem is to be created on.
+    /// * `image_layout` - The filesystem's [`ImageLayout`](layout::ImageLayout)
+    ///   to record in the [`MkFsInfoHeader`](image_header::MkFsInfoHeader).
+    /// * `salt` - The to be created filesystem's salt. Its lenght must not
+    ///   exceed [`u8::MAX`].
+    /// * `image_size` - The filesystem's desired image size.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        chip: &C,
+        image_layout: &layout::ImageLayout,
+        salt: &FixedVec<u8, 4>,
+        image_size: layout::AllocBlockCount,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Result<(), NvFsError>> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                WriteMkFsInfoHeaderFutureState::Init { to_backup_location } => {
+                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    if chip_io_block_size_128b_log2
+                        > image_layout.io_block_allocation_blocks_log2 as u32
+                            + image_layout.allocation_block_size_128b_log2 as u32
+                    {
+                        this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::from(
+                            CocoonFsFormatError::IoBlockSizeNotSupportedByDevice,
+                        )));
+                    }
+                    // As the ImageLayout's IO Block size fits an usize, this applies to the Chip IO
+                    // Block size as well.
+                    debug_assert!(chip_io_block_size_128b_log2 < usize::BITS - 7);
+
+                    let salt_len = match u8::try_from(salt.len()) {
+                        Ok(salt_len) => salt_len,
+                        Err(_) => {
+                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidSaltLength)));
+                        }
+                    };
+
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let chip_io_block_allocation_blocks_log2 =
+                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let mkfsinfo_header_location = if *to_backup_location {
+                        let chip_io_blocks = chip.chip_io_blocks();
+                        match image_header::MkFsInfoHeader::physical_backup_location(
+                            salt_len,
+                            chip_io_blocks,
+                            chip_io_block_size_128b_log2,
+                            image_layout.io_block_allocation_blocks_log2 as u32,
+                            allocation_block_size_128b_log2,
+                        ) {
+                            Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                            Err(e) => {
+                                this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        }
+                    } else {
+                        let encoded_header_len = image_header::MkFsInfoHeader::encoded_len(salt_len);
+                        let header_chip_io_blocks = ((encoded_header_len - 1)
+                            >> (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7))
+                            + 1;
+                        let header_allocation_blocks = layout::AllocBlockCount::from(
+                            (header_chip_io_blocks as u64) << chip_io_block_allocation_blocks_log2,
+                        );
+                        layout::PhysicalAllocBlockRange::from((
+                            layout::PhysicalAllocBlockIndex::from(0u64),
+                            header_allocation_blocks,
+                        ))
+                    };
+
+                    debug_assert!(
+                        (u64::from(mkfsinfo_header_location.begin()) | u64::from(mkfsinfo_header_location.end()))
+                            .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                    );
+                    let header_chip_io_blocks =
+                        u64::from(mkfsinfo_header_location.block_count()) >> chip_io_block_allocation_blocks_log2;
+                    // Does not overflow: the total encoded mkfsinfo header length never
+                    // exceeds 3 * 128 Bytes.
+                    debug_assert!(header_chip_io_blocks <= 3);
+
+                    let mut chip_io_block_buffers = match FixedVec::new_with_default(header_chip_io_blocks as usize) {
+                        Ok(buffers) => buffers,
+                        Err(e) => {
+                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    for chip_io_block_buffer in chip_io_block_buffers.iter_mut() {
+                        *chip_io_block_buffer = match FixedVec::new_with_default(
+                            1usize << (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7),
+                        ) {
+                            Ok(chip_io_block_buffer) => chip_io_block_buffer,
+                            Err(e) => {
+                                this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+                    }
+
+                    if let Err(e) = image_header::MkFsInfoHeader::encode(
+                        io_slices::BuffersSliceIoSlicesMutIter::new(&mut chip_io_block_buffers).map_infallible_err(),
+                        image_layout,
+                        image_size,
+                        salt,
+                    ) {
+                        this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(e));
+                    }
+
+                    let write_fut = write_blocks::WriteBlocksFuture::new(
+                        &mkfsinfo_header_location,
+                        chip_io_block_buffers,
+                        chip_io_block_allocation_blocks_log2 as u8,
+                        chip_io_block_allocation_blocks_log2 as u8,
+                        image_layout.allocation_block_size_128b_log2,
+                    );
+                    this.fut_state = WriteMkFsInfoHeaderFutureState::Write { write_fut };
+                }
+                WriteMkFsInfoHeaderFutureState::Write { write_fut } => {
+                    match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
+                        task::Poll::Ready(Ok((_, Ok(())))) => {
+                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Ok(()));
+                        }
+                        task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
+                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+                }
+                WriteMkFsInfoHeaderFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Write a filesystem creation info header.
+///
+/// In order to enable third parties not in possession of the root key to
+/// provision a storage volume for use with CocoonFs, they may write a
+/// "filesystem creation info" header" containing all the required core
+/// filesystem configuration parameters to it. The filesystem will then get
+/// created ("mkfs") at first use, i.e. at the first attempt to open it.
+///
+/// # See also:
+///
+/// * [`CocoonFsMkFsFuture`] for direct filesystem creation without a filesystem
+///   creation info header.
+pub struct CocoonFsWriteMkfsInfoHeaderFuture<C: chip::NvChip> {
+    // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+    // Self.
+    chip: Option<C>,
+    image_layout: layout::ImageLayout,
+    salt: FixedVec<u8, 4>,
+    image_size: layout::AllocBlockCount,
+    fut_state: CocoonFsWriteMkfsInfoHeaderFutureState<C>,
+}
+
+/// [`CocoonFsWriteMkfsInfoHeaderFuture`] state-machine state.
+enum CocoonFsWriteMkfsInfoHeaderFutureState<C: chip::NvChip> {
+    ResizeChip {
+        resize_fut: C::ResizeFuture,
+    },
+    WriteMkFsInfoHeader {
+        write_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture<C>,
+    },
+    WriteSyncAfterBackupMkFsInfoHeaderWrite {
+        write_sync_fut: C::WriteSyncFuture,
+    },
+    Done,
+}
+
+impl<C: chip::NvChip> CocoonFsWriteMkfsInfoHeaderFuture<C> {
+    /// Instantiate a [`CocoonFsWriteMkfsInfoHeaderFuture`].
+    ///
+    /// On error, the input `chip` is returned directly as part of
+    /// the `Err`. On success, the [`CocoonFsWriteMkfsInfoHeaderFuture`] assumes
+    /// ownership of the `chip` for the duration of the operation. It will
+    /// eventually get returned back from [`poll()`](Self::poll) at
+    /// completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `chip` - The storage the filesystem is to be created on.
+    /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
+    /// * `salt` - The filsystem salt to be stored in the static image header.
+    ///   Its length must not exceed [`u8::MAX`].
+    /// * `image_size` - Optional desired filesystem image size to eventually
+    ///   get recorded in the filesystem's mutable image header in the course of
+    ///   the actual filesystem creation. If not specified, the maximum possible
+    ///   value within the backing storage's
+    ///   [dimensions](chip::NvChip::chip_io_blocks) will be used.
+    pub fn new(
+        chip: C,
+        image_layout: &CocoonFsImageLayout,
+        salt: FixedVec<u8, 4>,
+        image_size: Option<layout::AllocBlockCount>,
+    ) -> Result<Self, (C, NvFsError)> {
+        let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
+        let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+        let chip_io_block_allocation_blocks_log2 =
+            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+        if chip_io_block_allocation_blocks_log2 > io_block_allocation_blocks_log2 {
+            return Err((
+                chip,
+                NvFsError::from(CocoonFsFormatError::IoBlockSizeNotSupportedByDevice),
+            ));
+        }
+        let allocation_block_chip_io_blocks_log2 =
+            allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+        let chip_io_blocks = chip.chip_io_blocks();
+        let chip_allocation_blocks = layout::AllocBlockCount::from(
+            chip_io_blocks << chip_io_block_allocation_blocks_log2 >> allocation_block_chip_io_blocks_log2,
+        );
+
+        let image_size = image_size.unwrap_or(chip_allocation_blocks);
+
+        // Before writing anything, verify that the to be created filesystem can get
+        // layout properly on a storage of size image_size.
+        let mkfs_layout = match MkFsLayout::new(image_layout, salt, image_size) {
+            Ok(mkfs_layout) => mkfs_layout,
+            Err(e) => {
+                return Err((chip, e));
+            }
+        };
+        let MkFsLayout {
+            salt,
+            image_size,
+            allocated_image_allocation_blocks_end,
+            ..
+        } = mkfs_layout;
+        // Verify that the desired image size is valid (large enough) for writing the
+        // backup mkfsinfo header at filesystem opening time.
+        // MkfsLayout::new() verifies that the salt length fits an u8.
+        let salt_len = salt.len() as u8;
+        let backup_mkfsinfo_header_location = match image_header::MkFsInfoHeader::physical_backup_location(
+            salt_len,
+            u64::from(image_size) << allocation_block_chip_io_blocks_log2 >> chip_io_block_allocation_blocks_log2,
+            chip_io_block_size_128b_log2,
+            io_block_allocation_blocks_log2,
+            allocation_block_size_128b_log2,
+        ) {
+            Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+            Err(e) => return Err((chip, e)),
+        };
+
+        // Check that the storage allocated to the initial metadata structures does not
+        // extend into the backup MkFsInfoHeader.
+        if backup_mkfsinfo_header_location.begin() < allocated_image_allocation_blocks_end {
+            return Err((chip, NvFsError::NoSpace));
+        }
+
+        // Ok, check whether we need to resize the backing storage to write the
+        // mkfsinfo header at least.
+        let mkfsinfo_header_len = image_header::MkFsInfoHeader::encoded_len(salt_len);
+        let mkfsinfo_header_chip_io_blocks = ((mkfsinfo_header_len - 1)
+            >> (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7))
+            + 1;
+        let mkfsinfo_header_allocation_blocks = layout::AllocBlockCount::from(
+            (mkfsinfo_header_chip_io_blocks as u64) << chip_io_block_allocation_blocks_log2,
+        );
+
+        let fut_state = if mkfsinfo_header_allocation_blocks > chip_allocation_blocks {
+            let resize_fut = match chip.resize(
+                u64::from(mkfsinfo_header_allocation_blocks) << allocation_block_chip_io_blocks_log2
+                    >> chip_io_block_allocation_blocks_log2,
+            ) {
+                Ok(resize_fut) => resize_fut,
+                Err(e) => {
+                    return Err((
+                        chip,
+                        NvFsError::from(match e {
+                            NvChipIoError::OperationNotSupported => NvChipIoError::IoBlockOutOfRange,
+                            _ => e,
+                        }),
+                    ));
+                }
+            };
+            CocoonFsWriteMkfsInfoHeaderFutureState::ResizeChip { resize_fut }
+        } else {
+            CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
+                write_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(false),
+            }
+        };
+
+        Ok(Self {
+            chip: Some(chip),
+            image_layout: image_layout.clone(),
+            salt,
+            image_size,
+            fut_state,
+        })
+    }
+}
+
+impl<C: chip::NvChip> future::Future for CocoonFsWriteMkfsInfoHeaderFuture<C> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned from the
+    /// [`Future::poll()`](future::Future::poll):
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input [`NvChip`](chip::NvChip)
+    ///   is lost.
+    /// * `Ok((chip, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input [`NvChip`](chip::NvChip), `chip`, and
+    ///   the operation result will get returned within:
+    ///   * `Ok((chip, Err(e)))` - In case of an error, the error reason `e` is
+    ///     returned in an [`Err`].
+    ///   * `Ok((chip, Ok(())))` - Otherwise an `Ok(())` is returned on success.
+    type Output = Result<(C, Result<(), NvFsError>), NvFsError>;
+
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        let chip = match this.chip.as_mut() {
+            Some(chip) => chip,
+            None => {
+                this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::Done;
+                return task::Poll::Ready(Err(nvfs_err_internal!()));
+            }
+        };
+
+        let result = loop {
+            match &mut this.fut_state {
+                CocoonFsWriteMkfsInfoHeaderFutureState::ResizeChip { resize_fut } => {
+                    match chip::NvChipFuture::poll(pin::Pin::new(resize_fut), chip, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            break Err(NvFsError::from(match e {
+                                NvChipIoError::OperationNotSupported => NvChipIoError::IoBlockOutOfRange,
+                                _ => e,
+                            }));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+                    this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
+                        write_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(false),
+                    };
+                }
+                CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
+                    write_mkfsinfo_header_fut,
+                } => {
+                    match WriteMkFsInfoHeaderFuture::poll(
+                        pin::Pin::new(write_mkfsinfo_header_fut),
+                        chip,
+                        &this.image_layout,
+                        &this.salt,
+                        this.image_size,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break Err(e),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let write_sync_fut = match chip.write_sync() {
+                        Ok(write_sync_fut) => write_sync_fut,
+                        Err(e) => break Err(NvFsError::from(e)),
+                    };
+                    this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::WriteSyncAfterBackupMkFsInfoHeaderWrite {
+                        write_sync_fut,
+                    };
+                }
+                CocoonFsWriteMkfsInfoHeaderFutureState::WriteSyncAfterBackupMkFsInfoHeaderWrite { write_sync_fut } => {
+                    match chip::NvChipFuture::poll(pin::Pin::new(write_sync_fut), chip, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break Err(NvFsError::from(e)),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    break Ok(());
+                }
+                CocoonFsWriteMkfsInfoHeaderFutureState::Done => unreachable!(),
+            }
+        };
+
+        this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::Done;
+        let chip = match this.chip.take() {
+            Some(chip) => chip,
+            None => {
+                return task::Poll::Ready(Err(nvfs_err_internal!()));
+            }
+        };
+        task::Poll::Ready(Ok((chip, result)))
     }
 }

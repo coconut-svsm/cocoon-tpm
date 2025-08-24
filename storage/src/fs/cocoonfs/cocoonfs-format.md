@@ -14,7 +14,13 @@ CocoonFS is a special purpose filesystem format designed for securely storing sm
 as, but not limited to, a software TPM's state and UEFI variables in a confidential Trusted Execution Environment (TEE)
 setting.
 
-### Security properties
+In addition to its primary design focus on [strong security properties](#sec-introduction-security), the format
+implemens support for some features of particular relevance to the intended use-case, such as support for [keyless
+storage volume provisioning](#sec-introduction-online-mkfs) and robustness against service interruptions by means of a
+[journal](#sec-introduction-journal).
+
+
+### [Security properties]{#sec-introduction-security}
 The most noteworthy features distinguishing CocoonFS from common existing Full Disk Encryption (FDE) solutions designed
 primarily for mass storage deployments are:
 
@@ -129,7 +135,7 @@ Note that for the anticipated CocoonFS usage scenarios, i.e. the storage of core
 possible to make such static assignments at development time and thus, it is certainly desirable to avoid the overhead
 of updating directory metadata structures.
 
-### Journal
+### [Journal]{#sec-introduction-journal}
 For robustness against service interruptions, e.g. power cuts, crashes and alike, CocoonFS implements a journal.
 
 In fact, it is not so much of a journal in the traditional sense as in "a journal with multiple update records": the
@@ -155,7 +161,7 @@ For example, upon update, the filesystem implementation could
    retry to reach the remote party until it answers.
 
 For handling any power cuts encountered after the new root digest has been sent, but before a reply has been received
-back, make the filesystem open code to query the remote trusted party for the latest root authentication digest at
+back, make the filesystem opening code to query the remote trusted party for the latest root authentication digest at
 filesystem opening time, depending on the answer either apply or cancel the pending journal.
 
 ### [Confidentiality of allocations and block trimming]{#sec-allocations-confidentiality}
@@ -185,6 +191,31 @@ of journal blocks by matching them to duplicates.
 Implementations may issue trim commands for deallocated blocks to the underlying storage device. Note however that
 trimming is mutually exclusive with the confidentiality of allocations, because a trimmed block is usually recognizable
 as such.
+
+### [Online filesystem creation support]{#sec-introduction-online-mkfs}
+In some use-cases, e.g. TEEs running in a public cloud, it might be desirable to create the filesystem from within the
+TEE itself upon first use: the initial filesystem creation requires access to the root key, and, as the TEE would need
+that anyway, such a setup scheme would allow for limiting the trust boundary to the bare minimum.
+
+However, a TEE should certainly not start to randomly create CocoonFS instances on any attached volumes whose formats it
+doesn't recognize and some sort of storage volume tagging mechanism is due. The CocoonFS format implements this by means
+of a special [filesystem creation header](#sec-mkfsinfo-header) marking the containing volume as intended for formatting
+with a CocoonFS instance at first use in the first place, and specifying all the core configuration parameters required
+for the filesystem creation.
+
+**Attention**: the [filesystem creation header](#sec-mkfsinfo-header) is not authenticated at all, and thus, to thwart
+downgrade attacks on the set of cryptographic algorithms, these **must** get authenticated/attested/validated by some
+other, unspecified means. If there's any potential for root key reuse, then the filesystem salt **must** get
+authenticated as well.
+
+The initial filesystem creation process involves a replacement of the [filesystem creation header](#sec-mkfsinfo-header)
+with the [regular filesystem header](#sec-filesystem-header) at some point. For robustness against service interruptions
+encountered during this final write operation, a backup copy of the [filesystem creation header](#sec-mkfsinfo-header)
+is to be written at a specific location on storage determined exclusively from its dimensions beforehand. In case no
+valid (integrity protected) [image header](#sec-image-header) of either type is found at the beginning of the storage
+when attempting to open a filesystem, i.e. following a service interruption, the implementation is supposed to check for
+the presence of the backup [filesystem creation header](#sec-mkfsinfo-header) and restart the filesystem creation as
+appropriate.
 
 ## Fundamental structures and encodings
 The core CocoonFS metadata structures are:
@@ -423,17 +454,35 @@ implements an integrity protection measure for the sequence of chained extents a
 which is good to have from a robustness perspective, especially for the journal log.
 
 ### [Image header]{#sec-image-header}
-The filesystem image header is split into two parts: a static and a mutable one.  The static image header is located at
-the beginning of the image, padded to an integral multiple of the [IO Block](#def-io-block) size so that no neighboring
-writes will ever alter its contents. This is important, as the configuration found in the static image header is needed
-for determining the filesystem layout and locating the fixed position of the journal log head.
+The CocoonFS format defines two mutually exclusive header types to be placed at the containing storage volume's
+beginning:
+
+- In the regular case, after the filesystem has been created on storage and is operational, the [regular CocoonFS
+  filesystem header](#sec-filesystem-header) is stored at that location.
+- Alternatively, to drive [online filesystem creation](#sec-introduction-online-mkfs) upon first use, a [filesystem
+  creation info header](#sec-mkfsinfo-header) may be placed there. It is expected that implementations will conduct the
+  filesystem creation upon encountering such one, eventually replacing the header with a [regular CocoonFS
+  filesystem header](#sec-filesystem-header) in the course.
+
+Both header types are protected by a checksum each. If no valid header of either type passing checksum verification is
+found at the storage's beginning when attempting to open a filesystem, implementations are expected to check for the
+presence of a filesystem creation info header [backup copy](#def-mkfsinfo-backup-header) at a specific location
+determined exclusively from the backing storage volume's dimensions, and proceed with the online filesystem creation if
+one is found.
+
+#### [Regular CocoonFS filesystem header]{#sec-filesystem-header}
+The regular CocoonFS filesystem image header is split into two parts: a [static](#sec-static-image-header) and a
+[mutable](#sec-mutable-image-header) one.  The static image header is located at the beginning of the image, padded to
+an integral multiple of the [IO Block](#def-io-block) size so that no neighboring writes will ever alter its
+contents. This is important, as the configuration found in the static image header is needed for determining the
+filesystem layout and locating the fixed position of the journal log head.
 
 The mutable header is located past the static image header's padding, and changes to it are tracked through the journal,
 just as is the case for any update. It contains changing values such as the filesystem image size or the authentication
 tree root hash.
 
-#### [Static image header]{#sec-static-image-header}
-The static image header starts at offset zero, it's format is:
+##### [Static image header]{#sec-static-image-header}
+The static image header starts at offset zero, its format is:
 
 +----------------+----------------------------------------------------------------------------------+
 |Length in bytes |Description                                                                       |
@@ -527,7 +576,7 @@ follows:
 |       |                                                     |big-endian format each.                                 |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 
-##### [Cyclic redundancy checksum (CRC) computation]{#sec-crc}
+###### [Cyclic redundancy checksum (CRC) computation]{#sec-crc}
 The static image header is integrity protected by a pair two CRC-32s: one over the plain header data from the magic to
 the salt, both inclusive, and another one over the same data but with any two neighboring bits swapped.
 
@@ -570,7 +619,7 @@ $\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$. Finally, becau
 $\mathbb{F}_2$'s only unit is $1$), it follows that $\mathcal{\bar{c}}=\mathcal{c}$.
 
 
-#### [Mutable image header]{#sec-mutable-image-header}
+##### [Mutable image header]{#sec-mutable-image-header}
 The mutable image header is located at the first [IO Block](#def-io-block) aligned boundary following the static image
 header. It gets updated through the general journalling mechanics, hence it may be in an inconsistent state at
 filesystem opening time.
@@ -597,6 +646,62 @@ The mutable image header's format is:
 |variable                               |Padding to align the mutable image header's length to a multiple of the       |
 |                                       |[Allocation Block](#def-allocation-block) size.                               |
 +---------------------------------------+------------------------------------------------------------------------------+
+
+#### [Filesystem creation info header]{#sec-mkfsinfo-header}
+As discussed in the introductionary section about [online filesystem creation support](#sec-introduction-online-mkfs),
+parties not in possession of the root key may mark a storage volume for formatting with a CocoonFS instance upon first
+use by writing a special filesystem creation info header to its beginning. This header provides all the information
+required for the actual filesystem creation and is of the following format:
+
++----------------+------------------------------------------------------------------------------------+
+|Length in bytes |Description                                                                         |
++================+====================================================================================+
+|8               |Magic string `'CCFSMKFS'` (without a terminating zero byte).                        |
++----------------+------------------------------------------------------------------------------------+
+|1               |The filesystem creation info header format version. Fixed to 0.                     |
++----------------+------------------------------------------------------------------------------------+
+|20              |The set of filesystem image layout parameters, encoded in the same                  |
+|                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
++----------------+------------------------------------------------------------------------------------+
+|8               |The desired filesystem image size in units of [Allocation                           |
+|                |Blocks](#def-allocation-block), encoded as a 64 bit integer in little-endian format.|
++----------------+------------------------------------------------------------------------------------+
+|1               |The salt length.                                                                    |
++----------------+------------------------------------------------------------------------------------+
+|variable        |The salt.                                                                           |
++----------------+------------------------------------------------------------------------------------+
+|4               |Cyclic redundancy checksum over the header.                                         |
++----------------+------------------------------------------------------------------------------------+
+|4               |Cyclic redundancy checksum over the header with any two neighboring bits swapped.   |
++----------------+------------------------------------------------------------------------------------+
+
+The filesystem creation info header is protected by a pair of two CRC-32s: one over the plain header data from the magic
+to the salt, both inclusive, and another one over the same data but with any two neighboring bits swapped, just in line
+with the regular filesystem header's [checksum computation](#sec-crc).
+
+Upon encountering such a filesystem creation header passing the checksum verification at the storage volume's beginning
+when attempting to open a filesystem, implementations are supposed to conduct the filesystem creation.
+
+The filesystem creation process inevitably involves a replacement of the filesystem creation info header at the
+storage's beginning with the [regular CocoonFS image header](#sec-filesystem-header) at some point. For robustness
+against service interruptions encountered during that write, a [backup copy]{#def-mkfsinfo-backup-header} of the former
+is made at a specific location on storage beforehand. The location is determined exlusively from the storage volume's
+dimensions as follows: find the largest possible power of two not less than $4\cdot 128\textrm{B}$ such that the storage
+volume accomodates at least $16$ units of that size and place the backup filesystem creation info header copy at the
+beginning of the last such. For clarity, the minimum storage volume size required for supporting online filesystem
+creation by means of a filesystem creation info header is $16\cdot 4\cdot 128\textrm{B} = 8192\textrm{B}$. Note that
+this scheme has been chosen such that the backup copy will get placed towards the storage volume's end, while still
+preserving a relatively large alignment at the same time: having it stored near the end prevents it from intefering with
+any of the filesystem's initial metadata structures' placement and the large alignment will enable meaningful error
+reporting in case the underlying hardware is not compatible with the selected [IO Block](#def-io-block) size.
+
+In either case, if no valid [image header](#sec-image-header) of either type passing the respective checksum
+verification is found at the storage volume's beginning when attempting to open a filesystem, neither a [regular
+CocoonFS static image header](#sec-static-image-header) nor a filesystem creation info header, then implementations are
+expected to check for the presence of a filesystem creation info header backup copy at the specified location. If one is
+found, and it passes its checksum verification, then the online filesystem creation procedure is supposed to get
+restarted from scratch.
+
 
 ### [Key derivation]{#sec-key-derivation}
 As outlined in the [introduction](#sec-introduction), the root key gets processed once through the TCG
