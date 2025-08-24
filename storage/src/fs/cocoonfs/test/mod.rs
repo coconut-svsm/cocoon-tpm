@@ -307,16 +307,17 @@ fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
 fn cocoonfs_test_start_read_sequence_op_helper(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
 ) -> Result<<TestCocoonFs as fs::NvFs>::ConsistentReadSequence, fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
     let start_read_sequence_fut = <CocoonFs<TestNopSyncTypes, _> as fs::NvFs>::start_read_sequence(
         &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
     );
     let executor = TestAsyncExecutor::new();
     let start_read_sequence_fut = TestAsyncExecutor::spawn(
         &executor,
-        fs::NvFsFutureAsCoreFuture::<TestCocoonFs, _>::new(fs_instance.clone(), start_read_sequence_fut),
+        fs::NvFsFutureAsCoreFuture::<TestCocoonFs, _>::new(fs_instance.clone(), start_read_sequence_fut, rng),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    start_read_sequence_fut.take().unwrap()
+    start_read_sequence_fut.take().unwrap().unwrap().1
 }
 
 fn cocoonfs_test_start_transaction_op_helper(
@@ -327,15 +328,14 @@ fn cocoonfs_test_start_transaction_op_helper(
     let start_transaction_fut = <CocoonFs<TestNopSyncTypes, _> as fs::NvFs>::start_transaction(
         &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
         continued_read_sequence,
-        rng,
     );
     let executor = TestAsyncExecutor::new();
     let start_transaction_waiter = TestAsyncExecutor::spawn(
         &executor,
-        fs::NvFsFutureAsCoreFuture::<TestCocoonFs, _>::new(fs_instance.clone(), start_transaction_fut),
+        fs::NvFsFutureAsCoreFuture::<TestCocoonFs, _>::new(fs_instance.clone(), start_transaction_fut, rng),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    start_transaction_waiter.take().unwrap()
+    start_transaction_waiter.take().unwrap().unwrap().1
 }
 
 fn cocoonfs_test_commit_transaction_op_helper(
@@ -343,6 +343,7 @@ fn cocoonfs_test_commit_transaction_op_helper(
     mut transaction: <TestCocoonFs as fs::NvFs>::Transaction,
     fail_apply_journal: bool,
 ) -> Result<(), fs::TransactionCommitError> {
+    let rng = Box::new(rng::test_rng());
     if fail_apply_journal {
         transaction.test_set_fail_apply_journal();
     }
@@ -356,10 +357,10 @@ fn cocoonfs_test_commit_transaction_op_helper(
     let executor = TestAsyncExecutor::new();
     let commit_transaction_waiter = TestAsyncExecutor::spawn(
         &executor,
-        fs::NvFsFutureAsCoreFuture::<TestCocoonFs, _>::new(fs_instance.clone(), commit_transaction_fut),
+        fs::NvFsFutureAsCoreFuture::<TestCocoonFs, _>::new(fs_instance.clone(), commit_transaction_fut, rng),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let commit_transaction_result = commit_transaction_waiter.take().unwrap();
+    let commit_transaction_result = commit_transaction_waiter.take().unwrap().unwrap().1;
     commit_transaction_result
 }
 
@@ -369,6 +370,7 @@ fn cocoonfs_test_write_inode_op_helper(
     inode: u32,
     data: &[u8],
 ) -> Result<<TestCocoonFs as fs::NvFs>::Transaction, fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
     let data = data.iter().copied().collect::<Vec<u8>>();
     let write_inode_fut = <TestCocoonFs as fs::NvFs>::write_inode(
         &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
@@ -379,10 +381,10 @@ fn cocoonfs_test_write_inode_op_helper(
     let executor = TestAsyncExecutor::new();
     let write_inode_waiter = TestAsyncExecutor::spawn(
         &executor,
-        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(fs_instance.clone(), write_inode_fut),
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(fs_instance.clone(), write_inode_fut, rng),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let write_inode_result = write_inode_waiter.take().unwrap();
+    let write_inode_result = write_inode_waiter.take().unwrap().unwrap().1;
     write_inode_result
         .and_then(|(transaction, _write_inode_data, write_inode_result)| write_inode_result.map(|_| transaction))
 }
@@ -392,15 +394,16 @@ fn cocoonfs_test_read_inode_op_helper(
     read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
     inode: u32,
 ) -> Result<(fs::NvFsReadContext<TestCocoonFs>, Option<zeroize::Zeroizing<Vec<u8>>>), fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
     let read_inode_fut =
         <TestCocoonFs as fs::NvFs>::read_inode(&cocoonfs_test_mk_fs_instance_ref(&fs_instance), read_context, inode);
     let executor = TestAsyncExecutor::new();
     let read_inode_waiter = TestAsyncExecutor::spawn(
         &executor,
-        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(fs_instance.clone(), read_inode_fut),
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(fs_instance.clone(), read_inode_fut, rng),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let read_inode_result = read_inode_waiter.take().unwrap();
+    let read_inode_result = read_inode_waiter.take().unwrap().unwrap().1;
     read_inode_result.and_then(|(read_context, read_inode_result)| read_inode_result.map(|data| (read_context, data)))
 }
 
@@ -438,15 +441,20 @@ fn cocoonfs_test_enumerate_inodes_op_cb<CB: CocoonFsTestEnumerateInodesFutureCal
     inodes_enumerate_range: ops::RangeInclusive<u32>,
     callback: CB,
 ) -> Result<(fs::NvFsReadContext<TestCocoonFs>, CB), fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
     let enumerate_inodes_fut =
         CocoonFsTestEnumerateInodesFuture::new(fs_instance, read_context, inodes_enumerate_range, callback)?;
     let executor = TestAsyncExecutor::new();
     let enumerate_inodes_waiter = TestAsyncExecutor::spawn(
         &executor,
-        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(fs_instance.clone(), enumerate_inodes_fut),
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(
+            fs_instance.clone(),
+            enumerate_inodes_fut,
+            rng,
+        ),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let enumerate_inodes_result = enumerate_inodes_waiter.take().unwrap();
+    let enumerate_inodes_result = enumerate_inodes_waiter.take().unwrap().unwrap().1;
     enumerate_inodes_result
 }
 
@@ -519,6 +527,7 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtrRef<'_>,
+        rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -530,7 +539,7 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
                     inodes_enumerate_range,
                 } => {
                     let read_sequence =
-                        match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, cx) {
+                        match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, rng, cx) {
                             task::Poll::Ready(Ok(read_sequence)) => read_sequence,
                             task::Poll::Ready(Err(e)) => {
                                 this.fut_state = CocoonFsTestEnumerateInodesFutureState::Done;
@@ -573,21 +582,21 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
                     this.fut_state = CocoonFsTestEnumerateInodesFutureState::Next { next_fut };
                 }
                 CocoonFsTestEnumerateInodesFutureState::Next { next_fut } => {
-                    let (enumerate_cursor, inode) = match fs::NvFsFuture::poll(pin::Pin::new(next_fut), fs_instance, cx)
-                    {
-                        task::Poll::Ready(result) => {
-                            match result
-                                .and_then(|(enumerate_cursor, result)| result.map(|inode| (enumerate_cursor, inode)))
-                            {
-                                Ok((enumerate_cursor, inode)) => (enumerate_cursor, inode),
-                                Err(e) => {
-                                    this.fut_state = CocoonFsTestEnumerateInodesFutureState::Done;
-                                    return task::Poll::Ready(Err(e));
+                    let (enumerate_cursor, inode) =
+                        match fs::NvFsFuture::poll(pin::Pin::new(next_fut), fs_instance, rng, cx) {
+                            task::Poll::Ready(result) => {
+                                match result.and_then(|(enumerate_cursor, result)| {
+                                    result.map(|inode| (enumerate_cursor, inode))
+                                }) {
+                                    Ok((enumerate_cursor, inode)) => (enumerate_cursor, inode),
+                                    Err(e) => {
+                                        this.fut_state = CocoonFsTestEnumerateInodesFutureState::Done;
+                                        return task::Poll::Ready(Err(e));
+                                    }
                                 }
                             }
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
 
                     match inode {
                         Some(inode) => {
@@ -617,7 +626,7 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
                 }
                 CocoonFsTestEnumerateInodesFutureState::ReadCurrentInodeData { inode, read_fut } => {
                     let (enumerate_cursor, inode_data) =
-                        match fs::NvFsFuture::poll(pin::Pin::new(read_fut), fs_instance, cx) {
+                        match fs::NvFsFuture::poll(pin::Pin::new(read_fut), fs_instance, rng, cx) {
                             task::Poll::Ready(result) => {
                                 match result.and_then(|(enumerate_cursor, result)| {
                                     result.map(|inode_data| (enumerate_cursor, inode_data))
@@ -703,15 +712,20 @@ fn cocoonfs_test_unlink_inodes_op_cb<CB: CocoonFsTestUnlinkInodesFutureCallback>
     inodes_unlink_range: ops::RangeInclusive<u32>,
     callback: CB,
 ) -> Result<(<TestCocoonFs as fs::NvFs>::Transaction, CB), fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
     let unlink_inodes_fut =
         CocoonFsTestUnlinkInodesFuture::new(fs_instance, transaction, inodes_unlink_range, callback)?;
     let executor = TestAsyncExecutor::new();
     let unlink_inodes_waiter = TestAsyncExecutor::spawn(
         &executor,
-        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(fs_instance.clone(), unlink_inodes_fut),
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(
+            fs_instance.clone(),
+            unlink_inodes_fut,
+            rng,
+        ),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let unlink_inodes_result = unlink_inodes_waiter.take().unwrap();
+    let unlink_inodes_result = unlink_inodes_waiter.take().unwrap().unwrap().1;
     unlink_inodes_result
 }
 
@@ -767,6 +781,7 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtrRef<'_>,
+        rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -774,19 +789,21 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
         loop {
             match &mut this.fut_state {
                 CocoonFsTestUnlinkInodesFutureState::Next { next_fut } => {
-                    let (unlink_cursor, inode) = match fs::NvFsFuture::poll(pin::Pin::new(next_fut), fs_instance, cx) {
-                        task::Poll::Ready(result) => {
-                            match result.and_then(|(unlink_cursor, result)| result.map(|inode| (unlink_cursor, inode)))
-                            {
-                                Ok((unlink_cursor, inode)) => (unlink_cursor, inode),
-                                Err(e) => {
-                                    this.fut_state = CocoonFsTestUnlinkInodesFutureState::Done;
-                                    return task::Poll::Ready(Err(e));
+                    let (unlink_cursor, inode) =
+                        match fs::NvFsFuture::poll(pin::Pin::new(next_fut), fs_instance, rng, cx) {
+                            task::Poll::Ready(result) => {
+                                match result
+                                    .and_then(|(unlink_cursor, result)| result.map(|inode| (unlink_cursor, inode)))
+                                {
+                                    Ok((unlink_cursor, inode)) => (unlink_cursor, inode),
+                                    Err(e) => {
+                                        this.fut_state = CocoonFsTestUnlinkInodesFutureState::Done;
+                                        return task::Poll::Ready(Err(e));
+                                    }
                                 }
                             }
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
 
                     match inode {
                         Some(inode) => {
@@ -816,7 +833,7 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
                 }
                 CocoonFsTestUnlinkInodesFutureState::ReadCurrentInodeData { inode, read_fut } => {
                     let (unlink_cursor, inode_data) =
-                        match fs::NvFsFuture::poll(pin::Pin::new(read_fut), fs_instance, cx) {
+                        match fs::NvFsFuture::poll(pin::Pin::new(read_fut), fs_instance, rng, cx) {
                             task::Poll::Ready(result) => {
                                 match result.and_then(|(unlink_cursor, result)| {
                                     result.map(|inode_data| (unlink_cursor, inode_data))
@@ -856,7 +873,7 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
                     };
                 }
                 CocoonFsTestUnlinkInodesFutureState::UnlinkCurrentInode { unlink_fut } => {
-                    let unlink_cursor = match fs::NvFsFuture::poll(pin::Pin::new(unlink_fut), fs_instance, cx) {
+                    let unlink_cursor = match fs::NvFsFuture::poll(pin::Pin::new(unlink_fut), fs_instance, rng, cx) {
                         task::Poll::Ready(result) => {
                             match result.and_then(|(unlink_cursor, result)| result.map(|_| unlink_cursor)) {
                                 Ok(unlink_cursor) => unlink_cursor,

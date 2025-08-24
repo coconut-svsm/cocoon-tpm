@@ -9,7 +9,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     chip,
-    crypto::symcipher,
+    crypto::{rng, symcipher},
     fs::{
         NvFsError,
         cocoonfs::{
@@ -158,15 +158,16 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
         NvFsError,
     >;
 
-    type AuxPollData<'a> = ();
+    type AuxPollData<'a> = &'a mut dyn rng::RngCoreDispatchable;
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
         fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
-        _aux_data: &mut Self::AuxPollData<'a>,
+        aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
+        let mut rng: &mut dyn rng::RngCoreDispatchable = *aux_data;
 
         let (mut transaction, e) = 'outer: loop {
             match &mut this.fut_state {
@@ -645,7 +646,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             cur_update_states_allocation_blocks_update_staging_bufs_iter,
                             &mut data,
                             cur_inode_extent.block_count(),
-                            transaction.rng.as_mut(),
+                            rng,
                         ) {
                             break 'outer match rollback(
                                 transaction,
@@ -700,7 +701,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         match CocoonFsSyncStateReadFuture::poll(
                             pin::Pin::new(write_inode_extents_list_fut),
                             fs_instance_sync_state,
-                            &mut (),
+                            &mut rng,
                             cx,
                         ) {
                             task::Poll::Ready(Ok((
@@ -753,7 +754,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let mut transaction = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(inode_index_insert_entry_fut),
                         fs_instance_sync_state,
-                        &mut (),
+                        &mut rng,
                         cx,
                     ) {
                         task::Poll::Ready(Ok((transaction, Ok(())))) => transaction,

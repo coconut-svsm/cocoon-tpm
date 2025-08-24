@@ -828,15 +828,16 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
         NvFsError,
     >;
 
-    type AuxPollData<'a> = ();
+    type AuxPollData<'a> = &'a mut dyn rng::RngCoreDispatchable;
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
         fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
-        _aux_data: &mut Self::AuxPollData<'a>,
+        aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
+        let rng: &mut dyn rng::RngCoreDispatchable = *aux_data;
 
         let (mut transaction, e) = 'outer: loop {
             match &mut this.fut_state {
@@ -1451,7 +1452,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             authenticated_associated_data.decoupled_borrow(),
                             cur_inode_extents_list_extent.block_count(),
                             next_chained_inode_extents_list_extent.as_ref(),
-                            transaction.rng.as_mut(),
+                            rng,
                         ) {
                             break 'outer match rollback(transaction, result, fs_sync_state_alloc_bitmap) {
                                 Ok(transaction) => (Some(transaction), e),

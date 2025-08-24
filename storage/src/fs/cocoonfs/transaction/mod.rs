@@ -22,8 +22,6 @@ use crate::{
     utils_common::fixed_vec::FixedVec,
 };
 
-use core::marker;
-
 pub(super) mod auth_tree_data_blocks_update_states;
 pub use auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStates;
 mod prepare_staged_updates_application;
@@ -48,11 +46,6 @@ use layout::ImageLayout;
 pub struct Transaction {
     /// Pending updates to data on storage.
     pub(super) auth_tree_data_blocks_update_states: AuthTreeDataBlocksUpdateStates,
-
-    /// The [random number generator](rng::RngCoreDispatchable) used
-    /// by the transaction for initializing unallocated stoage, unused padding
-    /// and for generating IVs.
-    pub(super) rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
 
     /// Optional journal staging copy disguising.
     ///
@@ -135,19 +128,18 @@ impl Transaction {
     ///   among the pending. There must be at most one pending with this
     ///   attribute at any time.
     /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
-    ///   by the transaction for initializing unallocated stoage, unused padding
-    ///   and for generating IVs.
+    ///   for generating the [journal staging copy
+    ///   disguising](journal::staging_copy_disguise::JournalStagingCopyDisguise)
+    ///   key.
     pub fn new<ST: sync_types::SyncTypes, C: chip::NvChip>(
         fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
         is_primary_pending: bool,
-        mut rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
+        rng: &mut dyn rng::RngCoreDispatchable,
     ) -> Result<Self, NvFsError> {
         let fs_instance = fs_instance_sync_state.get_fs_ref();
         let image_layout = &fs_instance.fs_config.image_layout;
-        let journal_staging_copy_disguise = journal::staging_copy_disguise::JournalStagingCopyDisguise::generate(
-            image_layout.block_cipher_alg,
-            rng.as_mut(),
-        )?;
+        let journal_staging_copy_disguise =
+            journal::staging_copy_disguise::JournalStagingCopyDisguise::generate(image_layout.block_cipher_alg, rng)?;
 
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
         let auth_tree_data_block_allocation_blocks_log2 = image_layout.auth_tree_data_block_allocation_blocks_log2;
@@ -162,7 +154,6 @@ impl Transaction {
                 auth_tree_data_block_allocation_blocks_log2,
                 allocation_block_size_128b_log2,
             ),
-            rng,
             journal_staging_copy_disguise: Some((journal_staging_copy_disguise, None)),
             allocation_block_size_128b_log2,
             auth_tree_data_block_allocation_blocks_log2,

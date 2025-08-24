@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
-    crypto::hash,
+    crypto::{hash, rng},
     fs::{
         NvFsError,
         cocoonfs::{
@@ -225,6 +225,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
     pub fn poll(
         self: pin::Pin<&mut Self>,
         mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        mut rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<Transaction>, (bool, Option<Box<Transaction>>, NvFsError)>> {
         let this = pin::Pin::into_inner(self);
@@ -254,7 +255,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     let mut transaction = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(update_root_inode_fut),
                         &mut CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state),
-                        &mut (),
+                        &mut rng,
                         cx,
                     ) {
                         task::Poll::Ready(Ok((transaction, Ok(())))) => transaction,
@@ -278,7 +279,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     if let Err(e) = transaction.inode_index_updates.apply_all_tree_nodes_staged_updates(
                         &transaction.allocs,
                         &mut transaction.auth_tree_data_blocks_update_states,
-                        transaction.rng.as_mut(),
+                        rng,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         fs_sync_state_inode_index,
@@ -329,7 +330,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                         &fs_config.image_layout,
                         &fs_config.root_key,
                         &mut fs_sync_state_keys_cache,
-                        transaction.rng.as_mut(),
+                        rng,
                     ) {
                         break (false, Some(transaction), e);
                     }
@@ -524,7 +525,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     let mut transaction = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(write_dirty_data_fut),
                         &mut CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state),
-                        &mut (),
+                        &mut rng,
                         cx,
                     ) {
                         task::Poll::Ready(Ok((transaction, _, Ok(())))) => transaction,
@@ -784,7 +785,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     let transaction = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(write_dirty_data_fut),
                         &mut CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state),
-                        &mut (),
+                        &mut rng,
                         cx,
                     ) {
                         task::Poll::Ready(Ok((transaction, _, Ok(())))) => transaction,
@@ -918,7 +919,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     journal_log_head_extent,
                     journal_log_encode_buf_layout,
                 } => {
-                    let mut transaction = match transaction.take() {
+                    let transaction = match transaction.take() {
                         Some(transaction) => transaction,
                         None => break (false, None, nvfs_err_internal!()),
                     };
@@ -1037,7 +1038,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                         (!journal_log_tail_extents.is_empty())
                             .then(|| journal_log_tail_extents.get_extent_range(0))
                             .as_ref(),
-                        transaction.rng.as_mut(),
+                        rng,
                     ) {
                         break (false, Some(transaction), e);
                     }
@@ -1051,7 +1052,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                             (i != journal_log_tail_extents.len() - 1)
                                 .then(|| journal_log_tail_extents.get_extent_range(i + 1))
                                 .as_ref(),
-                            transaction.rng.as_mut(),
+                            rng,
                         ) {
                             break 'outer (false, Some(transaction), e);
                         }

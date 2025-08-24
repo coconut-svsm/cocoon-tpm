@@ -835,10 +835,14 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
     ///   [Allocation Block level index
     ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
     ///   write out.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) to
+    ///   randomize unallocated [Allocation
+    ///   Blocks](layout::allocation_block_size_128b_log2) with.
     fn prepare_write_request(
         mut transaction: Box<Transaction>,
         aligned_write_region_states_allocation_blocks_index_range:
-            AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
+        AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
+        rng: &mut dyn rng::RngCoreDispatchable,
     ) -> Result<TransactionWriteDirtyDataNvChipWriteRequest, (Box<Transaction>, NvFsError)> {
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
         let allocation_block_size = 1usize << (allocation_block_size_128b_log2 + 7);
@@ -895,7 +899,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
                                     Err(e) => return Err((transaction, NvFsError::from(e))),
                                 };
                                 if let Err(e) = rng::rng_dyn_dispatch_generate(
-                                    transaction.rng.as_mut(),
+                                    rng,
                                     io_slices::SingletonIoSliceMut::new(&mut random_fillup).map_infallible_err(),
                                     None,
                                 ) {
@@ -1027,14 +1031,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
         NvFsError,
     >;
 
-    type AuxPollData<'a> = ();
+    type AuxPollData<'a> = &'a mut dyn rng::RngCoreDispatchable;
 
     fn poll<'a>(
         mut self: pin::Pin<&mut Self>,
         fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
-        _aux_poll_data: &mut Self::AuxPollData<'a>,
+        aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
+        let rng: &mut dyn rng::RngCoreDispatchable = *aux_data;
         loop {
             match &mut self.fut_state {
                 TransactionWriteDirtyDataFutureState::Init { transaction } => {
@@ -1178,6 +1183,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             let write_request = match Self::prepare_write_request(
                                 transaction,
                                 cur_aligned_write_region_states_allocation_blocks_index_range.clone(),
+                                rng,
                             ) {
                                 Ok(write_request) => write_request,
                                 Err((transaction, e)) => {

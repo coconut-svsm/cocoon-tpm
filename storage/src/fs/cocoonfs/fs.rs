@@ -9,7 +9,8 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip, crypto,
+    chip,
+    crypto::rng,
     fs::{
         self, NvFsError,
         cocoonfs::{
@@ -875,9 +876,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFs for CocoonFs<ST, C> {
     fn start_transaction(
         _this: &Self::SyncRcPtrRef<'_>,
         continued_read_sequence: Option<&Self::ConsistentReadSequence>,
-        rng: Box<dyn crypto::rng::RngCoreDispatchable + marker::Send>,
     ) -> Self::StartTransactionFut {
-        CocoonFsStartTransactionFuture::new(continued_read_sequence, rng)
+        CocoonFsStartTransactionFuture::new(continued_read_sequence)
     }
 
     type CommitTransactionFut = CocoonFsCommitTransactionFuture<ST, C>;
@@ -1028,10 +1028,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, C>,
+        rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
-        fs::NvFsFuture::poll(pin::Pin::new(&mut this.start_read_sequence_fut), fs_instance, cx)
+        fs::NvFsFuture::poll(pin::Pin::new(&mut this.start_read_sequence_fut), fs_instance, rng, cx)
     }
 }
 
@@ -1045,37 +1046,24 @@ pub struct CocoonFsStartTransactionFuture<ST: sync_types::SyncTypes, C: chip::Nv
 enum CocoonFsStartTransactionFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     ContinueReadSequence {
         read_sequence: CocoonFsConsistentReadSequence,
-        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
-        // reference on Self.
-        rng: Option<Box<dyn crypto::rng::RngCoreDispatchable + marker::Send>>,
     },
     StartReadSequence {
         start_read_sequence_fut: StartReadSequenceFuture<ST, C>,
-        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
-        // reference on Self.
-        rng: Option<Box<dyn crypto::rng::RngCoreDispatchable + marker::Send>>,
     },
     Done,
 }
 
 impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsStartTransactionFuture<ST, C> {
-    fn new(
-        mut continued_read_sequence: Option<&CocoonFsConsistentReadSequence>,
-        rng: Box<dyn crypto::rng::RngCoreDispatchable + marker::Send>,
-    ) -> Self {
+    fn new(mut continued_read_sequence: Option<&CocoonFsConsistentReadSequence>) -> Self {
         if let Some(read_sequence) = continued_read_sequence.take().copied() {
             return Self {
-                fut_state: CocoonFsStartTransactionFutureState::ContinueReadSequence {
-                    read_sequence,
-                    rng: Some(rng),
-                },
+                fut_state: CocoonFsStartTransactionFutureState::ContinueReadSequence { read_sequence },
             };
         }
 
         Self {
             fut_state: CocoonFsStartTransactionFutureState::StartReadSequence {
                 start_read_sequence_fut: StartReadSequenceFuture::new(),
-                rng: Some(rng),
             },
         }
     }
@@ -1089,24 +1077,22 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, C>,
+        rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
-        let (read_sequence, mut rng) = match &mut this.fut_state {
-            CocoonFsStartTransactionFutureState::ContinueReadSequence { read_sequence, rng } => {
+        let read_sequence = match &mut this.fut_state {
+            CocoonFsStartTransactionFutureState::ContinueReadSequence { read_sequence } => {
                 let read_sequence = *read_sequence;
-                let rng = rng.take();
                 this.fut_state = CocoonFsStartTransactionFutureState::Done;
-                (read_sequence, rng)
+                read_sequence
             }
             CocoonFsStartTransactionFutureState::StartReadSequence {
                 start_read_sequence_fut,
-                rng,
-            } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, cx) {
+            } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, rng, cx) {
                 task::Poll::Ready(Ok(read_sequence)) => {
-                    let rng = rng.take();
                     this.fut_state = CocoonFsStartTransactionFutureState::Done;
-                    (read_sequence, rng)
+                    read_sequence
                 }
                 task::Poll::Ready(Err(e)) => {
                     this.fut_state = CocoonFsStartTransactionFutureState::Done;
@@ -1125,11 +1111,6 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
             }
         };
         let mut sync_state = CocoonFsSyncStateMemberRef::from(&sync_state_read_guard);
-
-        let rng = match rng.take() {
-            Some(rng) => rng,
-            None => return task::Poll::Ready(Err(nvfs_err_internal!())),
-        };
 
         // The first in a series of concurrently started transactions is blessed and has
         // a bit more freedom regarding in-place journal writes.
@@ -1201,6 +1182,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, C>,
+        mut rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -1316,7 +1298,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
                 CocoonFsCommitTransactionFutureState::ProgressCommitting {
                     progress_committing_transaction_subscription_fut,
                 } => {
-                    match future::Future::poll(pin::Pin::new(progress_committing_transaction_subscription_fut), cx) {
+                    match ProgressCommittingTransactionBroadcastFutureSubscriptionType::poll(
+                        pin::Pin::new(progress_committing_transaction_subscription_fut),
+                        &mut rng,
+                        cx,
+                    ) {
                         task::Poll::Ready(r) => {
                             let r = match r {
                                 ProgressCommittingTransactionFutureResult::Ok => Ok(()),
@@ -1386,10 +1372,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, C>,
+        rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
-        match fs::NvFsFuture::poll(pin::Pin::new(&mut this.start_read_sequence_fut), fs_instance, cx) {
+        match fs::NvFsFuture::poll(pin::Pin::new(&mut this.start_read_sequence_fut), fs_instance, rng, cx) {
             task::Poll::Ready(Ok(_)) => task::Poll::Ready(Ok(())),
             task::Poll::Ready(Err(e)) => task::Poll::Ready(Err(e)),
             task::Poll::Pending => task::Poll::Pending,
@@ -1453,6 +1440,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, C>,
+        rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -1462,7 +1450,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
                 CocoonFsReadInodeFutureState::StartReadSequence {
                     start_read_sequence_fut,
                     inode,
-                } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, cx) {
+                } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, rng, cx) {
                     task::Poll::Ready(Ok(read_sequence)) => {
                         this.fut_state = CocoonFsReadInodeFutureState::ReadInodeDataPrepare {
                             context: Some(fs::NvFsReadContext::Committed { seq: read_sequence }),
@@ -1597,6 +1585,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, C>,
+        mut rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -1648,7 +1637,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
                     let (transaction, data, result) = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(write_inode_data_fut),
                         &mut sync_state,
-                        &mut (),
+                        &mut rng,
                         cx,
                     ) {
                         task::Poll::Ready(Ok((transaction, data, result))) => (transaction, data, result),
@@ -1796,6 +1785,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &<CocoonFs<ST, C> as fs::NvFs>::SyncRcPtrRef<'_>,
+        _rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -1844,6 +1834,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &<CocoonFs<ST, C> as fs::NvFs>::SyncRcPtrRef<'_>,
+        _rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -1961,6 +1952,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &<CocoonFs<ST, C> as fs::NvFs>::SyncRcPtrRef<'_>,
+        _rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -2001,6 +1993,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &<CocoonFs<ST, C> as fs::NvFs>::SyncRcPtrRef<'_>,
+        mut rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -2012,8 +2005,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
         };
         let mut sync_state = CocoonFsSyncStateMemberRef::from(&sync_state_read_guard);
 
-        match CocoonFsSyncStateReadFuture::poll(pin::Pin::new(&mut this.unlink_inode_fut), &mut sync_state, &mut (), cx)
-        {
+        match CocoonFsSyncStateReadFuture::poll(
+            pin::Pin::new(&mut this.unlink_inode_fut),
+            &mut sync_state,
+            &mut rng,
+            cx,
+        ) {
             task::Poll::Ready(Ok((cursor, result))) => task::Poll::Ready(Ok((
                 CocoonFsUnlinkCursor {
                     cursor,
@@ -2048,6 +2045,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &<CocoonFs<ST, C> as fs::NvFs>::SyncRcPtrRef<'_>,
+        _rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -2314,14 +2312,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> asynchronous::BroadcastedFuture
     for ProgressCommittingTransactionFuture<ST, C>
 {
     type Output = ProgressCommittingTransactionFutureResult;
-    type AuxPollData<'a> = ();
+    type AuxPollData<'a> = &'a mut dyn rng::RngCoreDispatchable;
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        _aux_data: &mut Self::AuxPollData<'a>,
+        aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
+        let rng: &mut dyn rng::RngCoreDispatchable = *aux_data;
         // All but the first future states keep a
         // CocoonFsSyncStateMemberWriteWeakGuard, the first represents the
         // task to obtain a non-weak one. Try to obtain a non-weak
@@ -2668,6 +2667,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> asynchronous::BroadcastedFuture
                     match transaction::TransactionWriteJournalFuture::poll(
                         pin::Pin::new(write_journal_fut),
                         CocoonFsSyncStateMemberMutRef::from(&mut sync_state_write_guard),
+                        rng,
                         cx,
                     ) {
                         task::Poll::Ready(Ok(transaction)) => {
@@ -3039,6 +3039,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, C>,
+        mut rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -3336,7 +3337,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> fs::NvFsFuture<CocoonFs<ST, C>>
                     // use the the fs instance will find the uncompleted transaction
                     // back in ->committing_transaction again and retry before
                     // proceeding any further.
-                    match future::Future::poll(pin::Pin::new(progress_committing_transaction_subscription_fut), cx) {
+                    match ProgressCommittingTransactionBroadcastFutureSubscriptionType::poll(
+                        pin::Pin::new(progress_committing_transaction_subscription_fut),
+                        &mut rng,
+                        cx,
+                    ) {
                         task::Poll::Ready(r) => match r {
                             ProgressCommittingTransactionFutureResult::Ok => (),
                             ProgressCommittingTransactionFutureResult::CommitOkApplyJournalErr {

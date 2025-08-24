@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::chip;
-use crate::crypto;
+use crate::crypto::{self, rng};
 use crate::utils_async::sync_types::{self, SyncRcPtrRef as _};
 use crate::utils_common::{self, zeroize};
 use core::{convert, future, marker, ops, pin, task};
@@ -298,11 +298,14 @@ pub enum TransactionCommitError {
 /// Future trait implemented by all [`NvFs`] related futures.
 ///
 /// `NvFsFuture` differs from the standard [Rust `Future`](future::Future) only
-/// in that it takes an additional `fs_instance` argument, thereby potentially
-/// avoiding the need of creating and storing additional
-/// [`SyncRcPtr`](sync_types::SyncRcPtr) clones for the fs instance. In cases
-/// where a proper Rust [`Future`] is needed, [`NvFsFuture`] implementation
-/// instances can get wrapped in a [`NvFsFutureAsCoreFuture`].
+/// in that it takes additional `fs_instance` and `rng` arguments, thereby
+/// potentially avoiding the need of creating and storing additional
+/// [`SyncRcPtr`](sync_types::SyncRcPtr) clones for the fs instance or passing
+/// ownership on a [random number generator](rng::RngCoreDispatchable) in and
+/// out of the future instances.
+///
+/// In cases where a proper Rust [`Future`] is needed, [`NvFsFuture`]
+/// implementation instances can get wrapped in a [`NvFsFutureAsCoreFuture`].
 ///
 /// # See also:
 ///
@@ -314,17 +317,21 @@ pub trait NvFsFuture<FS: NvFs>: 'static {
     ///
     /// Completely analogous to the standard [Rust
     /// `Future::poll()`](future::Future::poll), except for the additional
-    /// `fs_instance` argument.
+    /// `fs_instance` and `rng` arguments.
     ///
     /// # Arguments:
     ///
     /// * `fs_instance` - A [`SyncRcPtrRef<NvFs>`](sync_types::SyncRcPtrRef)
     ///   referring to the [`SyncRcPtr<NvFs>`](sync_types::SyncRcPtr) managing
     ///   the `NvFs` instance the [`NvFsFuture`] had been obtained from.
+    /// * `rng` - A [random number generator](rng::RngCoreDispatchable) instance
+    ///   for serving the filesystem implementation's needs, e.g. for creating
+    ///   block cipher chaining mode IVs or for randomizing padding data.
     /// * `cx` - The context of an asynchronous task.
     fn poll(
         self: pin::Pin<&mut Self>,
         fs_instance: &FS::SyncRcPtrRef<'_>,
+        rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output>;
 }
@@ -368,9 +375,10 @@ pub trait NvFsFuture<FS: NvFs>: 'static {
 /// The latter differ from the former only in that they take an additional
 /// `fs_instance` argument, thereby potentially avoiding the need of creating
 /// and storing additional [`SyncRcPtr`](sync_types::SyncRcPtr) clones for the
-/// fs instance. In cases where a proper Rust [`Future`] is needed,
-/// [`NvFsFuture`] implementation instances can get wrapped in a
-/// [`NvFsFutureAsCoreFuture`].
+/// fs instance or for passing [random number
+/// generator](rng::RngCoreDispatchable) ownership in and out). In cases where a
+/// proper Rust [`Future`] is needed, [`NvFsFuture`] implementation instances
+/// can get wrapped in a [`NvFsFutureAsCoreFuture`].
 ///
 /// # Transactions and Consistent Read Sequences
 ///
@@ -670,10 +678,13 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     /// * `this` - A [`SyncRcPtrRef<Self>`](sync_types::SyncRcPtrRef) referring
     ///   to the [`SyncRcPtr<Self>`](sync_types::SyncRcPtr) managing the `NvFs`
     ///   instance.
+    /// * `continued_read_sequence` - Optional
+    ///   [`ConsistentReadSequence`](Self::ConsistentReadSequence) previously
+    ///   obtained from [`start_read_sequence()`](Self::start_read_sequence) to
+    ///   continue the [`Transaction`](Self::Transaction) on.
     fn start_transaction(
         this: &Self::SyncRcPtrRef<'_>,
         continued_read_sequence: Option<&Self::ConsistentReadSequence>,
-        rng: Box<dyn crypto::rng::RngCoreDispatchable + marker::Send>,
     ) -> Self::StartTransactionFut;
 
     /// `NvFs` implementation specific [future](NvFsFuture) type instantiated
@@ -1254,29 +1265,60 @@ pub trait NvFsUnlinkCursor<FS: NvFs>: Sized {
 /// `Future`](future::Future) trait.
 pub struct NvFsFutureAsCoreFuture<FS: NvFs, F: NvFsFuture<FS>> {
     fs_instance: FS::SyncRcPtr,
+    // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+    // Self.
+    rng: Option<Box<dyn rng::RngCoreDispatchable + marker::Send>>,
     fut: F,
 }
 
 impl<FS: NvFs, F: NvFsFuture<FS>> NvFsFutureAsCoreFuture<FS, F> {
     /// Wrap a [`NvFsFuture`] in a new [`NvFsFutureAsCoreFuture`].
     ///
+    /// The [`NvFsFutureAsCoreFuture`] assumes ownership of the provided `rng`
+    /// for the duration of the operation and eventually returns it back
+    /// from [`poll()`](Self::poll) upon completion.
+    ///
     /// # Arguments:
     ///
     /// * `fs_instance` - The [`NvFs`] instance the [`NvFsFuture`] `fut` had
     ///   been obtained from.
     /// * `fut` - The [`NvFsFuture`] to wrap.
-    pub fn new(fs_instance: FS::SyncRcPtr, fut: F) -> Self {
-        Self { fs_instance, fut }
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable)
+    ///   instance to provide to `fut`'s [`poll()`](NvFsFuture::poll).
+    pub fn new(fs_instance: FS::SyncRcPtr, fut: F, rng: Box<dyn rng::RngCoreDispatchable + marker::Send>) -> Self {
+        Self {
+            fs_instance,
+            fut,
+            rng: Some(rng),
+        }
     }
 }
 
 impl<FS: NvFs, F: NvFsFuture<FS>> future::Future for NvFsFutureAsCoreFuture<FS, F> {
-    type Output = F::Output;
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// In case of an internal error, an `Err` is returned and the [random
+    /// number generator](rng::RngCoreDispatchable) instance initially
+    /// passed to [`new()`](Self::new) is lost. Otherwise a pair of the
+    /// input [random number generator](rng::RngCoreDispatchable) and
+    /// the wrapped [`NvFsFuture`]'s completion result is returned wrapped in an
+    /// `Ok`.
+    type Output = Result<(Box<dyn rng::RngCoreDispatchable + marker::Send>, F::Output), NvFsError>;
 
     fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         // Safe, it's just a projection pin.
         let this = unsafe { pin::Pin::into_inner_unchecked(self) };
         let fut = unsafe { pin::Pin::new_unchecked(&mut this.fut) };
-        NvFsFuture::poll(fut, &FS::SyncRcPtrRef::new(&this.fs_instance), cx)
+        let mut rng = match this.rng.take() {
+            Some(rng) => rng,
+            None => return task::Poll::Ready(Err(nvfs_err_internal!())),
+        };
+        match NvFsFuture::poll(fut, &FS::SyncRcPtrRef::new(&this.fs_instance), &mut *rng, cx) {
+            task::Poll::Ready(result) => task::Poll::Ready(Ok((rng, result))),
+            task::Poll::Pending => {
+                this.rng = Some(rng);
+                task::Poll::Pending
+            }
+        }
     }
 }
