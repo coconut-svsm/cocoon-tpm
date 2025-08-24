@@ -584,6 +584,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> MkFsFuture<ST, C> {
         let allocation_block_chip_io_blocks_log2 =
             allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
         let chip_io_blocks = chip.chip_io_blocks();
+        let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
         let chip_allocation_blocks = layout::AllocBlockCount::from(
             chip_io_blocks << chip_io_block_allocation_blocks_log2 >> allocation_block_chip_io_blocks_log2,
         );
@@ -841,6 +842,7 @@ where
                     let allocation_block_chip_io_blocks_log2 =
                         allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
                     let chip_io_blocks = chip.chip_io_blocks();
+                    let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
                     let chip_allocation_blocks = layout::AllocBlockCount::from(
                         chip_io_blocks << chip_io_block_allocation_blocks_log2 >> allocation_block_chip_io_blocks_log2,
                     );
@@ -906,6 +908,7 @@ where
                             let allocation_block_chip_io_blocks_log2 =
                                 allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
                             let chip_io_blocks = chip.chip_io_blocks();
+                            let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
                             let chip_allocation_blocks = layout::AllocBlockCount::from(
                                 chip_io_blocks << chip_io_block_allocation_blocks_log2
                                     >> allocation_block_chip_io_blocks_log2,
@@ -1843,8 +1846,9 @@ where
                         // MkfsLayout::new() verifies that the salt length fits an u8.
                         let salt_len = mkfs_layout.salt.len() as u8;
                         let chip = &fs_init_data.chip;
-                        let chip_io_blocks = chip.chip_io_blocks();
                         let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                        let chip_io_blocks = chip.chip_io_blocks();
+                        let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
                         let backup_mkfsinfo_header_location =
                             match image_header::MkFsInfoHeader::physical_backup_location(
                                 salt_len,
@@ -2421,6 +2425,7 @@ impl<C: chip::NvChip> InvalidateBackupMkFsInfoHeaderFuture<C> {
     ) -> Result<Self, NvFsError> {
         let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
         let chip_io_blocks = chip.chip_io_blocks();
+        let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
 
         let backup_mkfsinfo_header_location = image_header::MkFsInfoHeader::physical_backup_location(
             salt_len,
@@ -2717,6 +2722,7 @@ impl<C: chip::NvChip> WriteMkFsInfoHeaderFuture<C> {
                         chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
                     let mkfsinfo_header_location = if *to_backup_location {
                         let chip_io_blocks = chip.chip_io_blocks();
+                        let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
                         match image_header::MkFsInfoHeader::physical_backup_location(
                             salt_len,
                             chip_io_blocks,
@@ -2887,6 +2893,7 @@ impl<C: chip::NvChip> CocoonFsWriteMkfsInfoHeaderFuture<C> {
         let allocation_block_chip_io_blocks_log2 =
             allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
         let chip_io_blocks = chip.chip_io_blocks();
+        let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
         let chip_allocation_blocks = layout::AllocBlockCount::from(
             chip_io_blocks << chip_io_block_allocation_blocks_log2 >> allocation_block_chip_io_blocks_log2,
         );

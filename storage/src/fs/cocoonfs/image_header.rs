@@ -1246,6 +1246,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                 ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader { first_error } => {
                     let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
                     let chip_io_blocks = chip.chip_io_blocks();
+                    let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
                     let backup_location_chip_io_blocks_begin =
                         match MkFsInfoHeader::physical_backup_location_chip_io_blocks_begin(
                             chip_io_blocks,
