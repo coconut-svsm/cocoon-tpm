@@ -25,10 +25,37 @@ impl convert::From<BroadcastWakerError> for BroadcastFutureError {
     }
 }
 
-/// Future adaptor enabling collective polling on a wrapped [`Future`],
-/// replicating the result to all subscribers.
+/// [`Future`]-like type to get wrapped in a [`BroadcastFuture`].
 ///
-/// A `BroadcastFuture` wraps a given inner [`Future`] and allows for
+/// The standard Rust [`Future::poll()`](future::Future::poll) signature is
+/// extended to enable access to some auxiliary data provided through **any**
+/// `BroadcastFutureSubscription::poll()`](BroadcastFutureSubscription::poll).
+pub trait BroadcastedFuture {
+    /// The type of value produced on completion.
+    type Output: Clone + marker::Send;
+
+    /// Type of the auxiliary argument provided to [`poll()`](Self::poll).
+    type AuxPollData<'a>;
+
+    /// The extended `poll()` being provided access to some `aux_data`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `aux_data` - Auxiliary data passed onwards from **some unspecified**
+    ///   [`BroadcastFutureSubscription::poll()`](BroadcastFutureSubscription::poll).
+    /// * `cx` - Asynchronous task context providing access to a
+    ///   [`Waker`](task::Waker).
+    fn poll<'a>(
+        self: pin::Pin<&mut Self>,
+        aux_data: &mut Self::AuxPollData<'a>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output>;
+}
+
+/// Future adaptor enabling collective polling on a wrapped
+/// [`BroadcastedFuture`], replicating the result to all subscribers.
+///
+/// A `BroadcastFuture` wraps a given inner [`BrodacastedFuture`] and allows for
 /// collective polling from one or more subscribers instantiated via
 /// [`subscribe()`](Self::subscribe).
 ///
@@ -40,37 +67,26 @@ impl convert::From<BroadcastWakerError> for BroadcastFutureError {
 /// The `BroadcastFuture` implementation is robust against threads "loosing
 /// interest", e.g. abandoned tasks never polled again: whenever at least one
 /// subscribed thread is still getting polled, wakeups always do get processed
-/// and the [`Future`] is guaranteed to make progress. This comes at the cost of
-/// an (intentional) thundering-herd style wake-up scheme: whenever the inner
-/// [`Future`] is woken, the wake-up gets broadcasted to all subscribers.
-pub struct BroadcastFuture<ST: sync_types::SyncTypes, F: future::Future>
-where
-    F::Output: Clone + marker::Send,
-{
+/// and the wrapped [`BroadcastedFuture`] is guaranteed to make progress. This
+/// comes at the cost of an (intentional) thundering-herd style wake-up scheme:
+/// whenever the inner [`BroadcastedFuture`] is woken, the wake-up gets
+/// broadcasted to all subscribers.
+pub struct BroadcastFuture<ST: sync_types::SyncTypes, F: BroadcastedFuture> {
     /// The subscriptions to the `BroadcastFuture`.
     subscriptions: BroadcastWakerSubscriptions<ST>,
     /// Concurrent polling state for the `inner_fut`. Used to ensure only
     /// one thread is polling the `inner_fut` at a time.
     polling_state: ST::Lock<BroadcastFuturePollingState>,
-    /// The inner [`Future`].
+    /// The inner [`BroadcastedFuture`].
     inner_fut: cell::UnsafeCell<BroadcastFutureInnerFuture<F>>,
 }
 
-unsafe impl<ST: sync_types::SyncTypes, F: future::Future> marker::Send for BroadcastFuture<ST, F> where
-    F::Output: Clone + marker::Send
-{
-}
+unsafe impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> marker::Send for BroadcastFuture<ST, F> {}
 
-unsafe impl<ST: sync_types::SyncTypes, F: future::Future> marker::Sync for BroadcastFuture<ST, F> where
-    F::Output: Clone + marker::Send
-{
-}
+unsafe impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> marker::Sync for BroadcastFuture<ST, F> {}
 
-impl<ST: sync_types::SyncTypes, F: future::Future> BroadcastFuture<ST, F>
-where
-    F::Output: Clone + marker::Send,
-{
-    /// Wrap a given [`Future`] in a `BroadcastFuture`.
+impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
+    /// Wrap a given [`BroadcastedFuture`] in a `BroadcastFuture`.
     ///
     /// Note that the caller is supposed to move the returned `BroadcastFuture`
     /// into a pinned [`SyncRcPtr`](sync_types::SyncRcPtr) -- the other parts of
@@ -78,8 +94,8 @@ where
     ///
     /// # Arguments:
     ///
-    /// * `inner` - The [`Future`] to get wrapped, collectively polled and whose
-    ///   result is to get eventually broadcasted to all
+    /// * `inner` - The [`BroadcastedFuture`] to get wrapped, collectively
+    ///   polled and whose result is to get eventually broadcasted to all
     ///   [subscriptions](Self::subscribe).
     pub fn new(inner: F) -> Self {
         Self {
@@ -91,7 +107,7 @@ where
 
     /// Unwrap the inner future.
     ///
-    /// Returns the inner [`Future`] in case it's still
+    /// Returns the inner [`BroadcastedFuture`] in case it's still
     /// [`Pending`](task::Poll::Pending), `None` otherwise.
     pub fn into_inner(self) -> Option<F> {
         match self.inner_fut.into_inner() {
@@ -102,9 +118,9 @@ where
 
     /// Subscribe to the given `BroadcastFuture` instance.
     ///
-    /// On success, a [`BroadcastFutureSubscription`] [`Future`] will get
-    /// returned, which can then subsequently get polled to drive progress
-    /// on the wrapped future forward and to eventually obtain the
+    /// On success, a [`BroadcastFutureSubscription`] [`BrodacastedFuture`] will
+    /// get returned, which can then subsequently get polled to drive
+    /// progress on the wrapped future forward and to eventually obtain the
     /// broadcasted result.
     ///
     /// # Errors:
@@ -138,13 +154,22 @@ where
     ///   [`Self::new()`](Self::new).
     /// * subscription_id` - The id associated with the subscription on whose
     ///   behalf to poll from.
+    /// * `aux_poll_data` - The auxiliary argument to provide when
+    ///   [polling](BroadcastedFuture::poll) the wrapped [`BroadcastedFuture`].
+    ///   Note that the inner [`BroadcastedFuture::poll()`] will get invoked
+    ///   with the `aux_poll_data` passed on behalf of some unspecified
+    ///   subscription, so they must all be functionally equivalent!
+    /// * `cx` - Asynchronous task context providing access to a
+    ///   [`Waker`](task::Waker).
     fn poll_from_subscription<
         'a,
+        'b,
         BP: 'a + sync_types::SyncRcPtr<Self>,
         BR: 'a + sync_types::SyncRcPtrRef<'a, Self, BP>,
     >(
         this: pin::Pin<BR>,
         subscription_id: BroadcastWakerSubscriptionId,
+        aux_poll_data: &mut F::AuxPollData<'b>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<F::Output>
     where
@@ -233,7 +258,7 @@ where
             // Safe, it's a projection repin.
             let f = unsafe { pin::Pin::new_unchecked(&mut *f) };
 
-            let result = future::Future::poll(f, &mut task::Context::from_waker(&waker));
+            let result = BroadcastedFuture::poll(f, aux_poll_data, &mut task::Context::from_waker(&waker));
 
             // At this point the (broadcast) waker might wake other tasks, they'd see
             // ->polling_state == InPoll and put themselves immediately back to sleep. In
@@ -287,55 +312,52 @@ where
 /// via the [`SyncRcPtrForInner`](sync_types::SyncRcPtrForInner) mechanism.
 struct BroadcastFutureDerefInnerSubscriptionsTag;
 
-impl<ST: sync_types::SyncTypes, F: future::Future>
+impl<ST: sync_types::SyncTypes, F: BroadcastedFuture>
     sync_types::DerefInnerByTag<BroadcastFutureDerefInnerSubscriptionsTag> for BroadcastFuture<ST, F>
-where
-    F::Output: Clone + marker::Send,
 {
     crate::impl_deref_inner_by_tag!(subscriptions, BroadcastWakerSubscriptions<ST>);
 }
 
-impl<ST: sync_types::SyncTypes, F: future::Future>
+impl<ST: sync_types::SyncTypes, F: BroadcastedFuture>
     sync_types::DerefMutInnerByTag<BroadcastFutureDerefInnerSubscriptionsTag> for BroadcastFuture<ST, F>
-where
-    F::Output: Clone + marker::Send,
 {
     crate::impl_deref_mut_inner_by_tag!(subscriptions);
 }
 
-/// Polling progress of a [`BroadcastFuture`]'s inner [`Future`].
-enum BroadcastFutureInnerFuture<F: future::Future> {
-    /// The inner [`Future`] is not [`Ready`](task::Poll::Ready)
+/// Polling progress of a [`BroadcastFuture`]'s inner [`BroadcastedFuture`].
+enum BroadcastFutureInnerFuture<F: BroadcastedFuture> {
+    /// The inner [`BroadcastedFuture`] is not [`Ready`](task::Poll::Ready)
     /// yet and must get polled further.
     Pending {
         /// The inner future to get collectively polled for.
         inner: F,
     },
-    /// The inner [`Future`] is [`Ready`](task::Poll::Ready),
+    /// The inner [`BroadcastedFuture`] is [`Ready`](task::Poll::Ready),
     /// with the resulting [`Output`][`Future::Output`].
     Ready(F::Output),
 }
 
-/// Concurrent polling state of the [`BroadcastFuture`]'s inner [`Future`],
-/// tracked at [`BroadcastFuture::polling_state`].
+/// Concurrent polling state of the [`BroadcastFuture`]'s inner
+/// [`BroadcastedFuture`], tracked at [`BroadcastFuture::polling_state`].
 ///
-/// Used for managing exclusive access to the inner [`Future`] without
-/// holding a [`Lock`](sync_types::Lock), which is possibly of the spinlock
-/// kind, over [`Future::poll()`](Future::poll) invocations.
+/// Used for managing exclusive access to the inner [`BroadcastedFuture`]
+/// without holding a [`Lock`](sync_types::Lock), which is possibly of the
+/// spinlock kind, over [`Future::poll()`](Future::poll) invocations.
 ///
 /// Note that updates to the [`BroadcastFuture::polling_state`] are done under
 /// the protection of a [`Lock`](sync_types::Lock), but that's getting dropped
-/// inbetween while the [`Future`] is being polled.
+/// inbetween while the [`BroadcastedFuture`] is being polled.
 ///
 /// # See also:
 ///
 /// * [`BroadcastFutureInPollGuard`]
 #[derive(PartialEq, Eq, Debug)]
 enum BroadcastFuturePollingState {
-    /// No thread is currently polling the inner [`Future`].
+    /// No thread is currently polling the inner [`BroadcastedFuture`].
     Idle,
-    /// A thread is currently exclusively polling the inner [`Future`] and that
-    /// thread owns a [`BroadcastFutureInPollGuard`].
+    /// A thread is currently exclusively polling the inner
+    /// [`BroadcastedFuture`] and that thread owns a
+    /// [`BroadcastFutureInPollGuard`].
     InPoll,
 }
 
@@ -343,19 +365,13 @@ enum BroadcastFuturePollingState {
 /// [`InPoll`](BroadcastFuturePollingState::InPoll) state.
 ///
 /// Held exclusively by the thread currently polling the [`BroadcastFuture`]'s
-/// inner [`Future`].
-struct BroadcastFutureInPollGuard<'a, ST: sync_types::SyncTypes, F: future::Future>
-where
-    F::Output: Clone + marker::Send,
-{
+/// inner [`BroadcastedFuture`].
+struct BroadcastFutureInPollGuard<'a, ST: sync_types::SyncTypes, F: BroadcastedFuture> {
     broadcast_future: &'a BroadcastFuture<ST, F>,
     locked_in_poll: bool,
 }
 
-impl<'a, ST: sync_types::SyncTypes, F: future::Future> BroadcastFutureInPollGuard<'a, ST, F>
-where
-    F::Output: Clone + marker::Send,
-{
+impl<'a, ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFutureInPollGuard<'a, ST, F> {
     /// Transition the [`BroadcastFuture::polling_state`] from
     /// [`Idle`](BroadcastFuturePollingState::Idle) to
     /// [`InPoll`](BroadcastFuturePollingState::InPoll) and return a
@@ -409,10 +425,7 @@ where
     }
 }
 
-impl<'a, ST: sync_types::SyncTypes, F: future::Future> Drop for BroadcastFutureInPollGuard<'a, ST, F>
-where
-    F::Output: Clone + marker::Send,
-{
+impl<'a, ST: sync_types::SyncTypes, F: BroadcastedFuture> Drop for BroadcastFutureInPollGuard<'a, ST, F> {
     fn drop(&mut self) {
         if self.locked_in_poll {
             *self.broadcast_future.polling_state.lock() = BroadcastFuturePollingState::Idle;
@@ -424,9 +437,9 @@ where
 /// Subscription to a [`BroadcastFuture`].
 ///
 /// [`BroadcastFutureSubscription`], instantiated through
-/// [`BroadcastFuture::subscribe()`], implements [`Future`] itself and is to be
-/// used to poll on the wrapped inner future and to eventually obtain its
-/// broadcasted result once completed.
+/// [`BroadcastFuture::subscribe()`], implements [`poll()`](Self::poll) itself
+/// and is to be used to poll on the wrapped inner future and to eventually
+/// obtain its broadcasted result once completed.
 ///
 /// It should be obvious, but it is explictly permitted to concurrently poll on
 /// the same [`BroadcastFuture`] instance from multiple associated
@@ -437,19 +450,24 @@ where
 /// broadcasted to all registered subscribers.
 pub struct BroadcastFutureSubscription<
     ST: sync_types::SyncTypes,
-    F: future::Future,
+    F: BroadcastedFuture,
     BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>,
-> where
-    F::Output: Clone + marker::Send,
-{
+> {
     state: BroadcastFutureSubscriptionState<ST, F, BP>,
 }
 
-impl<ST: sync_types::SyncTypes, F: future::Future, BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>>
+impl<ST: sync_types::SyncTypes, F: BroadcastedFuture, BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>>
     BroadcastFutureSubscription<ST, F, BP>
-where
-    F::Output: Clone + marker::Send,
 {
+    /// Instantiate a [`BroadcastFutureSubscription`] bound to some
+    /// [`BroadcastFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `broadcast_future` - The [`BroadcastFuture`] the to be insantiated
+    ///   [`BroadcastFutureSubscription`] will be associated with.
+    /// * `subscription_id` - The subscription id obtained from
+    ///   [`BroadcastFuture::subscriptions`].
     fn new(broadcast_future: pin::Pin<BP>, subscription_id: BroadcastWakerSubscriptionId) -> Self {
         Self {
             state: BroadcastFutureSubscriptionState::Pending {
@@ -459,16 +477,23 @@ where
             },
         }
     }
-}
 
-impl<ST: sync_types::SyncTypes, F: future::Future, BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>> future::Future
-    for BroadcastFutureSubscription<ST, F, BP>
-where
-    F::Output: Clone + marker::Send,
-{
-    type Output = F::Output;
-
-    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    /// Poll on behalf of the subscription.
+    ///
+    /// # Arguments:
+    ///
+    /// * `aux_poll_data` - The auxiliary argument to provide when
+    ///   [polling](BroadcastedFuture::poll) the wrapped [`BroadcastedFuture`].
+    ///   Note that the inner [`BroadcastedFuture::poll()`] will get invoked
+    ///   with the `aux_poll_data` passed on behalf of some unspecified
+    ///   subscription, so they must all be functionally equivalent!
+    /// * `cx` - Asynchronous task context providing access to a
+    ///   [`Waker`](task::Waker).
+    pub fn poll<'a>(
+        self: pin::Pin<&mut Self>,
+        aux_poll_data: &mut F::AuxPollData<'a>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<F::Output> {
         let this = self.get_mut();
         match &this.state {
             BroadcastFutureSubscriptionState::Pending {
@@ -479,6 +504,7 @@ where
                 let result = BroadcastFuture::poll_from_subscription(
                     sync_types::SyncRcPtr::as_ref(broadcast_future),
                     *subscription_id,
+                    aux_poll_data,
                     cx,
                 );
                 if matches!(result, task::Poll::Ready(_)) {
@@ -491,10 +517,8 @@ where
     }
 }
 
-impl<ST: sync_types::SyncTypes, F: future::Future, BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>> Drop
+impl<ST: sync_types::SyncTypes, F: BroadcastedFuture, BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>> Drop
     for BroadcastFutureSubscription<ST, F, BP>
-where
-    F::Output: Clone + marker::Send,
 {
     fn drop(&mut self) {
         match &self.state {
@@ -511,16 +535,28 @@ where
     }
 }
 
+impl<
+    'a,
+    ST: sync_types::SyncTypes,
+    F: BroadcastedFuture<AuxPollData<'a> = ()>,
+    BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>,
+> future::Future for BroadcastFutureSubscription<ST, F, BP>
+{
+    type Output = F::Output;
+
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        BroadcastFutureSubscription::poll(self, &mut (), cx)
+    }
+}
+
 /// Private state of [`BroadcastFutureSubscription`].
 enum BroadcastFutureSubscriptionState<
     ST: sync_types::SyncTypes,
-    F: future::Future,
+    F: BroadcastedFuture,
     BP: sync_types::SyncRcPtr<BroadcastFuture<ST, F>>,
-> where
-    F::Output: Clone + marker::Send,
-{
-    /// The [`BroadcastFutureSubscription`] [`Future`] has not been polled to
-    /// completion yet.
+> {
+    /// The [`BroadcastFutureSubscription`] [`BroadcastedFuture`] has not been
+    /// polled to completion yet.
     Pending {
         /// The [`BroadcastFuture`] the subscription is to.
         broadcast_future: pin::Pin<BP>,
@@ -528,8 +564,8 @@ enum BroadcastFutureSubscriptionState<
         subscription_id: BroadcastWakerSubscriptionId,
         _phantom: marker::PhantomData<fn() -> (*const ST, *const F)>,
     },
-    /// The [`BroadcastFutureSubscription`] [`Future`] has been polled to
-    /// completion and the broadcasted result returned.
+    /// The [`BroadcastFutureSubscription`] [`BroadcastedFuture`] has been
+    /// polled to completion and the broadcasted result returned.
     Done,
 }
 
@@ -539,10 +575,15 @@ fn test_broadcast_future_single() {
 
     struct TestBroadcastedFuture {}
 
-    impl future::Future for TestBroadcastedFuture {
+    impl BroadcastedFuture for TestBroadcastedFuture {
         type Output = u32;
+        type AuxPollData<'a> = ();
 
-        fn poll<'a>(self: pin::Pin<&mut Self>, _cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        fn poll<'a>(
+            self: pin::Pin<&mut Self>,
+            _aux_data: &mut Self::AuxPollData<'a>,
+            _cx: &mut task::Context<'_>,
+        ) -> task::Poll<Self::Output> {
             task::Poll::Ready(1u32)
         }
     }
@@ -570,10 +611,15 @@ fn test_broadcast_future_broadcast() {
         polled_once: bool,
     }
 
-    impl future::Future for TestBroadcastedFuture {
+    impl BroadcastedFuture for TestBroadcastedFuture {
         type Output = u32;
+        type AuxPollData<'a> = ();
 
-        fn poll<'a>(self: pin::Pin<&mut Self>, _cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        fn poll<'a>(
+            self: pin::Pin<&mut Self>,
+            _aux_data: &mut Self::AuxPollData<'a>,
+            _cx: &mut task::Context<'_>,
+        ) -> task::Poll<Self::Output> {
             if self.polled_once == false {
                 self.get_mut().polled_once = true;
                 task::Poll::Pending
@@ -611,10 +657,15 @@ fn test_broadcast_future_post_completion_subscribe() {
         done: bool,
     }
 
-    impl future::Future for TestBroadcastedFuture {
+    impl BroadcastedFuture for TestBroadcastedFuture {
         type Output = u32;
+        type AuxPollData<'a> = ();
 
-        fn poll<'a>(self: pin::Pin<&mut Self>, _cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        fn poll<'a>(
+            self: pin::Pin<&mut Self>,
+            _aux_data: &mut Self::AuxPollData<'a>,
+            _cx: &mut task::Context<'_>,
+        ) -> task::Poll<Self::Output> {
             assert!(!self.done);
             self.get_mut().done = true;
             task::Poll::Ready(1u32)
@@ -647,10 +698,15 @@ fn test_broadcast_future_cancel_subscription() {
 
     struct TestBroadcastedFuture {}
 
-    impl future::Future for TestBroadcastedFuture {
+    impl BroadcastedFuture for TestBroadcastedFuture {
         type Output = u32;
+        type AuxPollData<'a> = ();
 
-        fn poll<'a>(self: pin::Pin<&mut Self>, _cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        fn poll<'a>(
+            self: pin::Pin<&mut Self>,
+            _aux_data: &mut Self::AuxPollData<'a>,
+            _cx: &mut task::Context<'_>,
+        ) -> task::Poll<Self::Output> {
             task::Poll::Ready(1u32)
         }
     }

@@ -2310,10 +2310,17 @@ enum ProgressCommittingTransactionFuture<ST: sync_types::SyncTypes, C: chip::NvC
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for ProgressCommittingTransactionFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, C: chip::NvChip> asynchronous::BroadcastedFuture
+    for ProgressCommittingTransactionFuture<ST, C>
+{
     type Output = ProgressCommittingTransactionFutureResult;
+    type AuxPollData<'a> = ();
 
-    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll<'a>(
+        self: pin::Pin<&mut Self>,
+        _aux_data: &mut Self::AuxPollData<'a>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
         // All but the first future states keep a
         // CocoonFsSyncStateMemberWriteWeakGuard, the first represents the

@@ -12,6 +12,9 @@ use crate::{
 };
 use core::{cell, convert, marker, pin, sync::atomic, task};
 
+#[cfg(doc)]
+use core::future;
+
 /// Trait for futures to be processed by a [`FutureQueue`].
 ///
 /// As the whole point of the [`FutureQueue`] concept is to arbitrate
@@ -19,20 +22,25 @@ use core::{cell, convert, marker, pin, sync::atomic, task};
 /// signature is being extended to provide exclusive access to that shared
 /// value.
 pub trait QueuedFuture<T> {
+    /// The type of value produced on completion.
     type Output;
+    /// Type of the auxiliary argument provided to [`poll()`](Self::poll).
     type AuxPollData<'a>;
 
     /// The extended `poll()` with access to the [`FutureQueue`]'s arbitrated
     /// ressource.
     ///
-    /// # Arguements:
+    /// # Arguments:
     ///
     /// * `arbitrated_ressource` - A `mut` reference to the [`FutureQueue`]'s
     ///   arbitrated ressource. As a [`FutureQueue`] processes queued futures in
     ///   order, no other future will be given access inbetween any two `poll()`
-    ///   invocations on this instance..
-    /// * `aux_data` - Auxiliary data passed onwards from **any**
-    ///   [`EnqueuedFutureSubscription::poll()`](EnqueuedFutureSubscription::poll).
+    ///   invocations on this instance.
+    /// * `aux_data` - Auxiliary data passed onwards from **some unspecified**
+    ///   [`EnqueuedFutureSubscription::poll()`](EnqueuedFutureSubscription::poll)
+    ///   subscription -- there is no guarantee it would be the one provided
+    ///   through the [`EnqueuedFutureSubscription`] obtained from
+    ///   [`FutureQueue::enqueue()`]!
     /// * `cx` - Asynchronous task context providing access to a
     ///   [`Waker`](task::Waker).
     fn poll<'a>(
@@ -235,10 +243,12 @@ impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> FutureQueue<ST, T, F> {
         {
             state_guard.submission_queue.remove(sqe_index);
 
-            debug_assert!(!state_guard
-                .completion_queue
-                .iter()
-                .any(|cqe| cqe.as_ref().map(|cqe| cqe.0 == queue_entry_id).unwrap_or(false)));
+            debug_assert!(
+                !state_guard
+                    .completion_queue
+                    .iter()
+                    .any(|cqe| cqe.as_ref().map(|cqe| cqe.0 == queue_entry_id).unwrap_or(false))
+            );
             let popped_cqe = state_guard.completion_queue.pop();
             debug_assert!(matches!(popped_cqe, Some(None)));
         } else if state_guard
@@ -260,10 +270,12 @@ impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> FutureQueue<ST, T, F> {
                 *active_fut = None;
             }
 
-            debug_assert!(!state_guard
-                .completion_queue
-                .iter()
-                .any(|cqe| cqe.as_ref().map(|cqe| cqe.0 == queue_entry_id).unwrap_or(false)));
+            debug_assert!(
+                !state_guard
+                    .completion_queue
+                    .iter()
+                    .any(|cqe| cqe.as_ref().map(|cqe| cqe.0 == queue_entry_id).unwrap_or(false))
+            );
             let popped_cqe = state_guard.completion_queue.pop();
             debug_assert!(matches!(popped_cqe, Some(None)));
         } else {
