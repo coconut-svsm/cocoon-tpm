@@ -60,9 +60,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
     /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the static image header.
     ///   Its length must not exceed [`u8::MAX`].
-    /// * `image_size` - Optional desired filesystem image size to get recorded
-    ///   in the mutable image header. If not specified, the maximum possible
-    ///   value within the backing storage's
+    /// * `image_size` - Optional desired filesystem image size in units of
+    ///   Bytes to get recorded in the mutable image header. If not specified,
+    ///   the maximum possible value within the backing storage's
     ///   [dimensions](chip::NvChip::chip_io_blocks) will be used.
     /// * `raw_root_key` - The filesystem's raw root key material supplied from
     ///   extern.
@@ -80,11 +80,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsMkFsFuture<ST, C> {
         chip: C,
         image_layout: &CocoonFsImageLayout,
         salt: FixedVec<u8, 4>,
-        image_size: Option<layout::AllocBlockCount>,
+        image_size: Option<u64>,
         raw_root_key: &[u8],
         enable_trimming: bool,
         rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
     ) -> Result<Self, (C, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
+        // Convert from units of Bytes to Allocation Blocks.
+        let image_size = image_size.map(|image_size| {
+            layout::AllocBlockCount::from(image_size >> (image_layout.allocation_block_size_128b_log2 as u32 + 7))
+        });
         Ok(Self {
             mkfs_fut: MkFsFuture::new(
                 chip,
@@ -2858,16 +2862,16 @@ impl<C: chip::NvChip> CocoonFsWriteMkfsInfoHeaderFuture<C> {
     /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the static image header.
     ///   Its length must not exceed [`u8::MAX`].
-    /// * `image_size` - Optional desired filesystem image size to eventually
-    ///   get recorded in the filesystem's mutable image header in the course of
-    ///   the actual filesystem creation. If not specified, the maximum possible
-    ///   value within the backing storage's
+    /// * `image_size` - Optional desired filesystem image size in units of
+    ///   Bytes to eventually get recorded in the filesystem's mutable image
+    ///   header in the course of the actual filesystem creation. If not
+    ///   specified, the maximum possible value within the backing storage's
     ///   [dimensions](chip::NvChip::chip_io_blocks) will be used.
     pub fn new(
         chip: C,
         image_layout: &CocoonFsImageLayout,
         salt: FixedVec<u8, 4>,
-        image_size: Option<layout::AllocBlockCount>,
+        image_size: Option<u64>,
     ) -> Result<Self, (C, NvFsError)> {
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
@@ -2887,6 +2891,9 @@ impl<C: chip::NvChip> CocoonFsWriteMkfsInfoHeaderFuture<C> {
             chip_io_blocks << chip_io_block_allocation_blocks_log2 >> allocation_block_chip_io_blocks_log2,
         );
 
+        // Convert from units of Bytes to Allocation Blocks.
+        let image_size = image_size
+            .map(|image_size| layout::AllocBlockCount::from(image_size >> (allocation_block_size_128b_log2 + 7)));
         let image_size = image_size.unwrap_or(chip_allocation_blocks);
 
         // Before writing anything, verify that the to be created filesystem can get
