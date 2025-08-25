@@ -55,7 +55,7 @@ pub trait BroadcastedFuture {
 /// Future adaptor enabling collective polling on a wrapped
 /// [`BroadcastedFuture`], replicating the result to all subscribers.
 ///
-/// A `BroadcastFuture` wraps a given inner [`BrodacastedFuture`] and allows for
+/// A `BroadcastFuture` wraps a given inner [`BroadcastedFuture`] and allows for
 /// collective polling from one or more subscribers instantiated via
 /// [`subscribe()`](Self::subscribe).
 ///
@@ -118,7 +118,7 @@ impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
 
     /// Subscribe to the given `BroadcastFuture` instance.
     ///
-    /// On success, a [`BroadcastFutureSubscription`] [`BrodacastedFuture`] will
+    /// On success, a [`BroadcastFutureSubscription`] [`BroadcastedFuture`] will
     /// get returned, which can then subsequently get polled to drive
     /// progress on the wrapped future forward and to eventually obtain the
     /// broadcasted result.
