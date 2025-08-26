@@ -310,7 +310,7 @@ pub enum TransactionCommitError {
 /// # See also:
 ///
 /// * [`NvFsFutureAsCoreFuture`]
-pub trait NvFsFuture<FS: NvFs>: 'static {
+pub trait NvFsFuture<FS: NvFs>: 'static + marker::Send {
     type Output;
 
     /// Poll on a [`NvFsFuture`].

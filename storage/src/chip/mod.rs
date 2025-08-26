@@ -89,7 +89,7 @@ impl convert::From<alloc::collections::TryReserveError> for NvChipIoError {
 /// argument, thereby potentially avoiding the need of creating and
 /// storing additional [`SyncRcPtr`](crate::utils_async::sync_types::SyncRcPtr)
 /// clones for the [`NvChip`] instance.
-pub trait NvChipFuture<C: ?Sized + NvChip> {
+pub trait NvChipFuture<C: ?Sized + NvChip>: marker::Send {
     type Output;
 
     /// Poll on a [`NvChipFuture`].
@@ -432,7 +432,7 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
 /// [`NvChipWriteRequest`] instance indexable with [`ChunkedIoRegionChunkRange`]
 /// "indices" emitted by the aforementioned
 /// [`ChunkedIoRegion`]'s iterators.
-pub trait NvChipWriteRequest {
+pub trait NvChipWriteRequest: marker::Send {
     /// Return a [`ChunkedIoRegion`] describing the buffer layout as well as the
     /// physical destination of the write request.
     /// [`ChunkedIoRegionChunkRange`]s obtained from its iterators will be
@@ -468,7 +468,7 @@ pub trait NvChipWriteRequest {
 /// [`NvChipReadRequest`] instance indexable with [`ChunkedIoRegionChunkRange`]
 /// "indices" emitted by the aforementioned
 /// [`ChunkedIoRegion`]'s iterators.
-pub trait NvChipReadRequest {
+pub trait NvChipReadRequest: marker::Send {
     /// Return a [`ChunkedIoRegion`] describing the buffer layout as well as the
     /// physical source of the read request.
     /// [`ChunkedIoRegionChunkRange`]s obtained from its iterators will be
