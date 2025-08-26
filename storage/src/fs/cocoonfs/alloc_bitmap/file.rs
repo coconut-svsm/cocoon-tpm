@@ -33,7 +33,7 @@ use crate::{
         io_slices::{self, IoSlicesIterCommon as _},
     },
 };
-use core::{convert, mem, pin, task};
+use core::{cmp, convert, mem, pin, task};
 
 #[cfg(doc)]
 use transaction::Transaction;
@@ -691,15 +691,19 @@ impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
                         );
                     let file_block_allocation_blocks_end = file_block_allocation_blocks_begin
                         + layout::AllocBlockCount::from(1u64 << file_block_allocation_blocks_log2);
-                    if file_block_allocation_blocks_end < cur_file_extent.end() {
-                        this.file_block_in_extent_index += 1;
-                    } else if file_block_allocation_blocks_end == cur_file_extent.end() {
-                        this.file_extent_index += 1;
-                        this.file_block_in_extent_index = 0;
-                    } else {
-                        this.fut_state = AllocBitmapFileReadFutureState::Done;
-                        return task::Poll::Ready(Err(nvfs_err_internal!()));
-                    }
+                    match file_block_allocation_blocks_end.cmp(&cur_file_extent.end()) {
+                        cmp::Ordering::Less => {
+                            this.file_block_in_extent_index += 1;
+                        }
+                        cmp::Ordering::Equal => {
+                            this.file_extent_index += 1;
+                            this.file_block_in_extent_index = 0;
+                        }
+                        cmp::Ordering::Greater => {
+                            this.fut_state = AllocBitmapFileReadFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
 
                     let read_fut = match read_buffer::BufferedReadAuthenticateDataFuture::new(
                         &layout::PhysicalAllocBlockRange::new(

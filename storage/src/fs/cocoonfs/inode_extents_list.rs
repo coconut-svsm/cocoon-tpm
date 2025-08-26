@@ -39,7 +39,7 @@ use crate::{
         io_slices::{self, IoSlicesIterCommon as _, PeekableIoSlicesIter as _},
     },
 };
-use core::{default, mem, pin, task};
+use core::{default, mem, pin, task, cmp};
 
 #[cfg(doc)]
 use transaction::Transaction;
@@ -211,16 +211,20 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
             decode_buf_len += src_slice.len();
         }
 
-        if decode_buf_len < 2 {
-            // No terminating (0, 0).
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
-        } else if decode_buf_len == 2 {
-            if decode_buf[0] != 0 || decode_buf[1] != 0 {
+        match decode_buf_len.cmp(&2) {
+            cmp::Ordering::Less => {
                 // No terminating (0, 0).
                 return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
             }
-            return Ok(inode_extents);
-        }
+            cmp::Ordering::Equal => {
+                if decode_buf[0] != 0 || decode_buf[1] != 0 {
+                    // No terminating (0, 0).
+                    return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                }
+                return Ok(inode_extents);
+            }
+            cmp::Ordering::Greater => (),
+        };
 
         // Decode one (delta, length) pair.
         let mut remaining_decode_buf = &decode_buf[..decode_buf_len];
