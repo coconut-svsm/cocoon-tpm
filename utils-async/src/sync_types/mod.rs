@@ -34,9 +34,6 @@
 //! member in an extra [`Lock`] or [`SyncRcPtr`]. For such scenarios the
 //! [`LockForInner`] and [`SyncRcPtrForInner`] implementations are provided.
 
-// Lifetimes are not obvious at first sight here, make them explicit.
-#![allow(clippy::needless_lifetimes)]
-
 extern crate alloc;
 use core::{clone, convert, marker, mem, ops, pin};
 
