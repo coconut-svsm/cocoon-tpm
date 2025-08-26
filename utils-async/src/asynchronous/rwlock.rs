@@ -54,11 +54,11 @@ impl convert::From<semaphore::AsyncSemaphoreError> for AsyncRwLockError {
 /// instances may always block other waiters, so it must be made sure that
 /// progress is always driven forward for a lock holder until the respective
 /// locking guard gets eventually dropped again.
-pub struct AsyncRwLock<ST: sync_types::SyncTypes, T> {
+pub struct AsyncRwLock<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> {
     sem: semaphore::AsyncSemaphore<ST, T>,
 }
 
-impl<ST: sync_types::SyncTypes, T> AsyncRwLock<ST, T> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> AsyncRwLock<ST, T> {
     /// Instantiate a new [`AsyncRwLock`]
     ///
     /// Note that the caller is supposed to move the returned `AsyncSemaphore`
@@ -177,7 +177,9 @@ impl<ST: sync_types::SyncTypes, T> AsyncRwLock<ST, T> {
 /// via the [`SyncRcPtrForInner`](sync_types::SyncRcPtrForInner) mechanism.
 struct AsyncRwLockIndexInnerSemTag;
 
-impl<ST: sync_types::SyncTypes, T> sync_types::DerefInnerByTag<AsyncRwLockIndexInnerSemTag> for AsyncRwLock<ST, T> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> sync_types::DerefInnerByTag<AsyncRwLockIndexInnerSemTag>
+    for AsyncRwLock<ST, T>
+{
     crate::impl_deref_inner_by_tag!(sem, semaphore::AsyncSemaphore<ST, T>);
 }
 
@@ -192,7 +194,11 @@ impl<ST: sync_types::SyncTypes, T> sync_types::DerefInnerByTag<AsyncRwLockIndexI
 /// [`AsyncRwLock`] instance and thus, would not hinder its deallocation. In
 /// case the lock gets dropped before the future had a chance to acquire it, its
 /// `poll()` would return [`AsyncRwLockError::StaleRwLock`].
-pub struct AsyncRwLockReadFuture<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> {
+pub struct AsyncRwLockReadFuture<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>,
+> {
     sem_trivial_lease_fut: semaphore::AsyncSemaphoreLeasesFuture<
         ST,
         T,
@@ -200,7 +206,9 @@ pub struct AsyncRwLockReadFuture<ST: sync_types::SyncTypes, T, LP: sync_types::S
     >,
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> AsyncRwLockReadFuture<ST, T, LP> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    AsyncRwLockReadFuture<ST, T, LP>
+{
     /// Obtain the associated [`AsyncRwLock`].
     ///
     /// Return the associated [`AsyncRwLock`] wrapped in `Some` if still
@@ -212,13 +220,13 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> marker::Unpin
-    for AsyncRwLockReadFuture<ST, T, LP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    marker::Unpin for AsyncRwLockReadFuture<ST, T, LP>
 {
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> future::Future
-    for AsyncRwLockReadFuture<ST, T, LP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    future::Future for AsyncRwLockReadFuture<ST, T, LP>
 {
     type Output = Result<AsyncRwLockReadGuard<ST, T, LP>, AsyncRwLockError>;
 
@@ -245,7 +253,11 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
 /// [`SyncRcPtr`](sync_types) for the [`AsyncRwLock`]'s inner value (or any of
 /// its members) via [`AsyncRwLockReadGuardForInner`] to APIs that expect such
 /// one.
-pub struct AsyncRwLockReadGuard<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> {
+pub struct AsyncRwLockReadGuard<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>,
+> {
     sem_trivial_lease_guard: semaphore::AsyncSemaphoreLeasesGuard<
         ST,
         T,
@@ -253,7 +265,9 @@ pub struct AsyncRwLockReadGuard<ST: sync_types::SyncTypes, T, LP: sync_types::Sy
     >,
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> AsyncRwLockReadGuard<ST, T, LP> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    AsyncRwLockReadGuard<ST, T, LP>
+{
     /// Obtain the associated [`AsyncRwLock`].
     pub fn get_rwlock(&self) -> LP::SyncRcPtrRef<'_> {
         self.sem_trivial_lease_guard.get_semaphore().get_container().clone()
@@ -297,8 +311,8 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> ops::Deref
-    for AsyncRwLockReadGuard<ST, T, LP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    ops::Deref for AsyncRwLockReadGuard<ST, T, LP>
 {
     type Target = T;
 
@@ -307,7 +321,7 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> Clone
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> Clone
     for AsyncRwLockReadGuard<ST, T, LP>
 {
     fn clone(&self) -> Self {
@@ -328,7 +342,11 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
 ///
 /// An `AsyncRwLockReadWeakGuard` may get converted back into a full
 /// [`AsyncRwLockReadGuard`] via [`upgrade()`](Self::upgrade).
-pub struct AsyncRwLockReadWeakGuard<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> {
+pub struct AsyncRwLockReadWeakGuard<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>,
+> {
     #[allow(clippy::type_complexity)]
     sem_trivial_lease_guard: Option<
         semaphore::AsyncSemaphoreLeasesWeakGuard<
@@ -339,7 +357,9 @@ pub struct AsyncRwLockReadWeakGuard<ST: sync_types::SyncTypes, T, LP: sync_types
     >,
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> AsyncRwLockReadWeakGuard<ST, T, LP> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    AsyncRwLockReadWeakGuard<ST, T, LP>
+{
     /// Attempt to convert back into an [`AsyncRwLockReadGuard`].
     ///
     /// Returns the [`AsyncRwLockReadGuard`] wrapped in `Some` if the
@@ -406,7 +426,7 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> Clone
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> Clone
     for AsyncRwLockReadWeakGuard<ST, T, LP>
 {
     fn clone(&self) -> Self {
@@ -441,7 +461,8 @@ pub struct AsyncRwLockReadGuardForInner<
     LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT>>,
     TAG,
 > where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     guard_for_outer: AsyncRwLockReadGuard<ST, OT, LP>,
     _phantom: marker::PhantomData<fn() -> TAG>,
@@ -450,7 +471,8 @@ pub struct AsyncRwLockReadGuardForInner<
 impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT>>, TAG> Clone
     for AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>
 where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     fn clone(&self) -> Self {
         Self {
@@ -463,7 +485,8 @@ where
 impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT>>, TAG>
     convert::From<AsyncRwLockReadGuard<ST, OT, LP>> for AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>
 where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     fn from(value: AsyncRwLockReadGuard<ST, OT, LP>) -> Self {
         Self {
@@ -476,7 +499,8 @@ where
 impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT>>, TAG> ops::Deref
     for AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>
 where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     type Target = <OT as sync_types::DerefInnerByTag<TAG>>::Output;
 
@@ -489,7 +513,7 @@ impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT
     sync_types::SyncRcPtr<<OT as sync_types::DerefInnerByTag<TAG>>::Output>
     for AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>
 where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
     <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     type WeakSyncRcPtr = AsyncRwLockReadWeakGuardForInner<ST, OT, LP, TAG>;
@@ -531,7 +555,8 @@ pub struct AsyncRwLockReadWeakGuardForInner<
     LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT>>,
     TAG,
 > where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     guard_for_outer: AsyncRwLockReadWeakGuard<ST, OT, LP>,
     _phantom: marker::PhantomData<fn() -> TAG>,
@@ -540,7 +565,8 @@ pub struct AsyncRwLockReadWeakGuardForInner<
 impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT>>, TAG> Clone
     for AsyncRwLockReadWeakGuardForInner<ST, OT, LP, TAG>
 where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     fn clone(&self) -> Self {
         Self {
@@ -553,7 +579,8 @@ where
 impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT>>, TAG>
     convert::From<AsyncRwLockReadWeakGuard<ST, OT, LP>> for AsyncRwLockReadWeakGuardForInner<ST, OT, LP, TAG>
 where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     fn from(value: AsyncRwLockReadWeakGuard<ST, OT, LP>) -> Self {
         Self {
@@ -569,7 +596,7 @@ impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT
         AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>,
     > for AsyncRwLockReadWeakGuardForInner<ST, OT, LP, TAG>
 where
-    OT: sync_types::DerefInnerByTag<TAG>,
+    OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
     <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
     fn upgrade(&self) -> Option<AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>> {
@@ -607,7 +634,11 @@ where
 /// [`AsyncRwLock`] instance and thus, would not hinder its deallocation. In
 /// case the lock gets dropped before the future had a chance to acquire it, its
 /// `poll()` would return [`AsyncRwLockError::StaleRwLock`].
-pub struct AsyncRwLockWriteFuture<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> {
+pub struct AsyncRwLockWriteFuture<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>,
+> {
     sem_exclusive_all_fut: semaphore::AsyncSemaphoreExclusiveAllFuture<
         ST,
         T,
@@ -615,7 +646,9 @@ pub struct AsyncRwLockWriteFuture<ST: sync_types::SyncTypes, T, LP: sync_types::
     >,
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> AsyncRwLockWriteFuture<ST, T, LP> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    AsyncRwLockWriteFuture<ST, T, LP>
+{
     pub fn get_rwlock(&self) -> Option<LP> {
         self.sem_exclusive_all_fut
             .get_semaphore()
@@ -623,13 +656,13 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> marker::Unpin
-    for AsyncRwLockWriteFuture<ST, T, LP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    marker::Unpin for AsyncRwLockWriteFuture<ST, T, LP>
 {
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> future::Future
-    for AsyncRwLockWriteFuture<ST, T, LP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    future::Future for AsyncRwLockWriteFuture<ST, T, LP>
 {
     type Output = Result<AsyncRwLockWriteGuard<ST, T, LP>, AsyncRwLockError>;
 
@@ -650,7 +683,11 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
 }
 
 /// Exclusive locking grant on an [`AsyncRwLock`].
-pub struct AsyncRwLockWriteGuard<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> {
+pub struct AsyncRwLockWriteGuard<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>,
+> {
     sem_exclusive_all_guard: semaphore::AsyncSemaphoreExclusiveAllGuard<
         ST,
         T,
@@ -658,7 +695,9 @@ pub struct AsyncRwLockWriteGuard<ST: sync_types::SyncTypes, T, LP: sync_types::S
     >,
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> AsyncRwLockWriteGuard<ST, T, LP> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    AsyncRwLockWriteGuard<ST, T, LP>
+{
     /// Obtain the associated [`AsyncRwLock`].
     pub fn get_rwlock(&self) -> LP::SyncRcPtrRef<'_> {
         self.sem_exclusive_all_guard.get_semaphore().get_container().clone()
@@ -698,8 +737,8 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> ops::Deref
-    for AsyncRwLockWriteGuard<ST, T, LP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    ops::Deref for AsyncRwLockWriteGuard<ST, T, LP>
 {
     type Target = T;
 
@@ -708,8 +747,8 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> ops::DerefMut
-    for AsyncRwLockWriteGuard<ST, T, LP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    ops::DerefMut for AsyncRwLockWriteGuard<ST, T, LP>
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.sem_exclusive_all_guard
@@ -726,7 +765,11 @@ impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>
 ///
 /// An `AsyncRwLockWriteWeakGuard` may get converted back into a full
 /// [`AsyncRwLockWriteGuard`] via [`upgrade()`](Self::upgrade).
-pub struct AsyncRwLockWriteWeakGuard<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> {
+pub struct AsyncRwLockWriteWeakGuard<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>,
+> {
     sem_exclusive_all_guard: semaphore::AsyncSemaphoreExclusiveAllWeakGuard<
         ST,
         T,
@@ -734,7 +777,9 @@ pub struct AsyncRwLockWriteWeakGuard<ST: sync_types::SyncTypes, T, LP: sync_type
     >,
 }
 
-impl<ST: sync_types::SyncTypes, T, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>> AsyncRwLockWriteWeakGuard<ST, T, LP> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, T>>>
+    AsyncRwLockWriteWeakGuard<ST, T, LP>
+{
     /// Attempt to convert back into an [`AsyncRwLockWriteGuard`].
     ///
     /// Returns the [`AsyncRwLockWriteGuard`] wrapped in `Some` if the

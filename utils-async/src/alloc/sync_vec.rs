@@ -2,7 +2,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::sync_types;
-use core::ops;
+use core::{marker, ops};
 
 /// Error returned by [`SyncVec::try_reserve()`] and
 /// [`SyncVec::try_reserve_exact()`].
@@ -34,7 +34,7 @@ pub enum SyncVecError {
 /// [`locking guard`](sync_types::Lock::Guard), either explictly or implicitly
 /// through e.g. a [`Vec::resize()`](Vec::resize) on a [`Vec`] with insufficient
 /// capcacity.
-pub struct SyncVec<T> {
+pub struct SyncVec<T: marker::Send> {
     /// The managed [`Vec`] instance.
     v: Vec<T>,
     /// Sum of the requested additional capacities of all currently pending
@@ -42,7 +42,7 @@ pub struct SyncVec<T> {
     pending_reservations_additional_capacity: usize,
 }
 
-impl<T> SyncVec<T> {
+impl<T: marker::Send> SyncVec<T> {
     /// Create a new empty `SyncVec`.
     pub fn new() -> Self {
         Self {
@@ -201,7 +201,7 @@ impl<T> SyncVec<T> {
     }
 }
 
-impl<T> ops::Deref for SyncVec<T> {
+impl<T: marker::Send> ops::Deref for SyncVec<T> {
     type Target = Vec<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -209,13 +209,13 @@ impl<T> ops::Deref for SyncVec<T> {
     }
 }
 
-impl<T> ops::DerefMut for SyncVec<T> {
+impl<T: marker::Send> ops::DerefMut for SyncVec<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.v
     }
 }
 
-impl<T> Default for SyncVec<T> {
+impl<T: marker::Send> Default for SyncVec<T> {
     fn default() -> Self {
         Self::new()
     }

@@ -30,7 +30,7 @@ impl convert::From<BroadcastWakerError> for BroadcastFutureError {
 /// The standard Rust [`Future::poll()`](future::Future::poll) signature is
 /// extended to enable access to some auxiliary data provided through **any**
 /// `BroadcastFutureSubscription::poll()`](BroadcastFutureSubscription::poll).
-pub trait BroadcastedFuture {
+pub trait BroadcastedFuture: marker::Send {
     /// The type of value produced on completion.
     type Output: Clone + marker::Send;
 

@@ -2130,6 +2130,13 @@ enum CommittingTransactionState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     },
 }
 
+// Unfortunately rustc runs into a recursion limit when trying to prove this. The reason seems to be
+// that CommittingTransactionState contains a CocoonFsSyncStateMemberWriteWeakGuard, which
+// ultimately contains a CocoonFsSyncRcPtrType::WeakSyncRcPtr and CocoonFs (the pointed to type)
+// contains the CommittingTransactionState.
+// SAFETY: all members are Send.
+unsafe impl<ST: sync_types::SyncTypes, C: chip::NvChip> marker::Send for CommittingTransactionState<ST, C> {}
+
 /// Result from a [`ProgressCommittingTransactionFuture`].
 #[derive(Clone, Copy)]
 enum ProgressCommittingTransactionFutureResult {

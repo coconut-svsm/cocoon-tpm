@@ -1012,12 +1012,12 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
 /// instances may always block other waiters, so it must be made
 /// sure that progress is always driven forward for a lease holder until the
 /// respective leases grant gets eventually dropped again.
-pub struct AsyncSemaphore<ST: sync_types::SyncTypes, T> {
+pub struct AsyncSemaphore<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> {
     state: AsyncSemaphoreState<ST>,
     data: cell::UnsafeCell<T>,
 }
 
-impl<ST: sync_types::SyncTypes, T> AsyncSemaphore<ST, T> {
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> AsyncSemaphore<ST, T> {
     /// Instantiate a new [`AsyncSemaphore`].
     ///
     /// Note that the caller is supposed to move the returned `AsyncSemaphore`
@@ -1201,10 +1201,10 @@ impl<ST: sync_types::SyncTypes, T> AsyncSemaphore<ST, T> {
 }
 
 // A non-Send semaphore would be quite pointless.
-unsafe impl<ST: sync_types::SyncTypes, T> marker::Send for AsyncSemaphore<ST, T> {}
+unsafe impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> marker::Send for AsyncSemaphore<ST, T> {}
 
 // A non-Sync semaphore would be quite pointless.
-unsafe impl<ST: sync_types::SyncTypes, T> marker::Sync for AsyncSemaphore<ST, T> {}
+unsafe impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> marker::Sync for AsyncSemaphore<ST, T> {}
 
 /// [`DerefInnerByTag`](sync_types::DerefInnerByTag) `TAG` for dereferencing
 /// [`AsyncSemaphore::data`].
@@ -1214,14 +1214,18 @@ unsafe impl<ST: sync_types::SyncTypes, T> marker::Sync for AsyncSemaphore<ST, T>
 /// via the [`SyncRcPtrForInner`](sync_types::SyncRcPtrForInner) mechanism.
 struct AsyncSemaphoreDerefInnerDataTag;
 
-impl<ST: sync_types::SyncTypes, T> sync_types::DerefInnerByTag<AsyncSemaphoreDerefInnerDataTag>
-    for AsyncSemaphore<ST, T>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync>
+    sync_types::DerefInnerByTag<AsyncSemaphoreDerefInnerDataTag> for AsyncSemaphore<ST, T>
 {
     crate::impl_deref_inner_by_tag!(data, cell::UnsafeCell<T>);
 }
 
 /// Internal [`AsyncSemaphoreLeasesFuture`] state.
-enum AsyncSemaphoreLeasesFuturePriv<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> {
+enum AsyncSemaphoreLeasesFuturePriv<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
+> {
     /// The requested number of semaphore leases had been unavailable at
     /// enqueueing time and the waiter got indeed enqueued.
     Enqueued {
@@ -1252,11 +1256,15 @@ enum AsyncSemaphoreLeasesFuturePriv<ST: sync_types::SyncTypes, T, SP: sync_types
 /// deallocation. In case the semaphore gets dropped before the future had a
 /// chance to acquire leases from it, its `poll()` would return
 /// [`AsyncSemaphoreError::StaleSemaphore`].
-pub struct AsyncSemaphoreLeasesFuture<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> {
+pub struct AsyncSemaphoreLeasesFuture<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
+> {
     private: AsyncSemaphoreLeasesFuturePriv<ST, T, SP>,
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
     AsyncSemaphoreLeasesFuture<ST, T, SP>
 {
     /// Obtain the associated [`AsyncSemaphore`].
@@ -1277,13 +1285,13 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> marker::Unpin
-    for AsyncSemaphoreLeasesFuture<ST, T, SP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+    marker::Unpin for AsyncSemaphoreLeasesFuture<ST, T, SP>
 {
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> future::Future
-    for AsyncSemaphoreLeasesFuture<ST, T, SP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+    future::Future for AsyncSemaphoreLeasesFuture<ST, T, SP>
 {
     type Output = Result<AsyncSemaphoreLeasesGuard<ST, T, SP>, AsyncSemaphoreError>;
 
@@ -1354,7 +1362,7 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
     for AsyncSemaphoreLeasesFuture<ST, T, SP>
 {
     fn drop(&mut self) {
@@ -1412,13 +1420,17 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
 /// specified. This is needed for obtaining more than one semaphore lease in a
 /// deadlock-free manner, c.f. the discussion at
 /// [`AsyncSemaphore::acquire_leases()`].
-pub struct AsyncSemaphoreLeasesGuard<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> {
+pub struct AsyncSemaphoreLeasesGuard<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
+> {
     sem: Option<SP>,
     leases_granted: usize,
     _phantom: marker::PhantomData<fn() -> (ST, T)>,
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
     AsyncSemaphoreLeasesGuard<ST, T, SP>
 {
     fn new(sem: SP, leases_granted: usize) -> Self {
@@ -1622,7 +1634,7 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
     for AsyncSemaphoreLeasesGuard<ST, T, SP>
 {
     fn drop(&mut self) {
@@ -1632,8 +1644,8 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> ops::Deref
-    for AsyncSemaphoreLeasesGuard<ST, T, SP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+    ops::Deref for AsyncSemaphoreLeasesGuard<ST, T, SP>
 {
     type Target = T;
 
@@ -1653,14 +1665,17 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
 ///
 /// An `AsyncSemaphoreLeasesWeakGuard` may get converted back into a full
 /// [`AsyncSemaphoreLeasesGuard`] via [`upgrade()`](Self::upgrade).
-pub struct AsyncSemaphoreLeasesWeakGuard<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
-{
+pub struct AsyncSemaphoreLeasesWeakGuard<
+    ST: sync_types::SyncTypes,
+    T: marker::Send + marker::Sync,
+    SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
+> {
     sem: Option<SP::WeakSyncRcPtr>,
     leases_granted: usize,
     _phantom: marker::PhantomData<fn() -> (ST, T)>,
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
     AsyncSemaphoreLeasesWeakGuard<ST, T, SP>
 {
     /// Attempt to convert back into an [`AsyncSemaphoreLeasesGuard`].
@@ -1741,7 +1756,7 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
     for AsyncSemaphoreLeasesWeakGuard<ST, T, SP>
 {
     fn drop(&mut self) {
@@ -1760,7 +1775,7 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
 /// Internal [`AsyncSemaphoreExclusiveAllFuture`] state.
 enum AsyncSemaphoreExclusiveAllFuturePriv<
     ST: sync_types::SyncTypes,
-    T,
+    T: marker::Send + marker::Sync,
     SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
 > {
     /// The exclusive grant on all of the semaphore's capcaity had been
@@ -1792,13 +1807,13 @@ enum AsyncSemaphoreExclusiveAllFuturePriv<
 /// [`AsyncSemaphoreError::StaleSemaphore`].
 pub struct AsyncSemaphoreExclusiveAllFuture<
     ST: sync_types::SyncTypes,
-    T,
+    T: marker::Send + marker::Sync,
     SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
 > {
     private: AsyncSemaphoreExclusiveAllFuturePriv<ST, T, SP>,
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
     AsyncSemaphoreExclusiveAllFuture<ST, T, SP>
 {
     /// Obtain the associated [`AsyncSemaphore`].
@@ -1815,13 +1830,13 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> marker::Unpin
-    for AsyncSemaphoreExclusiveAllFuture<ST, T, SP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+    marker::Unpin for AsyncSemaphoreExclusiveAllFuture<ST, T, SP>
 {
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> future::Future
-    for AsyncSemaphoreExclusiveAllFuture<ST, T, SP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+    future::Future for AsyncSemaphoreExclusiveAllFuture<ST, T, SP>
 {
     type Output = Result<AsyncSemaphoreExclusiveAllGuard<ST, T, SP>, AsyncSemaphoreError>;
 
@@ -1877,7 +1892,7 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
     for AsyncSemaphoreExclusiveAllFuture<ST, T, SP>
 {
     fn drop(&mut self) {
@@ -1918,14 +1933,14 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
 /// from making progress.
 pub struct AsyncSemaphoreExclusiveAllGuard<
     ST: sync_types::SyncTypes,
-    T,
+    T: marker::Send + marker::Sync,
     SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
 > {
     sem: Option<SP>,
     _phantom: marker::PhantomData<fn() -> (ST, T)>,
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
     AsyncSemaphoreExclusiveAllGuard<ST, T, SP>
 {
     fn new(sem: SP) -> Self {
@@ -2051,7 +2066,7 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
     for AsyncSemaphoreExclusiveAllGuard<ST, T, SP>
 {
     fn drop(&mut self) {
@@ -2061,8 +2076,8 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> ops::Deref
-    for AsyncSemaphoreExclusiveAllGuard<ST, T, SP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+    ops::Deref for AsyncSemaphoreExclusiveAllGuard<ST, T, SP>
 {
     type Target = T;
 
@@ -2072,8 +2087,8 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> ops::DerefMut
-    for AsyncSemaphoreExclusiveAllGuard<ST, T, SP>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+    ops::DerefMut for AsyncSemaphoreExclusiveAllGuard<ST, T, SP>
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         let p = self.sem.as_ref().unwrap().data.get();
@@ -2092,14 +2107,14 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
 /// [`AsyncSemaphoreExclusiveAllGuard`] via [`upgrade()`](Self::upgrade).
 pub struct AsyncSemaphoreExclusiveAllWeakGuard<
     ST: sync_types::SyncTypes,
-    T,
+    T: marker::Send + marker::Sync,
     SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>,
 > {
     sem: Option<SP::WeakSyncRcPtr>,
     _phantom: marker::PhantomData<fn() -> (ST, T)>,
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>>
     AsyncSemaphoreExclusiveAllWeakGuard<ST, T, SP>
 {
     /// Attempt to convert back into an [`AsyncSemaphoreExclusiveAllGuard`].
@@ -2118,7 +2133,7 @@ impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
+impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::SyncRcPtr<AsyncSemaphore<ST, T>>> Drop
     for AsyncSemaphoreExclusiveAllWeakGuard<ST, T, SP>
 {
     fn drop(&mut self) {

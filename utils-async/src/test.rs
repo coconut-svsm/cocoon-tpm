@@ -17,12 +17,12 @@ use core::{cell, convert, future, marker, ops, pin, sync::atomic, task};
 /// Dummy [`Lock`](sync_types::Lock) for testing purposes.
 ///
 /// Any attempt to lock an already locked `TestNopLock` will panic.
-pub struct TestNopLock<T> {
+pub struct TestNopLock<T: marker::Send> {
     locked: atomic::AtomicBool,
     v: cell::UnsafeCell<T>,
 }
 
-impl<T> convert::From<T> for TestNopLock<T> {
+impl<T: marker::Send> convert::From<T> for TestNopLock<T> {
     fn from(value: T) -> Self {
         Self {
             locked: atomic::AtomicBool::new(false),
@@ -31,10 +31,10 @@ impl<T> convert::From<T> for TestNopLock<T> {
     }
 }
 
-unsafe impl<T> marker::Send for TestNopLock<T> {}
-unsafe impl<T> marker::Sync for TestNopLock<T> {}
+unsafe impl<T: marker::Send> marker::Send for TestNopLock<T> {}
+unsafe impl<T: marker::Send> marker::Sync for TestNopLock<T> {}
 
-impl<T> sync_types::Lock<T> for TestNopLock<T> {
+impl<T: marker::Send> sync_types::Lock<T> for TestNopLock<T> {
     type Guard<'a>
         = TestNopLockGuard<'a, T>
     where
@@ -51,7 +51,7 @@ impl<T> sync_types::Lock<T> for TestNopLock<T> {
     }
 }
 
-impl<T> sync_types::ConstructibleLock<T> for TestNopLock<T> {
+impl<T: marker::Send> sync_types::ConstructibleLock<T> for TestNopLock<T> {
     fn get_mut(&mut self) -> &mut T {
         assert!(!self.locked.load(atomic::Ordering::Relaxed));
         let p = self.v.get();
@@ -61,11 +61,11 @@ impl<T> sync_types::ConstructibleLock<T> for TestNopLock<T> {
 
 /// The [locking guard](sync_types::Lock::Guard) associated with
 /// [`TestNopLock`].
-pub struct TestNopLockGuard<'a, T> {
+pub struct TestNopLockGuard<'a, T: marker::Send> {
     lock: &'a TestNopLock<T>,
 }
 
-impl<'a, T> Drop for TestNopLockGuard<'a, T> {
+impl<'a, T: marker::Send> Drop for TestNopLockGuard<'a, T> {
     fn drop(&mut self) {
         assert_eq!(
             self.lock
@@ -77,7 +77,7 @@ impl<'a, T> Drop for TestNopLockGuard<'a, T> {
     }
 }
 
-impl<'a, T> ops::Deref for TestNopLockGuard<'a, T> {
+impl<'a, T: marker::Send> ops::Deref for TestNopLockGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -87,7 +87,7 @@ impl<'a, T> ops::Deref for TestNopLockGuard<'a, T> {
     }
 }
 
-impl<'a, T> ops::DerefMut for TestNopLockGuard<'a, T> {
+impl<'a, T: marker::Send> ops::DerefMut for TestNopLockGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         let p = self.lock.v.get();
         // Safety: the very purpose of a Lock is exclusive access, so no aliasing.
@@ -99,12 +99,12 @@ impl<'a, T> ops::DerefMut for TestNopLockGuard<'a, T> {
 ///
 /// Any attempt to lock a read-locked `TestNopLock` for write or vice versa will
 /// panic.
-pub struct TestNopRwLock<T> {
+pub struct TestNopRwLock<T: marker::Send + marker::Sync> {
     locked: atomic::AtomicIsize,
     v: cell::UnsafeCell<T>,
 }
 
-impl<T> convert::From<T> for TestNopRwLock<T> {
+impl<T: marker::Send + marker::Sync> convert::From<T> for TestNopRwLock<T> {
     fn from(value: T) -> Self {
         Self {
             locked: atomic::AtomicIsize::new(0),
@@ -113,10 +113,10 @@ impl<T> convert::From<T> for TestNopRwLock<T> {
     }
 }
 
-unsafe impl<T> marker::Send for TestNopRwLock<T> {}
-unsafe impl<T> marker::Sync for TestNopRwLock<T> {}
+unsafe impl<T: marker::Send + marker::Sync> marker::Send for TestNopRwLock<T> {}
+unsafe impl<T: marker::Send + marker::Sync> marker::Sync for TestNopRwLock<T> {}
 
-impl<T> sync_types::RwLock<T> for TestNopRwLock<T> {
+impl<T: marker::Send + marker::Sync> sync_types::RwLock<T> for TestNopRwLock<T> {
     type ReadGuard<'a>
         = TestNopRwLockReadGuard<'a, T>
     where
@@ -152,11 +152,11 @@ impl<T> sync_types::RwLock<T> for TestNopRwLock<T> {
 
 /// The [read lock guard](sync_types::RwLock::ReadGuard) associated with
 /// [`TestNopRwLock`].
-pub struct TestNopRwLockReadGuard<'a, T> {
+pub struct TestNopRwLockReadGuard<'a, T: marker::Send + marker::Sync> {
     lock: &'a TestNopRwLock<T>,
 }
 
-impl<'a, T> Drop for TestNopRwLockReadGuard<'a, T> {
+impl<'a, T: marker::Send + marker::Sync> Drop for TestNopRwLockReadGuard<'a, T> {
     fn drop(&mut self) {
         assert!(
             self.lock.locked.fetch_sub(1, atomic::Ordering::Release) > 0,
@@ -165,7 +165,7 @@ impl<'a, T> Drop for TestNopRwLockReadGuard<'a, T> {
     }
 }
 
-impl<'a, T> ops::Deref for TestNopRwLockReadGuard<'a, T> {
+impl<'a, T: marker::Send + marker::Sync> ops::Deref for TestNopRwLockReadGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -178,11 +178,11 @@ impl<'a, T> ops::Deref for TestNopRwLockReadGuard<'a, T> {
 
 /// The [write lock guard](sync_types::RwLock::WriteGuard) associated with
 /// [`TestNopRwLock`].
-pub struct TestNopRwLockWriteGuard<'a, T> {
+pub struct TestNopRwLockWriteGuard<'a, T: marker::Send + marker::Sync> {
     lock: &'a TestNopRwLock<T>,
 }
 
-impl<'a, T> Drop for TestNopRwLockWriteGuard<'a, T> {
+impl<'a, T: marker::Send + marker::Sync> Drop for TestNopRwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
         assert_eq!(
             self.lock.locked.fetch_add(1, atomic::Ordering::Release),
@@ -192,7 +192,7 @@ impl<'a, T> Drop for TestNopRwLockWriteGuard<'a, T> {
     }
 }
 
-impl<'a, T> ops::Deref for TestNopRwLockWriteGuard<'a, T> {
+impl<'a, T: marker::Send + marker::Sync> ops::Deref for TestNopRwLockWriteGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -203,7 +203,7 @@ impl<'a, T> ops::Deref for TestNopRwLockWriteGuard<'a, T> {
     }
 }
 
-impl<'a, T> ops::DerefMut for TestNopRwLockWriteGuard<'a, T> {
+impl<'a, T: marker::Send + marker::Sync> ops::DerefMut for TestNopRwLockWriteGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         let p = self.lock.v.get();
         // Safety: the very purpose of a RwLock is exclusive Writers, so no
@@ -216,8 +216,8 @@ impl<'a, T> ops::DerefMut for TestNopRwLockWriteGuard<'a, T> {
 pub struct TestNopSyncTypes;
 
 impl sync_types::SyncTypes for TestNopSyncTypes {
-    type Lock<T> = TestNopLock<T>;
-    type RwLock<T> = TestNopRwLock<T>;
+    type Lock<T: marker::Send> = TestNopLock<T>;
+    type RwLock<T: marker::Send + marker::Sync> = TestNopRwLock<T>;
     type SyncRcPtrFactory = sync_types::GenericArcFactory;
 }
 
@@ -226,7 +226,7 @@ impl sync_types::SyncTypes for TestNopSyncTypes {
 /// # See also:
 ///
 /// * [`QueuedTask`]
-trait QueuedTaskDispatch {
+trait QueuedTaskDispatch: marker::Send {
     /// Poll the wrapped [`Future`].
     ///
     /// Return true once the wrapped [`Future`]'s
@@ -319,7 +319,7 @@ impl alloc::task::Wake for Waker {
     }
 }
 
-enum TaskWaiterState<T> {
+enum TaskWaiterState<T: marker::Send> {
     Pending {
         /// Executor the associated top-level [`Future`] had been enqueued to.
         executor: sync_types::GenericArc<TestAsyncExecutor>,
@@ -343,11 +343,11 @@ enum TaskWaiterState<T> {
 /// Note that a [`TestAsyncExecutorTaskWaiter`] implements [`Future`] itself, so
 /// it can get enqueued to the [`TestAsyncExecutor`] or polled from another
 /// owning [`Future`].
-pub struct TestAsyncExecutorTaskWaiter<T> {
+pub struct TestAsyncExecutorTaskWaiter<T: marker::Send> {
     state: TaskWaiterState<T>,
 }
 
-impl<T> TestAsyncExecutorTaskWaiter<T> {
+impl<T: marker::Send> TestAsyncExecutorTaskWaiter<T> {
     /// Take the associated enqueued [`Future`]'s
     /// [`Output`](future::Future::Output) if [`Ready`](task::Poll::Ready).
     ///
@@ -370,7 +370,7 @@ impl<T> TestAsyncExecutorTaskWaiter<T> {
     }
 }
 
-impl<T> Drop for TestAsyncExecutorTaskWaiter<T> {
+impl<T: marker::Send> Drop for TestAsyncExecutorTaskWaiter<T> {
     fn drop(&mut self) {
         match &self.state {
             TaskWaiterState::Pending {
@@ -387,9 +387,9 @@ impl<T> Drop for TestAsyncExecutorTaskWaiter<T> {
     }
 }
 
-impl<T> Unpin for TestAsyncExecutorTaskWaiter<T> {}
+impl<T: marker::Send> Unpin for TestAsyncExecutorTaskWaiter<T> {}
 
-impl<T> future::Future for TestAsyncExecutorTaskWaiter<T> {
+impl<T: marker::Send> future::Future for TestAsyncExecutorTaskWaiter<T> {
     type Output = T;
 
     fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {

@@ -21,9 +21,9 @@ use core::future;
 /// access to some shared value, the standard [`Future::poll()`](Future::poll)
 /// signature is being extended to provide exclusive access to that shared
 /// value.
-pub trait QueuedFuture<T> {
+pub trait QueuedFuture<T: marker::Send>: marker::Send {
     /// The type of value produced on completion.
-    type Output;
+    type Output: marker::Send;
     /// Type of the auxiliary argument provided to [`poll()`](Self::poll).
     type AuxPollData<'a>;
 
@@ -108,7 +108,7 @@ impl convert::From<SyncVecError> for FutureQueueError {
 /// [`EnqueuedFutureSubscription`] to drive their respective enqueued future's
 /// progress forward and eventually retrieve its result once
 /// [`Ready`](task::Poll::Ready).
-pub struct FutureQueue<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> {
+pub struct FutureQueue<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> {
     /// Broadcast waker subscriptions.
     ///
     /// There's a 1:1 correspondence between FutureQueue subscription and
@@ -133,10 +133,10 @@ pub struct FutureQueue<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> {
     arbitrated_ressource: cell::UnsafeCell<T>,
 }
 
-unsafe impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> marker::Send for FutureQueue<ST, T, F> {}
-unsafe impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> marker::Sync for FutureQueue<ST, T, F> {}
+unsafe impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> marker::Send for FutureQueue<ST, T, F> {}
+unsafe impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> marker::Sync for FutureQueue<ST, T, F> {}
 
-impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> FutureQueue<ST, T, F> {
+impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> FutureQueue<ST, T, F> {
     /// Crate a new [`FutureQueue`] instance.
     ///
     /// Note that the caller is supposed to move the returned `BroadcastFuture`
@@ -515,20 +515,20 @@ impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> FutureQueue<ST, T, F> {
 /// via the [`SyncRcPtrForInner`](sync_types::SyncRcPtrForInner) mechanism.
 struct FutureQueueDerefInnerWakersTag {}
 
-impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> sync_types::DerefInnerByTag<FutureQueueDerefInnerWakersTag>
-    for FutureQueue<ST, T, F>
+impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>>
+    sync_types::DerefInnerByTag<FutureQueueDerefInnerWakersTag> for FutureQueue<ST, T, F>
 {
     crate::impl_deref_inner_by_tag!(wakers, broadcast_waker::BroadcastWakerSubscriptions<ST>);
 }
 
-impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> sync_types::DerefMutInnerByTag<FutureQueueDerefInnerWakersTag>
-    for FutureQueue<ST, T, F>
+impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>>
+    sync_types::DerefMutInnerByTag<FutureQueueDerefInnerWakersTag> for FutureQueue<ST, T, F>
 {
     crate::impl_deref_mut_inner_by_tag!(wakers);
 }
 
 /// [`Lock`](sync_types::Lock) protected internal [`FutureQueue::state`].
-struct FutureQueueState<T, F: QueuedFuture<T>> {
+struct FutureQueueState<T: marker::Send, F: QueuedFuture<T>> {
     polling_state: FutureQueuePollingState,
     /// Submission queue.
     ///
@@ -550,7 +550,7 @@ struct FutureQueueState<T, F: QueuedFuture<T>> {
     active_queue_entry_id: Option<broadcast_waker::BroadcastWakerSubscriptionId>,
 }
 
-impl<T, F: QueuedFuture<T>> FutureQueueState<T, F> {
+impl<T: marker::Send, F: QueuedFuture<T>> FutureQueueState<T, F> {
     fn new() -> Self {
         Self {
             polling_state: FutureQueuePollingState::Idle,
@@ -592,12 +592,12 @@ enum FutureQueuePollingState {
 ///
 /// Held exclusively by the thread currently polling the the [enqueued
 /// futures](QueuedFuture).
-struct FutureQueueInPollGuard<'a, ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> {
+struct FutureQueueInPollGuard<'a, ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> {
     queue: &'a FutureQueue<ST, T, F>,
     locked_in_poll: bool,
 }
 
-impl<'a, ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> FutureQueueInPollGuard<'a, ST, T, F> {
+impl<'a, ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> FutureQueueInPollGuard<'a, ST, T, F> {
     /// Transition the [`FutureQueueState::polling_state`] from
     /// [`Idle`](FutureQueuePollingState::Idle) to
     /// [`InPoll`](FutureQueuePollingState::InPoll) and return a
@@ -646,7 +646,7 @@ impl<'a, ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> FutureQueueInPollGuar
     }
 }
 
-impl<'a, ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> Drop for FutureQueueInPollGuard<'a, ST, T, F> {
+impl<'a, ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> Drop for FutureQueueInPollGuard<'a, ST, T, F> {
     fn drop(&mut self) {
         if self.locked_in_poll {
             self.queue.state.lock().polling_state = FutureQueuePollingState::Idle;
@@ -664,7 +664,7 @@ impl<'a, ST: sync_types::SyncTypes, T, F: QueuedFuture<T>> Drop for FutureQueueI
 /// via the [`LockForInner`](sync_types::LockForInner) mechanism.
 struct FutureQueueStateDerefInnerSubmissionQueueTag;
 
-impl<T, F: QueuedFuture<T>> sync_types::DerefInnerByTag<FutureQueueStateDerefInnerSubmissionQueueTag>
+impl<T: marker::Send, F: QueuedFuture<T>> sync_types::DerefInnerByTag<FutureQueueStateDerefInnerSubmissionQueueTag>
     for FutureQueueState<T, F>
 {
     crate::impl_deref_inner_by_tag!(
@@ -673,7 +673,7 @@ impl<T, F: QueuedFuture<T>> sync_types::DerefInnerByTag<FutureQueueStateDerefInn
     );
 }
 
-impl<T, F: QueuedFuture<T>> sync_types::DerefMutInnerByTag<FutureQueueStateDerefInnerSubmissionQueueTag>
+impl<T: marker::Send, F: QueuedFuture<T>> sync_types::DerefMutInnerByTag<FutureQueueStateDerefInnerSubmissionQueueTag>
     for FutureQueueState<T, F>
 {
     crate::impl_deref_mut_inner_by_tag!(submission_queue);
@@ -688,7 +688,7 @@ impl<T, F: QueuedFuture<T>> sync_types::DerefMutInnerByTag<FutureQueueStateDeref
 /// via the [`LockForInner`](sync_types::LockForInner) mechanism.
 struct FutureQueueStateDerefInnerCompletionQueueTag;
 
-impl<T, F: QueuedFuture<T>> sync_types::DerefInnerByTag<FutureQueueStateDerefInnerCompletionQueueTag>
+impl<T: marker::Send, F: QueuedFuture<T>> sync_types::DerefInnerByTag<FutureQueueStateDerefInnerCompletionQueueTag>
     for FutureQueueState<T, F>
 {
     crate::impl_deref_inner_by_tag!(
@@ -697,7 +697,7 @@ impl<T, F: QueuedFuture<T>> sync_types::DerefInnerByTag<FutureQueueStateDerefInn
     );
 }
 
-impl<T, F: QueuedFuture<T>> sync_types::DerefMutInnerByTag<FutureQueueStateDerefInnerCompletionQueueTag>
+impl<T: marker::Send, F: QueuedFuture<T>> sync_types::DerefMutInnerByTag<FutureQueueStateDerefInnerCompletionQueueTag>
     for FutureQueueState<T, F>
 {
     crate::impl_deref_mut_inner_by_tag!(completion_queue);
@@ -714,14 +714,14 @@ impl<T, F: QueuedFuture<T>> sync_types::DerefMutInnerByTag<FutureQueueStateDeref
 /// the same [`FutureQueue`] instance from multiple associated subscriptions.
 pub struct EnqueuedFutureSubscription<
     ST: sync_types::SyncTypes,
-    T,
+    T: marker::Send,
     F: QueuedFuture<T>,
     QP: sync_types::SyncRcPtr<FutureQueue<ST, T, F>>,
 > {
     state: EnqueuedFutureSubscriptionState<ST, T, F, QP>,
 }
 
-impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>, QP: sync_types::SyncRcPtr<FutureQueue<ST, T, F>>>
+impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>, QP: sync_types::SyncRcPtr<FutureQueue<ST, T, F>>>
     EnqueuedFutureSubscription<ST, T, F, QP>
 {
     /// Instantiate a new `EnqueuedFutureSubscription`.
@@ -789,8 +789,8 @@ impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>, QP: sync_types::SyncRcPtr
     }
 }
 
-impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>, QP: sync_types::SyncRcPtr<FutureQueue<ST, T, F>>> Drop
-    for EnqueuedFutureSubscription<ST, T, F, QP>
+impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>, QP: sync_types::SyncRcPtr<FutureQueue<ST, T, F>>>
+    Drop for EnqueuedFutureSubscription<ST, T, F, QP>
 {
     fn drop(&mut self) {
         match &self.state {
@@ -810,7 +810,7 @@ impl<ST: sync_types::SyncTypes, T, F: QueuedFuture<T>, QP: sync_types::SyncRcPtr
 /// Private state of [`EnqueuedFutureSubscription`].
 enum EnqueuedFutureSubscriptionState<
     ST: sync_types::SyncTypes,
-    T,
+    T: marker::Send,
     F: QueuedFuture<T>,
     QP: sync_types::SyncRcPtr<FutureQueue<ST, T, F>>,
 > {

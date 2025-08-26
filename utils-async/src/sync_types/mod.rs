@@ -46,7 +46,7 @@ use core::{clone, convert, marker, mem, ops, pin};
 /// type and **must not** block while holding the lock or execute otherwise
 /// long-running work. This includes IO in particular, but also memory
 /// allocations.
-pub trait Lock<T>: marker::Send + marker::Sync {
+pub trait Lock<T: ?Sized>: marker::Send + marker::Sync {
     /// Lock guard type returned by [`lock()`](Self::lock).
     type Guard<'a>: ops::Deref<Target = T> + ops::DerefMut
     where
@@ -93,8 +93,9 @@ pub trait ConstructibleLock<T>: Lock<T> + convert::From<T> {
 /// translating references to the outer type to ones for the member.
 pub struct LockForInner<'a, OT, OL, TAG>
 where
-    OT: 'a + DerefMutInnerByTag<TAG>,
+    OT: 'a + ?Sized + DerefMutInnerByTag<TAG>,
     OL: 'a + Lock<OT>,
+    <OT as DerefInnerByTag<TAG>>::Output: marker::Send,
 {
     lock_for_outer: &'a OL,
     _phantom: marker::PhantomData<fn() -> (*const OT, *const TAG)>,
@@ -102,8 +103,9 @@ where
 
 impl<'a, OT, OL, TAG> LockForInner<'a, OT, OL, TAG>
 where
-    OT: DerefMutInnerByTag<TAG>,
+    OT: ?Sized + DerefMutInnerByTag<TAG>,
     OL: 'a + Lock<OT>,
+    <OT as DerefInnerByTag<TAG>>::Output: marker::Send,
 {
     /// Instantiate a [`LockForInner`] from a [`Lock`] wrapping the containing
     /// struct.
@@ -122,8 +124,9 @@ where
 
 impl<'a, OT, OL, TAG> Lock<<OT as DerefInnerByTag<TAG>>::Output> for LockForInner<'a, OT, OL, TAG>
 where
-    OT: DerefMutInnerByTag<TAG>,
+    OT: ?Sized + DerefMutInnerByTag<TAG>,
     OL: 'a + Lock<OT>,
+    <OT as DerefInnerByTag<TAG>>::Output: marker::Send,
 {
     type Guard<'b>
         = LockForInnerGuard<'b, OT, OL, TAG>
@@ -146,8 +149,9 @@ where
 /// from](Self::into_outer) a `LockForInnerGuard` instance.
 pub struct LockForInnerGuard<'a, OT, OL, TAG>
 where
-    OT: DerefMutInnerByTag<TAG>,
+    OT: ?Sized + DerefMutInnerByTag<TAG>,
     OL: 'a + Lock<OT>,
+    <OT as DerefInnerByTag<TAG>>::Output: marker::Send,
 {
     guard_for_outer: OL::Guard<'a>,
     _phantom_tag: marker::PhantomData<fn() -> *const TAG>,
@@ -155,8 +159,9 @@ where
 
 impl<'a, OT, OL, TAG> LockForInnerGuard<'a, OT, OL, TAG>
 where
-    OT: DerefMutInnerByTag<TAG>,
+    OT: ?Sized + DerefMutInnerByTag<TAG>,
     OL: 'a + Lock<OT>,
+    <OT as DerefInnerByTag<TAG>>::Output: marker::Send,
 {
     /// Convert an existing guard for the [`Lock`] wrapping the outer `OT` to a
     /// `LockForInnerGuard`.
@@ -176,8 +181,9 @@ where
 
 impl<'a, OT, OL, TAG> ops::Deref for LockForInnerGuard<'a, OT, OL, TAG>
 where
-    OT: DerefMutInnerByTag<TAG>,
+    OT: ?Sized + DerefMutInnerByTag<TAG>,
     OL: 'a + Lock<OT>,
+    <OT as DerefInnerByTag<TAG>>::Output: marker::Send,
 {
     type Target = <OT as DerefInnerByTag<TAG>>::Output;
 
@@ -188,8 +194,9 @@ where
 
 impl<'a, OT, OL, TAG> ops::DerefMut for LockForInnerGuard<'a, OT, OL, TAG>
 where
-    OT: DerefMutInnerByTag<TAG>,
+    OT: ?Sized + DerefMutInnerByTag<TAG>,
     OL: 'a + Lock<OT>,
+    <OT as DerefInnerByTag<TAG>>::Output: marker::Send,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         <OT as DerefMutInnerByTag<TAG>>::deref_mut_inner(self.guard_for_outer.deref_mut())
@@ -244,15 +251,7 @@ pub trait RwLock<T>: marker::Send + marker::Sync + convert::From<T> {
 /// due to long-lived strong reference count leases,
 /// [`WeakSyncRcPtr`](Self::WeakSyncRcPtr) may be stored instead of `SyncRcPtr`
 /// instances themselves.
-// It is virtually impossible to implement from_raw() for T: !Sized with stable
-// Rust. Until either 'layout_for_ptr' or even better,
-// 'allocator_api'/Arc::try_new() has been stabilized, T must remain Sized. This
-// is no real limitation at this point, because CoerceUnsized is unstable as
-// well and there would be no way to produce a SyncRcPtr wrapping a T: !Sized
-// anyway.
-pub trait SyncRcPtr<T: Sized + marker::Send + marker::Sync>:
-    Clone + ops::Deref<Target = T> + marker::Send + marker::Sync + marker::Unpin
-{
+pub trait SyncRcPtr<T: ?Sized>: Clone + ops::Deref<Target = T> + marker::Send + marker::Sync + marker::Unpin {
     /// Weak pointer type returned by [downgrade()](Self::downgrade).
     type WeakSyncRcPtr: WeakSyncRcPtr<T, Self>;
 
@@ -314,9 +313,7 @@ pub trait SyncRcPtr<T: Sized + marker::Send + marker::Sync>:
 /// [`SyncRcPtr`]'s wrapped value. Note that this concerns only the
 /// [`drop()`](Drop::drop) -- the backing memory mat get deallocated only once
 /// the last `WeakSyncRcPtr` is gone.
-pub trait WeakSyncRcPtr<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>>:
-    Clone + marker::Send + marker::Unpin
-{
+pub trait WeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>>: Clone + marker::Send + marker::Unpin {
     /// Convert a `WeakSyncRcPtr` back to a [`SyncRcPtr`].
     ///
     /// This will be successful only if at least one [`SyncRcPtr`] cloning spawn
@@ -371,7 +368,7 @@ pub enum SyncRcPtrTryNewWithError<E> {
 pub trait SyncRcPtrFactory {
     type SyncRcPtr<T>: SyncRcPtr<T>
     where
-        T: Sized + marker::Send + marker::Sync;
+        T: marker::Send + marker::Sync;
 
     /// Try to allocate a new [`SyncRcPtr`] instance.
     ///
@@ -480,9 +477,7 @@ pub trait SyncRcPtrFactory {
 ///   whereas
 /// * a [`SyncRcPtrRef<OT>`](SyncRcPtrRef) can get converted to a
 ///   [`SyncRcPtrRefForInner`] at zero cost.
-pub trait SyncRcPtrRef<'a, T: Sized + marker::Send + marker::Sync, P: 'a + SyncRcPtr<T>>:
-    Sized + Clone + ops::Deref<Target = T>
-{
+pub trait SyncRcPtrRef<'a, T: ?Sized, P: 'a + SyncRcPtr<T>>: Clone + ops::Deref<Target = T> {
     /// Create a new `SyncRcPtrRef` referencing the specified [`SyncRcPtr`]
     /// instance.
     fn new(p: &'a P) -> Self;
@@ -504,11 +499,11 @@ pub trait SyncRcPtrRef<'a, T: Sized + marker::Send + marker::Sync, P: 'a + SyncR
 /// Note that it is not possible to simply use `Pin<SyncRcPtr<T>::WeakSyncRcPtr`
 /// for that, as [`Pin`](pin::Pin) requires the wrapped pointer to be
 /// dereferencable.
-pub struct PinnedWeakSyncRcPtr<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> {
+pub struct PinnedWeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>> {
     weak_ptr: P::WeakSyncRcPtr,
 }
 
-impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> PinnedWeakSyncRcPtr<T, P> {
+impl<T: ?Sized, P: SyncRcPtr<T>> PinnedWeakSyncRcPtr<T, P> {
     /// Obtain a `PinnedWeakSyncRcPtr` from a `Pin<SyncRcPtr<T>>`.
     fn downgrade<'a, R: SyncRcPtrRef<'a, T, P>>(ptr_ref: &pin::Pin<R>) -> Self
     where
@@ -523,7 +518,7 @@ impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> PinnedWeakSyncRcPt
     }
 }
 
-impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> Clone for PinnedWeakSyncRcPtr<T, P> {
+impl<T: ?Sized, P: SyncRcPtr<T>> Clone for PinnedWeakSyncRcPtr<T, P> {
     fn clone(&self) -> Self {
         Self {
             weak_ptr: self.weak_ptr.clone(),
@@ -531,9 +526,7 @@ impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> Clone for PinnedWe
     }
 }
 
-impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> WeakSyncRcPtr<T, pin::Pin<P>>
-    for PinnedWeakSyncRcPtr<T, P>
-{
+impl<T: ?Sized, P: SyncRcPtr<T>> WeakSyncRcPtr<T, pin::Pin<P>> for PinnedWeakSyncRcPtr<T, P> {
     fn upgrade(&self) -> Option<pin::Pin<P>> {
         self.weak_ptr.upgrade().map(|ptr| {
             // This is safe, it's merely a rewrap: the internally stored weak_ptr had
@@ -552,7 +545,7 @@ impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> WeakSyncRcPtr<T, p
     }
 }
 
-impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> SyncRcPtr<T> for pin::Pin<P> {
+impl<T: ?Sized, P: SyncRcPtr<T>> SyncRcPtr<T> for pin::Pin<P> {
     type SyncRcPtrRef<'a>
         = pin::Pin<P::SyncRcPtrRef<'a>>
     where
@@ -582,8 +575,7 @@ impl<T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> SyncRcPtr<T> for p
     }
 }
 
-impl<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>, R: SyncRcPtrRef<'a, T, P>>
-    SyncRcPtrRef<'a, T, pin::Pin<P>> for pin::Pin<R>
+impl<'a, T: ?Sized, P: SyncRcPtr<T>, R: SyncRcPtrRef<'a, T, P>> SyncRcPtrRef<'a, T, pin::Pin<P>> for pin::Pin<R>
 where
     P: 'a,
 {
@@ -613,12 +605,12 @@ where
 /// [`SyncRcPtr`] with no special requirements, implementations may choose to
 /// use `GenericSyncRcPtrRef` for their associated [`SyncRcPtr::SyncRcPtrRef`]
 /// type.
-pub struct GenericSyncRcPtrRef<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> {
+pub struct GenericSyncRcPtrRef<'a, T: ?Sized, P: SyncRcPtr<T>> {
     r: &'a P,
     _phantom: marker::PhantomData<fn() -> *const T>,
 }
 
-impl<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> Clone for GenericSyncRcPtrRef<'a, T, P> {
+impl<'a, T: ?Sized, P: SyncRcPtr<T>> Clone for GenericSyncRcPtrRef<'a, T, P> {
     fn clone(&self) -> Self {
         Self {
             r: self.r,
@@ -627,7 +619,7 @@ impl<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> Clone for Gene
     }
 }
 
-impl<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> ops::Deref for GenericSyncRcPtrRef<'a, T, P> {
+impl<'a, T: ?Sized, P: SyncRcPtr<T>> ops::Deref for GenericSyncRcPtrRef<'a, T, P> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -635,9 +627,7 @@ impl<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> ops::Deref for
     }
 }
 
-impl<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> SyncRcPtrRef<'a, T, P>
-    for GenericSyncRcPtrRef<'a, T, P>
-{
+impl<'a, T: ?Sized, P: SyncRcPtr<T>> SyncRcPtrRef<'a, T, P> for GenericSyncRcPtrRef<'a, T, P> {
     fn new(p: &'a P) -> Self {
         Self {
             r: p,
@@ -687,7 +677,7 @@ impl<'a, T: Sized + marker::Send + marker::Sync, P: SyncRcPtr<T>> SyncRcPtrRef<'
 /// }
 /// ```
 pub trait DerefInnerByTag<TAG> {
-    type Output;
+    type Output: ?Sized;
 
     /// Translate a reference to the containing type to the member.
     fn deref_inner(&self) -> &Self::Output;
@@ -806,7 +796,7 @@ macro_rules! impl_deref_mut_inner_by_tag {
 /// outer type to ones for the member.
 pub struct SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -816,7 +806,7 @@ where
 
 impl<OT, OP, TAG> SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -857,7 +847,7 @@ where
 
 impl<OT, OP, TAG> SyncRcPtrForInner<OT, pin::Pin<OP>, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -886,7 +876,7 @@ where
 
 impl<OT, OP, TAG> convert::From<OP> for SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -897,7 +887,7 @@ where
 
 impl<OT, OP, TAG> clone::Clone for SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -911,7 +901,7 @@ where
 
 impl<OT, OP, TAG> ops::Deref for SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -924,7 +914,7 @@ where
 
 impl<OT, OP, TAG> marker::Unpin for SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -932,7 +922,7 @@ where
 
 impl<OT, OP, TAG> SyncRcPtr<<OT as DerefInnerByTag<TAG>>::Output> for SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -971,7 +961,7 @@ where
 /// [`WeakSyncRcPtr`] implementation associated with [`SyncRcPtrForInner`].
 pub struct WeakSyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -981,7 +971,7 @@ where
 
 impl<OT, OP, TAG> clone::Clone for WeakSyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -995,7 +985,7 @@ where
 
 impl<OT, OP, TAG> marker::Unpin for WeakSyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -1004,7 +994,7 @@ where
 impl<OT, OP, TAG> WeakSyncRcPtr<<OT as DerefInnerByTag<TAG>>::Output, SyncRcPtrForInner<OT, OP, TAG>>
     for WeakSyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
 {
@@ -1043,11 +1033,11 @@ where
 /// the member is not.
 pub struct SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: 'a + SyncRcPtr<OT>,
     OR: SyncRcPtrRef<'a, OT, OP>,
-    TAG: 'a,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    TAG: 'a,
 {
     ptr_to_outer_ref: OR,
     #[allow(clippy::type_complexity)]
@@ -1056,11 +1046,11 @@ where
 
 impl<'a, OT, OP, OR, TAG> SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: 'a + SyncRcPtr<OT>,
     OR: SyncRcPtrRef<'a, OT, OP>,
-    TAG: 'a,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    TAG: 'a,
 {
     pub fn new(ptr_to_outer_ref: &OR) -> Self {
         Self {
@@ -1078,7 +1068,7 @@ where
 
 impl<'a, OT, OP, OR, TAG> SyncRcPtrRefForInner<'a, OT, pin::Pin<OP>, OR, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
     OR: SyncRcPtrRef<'a, OT, pin::Pin<OP>>,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
@@ -1108,11 +1098,11 @@ where
 
 impl<'a, OT, OP, OR, TAG> Clone for SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: 'a + SyncRcPtr<OT>,
     OR: SyncRcPtrRef<'a, OT, OP>,
-    TAG: 'a,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    TAG: 'a,
 {
     fn clone(&self) -> Self {
         Self {
@@ -1124,11 +1114,11 @@ where
 
 impl<'a, OT, OP, OR, TAG> ops::Deref for SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
-    OT: Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: ?Sized + DerefInnerByTag<TAG>,
     OP: 'a + SyncRcPtr<OT>,
     OR: SyncRcPtrRef<'a, OT, OP>,
-    TAG: 'a,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    TAG: 'a,
 {
     type Target = <OT as DerefInnerByTag<TAG>>::Output;
 
@@ -1140,11 +1130,11 @@ where
 impl<'a, OT, OP, OR, TAG> SyncRcPtrRef<'a, <OT as DerefInnerByTag<TAG>>::Output, SyncRcPtrForInner<OT, OP, TAG>>
     for SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
-    OT: 'a + Sized + marker::Send + marker::Sync + DerefInnerByTag<TAG>,
+    OT: 'a + ?Sized + DerefInnerByTag<TAG>,
     OP: 'a + SyncRcPtr<OT>,
     OR: SyncRcPtrRef<'a, OT, OP>,
-    TAG: 'a,
     <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    TAG: 'a,
 {
     fn new(p: &'a SyncRcPtrForInner<OT, OP, TAG>) -> Self {
         Self::new(&OR::new(&p.ptr_to_outer))
@@ -1176,9 +1166,9 @@ where
 pub trait SyncTypes: marker::Unpin + 'static {
     /// The execution environment's implementation of the [`ConstructibleLock`]
     /// trait.
-    type Lock<T>: ConstructibleLock<T>;
+    type Lock<T: marker::Send>: ConstructibleLock<T>;
     /// The execution environment's implementation of the [`RwLock`] trait.
-    type RwLock<T>: RwLock<T>;
+    type RwLock<T: marker::Send + marker::Sync>: RwLock<T>;
     /// The execution environment's implementation of the [`SyncRcPtrFactory`]
     /// trait. Execution environments might want to consider using the
     /// provided [`GenericArcFactory`] for their [`SyncRcPtrFactory`].
