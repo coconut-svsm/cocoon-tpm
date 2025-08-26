@@ -432,7 +432,7 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
 /// [`NvChipWriteRequest`] instance indexable with [`ChunkedIoRegionChunkRange`]
 /// "indices" emitted by the aforementioned
 /// [`ChunkedIoRegion`]'s iterators.
-pub trait NvChipWriteRequest: marker::Send {
+pub trait NvChipWriteRequest: marker::Send + marker::Unpin {
     /// Return a [`ChunkedIoRegion`] describing the buffer layout as well as the
     /// physical destination of the write request.
     /// [`ChunkedIoRegionChunkRange`]s obtained from its iterators will be
@@ -468,7 +468,7 @@ pub trait NvChipWriteRequest: marker::Send {
 /// [`NvChipReadRequest`] instance indexable with [`ChunkedIoRegionChunkRange`]
 /// "indices" emitted by the aforementioned
 /// [`ChunkedIoRegion`]'s iterators.
-pub trait NvChipReadRequest: marker::Send {
+pub trait NvChipReadRequest: marker::Send + marker::Unpin {
     /// Return a [`ChunkedIoRegion`] describing the buffer layout as well as the
     /// physical source of the read request.
     /// [`ChunkedIoRegionChunkRange`]s obtained from its iterators will be
