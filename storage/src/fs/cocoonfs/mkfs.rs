@@ -2873,11 +2873,17 @@ impl<C: chip::NvChip> CocoonFsWriteMkfsInfoHeaderFuture<C> {
     ///   header in the course of the actual filesystem creation. If not
     ///   specified, the maximum possible value within the backing storage's
     ///   [dimensions](chip::NvChip::chip_io_blocks) will be used.
+    /// * `resize_image_to_final_size` - Whether to attempt to
+    ///   [resize](chip::NvChip::resize) the image to its full final
+    ///   `image_size` before writing the header. Otherwise the backing storage
+    ///   will only resized to accomodate for the to be written header, and only
+    ///   if neeeded.
     pub fn new(
         chip: C,
         image_layout: &CocoonFsImageLayout,
         salt: FixedVec<u8, 4>,
         image_size: Option<u64>,
+        resize_image_to_final_size: bool,
     ) -> Result<Self, (C, NvFsError)> {
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
@@ -2948,9 +2954,16 @@ impl<C: chip::NvChip> CocoonFsWriteMkfsInfoHeaderFuture<C> {
             (mkfsinfo_header_chip_io_blocks as u64) << chip_io_block_allocation_blocks_log2,
         );
 
-        let fut_state = if mkfsinfo_header_allocation_blocks > chip_allocation_blocks {
+        let fut_state = if mkfsinfo_header_allocation_blocks > chip_allocation_blocks
+            || resize_image_to_final_size && image_size != chip_allocation_blocks
+        {
+            let resize_target_allocation_blocks = if resize_image_to_final_size {
+                image_size
+            } else {
+                mkfsinfo_header_allocation_blocks
+            };
             let resize_fut = match chip.resize(
-                u64::from(mkfsinfo_header_allocation_blocks) << allocation_block_chip_io_blocks_log2
+                u64::from(resize_target_allocation_blocks) << allocation_block_chip_io_blocks_log2
                     >> chip_io_block_allocation_blocks_log2,
             ) {
                 Ok(resize_fut) => resize_fut,

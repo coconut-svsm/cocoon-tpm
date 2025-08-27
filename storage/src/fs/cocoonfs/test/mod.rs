@@ -250,7 +250,8 @@ fn cocoonfs_test_write_mkfsinfo_header_op_helper(
     let (chip, image_layout, salt) = test_config.instantiate(0);
     let image_size = image_size as u64;
     let write_mkfsinfo_header_fut =
-        CocoonFsWriteMkfsInfoHeaderFuture::new(chip, &image_layout, salt, Some(image_size)).map_err(|(_chip, e)| e)?;
+        CocoonFsWriteMkfsInfoHeaderFuture::new(chip, &image_layout, salt, Some(image_size), false)
+            .map_err(|(_chip, e)| e)?;
 
     let executor = TestAsyncExecutor::new();
     let write_mkfsinfo_header_waiter = TestAsyncExecutor::spawn(&executor, write_mkfsinfo_header_fut);
