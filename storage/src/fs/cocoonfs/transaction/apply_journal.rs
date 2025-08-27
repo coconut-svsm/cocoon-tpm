@@ -27,7 +27,7 @@ use crate::{
             read_buffer,
         },
     },
-    nvfs_err_internal,
+    nvchip_err_internal, nvfs_err_internal,
     utils_async::sync_types,
     utils_common::fixed_vec::FixedVec,
 };
@@ -1384,13 +1384,13 @@ impl chip::NvChipWriteRequest for TransactionWriteDataUpdatesNvChipRequest {
             AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => unallocated_state
                 .random_fillup
                 .as_deref()
-                .ok_or(chip::NvChipIoError::Internal)?,
+                .ok_or_else(|| nvchip_err_internal!())?,
             AllocationBlockUpdateNvSyncState::Allocated(allocated_state) => match allocated_state {
                 AllocationBlockUpdateNvSyncStateAllocated::Unmodified(unmodified_state) => unmodified_state
                     .cached_encrypted_data
                     .as_ref()
                     .map(|cached_encrypted_data| cached_encrypted_data.get_encrypted_data())
-                    .ok_or(chip::NvChipIoError::Internal)?,
+                    .ok_or_else(|| nvchip_err_internal!())?,
                 AllocationBlockUpdateNvSyncStateAllocated::Modified(modified_state) => match modified_state {
                     AllocationBlockUpdateNvSyncStateAllocatedModified::JournalDirty {
                         authenticated_encrypted_data,
@@ -1399,7 +1399,7 @@ impl chip::NvChipWriteRequest for TransactionWriteDataUpdatesNvChipRequest {
                         cached_encrypted_data
                             .as_ref()
                             .map(|cached_encrypted_data| cached_encrypted_data.get_encrypted_data())
-                            .ok_or(chip::NvChipIoError::Internal)?
+                            .ok_or_else(|| nvchip_err_internal!())?
                     }
                 },
             },

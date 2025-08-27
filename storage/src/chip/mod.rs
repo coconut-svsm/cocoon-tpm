@@ -82,6 +82,23 @@ impl convert::From<alloc::collections::TryReserveError> for NvChipIoError {
     }
 }
 
+/// Debugging friendly helper for [`NvChip`] implementations to instantiate
+/// [`NvChipIoError::Internal`].
+///
+/// Panics if `cfg!(debug_assertions)` is on, to allow for debugger examination
+/// at the point the logic error has happened. Otherwise a
+/// [`NvChipIoError::Internal`] is returned.
+#[macro_export]
+macro_rules! nvchip_err_internal {
+    () => {{
+        if cfg!(debug_assertions) {
+            panic!("NvChipError::Internal");
+        } else {
+            $crate::chip::NvChipIoError::Internal
+        }
+    }};
+}
+
 /// Future trait implemented by all [`NvChip`] related futures.
 ///
 /// `NvChipFuture` differs from the standard [Rust

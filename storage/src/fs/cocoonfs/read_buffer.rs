@@ -13,7 +13,7 @@ use crate::{
         NvFsError,
         cocoonfs::{CocoonFsFormatError, alloc_bitmap, auth_tree, layout},
     },
-    nvfs_err_internal,
+    nvchip_err_internal, nvfs_err_internal,
     utils_async::sync_types::{self, ConstructibleLock as _, Lock as _},
     utils_common::{bitmanip::BitManip as _, fixed_vec::FixedVec},
 };
@@ -2627,7 +2627,7 @@ impl chip::NvChipReadRequest for BufferedReadAuthenticateDataFutureNvChipReadReq
                     - head_alignment_scratch_allocation_blocks]
                     .as_mut_slice()
             } else {
-                return Err(chip::NvChipIoError::Internal);
+                return Err(nvchip_err_internal!());
             };
 
         if allocation_block_buf.is_empty() {
