@@ -1826,19 +1826,24 @@ where
                     let mkfs_layout = &fs_init_data.mkfs_layout;
                     let image_layout = &mkfs_layout.image_layout;
                     let tail_data_allocation_blocks_end = mkfs_layout.allocated_image_allocation_blocks_end;
-                    let aligned_tail_data_allocation_blocks_end = match tail_data_allocation_blocks_end
-                        .align_up(image_layout.io_block_allocation_blocks_log2 as u32)
-                    {
-                        Some(aligned_tail_data_allocation_blocks_end) => aligned_tail_data_allocation_blocks_end,
-                        None => {
-                            // The very same alignment had been conducted when preparing the tail
-                            // data write further above.
-                            break nvfs_err_internal!();
-                        }
-                    };
+                    let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
+                    let aligned_tail_data_allocation_blocks_end =
+                        match tail_data_allocation_blocks_end.align_up(io_block_allocation_blocks_log2) {
+                            Some(aligned_tail_data_allocation_blocks_end) => aligned_tail_data_allocation_blocks_end,
+                            None => {
+                                // The very same alignment had been conducted when preparing the tail
+                                // data write further above.
+                                break nvfs_err_internal!();
+                            }
+                        };
                     let image_remainder_allocation_blocks_begin = aligned_tail_data_allocation_blocks_end;
                     let image_remainder_allocation_blocks_end =
                         layout::PhysicalAllocBlockIndex::from(0u64) + mkfs_layout.image_size;
+                    // MkFsLayout::new() aligns the image_size to the IO Block size.
+                    debug_assert!(
+                        u64::from(image_remainder_allocation_blocks_end)
+                            .is_aligned_pow2(io_block_allocation_blocks_log2)
+                    );
                     // If there's a backup MkFsInfoHeader, then be careful not to overwrite it.
                     // Split the image remainder to randomize in (up to two) regions then: one
                     // before it and/or another one subsequent to it.
@@ -1854,7 +1859,7 @@ where
                                 salt_len,
                                 chip_io_blocks,
                                 chip_io_block_size_128b_log2,
-                                image_layout.io_block_allocation_blocks_log2 as u32,
+                                io_block_allocation_blocks_log2,
                                 image_layout.allocation_block_size_128b_log2 as u32,
                             ) {
                                 Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
@@ -1863,6 +1868,25 @@ where
                         debug_assert!(
                             backup_mkfsinfo_header_location.begin() >= image_remainder_allocation_blocks_begin
                         );
+                        // The WriteRandomDataFuture needs an IO Block aligned region, so align the
+                        // region to skip over.
+                        let backup_mkfsinfo_header_location =
+                            if backup_mkfsinfo_header_location.begin() < image_remainder_allocation_blocks_end {
+                                // MkFsInfoHeader::physical_backup_location() verifies that the
+                                // backup location's beginning is aligned to the IO Block size.
+                                debug_assert!(
+                                    u64::from(backup_mkfsinfo_header_location.begin())
+                                        .is_aligned_pow2(io_block_allocation_blocks_log2)
+                                );
+                                backup_mkfsinfo_header_location
+                                    .align(io_block_allocation_blocks_log2)
+                                    .unwrap_or(layout::PhysicalAllocBlockRange::new(
+                                        backup_mkfsinfo_header_location.begin(),
+                                        image_remainder_allocation_blocks_end,
+                                    ))
+                            } else {
+                                backup_mkfsinfo_header_location
+                            };
 
                         if backup_mkfsinfo_header_location.end() >= image_remainder_allocation_blocks_end {
                             let randomization_range_end =
@@ -2222,7 +2246,9 @@ impl<C: chip::NvChip> WriteRandomDataFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `extent` - The storage extent to initialize with random data.
+    /// * `extent` - The storage extent to initialize with random data. Must be
+    ///   aligned to the [IO
+    ///   Block](layout::ImageLayout::io_block_allocation_blocks_log2) size.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `chip` - The storage the filesystem is being created on.
@@ -2478,12 +2504,25 @@ impl<C: chip::NvChip> InvalidateBackupMkFsInfoHeaderFuture<C> {
                         continue;
                     }
 
-                    // Randomize the parts in range of image_size.
+                    // Randomize the parts in range of image_size. Be careful to
+                    // align the region to the IO Block size, as the WriteRandomDataFuture requires
+                    // that.
+                    let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
+                    // MkFsInfoHeader::physical_backup_location() verifies that the
+                    // backup location's beginning is aligned to the IO Block size.
+                    debug_assert!(
+                        u64::from(this.backup_mkfsinfo_header_location.begin())
+                            .is_aligned_pow2(io_block_allocation_blocks_log2)
+                    );
+                    // MkFsLayout::new() aligns the image_size to the IO Block size.
+                    debug_assert!(u64::from(this.image_size).is_aligned_pow2(io_block_allocation_blocks_log2));
                     let write_fut = match WriteRandomDataFuture::new(
                         &layout::PhysicalAllocBlockRange::new(
                             this.backup_mkfsinfo_header_location.begin(),
                             this.backup_mkfsinfo_header_location
                                 .end()
+                                .align_up(io_block_allocation_blocks_log2)
+                                .unwrap_or(layout::PhysicalAllocBlockIndex::from(0u64) + this.image_size)
                                 .min(layout::PhysicalAllocBlockIndex::from(0u64) + this.image_size),
                         ),
                         image_layout,
