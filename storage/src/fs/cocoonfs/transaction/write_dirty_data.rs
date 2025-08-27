@@ -837,7 +837,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
     ///   write out.
     /// * `rng` - The [random number generator](rng::RngCoreDispatchable) to
     ///   randomize unallocated [Allocation
-    ///   Blocks](layout::allocation_block_size_128b_log2) with.
+    ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2) with.
     fn prepare_write_request(
         mut transaction: Box<Transaction>,
         aligned_write_region_states_allocation_blocks_index_range:
