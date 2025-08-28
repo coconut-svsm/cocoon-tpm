@@ -31,8 +31,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::{
+    CryptoError,
     io_slices::{CryptoPeekableIoSlicesMutIter, CryptoWalkableIoSlicesIter, CryptoWalkableIoSlicesMutIter},
-    rng, CryptoError,
+    rng,
 };
 use crate::{
     tpm2_interface,
@@ -500,8 +501,6 @@ pub(crate) fn transform_next_blocks<
     block_len: usize,
     scratch_block_buf: &mut [u8],
 ) -> Result<bool, CryptoError> {
-    debug_assert!(ENABLE_PARTIAL_LAST_BLOCK || dst.is_empty()? || dst.total_len()? >= block_len);
-    debug_assert_eq!(src.total_len()?, dst.total_len()?);
     let first_dst_slice_len = dst.next_slice_len()?;
     // Try to process a batch of multiple block cipher blocks at once.
     if first_dst_slice_len >= 2 * block_len {
@@ -594,7 +593,6 @@ pub(crate) fn transform_next_blocks_in_place<
     block_len: usize,
     scratch_block_buf: &mut [u8],
 ) -> Result<bool, CryptoError> {
-    debug_assert!(ENABLE_PARTIAL_LAST_BLOCK || dst.is_empty()? || dst.total_len()? >= block_len);
     let first_dst_slice_len = dst.next_slice_len()?;
     // Try to process a batch of multiple block cipher blocks at once.
     if first_dst_slice_len >= 2 * block_len {
