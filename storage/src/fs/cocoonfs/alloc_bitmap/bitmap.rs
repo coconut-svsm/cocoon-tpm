@@ -340,6 +340,14 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
         let remaining_effective_payload_len = self.remaining_effective_payload_len();
         let extent_min_allocated_effective_payload_len = extent_accounted_target_effective_payload_len
             .saturating_sub(max_final_remaining_effective_payload_len.saturating_sub(remaining_effective_payload_len));
+        if !extent_stores_extents_hdr && extent_min_allocated_effective_payload_len == 0 {
+            // Remove the extent from the accounting. See above, if
+            // extent_accounted_target_effective_payload_len != 0, then
+            // allocated_excess_effective_payload_len is 0, hence no need to deduct from
+            // there.
+            self.allocated_effective_payload_len -= extent_accounted_target_effective_payload_len;
+            return layout::AllocBlockCount::from(0);
+        }
         let extent_allocation_blocks = layout::AllocBlockCount::from(
             u64::from(
                 self.request
@@ -359,6 +367,7 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
             )
             .round_up_pow2_unchecked(min_extent_alignment_allocation_blocks_log2),
         );
+        debug_assert_ne!(extent_allocation_blocks, layout::AllocBlockCount::from(0u64));
 
         // Finally compute the actual effective payload length capacity and update the
         // internal bookkeeping in order to account for any differences from
@@ -367,16 +376,7 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
             .request
             .layout
             .extent_effective_payload_len(extent_allocation_blocks, extent_stores_extents_hdr);
-        debug_assert!(
-            extent_stores_extents_hdr
-                || extent_allocated_effective_len == 0
-                || extent_accounted_target_effective_payload_len != 0
-        );
-        debug_assert!(
-            extent_stores_extents_hdr
-                || extent_allocated_effective_len == 0
-                || self.allocated_excess_effective_payload_len == 0
-        );
+        debug_assert!(extent_stores_extents_hdr || extent_allocated_effective_len != 0);
         if extent_allocated_effective_len >= extent_accounted_target_effective_payload_len {
             let x = extent_allocated_effective_len - extent_accounted_target_effective_payload_len;
             let y = x.min(remaining_effective_payload_len);
@@ -3061,6 +3061,13 @@ impl AllocBitmap {
                 }
             } else {
                 debug_assert!(!extents_hdr_transferred);
+            }
+
+            if extents.len() == 1
+                && progress.remaining_effective_payload_len() <= max_subword_extent_effective_payload_len
+            {
+                // No further progress possible.
+                break;
             }
         }
 
