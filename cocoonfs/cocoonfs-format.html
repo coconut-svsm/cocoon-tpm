@@ -1,0 +1,2592 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>cocoonfs-format</title>
+  <style>
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <script
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"
+  type="text/javascript"></script>
+</head>
+<body>
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="#cocoonfs-format-specification"
+id="toc-cocoonfs-format-specification">CocoonFs format specification</a>
+<ul>
+<li><a href="#introduction" id="toc-introduction"><span
+id="sec-introduction">Introduction</span></a>
+<ul>
+<li><a href="#security-properties" id="toc-security-properties"><span
+id="sec-introduction-security">Security properties</span></a></li>
+<li><a href="#filesystem-model" id="toc-filesystem-model">Filesystem
+model</a></li>
+<li><a href="#journal" id="toc-journal"><span
+id="sec-introduction-journal">Journal</span></a></li>
+<li><a href="#confidentiality-of-allocations-and-block-trimming"
+id="toc-confidentiality-of-allocations-and-block-trimming"><span
+id="sec-allocations-confidentiality">Confidentiality of allocations and
+block trimming</span></a></li>
+<li><a href="#online-filesystem-creation-support"
+id="toc-online-filesystem-creation-support"><span
+id="sec-introduction-online-mkfs">Online filesystem creation
+support</span></a></li>
+</ul></li>
+<li><a href="#fundamental-structures-and-encodings"
+id="toc-fundamental-structures-and-encodings">Fundamental structures and
+encodings</a>
+<ul>
+<li><a href="#storage-location-encodings"
+id="toc-storage-location-encodings">Storage location encodings</a></li>
+<li><a href="#authentication-contexts"
+id="toc-authentication-contexts"><span
+id="sec-auth-context">Authentication contexts</span></a></li>
+<li><a href="#encryption-entity-formats"
+id="toc-encryption-entity-formats">Encryption entity formats</a></li>
+<li><a href="#image-header" id="toc-image-header"><span
+id="sec-image-header">Image header</span></a></li>
+<li><a href="#key-derivation-1" id="toc-key-derivation-1"><span
+id="sec-key-derivation">Key derivation</span></a></li>
+</ul></li>
+<li><a href="#allocation-bitmap" id="toc-allocation-bitmap"><span
+id="sec-allocation-bitmap">Allocation bitmap</span></a></li>
+<li><a href="#authentication-tree" id="toc-authentication-tree"><span
+id="sec-auth-tree">Authentication tree</span></a>
+<ul>
+<li><a href="#authentication-tree-data-block-digests"
+id="toc-authentication-tree-data-block-digests"><span
+id="sec-auth-tree-data-block-digest">Authentication Tree Data Block
+digests</span></a></li>
+<li><a href="#authentication-tree-non-root-node-digests"
+id="toc-authentication-tree-non-root-node-digests"><span
+id="sec-auth-tree-descendant-node-digest">Authentication tree non-root
+node digests</span></a></li>
+<li><a href="#authentication-tree-root-node-digest"
+id="toc-authentication-tree-root-node-digest">Authentication tree root
+node digest</a></li>
+<li><a href="#organization-of-the-authentication-tree-storage"
+id="toc-organization-of-the-authentication-tree-storage">Organization of
+the authentication tree storage</a></li>
+</ul></li>
+<li><a href="#inode-index" id="toc-inode-index"><span
+id="sec-inode-index">Inode index</span></a>
+<ul>
+<li><a href="#inode-index-leaf-node-format"
+id="toc-inode-index-leaf-node-format">Inode index leaf node
+format</a></li>
+<li><a href="#inode-index-internal-node-format"
+id="toc-inode-index-internal-node-format">Inode index internal node
+format</a></li>
+<li><a
+href="#inode-index-entry-leaf-node-preauthentication-cca-protection-digest"
+id="toc-inode-index-entry-leaf-node-preauthentication-cca-protection-digest"><span
+id="sec-inode-index-entry-leaf-node-preauth-digest">Inode index entry
+leaf node preauthentication CCA protection digest</span></a></li>
+<li><a href="#inode-extents-lists" id="toc-inode-extents-lists">Inode
+extents lists</a></li>
+</ul></li>
+<li><a href="#regular-file-encryption"
+id="toc-regular-file-encryption">Regular file encryption</a></li>
+<li><a href="#journal-1" id="toc-journal-1"><span
+id="sec-journal">Journal</span></a>
+<ul>
+<li><a href="#allocation-bitmap-file-fragments-authentication-digests"
+id="toc-allocation-bitmap-file-fragments-authentication-digests">Allocation
+bitmap file fragments’ authentication digests</a></li>
+<li><a href="#writes-application-script"
+id="toc-writes-application-script"><span
+id="sec-journal-apply-writes-script-script">Writes application
+script</span></a></li>
+<li><a href="#authentication-tree-update-script"
+id="toc-authentication-tree-update-script"><span
+id="sec-journal-auth-tree-updates-script">Authentication tree update
+script</span></a></li>
+<li><a href="#trim-script" id="toc-trim-script">Trim script</a></li>
+<li><a href="#journal-staging-copy-disguising"
+id="toc-journal-staging-copy-disguising"><span
+id="sec-journal-staging-copy-disguise">Journal staging copy
+disguising</span></a></li>
+</ul></li>
+<li><a href="#opening-the-filesystem-informative"
+id="toc-opening-the-filesystem-informative">Opening the filesystem
+(informative)</a></li>
+<li><a href="#bibliography" id="toc-bibliography"><span
+id="sec-bibliography">Bibliography</span></a></li>
+</ul></li>
+</ul>
+</nav>
+<style>
+body { max-width: 72em !important; }
+</style>
+<h1 id="cocoonfs-format-specification">CocoonFs format
+specification</h1>
+<p>Copyright 2023-2025 SUSE LLC</p>
+<p>Licensed under CC BY-SA 4.0</p>
+<h2 id="introduction"><span
+id="sec-introduction">Introduction</span></h2>
+<p>CocoonFs is a special purpose filesystem format designed for securely
+storing small items of highly sensitive data such as, but not limited
+to, a software TPM’s state and UEFI variables in a confidential Trusted
+Execution Environment (TEE) setting.</p>
+<p>In addition to its primary design focus on <a
+href="#sec-introduction-security">strong security properties</a>, the
+format implemens support for some features of particular relevance to
+the intended use-case, such as support for <a
+href="#sec-introduction-online-mkfs">keyless storage volume
+provisioning</a> and robustness against service interruptions by means
+of a <a href="#sec-introduction-journal">journal</a>.</p>
+<h3 id="security-properties"><span
+id="sec-introduction-security">Security properties</span></h3>
+<p>The most noteworthy features distinguishing CocoonFs from common
+existing Full Disk Encryption (FDE) solutions designed primarily for
+mass storage deployments are:</p>
+<ul>
+<li>The use of fresh, random Initialization Vectors (IV) for each
+encryption operation.</li>
+<li>Authentication of the filesystem as a whole by means of a Merkle
+tree.</li>
+<li>The use of subkeys derived from a single (full-entropy) root key for
+each unique combination of filesystem entity and purpose as a means to
+confine wear-out.</li>
+</ul>
+<p>Regarding cryptographic algorithms, the CocoonFs format supports the
+full set of block cipher and hash algorithms specified by the TCG
+Algorithm Registry [<a href="#bib-tcgalg25">TCGALG25</a>], with
+implementations explicitly being permitted to support a subset thereof
+only.</p>
+<p>All filesystem metadata is encrypted (and authenticated for that
+matter), even though some might be very well predictable.</p>
+<p>Details and rationale follow below.</p>
+<h4 id="random-ivs">Random IVs</h4>
+<p>Commonly used Full Disk Encryption (FDE) techniques operating
+exclusively at the block layer implement certain trade-offs in order to
+maintain a reasonable level of efficiency on mass storage devices, but
+that comes at the cost of sacrificing some cryptographic security
+properties not so important for data at rest. For a good discussion of
+the encryption aspect refer to [<a href="#bib-khati16">KHATI16</a>] and
+[<a href="#bib-fruhwirth05">FRUHWIRTH05</a>], but in a nutshell it all
+boils down to that <em>indistinguishability of encryptions</em> (“IND”),
+c.f. [<a href="#bib-goldreich09">GOLDREICH09</a>] chapter 5, cannot be
+achieved at full within a given fixed sector. That is, due to the fact
+that a sector’s encryption tweak gets derived exclusively from its
+location – and is deterministic in particular – it is possible to infer
+some relations between two plaintexts encrypted successively to the same
+sector: e.g. whether the two plaintexts share a common prefix
+(CBC-ESSIV) or some common data (XTS) at block cipher block granularity.
+Note that this is not much of a concern for data at rest, because an
+adversary cannot observe two consecutive ciphertexts by definition.</p>
+<p>The TEE threat model assumed for CocoonFs deployments is different in
+that respect though, in that an eavesdropper might be capable of
+recording any individual storage write request issued from a TEE.
+Therefore a fresh, random IV is getting generated for each encryption
+operation. Storing those random IVs for individual blocks would be too
+much overhead, hence they are associated with logical filesystem
+entities – either some metadata structure or a file – instead. More
+specifically, each entity is encrypted with a random IV in Cipher Block
+Chaining (CBC) mode. This does imply that partial file updates are not
+possible, and neither are seeks for reading because of the choice of CBC
+mode. With the kind of files anticipated to get typically stored on a
+CocoonFs target, i.e. small ones, the potential overhead incurred with
+full file reads or writes is expected to be bearable though.</p>
+<h4 id="authentication">Authentication</h4>
+<p>Authentication serves two vital purposes:</p>
+<ul>
+<li>It provides assurance that any data read back from storage by an
+application is genuine, i.e. had previously been written out.</li>
+<li>Authentication of ciphertexts implements a measure against Chosen
+Ciphertext Attacks (“IND-CCA”), c.f. [<a
+href="#bib-goldreich09">GOLDREICH09</a>] chapter 5.4.4.3.</li>
+</ul>
+<p>For protecting application state, it is desirable that the units of
+authentication comprise individual files as a whole at the very least:
+alternative approaches like the one taken by the Linux kernel’s
+dm-integrity, which authenticates individual device blocks, would
+potentially allow an adversary to revert selected parts of a file back
+to the state from a previous write, i.e. to combine old with new
+contents.</p>
+<p>Likewise, for IND-CCA security it is mandatory to authenticate the
+respective units of encryption (“messages” in common crypto terminology)
+as a whole each – that is, it is not sufficient to authenticate
+individual parts at e.g. device block granularity independently from
+each other. With the units of encryption corresponding to the logical
+filesystem entities, i.e. metadata or files, as described in the
+previous subsection, there are effectively two natural choices for
+defining the units of authentication left:</p>
+<ul>
+<li>Authenticate each encryption entity individually and store an
+authentication tag inline to it, alongside the random
+<ol start="4" type="I">
+<li></li>
+</ol></li>
+<li>Implement a Merkle tree scheme for authenticating the filesystem as
+a whole.</li>
+</ul>
+<p>Both alternatives have some pros and cons each. The authentication of
+individual filesystem entities is clearly more efficient, in terms of
+storage space as well as computational work required (even though the
+inline storage of authentication tags would inevitably introduce some
+significant padding waste to align allocations to an integral multiple
+of the unit of allocation, which is 128B at least). A Merkle tree based
+scheme is more appealing from a security property point of view, because
+it yields a single authentication tag binding the state of the CocoonFs
+instance as a whole. This enables applications to distribute their state
+across multiple files while still being guaranteed a globally coherent
+view. Note that in particular, that would allow for moving frequently
+written data, like a software TPM’s current time value, into a dedicated
+file, thereby avoiding the need to write out the complete, mostly
+unchanged state upon each and every update. Furthermore, having a single
+root authentication digest for the whole CocoonFs image available might
+perhaps serve as a basis for interesting future research projects in the
+area of rollback protection protocols: any digest updates could get sent
+to and recorded at a trusted remote party (with the journal to be
+introduced later providing a means to reliably recover from lost ACKs
+due to network failures).</p>
+<p>It’s expected that the storage backing CocoonFs deployments will
+typically be relatively small, i.e. that the height of the Merkle tree
+will remain within affordable bounds. To get a rough idea on the
+numbers: five levels with an assumed node size of 1kB and fanout of 16
+would cover 128MB worth of data already. Moreover tree node caches can
+certainly help with mitigating the overhead at the read side, as they
+can get organized such that especially the nodes at the upper layers
+will have a good probability of cache residency.</p>
+<p>With these considerations, the design choice made for CocoonFs is to
+accept the additional cost inherent to the Merkle tree approach in favor
+of achieving better security guarantees.</p>
+<p>As a minor technical detail, note that a few filesystem metadata
+items still need additional inline authentication tags for preserving
+IND-CCA when e.g. finding the location of the authentication tree or
+reading the journal during bootstrap, i.e. when opening the
+filesystem.</p>
+<h4 id="key-derivation">Key derivation</h4>
+<p>Some of the data stored on a CocoonFs instance will have low entropy,
+which might perhaps enable adversaries to acquire plaintext-ciphertext
+pairs to conduct a cryptanalysis on. Examples would include e.g. the
+filesystem metadata structures, but also certain application files’
+contents. In order to confine the effects of key wear-out, a unique
+subkey is derived from a root key for each combination of filesystem
+entity and cryptographic purpose. The Key Derivation Function (KDF) used
+for that is the <code>KDFa()</code> specified in [<a
+href="#bib-tcgtpm19a">TCGTPM19A</a>].</p>
+<p>The initially mentioned algorithm agility support, i.e. the
+possibility to use any of the algorithms from the TCG Algorithm Registry
+[<a href="#bib-tcgalg25">TCGALG25</a>] with CocoonFs, introduces a
+potential risk of downgrade attacks: by overwriting algorithms with weak
+ones in the CocoonFs header, an adversary might perhaps be able to
+recover some subkey or even the root key. In order to thwart such
+attacks, the externally supplied raw root key material, assumed to have
+full entropy, is not taken as is, but first run through the
+<code>KDFa()</code> with a fixed hash algorithm, namely SHA-512, with
+the other algorithms as found in the image header as additional
+input.</p>
+<h3 id="filesystem-model">Filesystem model</h3>
+<p>The filesystem model implemented by CocoonFs is a very limited one:
+there’s no directory hierarchy and “file names” are simply 32 bit
+integers, i.e. inode numbers.</p>
+<p>It is expected that some inode numbers or ranges thereof get
+statically assigned to a specific application purpose. For example, when
+storing a software TPM’s state, it would be natural to reserve the
+ranges 0x01000000-0x01ffffff for the storage of NV indices and
+0x81000000-0x81ffffff for persistent objects, c.f. [<a
+href="#bib-tcgtpm19b">TCGTPM19B</a>].</p>
+<p>Note that for the anticipated CocoonFs usage scenarios, i.e. the
+storage of core TEE state, it will likely always be possible to make
+such static assignments at development time and thus, it is certainly
+desirable to avoid the overhead of updating directory metadata
+structures.</p>
+<h3 id="journal"><span id="sec-introduction-journal">Journal</span></h3>
+<p>For robustness against service interruptions, e.g. power cuts,
+crashes and alike, CocoonFs implements a journal.</p>
+<p>In fact, it is not so much of a journal in the traditional sense as
+in “a journal with multiple update records”: the CocoonFs journal’s
+capacity is limited to tracking a single pending transaction at a time,
+where that single transaction can comprise an arbitrary number of
+accumulated filesystem operations.</p>
+<p>Unlike it’s the case with other journal implementations, there’s no
+dedicated, preallocated journal area except for a small (a single IO
+Block) entry structure at a fixed location, the <em>journal log
+head</em>, potentially linking to further, dynamically allocated parts
+describing the pending transaction.</p>
+<p>That journal log head is supposed to get written last, after the
+remainder of the journal has been setup. Once in place, the filesystem
+update is considered effective and success may get reported back to the
+issuing application at this point already.</p>
+<p>Note that the journalling functionality might provide a convenient
+basis for implementing a rollback protection protocol robust against
+network failures.</p>
+<p>For example, upon update, the filesystem implementation could</p>
+<ol type="1">
+<li>Setup the journal. At this point it is possible to transition to the
+new state or to revert back.</li>
+<li>Send the new authentication root digest to the remote trusted
+party.</li>
+<li>Wait for an ACK reply. In the common case that an ACK is received,
+apply the journal. If no ACK is being received, retry to reach the
+remote party until it answers.</li>
+</ol>
+<p>For handling any power cuts encountered after the new root digest has
+been sent, but before a reply has been received back, make the
+filesystem opening code to query the remote trusted party for the latest
+root authentication digest at filesystem opening time, depending on the
+answer either apply or cancel the pending journal.</p>
+<h3 id="confidentiality-of-allocations-and-block-trimming"><span
+id="sec-allocations-confidentiality">Confidentiality of allocations and
+block trimming</span></h3>
+<p>Ideally it should not be possible for an adversary to infer the
+allocation status of any blocks at any time, because that would
+e.g. allow for fingerprinting the TEE’s workload.</p>
+<p>The metadata tracking the allocations, i.e. the <a
+href="#sec-allocation-bitmap">allocation bitmap</a>, is encrypted, but
+in the assumed TEE threat model of an active adversary able to eavesdrop
+on IO requests, it is difficult to specify clear, well-defined security
+semantics with respect to the confidentiality of the overall allocations
+state: for example, whenever a given block is read or written, an
+adversary observing the IO may readily infer it’s allocated at that
+point in time.</p>
+<p>For that reason, CocoonFs does not define any security guarantees
+regarding the confidentiality of allocations with respect to adversaries
+able to eavesdrop or even alter IO communication.</p>
+<p>As a side note: this relaxation is a prerequisite for the support of
+a dynamically allocated journal: the blocks used temporarily for the
+journal can be in any state, therefore their contents cannot get
+authenticated reliably. More generally, unallocated block’s contents
+cannot get considered as input for the authentication, only the fact
+that they are unallocated can, but this implies that a given block’s
+authentication tag returns to a previous value when deallocated,
+something which would otherwise have been highly unlikely.</p>
+<p>CocoonFs does however provide optional confidentiality of allocations
+in the “data at rest model”. If enabled, certain additional measures
+with some computational overhead need to get taken – most notably a <a
+href="#sec-journal-staging-copy-disguise">reencryption</a> of data
+copies in the journal in order to prevent the identification of journal
+blocks by matching them to duplicates.</p>
+<p>Implementations may issue trim commands for deallocated blocks to the
+underlying storage device. Note however that trimming is mutually
+exclusive with the confidentiality of allocations, because a trimmed
+block is usually recognizable as such.</p>
+<h3 id="online-filesystem-creation-support"><span
+id="sec-introduction-online-mkfs">Online filesystem creation
+support</span></h3>
+<p>In some use-cases, e.g. TEEs running in a public cloud, it might be
+desirable to create the filesystem from within the TEE itself upon first
+use: the initial filesystem creation requires access to the root key,
+and, as the TEE would need that anyway, such a setup scheme would allow
+for limiting the trust boundary to the bare minimum.</p>
+<p>However, a TEE should certainly not start to randomly create CocoonFs
+instances on any attached volumes whose formats it doesn’t recognize and
+some sort of storage volume tagging mechanism is due. The CocoonFs
+format implements this by means of a special <a
+href="#sec-mkfsinfo-header">filesystem creation header</a> marking the
+containing volume as intended for formatting with a CocoonFs instance at
+first use in the first place, and specifying all the core configuration
+parameters required for the filesystem creation.</p>
+<p><strong>Attention</strong>: the <a
+href="#sec-mkfsinfo-header">filesystem creation header</a> is not
+authenticated at all, and thus, to thwart downgrade attacks on the set
+of cryptographic algorithms, these <strong>must</strong> get
+authenticated/attested/validated by some other, unspecified means. If
+there’s any potential for root key reuse, then the filesystem salt
+<strong>must</strong> get authenticated as well.</p>
+<p>The initial filesystem creation process involves a replacement of the
+<a href="#sec-mkfsinfo-header">filesystem creation header</a> with the
+<a href="#sec-filesystem-header">regular filesystem header</a> at some
+point. For robustness against service interruptions encountered during
+this final write operation, a backup copy of the <a
+href="#sec-mkfsinfo-header">filesystem creation header</a> is to be
+written at a specific location on storage determined exclusively from
+its dimensions beforehand. In case no valid (integrity protected) <a
+href="#sec-image-header">image header</a> of either type is found at the
+beginning of the storage when attempting to open a filesystem,
+i.e. following a service interruption, the implementation is supposed to
+check for the presence of the backup <a
+href="#sec-mkfsinfo-header">filesystem creation header</a> and restart
+the filesystem creation as appropriate.</p>
+<h2 id="fundamental-structures-and-encodings">Fundamental structures and
+encodings</h2>
+<p>The core CocoonFs metadata structures are:</p>
+<ul>
+<li>The <a href="#sec-image-header">image header</a> defining filesystem
+properties, split into an <a
+href="#sec-static-image-header">immutable</a> and a <a
+href="#sec-mutable-image-header">mutable</a> part. The immutable part
+contains all static configuration parameters, the immutable part the
+changing values such as the authentication tree root digest, the
+filesystem image size etc.</li>
+<li>The <a href="#sec-auth-tree">authentication tree</a>.</li>
+<li>The <a href="#sec-allocation-bitmap">allocation bitmap</a> tracking
+the allocation status of each <em>Allocation Block</em> in the
+filesystem image.</li>
+<li>The <a href="#sec-inode-index">inode index</a>, organized as a
+B+-tree.</li>
+<li>The <a href="#sec-journal">journal</a>.</li>
+</ul>
+<p>Inodes 0 to 5 (inclusive) are reserved for CocoonFs internal use. The
+<a href="#sec-auth-tree">authentication tree</a>, the <a
+href="#sec-allocation-bitmap">allocation bitmap</a> and the <a
+href="#sec-inode-index">inode index</a> root have entries in the inode
+index and are assigned inode numbers 1, 2 and 3 respectively. The <a
+href="#sec-journal">journal log</a> has inode number 5 associated with
+it, but there’s no explicit entry for it in the inode index – the number
+is used only for key derivation subject purposes.</p>
+<p>For completeness in this context: inode number 0 is reserved for a
+special “no inode” value, inode number 4 is currently not allocated and
+reserved. Note that the minimum inode index B+-tree node fill-level is
+such that inodes 1 to 4 will always be found in the leftmost leaf, which
+is referred to as the <a
+href="#def-inode-index-entry-leaf-node"><em>inode index entry leaf
+node</em></a>. The location of the inode index entry leaf node is
+referenced from the <a href="#sec-mutable-image-header">mutable image
+header</a> and enables discovering all the other metadata structures at
+filesystem opening time.</p>
+<p>An <span id="def-extent"><em>extent</em></span> is a
+<strong>non-empty</strong>, physically contiguous range on storage. Any
+inode, except for the special inode index root node inode, stores its
+data in one or more extents.</p>
+<p>The term <span id="def-block"><em>block</em></span> is used to denote
+an extent which is a power of two in length and whose length is implicit
+from the context. Block boundaries on storage are not necessarily
+aligned to the block size in the general case, any alignment
+requirements on extents or blocks are stated explicitly where they
+apply.</p>
+<p>The unit of allocations is an <span
+id="def-allocation-block"><em>Allocation Block</em></span>, a power of
+two multiple of 128B, specified as a configuration parameter in the
+static image header. The <a href="#sec-allocation-bitmap">allocation
+bitmap</a> has one bit entry associated with each possible Allocation
+Block in the filesystem image: if set, the corresponding Allocation
+Block is allocated, otherwise it’s free.</p>
+<p>Unless otherwise noted, all locations on storage are specified in
+units of Allocation Blocks. The maximum supported filesystem image size
+is <span class="math inline">\(2^{64} - 1\)</span> rounded down to the
+Allocation Block size.</p>
+<p>An <span id="def-io-block"><em>IO Block</em></span> is a power of two
+multiple of the Allocation Block size, specified as a filesystem
+parameter in the static image header and defining an upper bound on the
+supported backing device’s IO granularity. More specifically, it is
+assumed that a write to an aligned IO Block doesn’t affect the contents
+of any other IO Block. Implementations must reject to open a filesystem
+if the backing storage device supports only larger IO sizes than the IO
+Block size recorded in the static image header.</p>
+<p>The filesystem image size must always be a multiple of the IO Block
+size. Note that this effectively limits the maximum supported image size
+to <span class="math inline">\(2^{64} - 1\)</span> rounded down to the
+IO Block size.</p>
+<p>An <span id="def-auth-tree-data-block"><em>Authentication Tree Data
+Block</em></span> is a power of two multiple of the Allocation Block
+size, specified as a filesystem parameter in the static image header and
+defining the unit of authentication, i.e the fan-out factor from the <a
+href="#sec-auth-tree">authentication tree</a> leafs’ entries.</p>
+<p>All of the authentication tree’s extents’ boundaries must be aligned
+to the larger of the IO Block and the Authentication Tree Data Block
+size.</p>
+<p>All of the <a href="#sec-allocation-bitmap">allocation bitmap’s</a>
+extents’ boundaries must be aligned to the Authentication Tree Data
+Block size, as is required for bootstrapping the authentication at
+filesystem opening time: in general an Authentication Tree Data Block’s
+individual Allocation Blocks’ respective allocation status must be known
+each for <a href="#sec-auth-tree-data-block-digest">computing its
+authentication digest</a>, but with the aligned allocation bitmap file
+extents all overlapping Authentication Tree Data Blocks’ Allocation
+Blocks are known a priori to be allocated.</p>
+<h3 id="storage-location-encodings">Storage location encodings</h3>
+<h4 id="encoded-extent-pointer"><span id="sec-enc-extent-ptr">Encoded
+extent pointer</span></h4>
+<p>An <em>encoded extent pointer</em> is a packed 64 bit encoding format
+for specifying the location and type of an <a
+href="#def-extent">extent</a> of up to 64 <a
+href="#def-allocation-block">Allocation Blocks</a>.</p>
+<p>The type of an extent referenced from an encoded extent pointer is
+either “direct” or “indirect”. A direct extent contains payload data, an
+indirect one (the beginning of) an <a
+href="#sec-enc-extents-list">encoded extent list</a> specifying the
+extents containing the actual payload data. Indirect extents are used if
+the payload data either exceeds 64 Allocation Blocks or spans multiple
+extents and can be referenced only from entries in the inode index.</p>
+<p>An encoded extent pointer is formed as follows:</p>
+<ul>
+<li>Shift the referenced extent’s beginning on storage in units of
+Allocation Blocks represented as a 64 bit integer to the left by 7
+bits.</li>
+<li>Subtract one from the extent length in units of Allocation Blocks
+represented as a 64 bit integer and shift it to the left by 1 bit.</li>
+<li>Or the two values together, set the least significant bit if the
+referenced extent’s type is “indirect”, encode the resulting integer in
+little-endian format.</li>
+</ul>
+<p>The value of all-zeros denotes a special “NIL” value – as the static
+image header is located at the filesystem image’s beginning, no extent
+can ever start at position 0.</p>
+<p>Note that with a maximum supported filesystem image size of <span
+class="math inline">\(2^{64} - 1\)</span> rounded down to the Allocation
+Block size, and a minimum Allocation Block size of 128B, any Allocation
+Block index always has its upper 7 bits clear, so the shift in the first
+step wouldn’t shift non-zero bits out.</p>
+<h4 id="encoded-block-pointer"><span id="sec-enc-block-ptr">Encoded
+block pointer</span></h4>
+<p>An <em>encoded block pointer</em> is a packed encoding format for
+specifying the location a <a href="#def-block">block</a>, i.e. some
+extent whose length is a fixed power of two implicit from the
+context.</p>
+<p>An encoded block pointer is formed by shifting the block’s beginning
+on storage in units of Allocation Blocks represented as a 64 bit integer
+to the left by 7 bits. The lower 7 bits are reserved for future use.</p>
+<p>The value of all-zeros denotes a special “NIL” value – as the static
+image header is located at the filesystem image’s beginning, no block
+can ever start at position 0.</p>
+<h4 id="encoded-extents-list"><span id="sec-enc-extents-list">Encoded
+extents list</span></h4>
+<p>An <em>encoded extents list</em> specifies the location of one or
+more <a href="#def-extent">extents</a>.</p>
+<p>The extents lists is encoded as a sequence of (beginning, length)
+pairs, one for each extent.</p>
+<p>An extent’s beginning is specified in terms of the difference
+relative to the previous extent’s end, if any, or zero for the first
+entry, in units of <a href="#def-allocation-block">Allocation Blocks</a>
+and represented in two’s complement modulo <span
+class="math inline">\(2^{64}\)</span>, encoded in signed LEB128 format.
+An extent’s length is specified in units of Allocation Blocks and
+encoded in unsigned LEB128 format. It must not be zero.</p>
+<p>The encoded list is terminated by two zero bytes.</p>
+<h3 id="authentication-contexts"><span
+id="sec-auth-context">Authentication contexts</span></h3>
+<p>Any data digested for authentication gets extended by an
+<em>authentication context</em> for the purpose of the digesting
+operation. The authentication context uniquely encodes the type and
+format of the authenticated data. Its exact format depends on the
+authenticated subject, but it always ends with one of the <span
+id="def-auth-subject-id"><em>authentication subject
+identifiers</em></span> defined in the table below. An authentication
+context’s subject identifier uniquely identifies the format and
+semantics of its remainder, which in turn binds the format and semantics
+of the authenticated data.</p>
+<table style="width:99%;">
+<colgroup>
+<col style="width: 43%" />
+<col style="width: 6%" />
+<col style="width: 49%" />
+</colgroup>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+<th>Authentication subject description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AUTH_SUBJECT_ID_IMAGE_CONTEXT</code></td>
+<td>1</td>
+<td>Collection of filesystem configuration parameters describing the
+layout as well as the locations of certain entities needed for
+bootstrapping at filesystem opening time. The <a
+href="#sec-auth-tree-root-digest">image context digest</a> gets in turn
+digested into the authentication tree root digest.</td>
+</tr>
+<tr>
+<td><code>AUTH_SUBJECT_ID_AUTH_TREE_ROOT_NODE</code></td>
+<td>2</td>
+<td>The <a href="#sec-auth-tree-root-digest">authentication tree root
+node</a>.</td>
+</tr>
+<tr>
+<td><code>AUTH_SUBJECT_ID_AUTH_TREE_DESCENDANT_NODE</code></td>
+<td>3</td>
+<td><a href="#sec-auth-tree-descendant-node-digest">Non-root
+authentication tree node</a>.</td>
+</tr>
+<tr>
+<td><code>AUTH_SUBJECT_ID_AUTH_TREE_DATA_BLOCK</code></td>
+<td>4</td>
+<td><a href="#sec-auth-tree-data-block-digest">Authentication tree data
+block</a>.</td>
+</tr>
+<tr>
+<td><code>AUTH_SUBJECT_ID_ENCRYPTION_ENTITY_CHAINED_EXTENTS</code></td>
+<td>5</td>
+<td>Extent in a sequence of <a
+href="#sec-encryption-entity-chained-extents">encrypted chained
+extents</a>.</td>
+</tr>
+<tr>
+<td><code>AUTH_SUBJECT_ID_INODE_INDEX_NODE</code></td>
+<td>6</td>
+<td>A node in the inode index tree. Used only for <a
+href="#sec-inode-index-entry-leaf-node-preauth-digest">authenticating
+the contents of the inode index entry leaf node</a>.</td>
+</tr>
+<tr>
+<td><code>AUTH_SUBJECT_ID_JOURNAL_LOG_FIELD</code></td>
+<td>7</td>
+<td>A field in the <a href="#sec-journal">journal log</a>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="encryption-entity-formats">Encryption entity formats</h3>
+<p>There are three different encryption entity formats defined: * one
+for encrypted <a href="#def-block">blocks</a>, where it is assumed that
+the length of the encrypted payload is implicit from the context, * one
+for a sequence of encrypted extents, where the locations of all <a
+href="#def-extent">extents</a> the sequence are determined by some means
+external to the encrypted entity and * one for a linked list of extents,
+where only the head extent’s locations is determined by some external
+means while the tail is to be found by traversing the linked list.</p>
+<p>For example, the block encryption format is used for nodes in the
+inode index B+-tree, the encrypted extents for inode data, and chained
+encrypted extents for storing <a href="#sec-enc-extents-list">inode
+extents lists</a> as well as the journal log.</p>
+<h4 id="encrypted-block"><span
+id="sec-encryption-entity-block">Encrypted block</span></h4>
+<p>An encrypted <a href="#def-block">block’s</a> payload length is
+assumed to be known a priori from the context.</p>
+<p>The format is stored as follows:</p>
+<ol type="1">
+<li>The IV for the CBC block cipher chaining mode.</li>
+<li>Randomized padding to align the remainder of the block’s length to a
+multiple of the block cipher block length. Note that the padding is
+empty for all possibly supported block cipher algorithms currently
+defined in the <a href="#bib-tcgalg25">TCG Algorithm Registry</a>.</li>
+<li>An integral multiple of block cipher blocks storing the result of
+encrypting the fixed-length payload in CBC block cipher chaining
+mode.</li>
+<li>An integral multiple of remainder block cipher blocks extending up
+to the encryption entity block’s end and filled with random data.</li>
+</ol>
+<p>As the payload length is assumed to be fixed and implicit from the
+context, it is unspecified how to pad the encrypted payload to align
+with the block cipher block length. It is also unspecified how the
+remainder of the encrypted entity block is filled with random data.
+Implementations might e.g. simply continue the CBC encryption on a
+sequence of zeros, or they make invoke a cryptographic random number
+generator (CSPRNG).</p>
+<h4 id="encrypted-extents"><span
+id="sec-encryption-entity-extents">Encrypted extents</span></h4>
+<p>The locations of all extents in the sequence is assumed to be
+determined by some means external to the encrypted entity, the encrypted
+payload may be of any length, zero included.</p>
+<p>The IV is stored at the beginning of the first extent. Randomized
+padding is inserted in any extent to align the remainder of the extents’
+lengths to a multiple of the block cipher block size each – after the IV
+for the first extent, at the extents’ beginnings for any subsequent
+extent. Note that the padding is empty for all possibly supported block
+cipher algorithms currently defined in the <a href="#bib-tcgalg25">TCG
+Algorithm Registry</a>. The remainders of all extents are concatenated
+to collectively form the ciphertext. The ciphertext is the result of
+encrypting the payload, amended by a PKCS#7 padding and an integral
+multiple of zero-filled block cipher blocks as appropriate, in CBC block
+cipher chaining mode.</p>
+<h4 id="encrypted-chained-extents"><span
+id="sec-encryption-entity-chained-extents">Encrypted chained
+extents</span></h4>
+<p>Only the location of the first extent in a sequence of chained
+extents is assumed to be determined by some means external to the
+encrypted entity: the chained extents form a singly linked list with the
+pointers to the respective next extent being part of the encrypted
+plaintexts each.</p>
+<p>Encrypted chained extents come in two flavors: with and without
+inline authentication. The variant with inline authentication is used
+for implementing IND-CCA security for certain filesystem structures at
+filesystem opening time before the full Merkle tree based authentication
+has been bootstrapped.</p>
+<p>The first extent may store some optional plaintext header at its
+beginning, like e.g. a magic for the journal log head, followed by the
+mandatory IV. For the inline authenticated variant an authentication tag
+is stored in each extent in the chain: after the IV for the first
+extent, at the extents’ beginnings for any subsequent continuation
+extent. Randomized padding is then inserted at the current position in
+each extent in order to align its remainder to an integral multiple of
+the block cipher block size.</p>
+<p>The (aligned) remainder of each extent constitutes its ciphertext.
+The ciphertext is the result of encrypting the plaintext associated with
+an extent in CBC mode, with the IV being the output IV from the previous
+extent’s CBC encryption, if any, or the IV stored inline to the first
+extent otherwise. The extents’ plaintexts are formed by prepending an <a
+href="#sec-enc-extent-ptr">encoded extent pointer</a> with its
+“indirect” bit clear and linking to the next extent in the chain, if
+any, or set to NIL if not, to a chunk of payload data from the encrypted
+entity. Chunks of entity payload data are consumed greedily, that is,
+each but the last extent’s capacity is exhausted in full. A PKCS#7
+padding is appended to the last extent’s plaintext, followed by an
+integral multiple of zero-filled block cipher blocks as appropriate.</p>
+<p>For the inline-authenticated variant, the extents’ authentication
+tags are computed as HMACs over the following data:</p>
+<ol type="1">
+<li>The extent’s stored contents, with the authentication tag replaced
+by all-zeros for the first extent, or by the previous extent’s
+authentication tag for any subsequent continuation extent.</li>
+<li>An additional <a href="#sec-auth-context">authentication context</a>
+constructed as follows:
+<ol type="1">
+<li>For a continuation extent only: the IV used for the extent’s CBC
+encryption, i.e. the IV output from the previous extent’s
+encryption.</li>
+<li>Possibly empty authenticated associated data common to all
+extents.</li>
+<li>A single byte set to 0 for the first extent, or to 1 for any
+subsequent continuation extent.</li>
+<li>An authentication context format version identifier byte of constant
+0.</li>
+<li>An authentication context subject identifier byte of constant <a
+href="#def-auth-subject-id"><code>AUTH_SUBJECT_ID_ENCRYPTION_ENTITY_CHAINED_EXTENTS</code></a>
+identifying the authenticated subject.</li>
+</ol></li>
+</ol>
+<p>The security strength of authenticating the individual extents with a
+HMAC is that of the underlying hash’s preimage resistance, i.e. the
+digest size in bits usually. Note however that because intermediate
+authentication tags in the chain are public, including the previous one
+in the digest for the next extent in the chain provides authenticity for
+the chain as a whole only at the underlying hash’s collision resistance,
+which is at most half the underlying hash’s digest length. In fact the
+inclusion of the previous tags is not needed for correctness or
+soundness at all, but implements an integrity protection measure for the
+sequence of chained extents as a whole at little additional cost, which
+is good to have from a robustness perspective, especially for the
+journal log.</p>
+<h3 id="image-header"><span id="sec-image-header">Image
+header</span></h3>
+<p>The CocoonFs format defines two mutually exclusive header types to be
+placed at the containing storage volume’s beginning:</p>
+<ul>
+<li>In the regular case, after the filesystem has been created on
+storage and is operational, the <a href="#sec-filesystem-header">regular
+CocoonFs filesystem header</a> is stored at that location.</li>
+<li>Alternatively, to drive <a
+href="#sec-introduction-online-mkfs">online filesystem creation</a> upon
+first use, a <a href="#sec-mkfsinfo-header">filesystem creation info
+header</a> may be placed there. It is expected that implementations will
+conduct the filesystem creation upon encountering such one, eventually
+replacing the header with a <a href="#sec-filesystem-header">regular
+CocoonFs filesystem header</a> in the course.</li>
+</ul>
+<p>Both header types are protected by a checksum each. If no valid
+header of either type passing checksum verification is found at the
+storage’s beginning when attempting to open a filesystem,
+implementations are expected to check for the presence of a filesystem
+creation info header <a href="#def-mkfsinfo-backup-header">backup
+copy</a> at a specific location determined exclusively from the backing
+storage volume’s dimensions, and proceed with the online filesystem
+creation if one is found.</p>
+<h4 id="regular-cocoonfs-filesystem-header"><span
+id="sec-filesystem-header">Regular CocoonFs filesystem
+header</span></h4>
+<p>The regular CocoonFs filesystem image header is split into two parts:
+a <a href="#sec-static-image-header">static</a> and a <a
+href="#sec-mutable-image-header">mutable</a> one. The static image
+header is located at the beginning of the image, padded to an integral
+multiple of the <a href="#def-io-block">IO Block</a> size so that no
+neighboring writes will ever alter its contents. This is important, as
+the configuration found in the static image header is needed for
+determining the filesystem layout and locating the fixed position of the
+journal log head.</p>
+<p>The mutable header is located past the static image header’s padding,
+and changes to it are tracked through the journal, just as is the case
+for any update. It contains changing values such as the filesystem image
+size or the authentication tree root hash.</p>
+<h5 id="static-image-header"><span id="sec-static-image-header">Static
+image header</span></h5>
+<p>The static image header starts at offset zero, its format is:</p>
+<table>
+<colgroup>
+<col style="width: 17%" />
+<col style="width: 83%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length in bytes</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td>Magic string <code>'COCOONFS'</code> (without a terminating zero
+byte).</td>
+</tr>
+<tr>
+<td>1</td>
+<td>The filesystem format version. Fixed to 0.</td>
+</tr>
+<tr>
+<td>20</td>
+<td>The set of filesystem image layout parameters, c.f. further
+below.</td>
+</tr>
+<tr>
+<td>1</td>
+<td>The salt length.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>The salt.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Cyclic redundancy checksum over the header.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Cyclic redundancy checksum over the header with any two neighboring
+bits swapped.</td>
+</tr>
+</tbody>
+</table>
+<p>After the static image header, some padding is inserted up to the
+next <a href="#def-io-block">IO Block</a> alignment boundary. None of
+the IO Blocks overlapping with the static image header, including that
+padding, may ever get written to.</p>
+<p>The set of filesystem configuration parameters, referred to as the
+<span id="def-image-layout"><em>image layout</em></span>, is encoded as
+follows:</p>
+<table style="width:99%;">
+<colgroup>
+<col style="width: 6%" />
+<col style="width: 45%" />
+<col style="width: 47%" />
+</colgroup>
+<thead>
+<tr>
+<th>Encoded length in bytes</th>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>allocation_block_size_128b_log2</code></td>
+<td>Size of an <a href="#def-allocation-block">Allocation Block</a>,
+specified as the base-2 logarithm of the size in units of 128B.</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>io_block_allocation_blocks_log2</code></td>
+<td>Size of an <a href="#def-io-block">IO Block</a>, specified as the
+base-2 logarithm in units of Allocation Blocks.</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>auth_tree_node_io_blocks_log2</code></td>
+<td>Size of an <a href="#sec-auth-tree">authentication tree node</a>,
+specified as the base-2 logarithm in units of IO Blocks.</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>auth_tree_data_block_allocation_blocks_log2</code></td>
+<td>Size of an <a href="#def-auth-tree-data-block">Authentication Tree
+Data Block</a>, specified as the base-2 logarithm in units of Allocation
+Blocks. Must be &lt;= 6.</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>allocation_bitmap_file_block_allocation_blocks_log2</code></td>
+<td>Size of an <a href="#sec-allocation-bitmap">allocation bitmap file
+block</a>, specified as the base-2 logarithm in units of Allocation
+blocks.</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>index_tree_node_allocation_blocks_log2</code></td>
+<td>Size of an <a href="#sec-inode-index">inode index</a> B+-tree node,
+specified as the base-2 logarithm in units of Allocation blocks. Must be
+&lt;= 64.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>auth_tree_node_hash_alg</code></td>
+<td><a href="#bib-tcgalg25">TCG algorithm identifier</a> of the hash
+algorithm to be used for <a
+href="#sec-auth-tree-descendant-node-digest">digesting the descendant,
+non-root nodes of the authentication tree</a>, referred to as the
+“authentication tree node hash algorithm”. Encoded in big-endian
+format.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>auth_tree_data_hmac_hash_alg</code></td>
+<td><a href="#bib-tcgalg25">TCG algorithm identifier</a> of the hash
+algorithm to be used for <a
+href="#sec-auth-tree-data-block-digest">digesting Authentication Tree
+Data Blocks</a>, referred to as the “authentication tree data hash
+algorithm”. Encoded in big-endian format.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>auth_tree_root_hmac_hash_alg</code></td>
+<td><a href="#bib-tcgalg25">TCG algorithm identifier</a> of the hash
+algorithm to be used for <a href="#sec-auth-tree-root-digest">digesting
+the root node of the authentication tree</a>, the “authentication tree
+root hash algorithm”. Encoded in big-endian format.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>preauth_cca_protection_hmac_hash_alg</code></td>
+<td><a href="#bib-tcgalg25">TCG algorithm identifier</a> of the hash
+algorithm to be used for the inline authentication of various metadata
+items for maintaining IND-CCA during bootstrapping, referred to as the
+“preauthentication CCA protection hash algorithm”. Encoded in big-endian
+format.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>kdf_hash_alg</code></td>
+<td><a href="#bib-tcgalg25">TCG algorithm identifier</a> of the hash
+algorithm to be used for <a href="#sec-key-derivation">deriving
+subkeys</a> by means of the TCG <code>KDFa()</code>, referred to as the
+“key derivation hash algorithm”.</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>block_cipher_alg</code></td>
+<td><a href="#bib-tcgalg25">TCG algorithm identifier</a> and key size of
+the block cipher algorithm used for any encryption. Encoded as a pair of
+two 16 bit integers in big-endian format each.</td>
+</tr>
+</tbody>
+</table>
+<h6 id="cyclic-redundancy-checksum-crc-computation"><span
+id="sec-crc">Cyclic redundancy checksum (CRC) computation</span></h6>
+<p>The static image header is integrity protected by a pair two CRC-32s:
+one over the plain header data from the magic to the salt, both
+inclusive, and another one over the same data but with any two
+neighboring bits swapped.</p>
+<p>The CRC polynomial used in either case is the standard CRC-32 one,
+with a corresponding 32 bit integer representation of
+<code>0x04c11db71</code>, where the arithmetically most significant bit
+specifies the coefficient to the term of degree <span
+class="math inline">\(31\)</span>, and the least signigicant bit the
+constant term. A string of <span class="math inline">\(32\)</span> <span
+class="math inline">\(1\)</span>-bits is prepended to the data before
+the CRC computation starts. Successive bytes in the data correspond to
+terms of decreasing degree in the to be reduced data polynomial, and
+within each byte, bits of decreasing arithmetic significance correspond
+to terms of increasing polynomial degree. The final residual
+polynomial’s coefficient are inverted and serialized with the same
+association between polynomial terms and bits on storage as just
+described for the data.</p>
+<p>The distribution of the CRC algorithm output over uniformly
+distributed data is again uniform, so in this idealized case the
+probability of not detecting random errors with a single CRC-32 is <span
+class="math inline">\(1:2^{32}\)</span>. One of the checksum’s primary
+purposes is to detect incomplete writes issued from an interrupted
+filesystem creation operation – the only point in time the static image
+header is getting actively written to. A chance of <span
+class="math inline">\(1:2^{32}\)</span> for missing header corruptions
+may well be considered too unreliable, and a 64 bit checksum should be
+used instead. The most straightforward solution would be to use a CRC-64
+variant. However, in practice, this would double the size of a CRC
+implementation’s internal lookup tables, which is undesirable. So a
+different approach is taken instead: a 64 bit checksum is formed by
+combining one CRC-32 over the header’s data with another over the same
+data, but with any two neighboring bits swapped. Because the CRC-32
+polynomial is irreducible – hence the ring of its residue classes is a
+field, this is equivalent to computing two independent CRC-32 values
+over the bits at odd and even positions in the input data each.
+Therefore, the probability of missing uniformly random corruptions is
+<span class="math inline">\(1:2^{64}\)</span>.</p>
+<p>The well-known feature of CRC-64 that burst errors of length up to 64
+bits are detected reliably also applies to this method of combining the
+two CRC-32 checksums. To see this, consider the polynomial ring <span
+class="math inline">\(\mathbb{F}_2[X]\)</span> with coefficients in the
+binary field <span class="math inline">\(\mathbb{F}_2\)</span>. Denote
+the CRC polynomial in this ring by <span
+class="math inline">\(\mathcal{c}\)</span>. The ability to detect burst
+errors up to a length of 64 bits translates to requiring that the only
+polynomial of degree less than 64 with its terms of odd degree all zero
+and a residue <span
+class="math inline">\(\mathrm{mod}\mathcal{c}\)</span> of zero is the
+zero polynomial. Note that <span
+class="math inline">\(\mathrm{char}(\mathbb{F}_2)=2\)</span>, and <span
+class="math inline">\(\phi: p\mapsto p^2\)</span> is a ring endomorphism
+on <span class="math inline">\(\mathbb{F}_2[X]\)</span>. In particular
+<span class="math inline">\(\phi(X)=X^2\)</span>. The image of <span
+class="math inline">\(\phi\)</span> is exactly the set of polynomials
+with their terms of odd degree all zero. Observe that <span
+class="math inline">\(\phi(\mathcal{c})=\mathcal{c}^2\)</span> yields
+such a polynomial with a residue <span
+class="math inline">\(\mathrm{mod}\mathcal{c}\)</span> of <span
+class="math inline">\(0\)</span>. It has degree <span
+class="math inline">\(64\)</span> though, and it remains to be shown
+that this is the polynomial of least degree with these properties.
+Consider the composition of maps <span
+class="math inline">\(\psi\circ\phi\)</span>, where <span
+class="math inline">\(\psi\)</span> denotes the canonical map <span
+class="math inline">\(\mathbb{F}_2[X]\rightarrow
+\mathbb{F}_2[X]/(\mathcal{c})\)</span> into the residue class ring. The
+<span class="math inline">\(\mathrm{kern}(\psi\circ\phi)\)</span> is an
+ideal in <span class="math inline">\(\mathbb{F}_2[X]\)</span>, and is
+prinicipal, because <span class="math inline">\(\mathbb{F}_2[X]\)</span>
+is a principal ideal ring. That is, <span
+class="math inline">\(\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})\)</span>
+for some <span
+class="math inline">\(\bar{\mathcal{c}}\in\mathbb{F}_2[X]\)</span>, and
+<span class="math inline">\(\phi(\bar{\mathcal{c}})\)</span> is a
+polynomial of minimum degree in <span
+class="math inline">\(\mathrm{kern}(\psi)\)</span> with its terms of odd
+degree all zero. By what has been said above, it is already known that
+<span
+class="math inline">\(\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})\)</span>.
+Finally, because <span class="math inline">\(\mathcal{c}\)</span> is
+irreducible (and <span class="math inline">\(\mathbb{F}_2\)</span>’s
+only unit is <span class="math inline">\(1\)</span>), it follows that
+<span class="math inline">\(\mathcal{\bar{c}}=\mathcal{c}\)</span>.</p>
+<h5 id="mutable-image-header"><span
+id="sec-mutable-image-header">Mutable image header</span></h5>
+<p>The mutable image header is located at the first <a
+href="#def-io-block">IO Block</a> aligned boundary following the static
+image header. It gets updated through the general journalling mechanics,
+hence it may be in an inconsistent state at filesystem opening time.</p>
+<p>The mutable image header’s format is:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 66%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Digest length produced by
+<code>auth_tree_root_hmac_hash_alg</code>.</td>
+<td>The <a href="#sec-auth-tree-root-digest">authentication tree root
+HMAC digest</a>.</td>
+</tr>
+<tr>
+<td>Digest length produced by
+<code>preauth_cca_protection_hmac_hash_alg</code>.</td>
+<td><a href="#sec-inode-index-entry-leaf-node-preauth-digest">HMAC
+digest over the inode index entry leaf node</a>, used for maintaining
+IND-CCA security when first decrypting the node at filesystem opening
+time.</td>
+</tr>
+<tr>
+<td>8B</td>
+<td><a href="#sec-enc-block-ptr">Encoded block pointer</a> to the <a
+href="#def-inode-index-entry-leaf-node">inode index entry leaf
+node</a>.</td>
+</tr>
+<tr>
+<td>8B</td>
+<td>The filesystem image size in units of <a
+href="#def-allocation-block">Allocation Blocks</a>, encoded as a 64 bit
+integer in little-endian format.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>Padding to align the mutable image header’s length to a multiple of
+the <a href="#def-allocation-block">Allocation Block</a> size.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="filesystem-creation-info-header"><span
+id="sec-mkfsinfo-header">Filesystem creation info header</span></h4>
+<p>As discussed in the introductionary section about <a
+href="#sec-introduction-online-mkfs">online filesystem creation
+support</a>, parties not in possession of the root key may mark a
+storage volume for formatting with a CocoonFs instance upon first use by
+writing a special filesystem creation info header to its beginning. This
+header provides all the information required for the actual filesystem
+creation and is of the following format:</p>
+<table>
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 83%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length in bytes</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td>Magic string <code>'CCFSMKFS'</code> (without a terminating zero
+byte).</td>
+</tr>
+<tr>
+<td>1</td>
+<td>The filesystem creation info header format version. Fixed to 0.</td>
+</tr>
+<tr>
+<td>20</td>
+<td>The set of filesystem image layout parameters, encoded in the same
+<a href="#def-image-layout">format</a> as for the regular filesystem
+header’s static part.</td>
+</tr>
+<tr>
+<td>8</td>
+<td>The desired filesystem image size in units of <a
+href="#def-allocation-block">Allocation Blocks</a>, encoded as a 64 bit
+integer in little-endian format.</td>
+</tr>
+<tr>
+<td>1</td>
+<td>The salt length.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>The salt.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Cyclic redundancy checksum over the header.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Cyclic redundancy checksum over the header with any two neighboring
+bits swapped.</td>
+</tr>
+</tbody>
+</table>
+<p>The filesystem creation info header is protected by a pair of two
+CRC-32s: one over the plain header data from the magic to the salt, both
+inclusive, and another one over the same data but with any two
+neighboring bits swapped, just in line with the regular filesystem
+header’s <a href="#sec-crc">checksum computation</a>.</p>
+<p>Upon encountering such a filesystem creation header passing the
+checksum verification at the storage volume’s beginning when attempting
+to open a filesystem, implementations are supposed to conduct the
+filesystem creation.</p>
+<p>The filesystem creation process inevitably involves a replacement of
+the filesystem creation info header at the storage’s beginning with the
+<a href="#sec-filesystem-header">regular CocoonFs image header</a> at
+some point. For robustness against service interruptions encountered
+during that write, a <span id="def-mkfsinfo-backup-header">backup
+copy</span> of the former is made at a specific location on storage
+beforehand. The location is determined exlusively from the storage
+volume’s dimensions as follows: find the largest possible power of two
+not less than <span class="math inline">\(4\cdot 128\textrm{B}\)</span>
+such that the storage volume accomodates at least <span
+class="math inline">\(16\)</span> units of that size and place the
+backup filesystem creation info header copy at the beginning of the last
+such. For clarity, the minimum storage volume size required for
+supporting online filesystem creation by means of a filesystem creation
+info header is <span class="math inline">\(16\cdot 4\cdot 128\textrm{B}
+= 8192\textrm{B}\)</span>. Note that this scheme has been chosen such
+that the backup copy will get placed towards the storage volume’s end,
+while still preserving a relatively large alignment at the same time:
+having it stored near the end prevents it from intefering with any of
+the filesystem’s initial metadata structures’ placement and the large
+alignment will enable meaningful error reporting in case the underlying
+hardware is not compatible with the selected <a href="#def-io-block">IO
+Block</a> size.</p>
+<p>In either case, if no valid <a href="#sec-image-header">image
+header</a> of either type passing the respective checksum verification
+is found at the storage volume’s beginning when attempting to open a
+filesystem, neither a <a href="#sec-static-image-header">regular
+CocoonFs static image header</a> nor a filesystem creation info header,
+then implementations are expected to check for the presence of a
+filesystem creation info header backup copy at the specified location.
+If one is found, and it passes its checksum verification, then the
+online filesystem creation procedure is supposed to get restarted from
+scratch.</p>
+<h3 id="key-derivation-1"><span id="sec-key-derivation">Key
+derivation</span></h3>
+<p>As outlined in the <a href="#sec-introduction">introduction</a>, the
+root key gets processed once through the TCG <a
+href="#bib-tcgtpm19a"><code>KDFa()</code></a> with SHA-512 in order to
+thwart downgrade attacks. Furthermore subkeys are derived from that for
+every combination of filesystem entity and cryptographic purpose in
+order to confine a potential key wear-out.</p>
+<p>For reference in what follows, the input parameters to the
+<code>KDFa()</code> are specified in [<a
+href="#bib-tcgtpm19a">TCGTPM19A</a>] as follows:</p>
+<ul>
+<li><code>hashAlg</code> - The <a href="#bib-tcgalg25">TCG Algorithm
+Registry</a> identifier of the hash to be used for the KDF.</li>
+<li><code>key</code> - The input key material.</li>
+<li><code>label</code> - A variable sized octet stream.</li>
+<li><code>context</code> - A variable sized octet stream used as the
+context.</li>
+<li><code>bits</code> - The output key size in units of bits.</li>
+</ul>
+<p><code>label</code> is set to one of the following single-byte
+constants identifying the cryptographic purpose the derived key is to be
+used for:</p>
+<table style="width:99%;">
+<colgroup>
+<col style="width: 35%" />
+<col style="width: 5%" />
+<col style="width: 59%" />
+</colgroup>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KEY_PURPOSE_DERIVATION</code></td>
+<td>1</td>
+<td>The key will be used for <a
+href="#sec-key-derivation-subkey">deriving further keys</a> from it, by
+means of of <a
+href="#def-image-layout"><code>kdf_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_AUTH_ROOT</code></td>
+<td>2</td>
+<td>The key will be used for forming the <a
+href="#sec-auth-tree-root-digest">authentication tree root HMAC</a> with
+<a
+href="#def-image-layout"><code>auth_tree_root_hmac_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_AUTH_DATA</code></td>
+<td>3</td>
+<td>The key will be used for forming an <a
+href="#sec-auth-tree-data-block-digest">HMAC over an Authentication Tree
+Data Block</a> with <a
+href="#def-image-layout"><code>auth_tree_data_hmac_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code></td>
+<td>4</td>
+<td>The key will be used for some inline authentication HMAC formed with
+<a
+href="#def-image-layout"><code>preauth_cca_protection_hmac_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_ENCRYPTION</code></td>
+<td>5</td>
+<td>The key will be used for encrypting with <a
+href="#def-image-layout"><code>block_cipher_alg</code></a>.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="root-key-derivation"><span id="sec-key-derivation-root">Root key
+derivation</span></h4>
+<p>The root key is derived from the externally supplied key material by
+invoking <code>KDFa()</code> with its parameters set to:</p>
+<ul>
+<li><code>hashAlg</code> - The <a href="#bib-tcgalg25">TCG Algorithm
+Registry</a> identifier of SHA-512, i.e. <code>TPM_ALG_SHA512</code> or
+<code>0xd</code>.</li>
+<li><code>key</code> - The raw key material supplied from extern.</li>
+<li><code>label</code> - Constant
+<code>KEY_PURPOSE_DERIVATION</code>.</li>
+<li><code>context</code> - The concatenation of
+<ol type="1">
+<li>The magic string <code>'COCOONFS'</code>, without a terminating zero
+byte.</li>
+<li>The image format version, fixed to 0, encoded as a single byte.</li>
+<li><a href="#def-image-layout"><code>kdf_hash_alg</code></a> encoded as
+a 16 bit integer in big-endian format.</li>
+<li><a
+href="#def-image-layout"><code>auth_tree_root_hmac_hash_alg</code></a>
+encoded as a 16 bit integer in big-endian format.</li>
+<li><a href="#def-image-layout"><code>auth_tree_node_hash_alg</code></a>
+encoded as a 16 bit integer in big-endian format.</li>
+<li><a
+href="#def-image-layout"><code>auth_tree_data_hmac_hash_alg</code></a>
+encoded as a 16 bit integer in big-endian format.</li>
+<li><a
+href="#def-image-layout"><code>preauth_cca_protection_hmac_hash_alg</code></a>
+encoded as a 16 bit integer in big-endian format.</li>
+<li><a href="#def-image-layout"><code>block_cipher_alg</code></a>
+encoded as a pair of two 16 bit integers, encoded in big-endian format
+each.</li>
+<li>The filesystem image salt as found in the <a
+href="#sec-static-image-header">static image header</a>, encoded as a
+single byte specifying the salt length, followed by the salt
+itself.</li>
+</ol></li>
+<li><code>bits</code> - The digest size produced by the
+<code>hashAlg</code> of SHA-512, i.e. 512.</li>
+</ul>
+<h4 id="subkey-derivation"><span id="sec-key-derivation-subkey">Subkey
+derivation</span></h4>
+<p>The input parameters to subkey derivation are</p>
+<ul>
+<li>The derived key’s cryptographic purpose, i.e. one of the constants
+defined in the table above.</li>
+<li>A pair of two 32 bit integers specifying a “domain” and
+“subdomain”.</li>
+</ul>
+<p>Unless otherwise noted, the domain is set to an inode number
+associated with the to be derived key and subdomain is one of</p>
+<table style="width:99%;">
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 5%" />
+<col style="width: 60%" />
+</colgroup>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>INODE_KEY_SUBDOMAIN_DATA</code></td>
+<td>1</td>
+<td>The key will be used for processing the inode’s data.</td>
+</tr>
+<tr>
+<td><code>INODE_KEY_SUBDOMAIN_EXTENTS_LIST</code></td>
+<td>2</td>
+<td>The key will be used for processing the inode’s extents list.</td>
+</tr>
+</tbody>
+</table>
+<p>The subkey is derived from the <a
+href="#sec-key-derivation-root">root key</a> by invoking
+<code>KDFa()</code> with its parameters set to:</p>
+<ul>
+<li><p><code>hashAlg</code> - <a
+href="#def-image-layout"><code>kdf_hash_alg</code></a>.</p></li>
+<li><p><code>key</code> - The root key derived from externally supplied
+key material as described in the previous section above.</p></li>
+<li><p><code>label</code> - A single byte set to the desired key purpose
+input as a parameter to the subkey derivation.</p></li>
+<li><p><code>context</code> - The concatenation of the input “domain”
+and “subdomain” values, encoded as 32 bit integers in little-endian
+format each.</p></li>
+<li><p><code>bits</code> - A key size suitable for the specified
+cryptographic purpose and determined as follows:</p>
+<table>
+<colgroup>
+<col style="width: 37%" />
+<col style="width: 62%" />
+</colgroup>
+<thead>
+<tr>
+<th>Specified key purpose</th>
+<th>Output key size</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KEY_PURPOSE_DERIVATION</code></td>
+<td>Digest length produced by <a
+href="#def-image-layout"><code>kdf_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_AUTH_ROOT</code></td>
+<td>Digest length produced by <a
+href="#def-image-layout"><code>auth_tree_root_hmac_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_AUTH_DATA</code></td>
+<td>Digest length produced by <a
+href="#def-image-layout"><code>auth_tree_data_hmac_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code></td>
+<td>Digest length produced by <a
+href="#def-image-layout"><code>preauth_cca_protection_hmac_hash_alg</code></a>.</td>
+</tr>
+<tr>
+<td><code>KEY_PURPOSE_ENCRYPTION</code></td>
+<td>Key size of the <a
+href="#def-image-layout"><code>block_cipher_alg</code></a>.</td>
+</tr>
+</tbody>
+</table>
+<p>Note that it is assumed here that the relevant property for the
+security strength of a HMAC is the preimage resistance of the underlying
+hash function, which is commonly estimated to equal its digest
+length.</p></li>
+</ul>
+<h2 id="allocation-bitmap"><span id="sec-allocation-bitmap">Allocation
+bitmap</span></h2>
+<p>The allocation bitmap tracks the filesystem image’s <a
+href="#def-allocation-block">Allocation Blocks’</a> allocation status in
+an associated bit each: a bit is set if the corresponding Allocation
+Block is allocated. The bitmap is organized as an array of unsigned 64
+bit integers, henceforth denoted by “allocation bitmap words”, with any
+excess bits corresponding to a region beyond the <a
+href="#sec-mutable-image-header">filesystem image size</a> set to 0. The
+region at the start of the filesystem image storing the <a
+href="#sec-image-header">image headers</a>, as well as the one where the
+<a href="#sec-journal">journal log head</a> is located, are always
+allocated.</p>
+<p>The Allocation Bitmap is stored in inode number 2, and the inode
+index B+-tree minimum fill level is such that it can always be found
+through the <a href="#def-inode-index-entry-leaf-node">inode index entry
+leaf node</a>, in turn referenced from the <a
+href="#sec-mutable-image-header">mutable image header</a>.</p>
+<p>In order to support partial allocation bitmap updates, the encryption
+format deviates from the standard “<a
+href="#sec-encryption-entity-extents">encrypted extents</a>” one
+generally used for inodes: the allocation bitmap files’ extents are
+divided into blocks of size as specified by the <a
+href="#def-image-layout"><code>allocation_bitmap_file_block_allocation_blocks_log2</code></a>
+filesystem configuration parameter, and each one gets encrypted
+individually with the common <a
+href="#sec-encryption-entity-block">encrypted block format</a>. Even
+though the maximum possible payload size of such an encrypted block is
+not necessarily a multiple of the bitmap word size, only an integral
+number of bitmap words is stored in each block, the maximum possible to
+be specific. The encryption key used for encrypting the individual file
+blocks a <a href="#sec-key-derivation-subkey">a subkey derived from the
+root key</a> with the domain parameter set to 2, i.e. the allocation
+bitmap file’s associated inode number, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_ENCRYPTION</code></a>.</p>
+<p>Note that this scheme on encrypting the allocation bitmap file
+block-wise does allow an adversary to determine which parts of the
+allocations bitmap have changed between two updates, but is in line with
+the previously discussed relaxation that <a
+href="#sec-allocations-confidentiality">allocations are kept
+confidential only for data at reset</a>.</p>
+<p>Special constraints apply to the allocation bitmap file’s extents on
+storage: their boundaries must all be aligned to the <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a> size
+and their lengths must all be a multiple of the allocation bitmap file
+block size. Note that the alignment to the Authentication Tree Data
+Block size is required for bootstrapping authentication at filesystem
+opening time: in general an Authentication Tree Data Block’s individual
+Allocation Blocks’ respective allocation status must be known each for
+<a href="#sec-auth-tree-data-block-digest">computing its authentication
+digest</a>, but with the aligned allocation bitmap file extents all
+overlapping Authentication Tree Data Blocks’ Allocation Blocks are known
+a priori to be allocated.</p>
+<h2 id="authentication-tree"><span id="sec-auth-tree">Authentication
+tree</span></h2>
+<p>A Merkle tree construction is used for the authentication. All nodes’
+sizes are equal and is as specified by the <a
+href="#def-image-layout"><code>auth_tree_node_io_blocks_log2</code></a>.
+Leaf nodes store a number of digests of lengths as produced by <a
+href="#def-image-layout"><code>auth_tree_data_hmac_hash_alg</code></a>,
+as many as fit a node rounded down to the next power of two. Each digest
+entry in a leaf node authenticates an associated <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a>,
+which may comprise one or more <a
+href="#def-allocation-block">Allocation Blocks</a> as specified by the
+<a
+href="#def-image-layout"><code>auth_tree_data_block_allocation_blocks_log2</code></a>
+filesystem configuration parameter. Internal nodes store a number of
+digests as produced by <a
+href="#def-image-layout"><code>auth_tree_node_hash_alg</code></a>, as
+many as fit a node rounded down to the next power of two. Each digest
+entry in an internal node authenticates an associated child node’s
+contents. A root HMAC digest is performed over the tree’s root node
+(alongside some auxiliary information needed for bootstrapping), which
+can be either a leaf or an internal node. The root HMAC digest fully
+captures all of the filesystem’s contents and is stored in the <a
+href="#sec-mutable-image-header">mutable image header</a>.</p>
+<p>The authentication tree is stored in inode number 1 and inode index
+B+-tree minimum fill level is such that it that it can always be found
+through the <a href="#def-inode-index-entry-leaf-node">inode index entry
+leaf node</a>, in turn referenced from the <a
+href="#sec-mutable-image-header">mutable image header</a>.</p>
+<p>All of the authentication tree’s extents’ boundaries must be aligned
+to the larger of an <a href="#def-io-block">IO Block</a> and an <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a>. No
+leaf entry is associated with any storage region overlapping with some
+of the authentication tree’s extents – the authenticated data ranges
+comprise all of the filesystem image with the authentication tree’s
+extents skipped. An authenticated <a
+href="#def-allocation-block">Allocation Block’s</a> associated index on
+physical storage is converted to its containing Authentication Tree Data
+Block’s index in the <span
+id="def-auth-tree-data-block-index-domain"><em>Authentication Tree Data
+Block index domain</em></span> by subtracting from it the accumulated
+lengths of any authentication tree extents located before it on physical
+storage and converting the result to units of Authentication Tree Data
+Blocks, i.e. by shifting it to the right by a distance of <a
+href="#def-image-layout"><code>auth_tree_data_block_allocation_blocks_log2</code></a>
+bits.</p>
+<p>Any leaf node (data) digest entry is implicitly associated with an
+Authentication Tree Data Block index domain index by means of its
+position in the tree with respect to tree order.</p>
+<h3 id="authentication-tree-data-block-digests"><span
+id="sec-auth-tree-data-block-digest">Authentication Tree Data Block
+digests</span></h3>
+<p>When forming a given <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block’s</a>
+digest, only its allocated <a href="#def-allocation-block">Allocation
+Blocks’</a> contents are considered. The reason is that in order to
+support the journalling functionality, any Authentication Tree Data
+Block’s digest must be reconstructible, but the contents of unallocated
+Allocation Blocks must be assumed indeterminate – it could have
+e.g. been used for temporarily storing the dynamically allocated parts
+of the journal (or even been trimmed to begin with).</p>
+<p>If a plain hash was directly used for digesting the Authentication
+Tree Data Blocks, an adversary could immediately figure the allocation
+status of each of its constituent <a
+href="#def-allocation-block">Allocation Blocks</a>, simply by attempting
+to recreate the digest found in the authentication tree by brute-forcing
+over a small search space. As the allocations state is <a
+href="#sec-allocations-confidentiality">considered confidential for data
+at rest</a>, the Authentication Tree Data Blocks are digested with a
+keyed HMAC instead. It should be stressed at this point that the HMAC
+serves only as a device to efficiently obfuscate the digests, none of
+its security properties beyond those provided by the underlying hash are
+relied upon authentication-wise. In particular, given that the
+allocations are considered confidential only in the data at rest model,
+implementations are not required to make any provisions prohibiting
+their use as an HMACcing oracle. That is, they may produce and expose
+HMAC digests for any data found on storage without verifying its
+authenticity first.</p>
+<p>Digests for (virtual) <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block’s</a>
+located completely after the filesystem image’s end, as determined by
+the image size field in the <a href="#sec-mutable-image-header">mutable
+image header</a>, are set to all-zeros. Note that this is relevant for
+any “excess” entries in the authentication tree’s leaf nodes tail.
+Digests for Authentication Tree Data Blocks within the filesystem image
+range are formed as described in what follows.</p>
+<p>The key used for producing an HMAC over an <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a> is
+<a href="#sec-key-derivation-subkey">a subkey derived from the root
+key</a> with the domain parameter set to 1, i.e. the authentication
+tree’s associated inode number, a subdomain value of 0, and a key
+purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_AUTH_DATA</code></a>.</p>
+<p>The HMAC is formed with a hash algorithm of <a
+href="#def-image-layout"><code>auth_tree_data_hmac_hash_alg</code></a>
+over</p>
+<ol type="1">
+<li>the <a href="#def-auth-tree-data-block">Authentication Tree Data
+Block’s</a> constituent allocated <a
+href="#def-allocation-block">Allocation Blocks</a> contents, while
+skipping over the unallocated ones, as well as those allocated to the <a
+href="#sec-image-header">image header</a> or journal log head,</li>
+<li>and an <a href="#sec-auth-context">authentication context</a> formed
+as follows:
+<ol type="1">
+<li>A 64 bit allocation bitmap word specifying the allocation status of
+each of the Authentication Tree Data Block’s constituent Allocation
+Blocks, encoded in little-endian format.</li>
+<li>The Authentication Tree Data Block’s Authentication Tree Data
+Block’s index in the Authentication Tree Data Block index domain,
+encoded as a 64 bit integer in little-endian format.</li>
+<li>An authentication context format version identifier byte of constant
+0.</li>
+<li>An authentication context subject identifier byte of constant <a
+href="#def-auth-subject-id"><code>AUTH_SUBJECT_ID_AUTH_TREE_DATA_BLOCK</code></a>
+identifying the authenticated subject.</li>
+</ol></li>
+</ol>
+<h3 id="authentication-tree-non-root-node-digests"><span
+id="sec-auth-tree-descendant-node-digest">Authentication tree non-root
+node digests</span></h3>
+<p>The internal, i.e. non-leaf nodes store digests over their child
+nodes each. Note that each subtree rooted at a child effectively covers
+a certain associated data range, with that range’s length in units of
+Authentication Tree Data Blocks being a power of two.</p>
+<p>Digests for children covering a data range located completely after
+the filesystem image’s end, as determined by the image size field in the
+<a href="#sec-mutable-image-header">mutable image header</a>, are set to
+all-zeros. Digests for child nodes whose an associated data range
+overlaps with the filesystem image range are formed as described in what
+follows.</p>
+<p>The digest over a child node is produced by computing the (regular)
+hash with <a
+href="#def-image-layout"><code>auth_tree_node_hash_alg</code></a>
+over</p>
+<ol type="1">
+<li>the digests stored in the child node back to back</li>
+<li>and an <a href="#sec-auth-context">authentication context</a> formed
+as follows:
+<ol type="1">
+<li>The index in the <a
+href="#def-auth-tree-data-block-index-domain">Authentication Tree Data
+Block index domain</a> of the child’s last entry’s associated data
+region’s beginning, encoded as a 64 bit integer in little-endian format.
+Observe that this uniquely fixes the position of the child node in the
+tree.</li>
+<li>An authentication context format version identifier byte of constant
+0.</li>
+<li>An authentication context subject identifier byte of constant <a
+href="#def-auth-subject-id"><code>AUTH_SUBJECT_ID_AUTH_TREE_DESCENDANT_NODE</code></a>
+identifying the authenticated subject.</li>
+</ol></li>
+</ol>
+<h3 id="authentication-tree-root-node-digest"><a
+href="#sec-auth-tree-root-digest">Authentication tree root node
+digest</a></h3>
+<p>The authentication tree root digest is created by computing a HMAC
+with an underlying hash of <a
+href="#def-image-layout"><code>auth_tree_root_hmac_hash_alg</code></a>
+and a <a href="#sec-key-derivation-subkey">a subkey derived from the
+root key</a> with the domain parameter set to 1, i.e. the authentication
+tree’s associated inode number, a subdomain value of 0, and a key
+purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_AUTH_ROOT</code></a>
+over</p>
+<ol type="1">
+<li>the digests stored in the root node back to back</li>
+<li>and an <a href="#sec-auth-context">authentication context</a> formed
+as follows:
+<ol type="1">
+<li>The index in the <a
+href="#def-auth-tree-data-block-index-domain">Authentication Tree Data
+Block index domain</a> of the root node’s last entry’s associated data
+region’s beginning modulo <span class="math inline">\(2^{64}\)</span>,
+encoded as a 64 bit integer in little-endian format. Observe that this
+uniquely fixes the position of the root node in the tree.</li>
+<li>The “image context”, a digest over filesystem configuration
+parameters computed as described below.</li>
+<li>An authentication context format version identifier byte of constant
+0.</li>
+<li>An authentication context subject identifier byte of constant <a
+href="#def-auth-subject-id"><code>AUTH_SUBJECT_ID_AUTH_TREE_ROOT_NODE</code></a>
+identifying the authenticated subject.</li>
+</ol></li>
+</ol>
+<p>The image context digest is produced by forming a HMAC with same hash
+algorithm and subkey as for the root node above over</p>
+<ol type="1">
+<li>The magic <code>'COCOONFS'</code>, without a terminating zero
+byte.</li>
+<li>A single byte filesystem format version identifier of constant
+0.</li>
+<li>The <a href="#def-image-layout">encoded image layout</a>.</li>
+<li>The <a href="#sec-enc-block-ptr">encoded block pointer</a> to the <a
+href="#def-inode-index-entry-leaf-node">inode index entry leaf node</a>,
+as found in the <a href="#sec-mutable-image-header">mutable image
+header</a>.</li>
+<li>The filesystem image size in units of <a
+href="#def-allocation-block">Allocation Blocks</a>, as found in the <a
+href="#sec-mutable-image-header">mutable image header</a>.</li>
+<li>The <a href="#sec-auth-tree">authentication tree’s</a> extents,
+represented in the common <a href="#sec-enc-extents-list">extents list
+format</a>.</li>
+<li>The <a href="#sec-allocation-bitmap">allocation bitmap file’s</a>
+extents, represented in the common <a
+href="#sec-enc-extents-list">extents list format</a>.</li>
+<li>An authentication context format version identifier byte of constant
+0.</li>
+<li>An authentication context subject identifier byte of constant <a
+href="#def-auth-subject-id"><code>AUTH_SUBJECT_ID_IMAGE_CONTEXT</code></a>
+identifying the authenticated subject.</li>
+</ol>
+<p>Note that the image contexts binds</p>
+<ul>
+<li>All information required for interpreting any of the filesystem’s
+encoded structures.</li>
+<li>The mapping of physical locations into the <a
+href="#def-auth-tree-data-block-index-domain">Authentication Tree Data
+Block index domain</a>, by virtue of the authentication tree’s
+extents.</li>
+<li>The location of the <a href="#def-inode-index-entry-leaf-node">inode
+index entry leaf node</a> serving as the entry point for locating any
+other filesystem entity on storage. That effectively makes the
+authentication tree to not only authenticate the raw data, but also the
+full metadata hierarchy, i.e. what’s being stored where.</li>
+<li>The locations of the <a href="#sec-allocation-bitmap">allocation
+bitmap file’s</a> extents are included explicitly, because they need to
+get read for bootstrapping the authentication, before the authentication
+tree is available.</li>
+</ul>
+<p>Note that in principle the encoded image context could have been
+included verbatim in the data the authentication tree root digest is
+getting computed over. However, for reasons of efficiency, an
+intermediate digest is performed over the image context first, which
+gets then in turn considered in the computation of the authentication
+tree root digest – the image context’s contents are expected to change
+only infrequently if at all, whereas the root digest needs to get
+recomputed upon every filesystem update.</p>
+<h3 id="organization-of-the-authentication-tree-storage">Organization of
+the authentication tree storage</h3>
+<p>The authentication tree’s nodes are serialized back to back in the
+tree’s DFS PRE order into the tree’s associated extents. A node’s
+digests are located back to back at the beginning of its associated
+storage area, any padding to align the node size up to the length
+specified by <a
+href="#def-image-layout"><code>auth_tree_node_io_blocks_log2</code></a>
+is retained on storage.</p>
+<p>Note that it is possible to deduce the authentication tree’s
+dimensions from its extents’ total length and implementations are
+required to do so at filesystem opening time. The alignment constraints
+on the extents’ boundaries may result in more nodes being stored than is
+required to cover all of the filesystem image. As outlined in the
+previous sections, excess digest entries are to be set to all zeros.</p>
+<p>When deducing the authentication tree dimensions from the extents’
+total length, implementations must cap the height at <span
+class="math display">\[\textrm{min}\left\{\left\lceil\frac{W}{c}\right\rceil,
+\left\lceil\frac{W - d - a}{c}\right\rceil + 1\right\}\]</span> with
+<span class="math inline">\(W=64\)</span>, <span
+class="math inline">\(c\)</span> denoting the base-2 logarithm of the
+number of digest entries in a non-leaf node, <span
+class="math inline">\(d\)</span> denoting the base-2 logarithm of the
+number of digests in a leaf node and <span
+class="math inline">\(a\)</span> the base-2 logarithm of the number of
+<a href="#def-allocation-block">Allocation Blocks</a> in an <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a>,
+i.e. <a
+href="#def-image-layout"><code>auth_tree_data_block_allocation_blocks_log2</code></a>.
+Imposing this upper limit on the tree height does not restrict the data
+range coverable by an authentication tree (to below the maximum
+supported filesystem image size), but ensures that</p>
+<ul>
+<li>the number of nodes in a full tree at that height is representable
+as a 64 bit integer,</li>
+<li>the length of a range covered by any proper subtree in units of <a
+href="#def-allocation-block">Allocation Blocks</a> is representable as a
+64 bit integer.</li>
+</ul>
+<h2 id="inode-index"><span id="sec-inode-index">Inode index</span></h2>
+<p>Inodes are identified by positive 32 bit integers. The inode index
+tracks the allocated inodes and their associated locations on storage
+each, either by means of a direct <a href="#sec-enc-extent-ptr">encoded
+extent pointer</a> or by an “indirect” pointer pointing to the head of
+some <a href="#sec-encryption-entity-chained-extents">chained
+extents</a> storing the inode’s <a href="#sec-enc-extents-list">extents
+list</a>.</p>
+<p>The inode index is organized as a B+-tree, with a node size as
+specified by the <a
+href="#def-image-layout"><code>index_tree_node_allocation_blocks_log2</code></a>
+filesystem configuration parameter.</p>
+<p>The minimum leaf node fill level is constrained to be &gt;= 4, so
+that inodes 1-4 are always found in the leftmost leaf node, the <span
+id="def-inode-index-entry-leaf-node"><em>inode index entry leaf
+node</em></span>. The location of the inode index entry leaf node is
+specified in the <a href="#sec-mutable-image-header">mutable image
+header</a>. Among those four special inodes is inode 3 allocated to the
+inode index root node. The index entry for this inode must always
+specify the location of the index root node in terms of a direct <a
+href="#sec-enc-extent-ptr">encoded extent pointer</a>, an indirect
+extents list is not permitted for it.</p>
+<p>The index’ individual nodes are <a
+href="#sec-encryption-entity-block">encrypted as blocks</a> each, with a
+<a href="#sec-key-derivation-subkey">a subkey derived from the root
+key</a> with the domain parameter set to 3, i.e. the inode index’
+associated inode number, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_ENCRYPTION</code></a>.</p>
+<h3 id="inode-index-leaf-node-format">Inode index leaf node format</h3>
+<p>Let <span class="math inline">\(B\)</span> denote a decrypted index
+node’s maximum possible payload size in units of bytes. The maximum
+number of entries in a leaf node is then given by <span
+class="math inline">\(M_{\textrm{leaf}} = \left\lfloor\frac{B -
+12}{12}\right\rfloor\)</span>. The minimum leaf node fill level is set
+to <span class="math inline">\(m_\textrm{leaf} =
+\left\lceil\frac{M_\textrm{leaf}}{2}\right\rceil\)</span>. <span
+class="math inline">\(B\)</span> must be large enough so that the
+constraint <span class="math inline">\(m_\textrm{leaf} &gt;= 4\)</span>
+holds. Note that with a minimum inode index block size of 128B, and a
+maximum IV length of 32B, the <span
+class="math inline">\(m_\textrm{leaf} &gt;= 4\)</span> is automatically
+fulfilled.</p>
+<p>The leaf node format is as follows:</p>
+<table>
+<colgroup>
+<col style="width: 53%" />
+<col style="width: 46%" />
+</colgroup>
+<thead>
+<tr>
+<th>Range in units of bytes</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="math inline">\(0\)</span> to <span
+class="math inline">\(8\)</span></td>
+<td><a href="#sec-enc-block-ptr">Encoded block pointer</a> to the next
+leaf node in tree order, if any, or NIL otherwise.</td>
+</tr>
+<tr>
+<td><span class="math inline">\(8\)</span> to <span
+class="math inline">\(8 + 8\cdot M_\textrm{leaf}\)</span></td>
+<td>The inode entries associated <a href="#sec-enc-extent-ptr">encoded
+extent pointers</a>.</td>
+</tr>
+<tr>
+<td><span class="math inline">\(8 + 8\cdot M_\textrm{leaf}\)</span> to
+<span class="math inline">\(8 + 12\cdot M_\textrm{leaf}\)</span></td>
+<td>The inode entries associated keys, i.e. the inode numbers, encoded
+as 32 bit integers in little endian format.</td>
+</tr>
+<tr>
+<td><span class="math inline">\(8 + 12\cdot M_\textrm{leaf}\)</span> to
+<span class="math inline">\(12 + 12\cdot M_\textrm{leaf}\)</span></td>
+<td>The node level, fixed to 1 for leaf nodes, encoded as a 32 bit
+integer in little-endian format.</td>
+</tr>
+</tbody>
+</table>
+<p>For <span class="math inline">\(i\in\{0\ldots M_\textrm{leaf} -
+1\}\)</span>, the i’th <a href="#sec-enc-extent-ptr">encoded extent
+pointer</a> is associated with the i’th key. Unoccupied entries have a
+key value of 0, i.e. the special “no inode” value, and an encoded extent
+pointer value of NIL. The unoccupied slots must all be at the tail. The
+occupied entries must be sorted by the inode number. No leaf node with
+less than <span class="math inline">\(m_\textrm{leaf}\)</span> nodes may
+exist, except for possibly at the tree root.</p>
+<h3 id="inode-index-internal-node-format">Inode index internal node
+format</h3>
+<p>Let <span class="math inline">\(B\)</span> denote a decrypted index
+node’s maximum possible payload size in units of bytes again. The
+maximum number of entries, i.e. separating keys, in an internal node is
+then given by <span class="math inline">\(M_{\textrm{internal}} =
+\left\lfloor\frac{B -
+12}{12}\right\rfloor\)</span>. The minimum internal node fill level is
+set to <span class="math inline">\(m_\textrm{internal} =
+\left\lfloor\frac{M_\textrm{internal} - 1}{2}\right\rfloor\)</span>.</p>
+<p>Implementations might want to preemptively split full nodes or merge
+pairs of nodes at minimum fill level when walking down a path from the
+root for insertion or deletion. By coincidence, <span
+class="math inline">\(M_\textrm{internal} = M_\textrm{leaf}\)</span> and
+from the constraint <span class="math inline">\(m_\textrm{leaf} &gt;=
+4\)</span>, it follows that <span
+class="math inline">\(M_\textrm{internal} = M_\textrm{leaf} &gt;= 7 &gt;
+2\)</span>, as is required for supporting preemptive node splitting of
+full nodes. Note that <span
+class="math inline">\(m_\textrm{internal}\)</span> has been defined
+specifically in a way to enable preemptive splitting of full nodes as
+well as merging nodes at the minimum fill level, even for even values of
+<span class="math inline">\(M_\textrm{internal}\)</span>.</p>
+<table>
+<colgroup>
+<col style="width: 60%" />
+<col style="width: 39%" />
+</colgroup>
+<thead>
+<tr>
+<th>Range in units of bytes</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="math inline">\(0\)</span> to <span
+class="math inline">\(8 + 8\cdot M_\textrm{internal}\)</span></td>
+<td><a href="#sec-enc-block-ptr">Encoded block pointers</a> to the
+node’s children.</td>
+</tr>
+<tr>
+<td><span class="math inline">\(8 + 8\cdot M_\textrm{internal}\)</span>
+to <span class="math inline">\(8 + 12\cdot
+M_\textrm{internal}\)</span></td>
+<td>The separator keys, encoded as 32 bit integers in little-endian
+format.</td>
+</tr>
+<tr>
+<td><span class="math inline">\(8 + 12\cdot M_\textrm{internal}\)</span>
+to <span class="math inline">\(12 + 12\cdot
+M_\textrm{internal}\)</span></td>
+<td>The node level, counted 1-based from the leaf upwards, encoded as a
+32 bit integer in little-endian format.</td>
+</tr>
+</tbody>
+</table>
+<p>For <span class="math inline">\(i\in\{0\ldots M_\textrm{internal} -
+1\}\)</span>, the i’th key is the separator key between the <span
+class="math inline">\(i\)</span>’th and <span class="math inline">\((i +
+1)\)</span>’th child – inode entries stored under the left child have an
+inode value all strictly less than the separator key, inode entries
+stored under the right child have an inode value greater than or equal
+to the separator key value. Unoccupied entries have a key value of 0,
+i.e. the special “no inode” value, and the block pointer to the
+associated right child is NIL. The unoccupied slots must all be at the
+tail. The occupied entries must be sorted by the inode number. No
+internal node with less than <span
+class="math inline">\(m_\textrm{internal}\)</span> occupied key entries
+may exist except for possibly at the tree root, which must still have at
+least two children and a separator key inbetween.</p>
+<h3
+id="inode-index-entry-leaf-node-preauthentication-cca-protection-digest"><span
+id="sec-inode-index-entry-leaf-node-preauth-digest">Inode index entry
+leaf node preauthentication CCA protection digest</span></h3>
+<p>The <a href="#def-inode-index-entry-leaf-node">inode index entry leaf
+node</a>, i.e. the first leaf node in tree order, serves as the entry
+point when opening the filesystem, and its location is specified in the
+<a href="#sec-mutable-image-header">mutable image header</a>
+accordingly. However, it needs to get decrypted before the full
+authentication tree based authentication has become functional, and
+therefore must first get authenticated by some other means before
+starting the decryption.</p>
+<p>For this purpose, a HMAC over the entry leaf node is stored in the <a
+href="#sec-mutable-image-header">mutable image header</a>. This HMAC is
+created with an underlying hash algorithm of <a
+href="#def-image-layout"><code>preauth_cca_protection_hmac_hash_alg</code></a>
+and <a href="#sec-key-derivation-subkey">a subkey derived from the root
+key</a> with the domain parameter set to 3, i.e. the inode index’
+associated inode number, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code></a>,
+over</p>
+<ol type="1">
+<li>the encrypted entry leaf node’s data, of size as determined by <a
+href="#def-image-layout"><code>index_tree_node_allocation_blocks_log2</code></a></li>
+<li>and an <a href="#sec-auth-context">authentication context</a> formed
+as follows:
+<ol type="1">
+<li><a href="#def-image-layout"><code>block_cipher_alg</code></a>
+encoded as a pair of two 16 bit integers, encoded in big-endian format
+each.</li>
+<li>An authentication context format version identifier byte of constant
+0.</li>
+<li>An authentication context subject identifier byte of constant <a
+href="#def-auth-subject-id"><code>AUTH_SUBJECT_ID_INODE_INDEX_NODE</code></a>
+identifying the authenticated subject.</li>
+</ol></li>
+</ol>
+<h3 id="inode-extents-lists">Inode extents lists</h3>
+<p>The inode entries stored in the index tree’s leaf nodes have an
+associated <a href="#sec-enc-extent-ptr">encoded extent pointer</a> each
+for specifying an inode’s location on storage. This extent pointer can
+either be direct or indirect. If direct, it encodes the location and
+dimensions of an inode’s (single) extent on storage. If indirect, it
+points to the head extent in a list of <a
+href="#sec-encryption-entity-chained-extents">encrypted chained
+extents</a> collectively storing the inode’s <a
+href="#sec-enc-extents-list">encoded extents list</a>.</p>
+<p>For encryption in the <a
+href="#sec-encryption-entity-chained-extents">encrypted chained
+extents</a> format, a <a href="#sec-key-derivation-subkey">a subkey is
+derived from the root key</a> with the domain parameter set to the
+respective inode number, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_EXTENTS_LIST</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_ENCRYPTION</code></a>.</p>
+<p>The authentication tree and allocation bitmap files need to get
+located at filesystem opening time in order to bootstrap the full tree
+based authentication. Therefore, the inline authenticated variant of the
+<a href="#sec-encryption-entity-chained-extents">encrypted chained
+extents</a> format is used for storing these two files’ extents lists,
+if any. The hash algorithm used for this is the <a
+href="#def-image-layout"><code>preauth_cca_protection_hmac_hash_alg</code></a>,
+the HMAC key is set to <a href="#sec-key-derivation-subkey">a subkey
+derived from the root key</a> with the domain parameter set to the inode
+number, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_EXTENTS_LIST</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code></a>.
+The authenticated associated data for the encrypted chained extents’
+inline authentication is set to</p>
+<ol type="1">
+<li>The inode number as a 32 bit integer, encoded in little-endian
+format.</li>
+<li>A format version identifier byte of constant 0.</li>
+<li>An identifier byte of constant 2 identifying the type of
+authenticated associated data for the encrypted chained extents’ inline
+authentication.</li>
+</ol>
+<h2 id="regular-file-encryption">Regular file encryption</h2>
+<p>Except for the special case of the <a
+href="#sec-allocation-bitmap">allocation bitmap file</a>, any file’s
+data is stored in <a href="#sec-encryption-entity-extents">encrypted
+extents</a>, with the set of extents specified by its corresponding
+entry in the <a href="#sec-inode-index">inode index</a>.</p>
+<p>The key used for the encryption is <a
+href="#sec-key-derivation-subkey">a subkey derived from the root key</a>
+with the domain parameter set to the inode number, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_ENCRYPTION</code></a>.</p>
+<h2 id="journal-1"><span id="sec-journal">Journal</span></h2>
+<p>The journal contains all the information needed to apply pending
+changes at filesystem opening time following a possible service
+interruption. From a high level, it consists of <em>staging copies</em>
+of the to be written data at <a href="#def-io-block">IO block</a>
+granularity and a log specifying what needs to get written where as well
+as information about which parts of the the <a
+href="#sec-auth-tree">authentication tree</a> need a reconstruction.</p>
+<p>The journal log is stored in a list of <a
+href="#sec-encryption-entity-chained-extents">encrypted chained
+extents</a>, with the head extent, the <a
+href="#def-journal-log-head"><em>journal log head</em></a>, being
+located at a fixed position in the filesystem image, which can get
+determined from the information provided in the <a
+href="#sec-static-image-header">static image header</a>. More
+specifically, the journal log head extent is located at the first <a
+href="#def-io-block">IO Block</a> and <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a>
+aligned boundary following the <a
+href="#sec-mutable-image-header">mutable image header’s</a>. Its length
+is set to the least multiple of the larger of the <a
+href="#def-io-block">IO block</a> and <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a> size
+sufficient for storing the minimum possible <a
+href="#sec-encryption-entity-chained-extents">encrypted chained
+extents’</a> head. The journal log tail extents as well as the data
+staging copies are stored at arbitrary, otherwise unallocated locations,
+with the constraint that all extents’ boundaries must be aligned to the
+<a href="#def-io-block">IO Block</a> size. Note that the journal log
+head extent is constrained to be aligned to the <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a> size
+only for the convenience of implementations: for the purpose of
+computing <a href="sec-auth-tree-data-block-digest">“authentication tree
+data block digests”</a>, the journal log head extent is to be considered
+as if unallocated as a special case, and letting it occupy an integral
+multiple of the Authentication Tree Data Block size alleviates the need
+to implement range checks for detecting this special case when updating
+potentially neighboring data.</p>
+<p>The journal log’s encrypted chained extents are encrypted with a <a
+href="#sec-key-derivation-subkey">a subkey is derived from the root
+key</a> with the domain parameter set to 5, i.e. the inode number
+allocated to the (virtual) journal log file, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_ENCRYPTION</code></a>. The
+constituent extents are inline authenticated with a HMAC with underlying
+hash algorithm as specified by <a
+href="#def-image-layout"><code>preauth_cca_protection_hmac_hash_alg</code></a>,
+a subkey is derived from the root key with the domain parameter also set
+to 5, a subdomain value of <code>INODE_KEY_SUBDOMAIN_DATA</code>, and a
+key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code></a>.
+The authenticated associated data for the encrypted chained extents’
+inline authentication is set to</p>
+<ol type="1">
+<li>The <a href="#def-image-layout">encoded image layout</a>.</li>
+<li>A format version identifier byte of constant 0.</li>
+<li>An identifier byte of constant 1 identifying the type of
+authenticated associated data for the encrypted chained extents’ inline
+authentication.</li>
+</ol>
+<p>The journal is to be considered non-empty and to get applied upon the
+next filesystem opening following a possible service interruption
+whenever its head extent begins with a magic of <code>'CCFSJRNL'</code>,
+without a terminating zero byte, and the head extent’s inline
+authentication digest successfully verifies its contents. Note that the
+head extent’s inline authentication digest serves as an integrity
+protection measure here, in particular it is not an error if the head
+extent’s authentication fails – in this case the journal is simply
+considered as having been only partially written and is disregarded.</p>
+<p>It is expected that implementations would write all of the journal’s
+data before the journal log head extent, issuing write barriers as is
+appropriate for the underlying hardware device inbetween. Similarly,
+after the journal has been applied, either online or following a service
+interruption, it is expected that implementations would first invalidate
+the journal log head extent before proceeding to reusing any of the
+storage areas occupied by the journal’s remainder, likewise issuing
+write barriers as needed. In particular failure to authenticate a
+journal log tail extent when the head authenticated successfully is a
+fatal error.</p>
+<p>The journal log plaintext is organized as sequence of
+tag-length-value (TLV) encoded fields. The tag and length are encoded as
+unsigned integers in LEB128 format, the format of the value depends on
+the field. The fields must be stored in the journal in the order induced
+by increasing tag values. The defined tag values are:</p>
+<table style="width:99%;">
+<colgroup>
+<col style="width: 54%" />
+<col style="width: 5%" />
+<col style="width: 40%" />
+</colgroup>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOURNAL_LOG_FIELD_TAG_AUTH_TREE_EXTENTS</code></td>
+<td>1</td>
+<td>Mandatory. The authentication tree’s <a
+href="#sec-enc-extents-list">encoded extents list</a>.</td>
+</tr>
+<tr>
+<td><code>JOURNAL_LOG_FIELD_TAG_ALLOC_BITMAP_FILE_EXTENTS</code></td>
+<td>2</td>
+<td>Mandatory. The allocation bitmap file’s <a
+href="#sec-enc-extents-list">encoded extents list</a>.</td>
+</tr>
+<tr>
+<td><code>JOURNAL_LOG_FIELD_TAG_ALLOC_BITMAP_FILE_FRAGMENTS_AUTH_DIGESTS</code></td>
+<td>3</td>
+<td>Mandatory. Authentication digests of allocation bitmap file
+fragments needed for reconstructing the authentication tree.</td>
+</tr>
+<tr>
+<td><code>JOURNAL_LOG_FIELD_TAG_APPLY_WRITES_SCRIPT</code></td>
+<td>4</td>
+<td>Mandatory. List of data updates to replay.</td>
+</tr>
+<tr>
+<td><code>JOURNAL_LOG_FIELD_TAG_UPDATE_AUTH_DIGESTS_SCRIPT</code></td>
+<td>5</td>
+<td>Mandatory. List of authentication tree updates to replay.</td>
+</tr>
+<tr>
+<td><code>JOURNAL_LOG_FIELD_TAG_TRIM_SCRIPT</code></td>
+<td>6</td>
+<td>Optional. List of trim operations to issue after the journal has
+been replayed.</td>
+</tr>
+<tr>
+<td><code>JOURNAL_LOG_FIELD_TAG_JOURNAL_STAGING_COPY_DISGUISE</code></td>
+<td>7</td>
+<td>Optional. Encryption parameters used for disguising the journal’s
+data staging copies.</td>
+</tr>
+</tbody>
+</table>
+<h3
+id="allocation-bitmap-file-fragments-authentication-digests">Allocation
+bitmap file fragments’ authentication digests</h3>
+<p>Whenever <a href="#sec-journal-auth-tree-updates-script">replaying
+any authentication tree node entry update</a> from the journal at
+filesystem opening time, the complete node must get reconstructed in
+full from scratch: the nodes’ boundaries are aligned to the <a
+href="#def-io-block">IO Block</a> size each, but some previous attempt
+to apply the journal might have failed and left the nodes’ contents in
+an indeterminate state.</p>
+<p>For recreating the data digests at the leaf level, i.e. <a
+href="#sec-auth-tree-data-block-digest">computing the Authentication
+Tree Data Blocks’ digests</a>, the allocation status of each constituent
+<a href="#def-allocation-block">Allocation Block</a> must be known.
+Therefore, those parts of the <a
+href="#sec-allocation-bitmap">allocation bitmap file</a> that track the
+data ranges covered by the affected authentication tree leaf nodes must
+get read. Remember that the allocation bitmap is encrypted in units of
+allocation bitmap file blocks, so it is possible to decrypt only those
+fragments needed for the authentication tree reconstruction during
+journal replay. However, for maintaining IND-CCA security, the encrypted
+contents must get authenticated before a decryption is attempted.</p>
+<p>The journal log field with tag
+<code>JOURNAL_LOG_FIELD_TAG_ALLOC_BITMAP_FILE_FRAGMENTS_AUTH_DIGESTS</code>
+provides all of the <a href="#def-auth-tree-data-block">Authentication
+Tree Data Block</a> digests overlapping with any of the allocation
+bitmap file fragments needed for reconstructing the authentication tree
+from journal replay. Those digests are over the updated allocation
+bitmap data, i.e. over the allocation bitmap ciphertext fragments as if
+the journal had been replayed already.</p>
+<p>The field’s value contents is constructed by concatenating</p>
+<ol type="1">
+<li><p>A sequence of records, one for each of the allocation bitmap
+file’s covered <a href="#def-auth-tree-data-block">Authentication Tree
+Data Block</a>, encoded as pairs of location and digest each. The
+location of the respective Authentication Tree Data Block is encoded as
+the difference between its beginning on physical storage relative to the
+previous record’s associated Authentication Tree Data Block’s end, if
+any, or 0 otherwise, converted to units of Authentication Tree Data
+Blocks, and encoded as an unsigned integer in LEB128 format. The
+Authentication Tree Data Block digest, of size as determined by the <a
+href="#def-image-layout"><code>auth_tree_data_block_allocation_blocks_log2</code></a>
+parameter, is serialized right after that.</p>
+<p>Remember that all of the <a href="#sec-allocation-bitmap">allocation
+bitmap file’s</a> extents’ boundaries are constrained to be aligned to
+the <a href="#def-auth-tree-data-block">Authentication Tree Data
+Block</a> size, hence no such block can overlap only partially with the
+file. It is an error if any of the allocation bitmap file’s encryption
+blocks is covered only partially by the collective set of records in
+this journal log field: any must be either not covered at all or in
+full.</p></li>
+<li><p>An authentication HMAC with an underlying hash algorithm of <a
+href="#def-image-layout"><code>preauth_cca_protection_hmac_hash_alg</code></a>
+and <a href="#sec-key-derivation-subkey">a subkey is derived from the
+root key</a> with the domain parameter set to 2, i.e. the allocation
+bitmap files associated inode number, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code></a>
+over</p>
+<ol type="1">
+<li>The <a href="#def-image-layout">encoded image layout</a>.</li>
+<li>The allocation bitmap file’s <a href="#sec-enc-extents-list">encoded
+extents list</a>.</li>
+<li>The journal log field’s records encoded as above.</li>
+<li>An <a href="#sec-auth-context">authentication context</a>
+constructed as follows:
+<ol type="1">
+<li>A format version identifier byte of constant 0 identifying the inner
+format.</li>
+<li>The value
+<code>JOURNAL_LOG_FIELD_TAG_ALLOC_BITMAP_FILE_FRAGMENTS_AUTH_DIGESTS</code>
+represented as a single byte</li>
+<li>A format version identifier byte of constant 0 identifying the outer
+“envelope” format.</li>
+<li>The value of <a
+href="#sec-auth-context"><code>AUTH_SUBJECT_ID_JOURNAL_LOG_FIELD</code></a>
+encoded as a single byte.</li>
+</ol></li>
+</ol></li>
+</ol>
+<h3 id="writes-application-script"><span
+id="sec-journal-apply-writes-script-script">Writes application
+script</span></h3>
+<p>The journal log contains instructions how to apply pending data
+updates, more specifically which journal staging copies to write to
+which target location. This information is encoded in a journal log
+field with a tag value of
+<code>JOURNAL_LOG_FIELD_TAG_APPLY_WRITES_SCRIPT</code> as a sequence of
+records, each one consisting of</p>
+<ol type="1">
+<li>The beginning of the target location on physical storage,
+represented as the difference to the previous record’s associated target
+range’s end, if any, or 0 otherwise, converted to units of <a
+href="#def-io-block">IO Blocks</a>, and encoded as an unsigned integer
+in LEB128 format.</li>
+<li>The beginning of the source location on physical storage, i.e. of
+the journal staging copy, represented as the difference to the previous
+record’s associated source range’s end, if any, or 0 otherwise, in units
+of <a href="#def-io-block">IO Blocks</a> and taken modulo <span
+class="math inline">\(2^{64}\)</span>, encoded as a signed integer in
+LEB128 format.</li>
+<li>The range’s length, in units of <a href="#def-io-block">IO
+Blocks</a> and encoded as an unsigned integer in LEB128 format. It must
+not be zero.</li>
+</ol>
+<p>The sequence is terminated with a termination records of three
+consecutive zero bytes.</p>
+<p>No target region may overlap with any source region, with the
+exception that the two may be equal for a given record, in which case
+implementations must skip it.</p>
+<h3 id="authentication-tree-update-script"><span
+id="sec-journal-auth-tree-updates-script">Authentication tree update
+script</span></h3>
+<p>The journal log field with tag
+<code>JOURNAL_LOG_FIELD_TAG_UPDATE_AUTH_DIGESTS_SCRIPT</code> contains
+all information needed to update the authentication tree, namely a list
+of <a href="#def-auth-tree-data-block">Authentication Tree Data
+Blocks</a> whose <a href="#sec-auth-tree-data-block-digest">digests</a>
+have changed – either because their contents got updated or because some
+of the constituent <a href="#def-allocation-block">Allocation Blocks</a>
+got deallocated, or both.</p>
+<p>The journal’s <a
+href="#sec-journal-apply-writes-script-script">writes application
+script</a> is not considered for the purpose of determining which <a
+href="#def-auth-tree-data-block">Authentication Tree Data Blocks</a>’s
+digests have changed, and is queried only for possibly retrieving the
+updated contents of any data range referenced from the authentication
+tree update script. In particular, the authentication tree update script
+must be complete.</p>
+<p>The field contains a sequence of records, each encoded as</p>
+<ol type="1">
+<li>The beginning of the authenticated data range on physical storage,
+represented as the difference to the previous record’s associated
+range’s end, if any, or 0 otherwise, converted to units of <a
+href="#def-auth-tree-data-block">Authentication Tree Data Blocks</a> and
+encoded as an unsigned integer in LEB128 format.</li>
+<li>The length of the authenticated range in units of <a
+href="#def-auth-tree-data-block">Authentication Tree Data Blocks</a>,
+encoded as an unsigned integer in LEB128 format. It must not be
+zero.</li>
+</ol>
+<p>The sequence is terminated with a termination records of two
+consecutive zero bytes.</p>
+<p>It should be stressed that implementations must always reconstruct
+any modified authentication tree node from scratch when replaying the
+journal: a previous attempt to write to it might have failed and the
+contents must therefore be assumed to be in an indeterminate state.</p>
+<h3 id="trim-script">Trim script</h3>
+<p>A journal log may contain an optional field of tag
+<code>JOURNAL_LOG_FIELD_TAG_TRIM_SCRIPT</code> for specifying a sequence
+of ranges to issue trim commands on after the journal has been replayed
+and the journal log head invalidated.</p>
+<p>The field contains a sequence of records, each encoded as</p>
+<ol type="1">
+<li>The beginning of the to be trimmed range on physical storage,
+represented as the difference to the previous record’s associated
+range’s end, if any, or 0 otherwise, converted to units of <a
+href="#def-io-block">IO Blocks</a> and encoded as an unsigned integer in
+LEB128 format.</li>
+<li>The length of the to be trimmed range in units of <a
+href="#def-io-block">IO Blocks</a>, encoded as an unsigned integer in
+LEB128 format. It must not be zero.</li>
+</ol>
+<p>The sequence is terminated with a termination records of two
+consecutive zero bytes.</p>
+<p>If the field is present, then any of the journal staging copies
+referenced from records in the <a
+href="#sec-journal-apply-writes-script-script">writes application
+script</a>, with the target range not being equal to the journal staging
+copy range, get implicitly added to it, as do the journal log’s tail
+extents.</p>
+<h3 id="journal-staging-copy-disguising"><span
+id="sec-journal-staging-copy-disguise">Journal staging copy
+disguising</span></h3>
+<p>For each record in the <a
+href="#sec-journal-apply-writes-script-script">writes application
+script</a>, the specified journal staging copy is to get copied over to
+the target destination during journal replay. This enables adversaries
+to identify the journal staging copy blocks as such, simply by
+attempting to find pairs of blocks with identical contents. As the
+journal staging copies’ backing storage is always tracked as
+unallocated, this leaks information about the allocations state, which
+violates the principle that allocations are considered confidential for
+data at rest.</p>
+<p>To restore the confidentiality of allocations for data at rest, the
+journal staging copies may – at users’ option – get encrypted with a
+one-time key. Note that this additional layer of encryption is
+computationally expensive, hence the feature is optional and can get
+enabled on a per-transaction basis.</p>
+<p>If a journal log field with a tag of
+<code>JOURNAL_LOG_FIELD_TAG_JOURNAL_STAGING_COPY_DISGUISE</code> is
+present, then journal staging copy disguising is enabled, with the
+encryption algorithm and key as specified in the encoded field
+value:</p>
+<ol type="1">
+<li>The block cipher algorithm as a <a href="#bib-tcgalg25">TCG
+algorithm identifier</a>, encoded as a 16 bit integer in big-endian
+format.</li>
+<li>The selected key size in bits, encoded as a 16 bit integer in
+big-endian format.</li>
+<li>The encryption key of length as specified by the key size.</li>
+<li>The IV generation encryption key of length as specified by the key
+size.</li>
+</ol>
+<p>The journal staging copy disguising is implemented by encrypting each
+<a href="#def-allocation-block">Allocation Block</a> from the journal
+staging copy with the specified block cipher in CBC mode and an IV
+obtained as follows:</p>
+<ol type="1">
+<li>Concatenate the <a href="#def-allocation-block">Allocation
+Block’s</a> target location to its journal staging copy location, both
+represented as Allocation Block indices within the filesystem image and
+encoded as 64 bit integers in little-endian format.</li>
+<li>Truncate or pad the result at the beginning so that its length
+becomes equal to the block cipher block size.</li>
+<li>Encrypt the single block cipher block with the IV generation
+encryption key.</li>
+</ol>
+<h2 id="opening-the-filesystem-informative">Opening the filesystem
+(informative)</h2>
+<p>In order to illustrate how the various pieces needed for opening the
+filesystem fit together, especially with respect to bootstrapping the
+authentication, the opening process is outlined below:</p>
+<ol type="1">
+<li><p>Read the <a href="#sec-static-image-header">static image
+header</a>, i.e. the various filesystem configuration parameters and the
+salt.</p></li>
+<li><p><a href="#sec-key-derivation-root">Derive the root key from
+externally supplied key material</a>.</p></li>
+<li><p>Determine the locations of the <a href="#sec-journal">journal log
+head extent</a> as well as of the <a
+href="#sec-mutable-image-header">mutable image header</a>.</p></li>
+<li><p>Check whether there’s a valid <a href="#sec-journal">journal</a>
+at the journal log head extent location, if so apply it.</p></li>
+<li><p>Read the <a href="#sec-mutable-image-header">mutable image
+header</a>. This yields the <a
+href="#sec-auth-tree-root-digest">authentication tree root digest</a>,
+the location of the <a href="#def-inode-index-entry-leaf-node">inode
+index entry leaf node</a> and its <a
+href="#sec-inode-index-entry-leaf-node-preauth-digest">preauthentication
+CCA protection digest</a>.</p></li>
+<li><p>Read the inode index entry leaf node, authenticate it against its
+preauthentication CCA protection digest and decrypt it.</p></li>
+<li><p>Lookup the <a href="#sec-auth-tree">authentication tree</a> and
+<a href="#sec-allocation-bitmap">allocation bitmap file</a> inodes in
+the decrypted inode index entry leaf node. Remember that the minimum
+inode index B+-tree minimum leaf node fill level is defined so that
+inodes 1-4 will always be found in that node.</p></li>
+<li><p>If the inode index entries for the authentication tree or
+allocation bitmap files contain indirect references to <a
+href="#sec-enc-extents-list">extents lists</a>, stored in the inline
+authenticated variant of the <a
+href="#sec-encryption-entity-chained-extents">encrypted chained
+extents</a>, then decrypt while verifying against the inline
+authentication.</p></li>
+<li><p>The allocation bitmap file’s extents are constrained to all be
+aligned to the <a href="#def-auth-tree-data-block">Authentication Tree
+Data Block</a> size, in particular any Authentication Tree Data Block
+overlapping with it is a proper subrange and has all of its constituent
+<a href="#def-allocation-block">Allocation Blocks</a> allocated.
+Therefore, all information needed for <a
+href="#sec-auth-tree-data-block-digest">digesting the Authentication
+Tree Data Blocks</a> overlapping with the allocation bitmap file’s
+extents and authenticating them through the authentication tree is
+available. Furthermore, the <a
+href="#sec-auth-tree-root-digest">authentication tree root digest</a>
+binds the location of the allocation bitmap file’s extents on
+storage.</p>
+<p>Authenticate the allocation bitmap file’s contents through the
+authentication tree and decrypt it afterwards. Once the allocation
+bitmap has been read, the information needed for <a
+href="#sec-auth-tree-data-block-digest">digesting any Authentication
+Tree Data Block</a> is available.</p></li>
+<li><p>Note that the <a href="#sec-auth-tree-root-digest">authentication
+tree root digest</a> also binds the location of the <a
+href="#def-inode-index-entry-leaf-node">inode index entry leaf node</a>.
+Re-authenticate that node’s encrypted contents, this time through the
+authentication tree.</p></li>
+<li><p>The authentication of the filesystem through the authentication
+tree has been bootstrapped now.</p></li>
+<li><p>Lookup the inode index root node inode in the <a
+href="#def-inode-index-entry-leaf-node">inode index entry leaf node</a>.
+Read it, authenticate it through the authentication tree and decrypt
+it.</p></li>
+<li><p>The filesystem is now operational.</p></li>
+</ol>
+<h2 id="bibliography"><span
+id="sec-bibliography">Bibliography</span></h2>
+<ul>
+<li><span id="bib-fruhwirth05">FRUHWIRTH05 - “New Methods in Hard Disk
+Encryption”, Clemens Fruhwirth, 2005, Vienna University of Technology,
+Institute for Computer Languages, <a
+href="https://clemens.endorphin.org/nmihde/nmihde-A4-ds.pdf">https://clemens.endorphin.org/nmihde/nmihde-A4-ds.pdf</a></span></li>
+<li><span id="bib-goldreich09">GOLDREICH09 - “Foundations of
+Cryptography, Volume 2: Basic Applications”, Oded Goldreich, Cambridge
+University Press, 2009, <a
+href="https://www.cambridge.org/9780521119917">https://www.cambridge.org/9780521119917</a></span></li>
+<li><span id="bib-khati16">KHATI16 - “Full Disk Encryption: Bridging
+Theory and Practice”, Louiza Khati, Nicky Mouha and Damien Vergnaud,
+Cryptology ePrint Archive, Paper 2016/1114, 2016, <a
+href="https://eprint.iacr.org/2016/1114">https://eprint.iacr.org/2016/1114</a></span></li>
+<li><span id="bib-tcgalg25">TCGALG25 - “TCG Algorithm Registry”, Familiy
+2.0, Level 00, Revision 01.35, Feb 18, 2025, TrustedComputing
+Group</span></li>
+<li><span id="bib-tcgtpm19a">TCGTPM19A - “Trusted Platform Module
+Library - Part1: Architecture”, Familiy 2.0, Level 00, Revision 01.59,
+Nov 8, 2019, Trusted Computing Group</span></li>
+<li><span id="bib-tcgtpm19b">TCGTPM19B - “Trusted Platform Module
+Library - Part2: Structures”, Familiy 2.0, Level 00, Revision 01.59, Nov
+8, 2019, Trusted Computing Group</span></li>
+</ul>
+</body>
+</html>
