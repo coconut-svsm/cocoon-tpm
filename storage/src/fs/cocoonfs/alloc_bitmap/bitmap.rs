@@ -1118,6 +1118,10 @@ impl FindFreeFullwordChunksExtentCandiateFilter for FindFreeFullwordChunksExtent
     }
 }
 
+/// The maximum search distance in units of bitmap words when attempting
+/// allocation placement optimization in order to reduce overall fragmentation.
+const PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS: u64 = 16;
+
 /// In-memory representation of the filesystem instance's allocation bitmap.
 pub struct AllocBitmap {
     pub(super) bitmap: Vec<BitmapWord>,
@@ -1341,6 +1345,14 @@ impl AllocBitmap {
     ///  * `image_size` - The filesystem image size. No [Allocation
     ///    Block](layout::ImageLayout::allocation_block_size_128b_log2) beyond
     ///    it will be considered for the allocation.
+    ///  * `search_allocation_blocks_begin` - Hint about where to start the
+    ///    search, if any. Should usually be set to the location of the most
+    ///    recently allocated block in a series of such allocations.
+    ///  * `optimize_placement` - Whether to attempt to optimize block placement
+    ///    in order to reduce fragmentation. Doing that is relatively costly, so
+    ///    it may be set to false when allocating blocks with a limited
+    ///    lifetime, such as for the journal staging copies.
+    #[allow(clippy::too_many_arguments)]
     pub fn find_free_block<const AN: usize, const FN: usize>(
         &self,
         block_allocation_blocks_log2: u32,
@@ -1348,6 +1360,8 @@ impl AllocBitmap {
         pending_allocs: &SparseAllocBitmapUnion<'_, AN>,
         pending_frees: &SparseAllocBitmapUnion<'_, FN>,
         image_size: layout::AllocBlockCount,
+        search_allocation_blocks_begin: Option<layout::PhysicalAllocBlockIndex>,
+        optimize_placement: bool,
     ) -> Option<layout::PhysicalAllocBlockIndex> {
         let block_allocations_blocks = 1u32 << block_allocation_blocks_log2;
         debug_assert!(block_allocations_blocks <= BitmapWord::BITS);
@@ -1359,10 +1373,28 @@ impl AllocBitmap {
         // and has at least the upper 7 Bits clear.
         let image_bitmap_words = (u64::from(image_size) + (u64::BITS as u64 - 1)) >> BITMAP_WORD_BITS_LOG2;
 
+        let search_begin_bitmap_word_index = match search_allocation_blocks_begin {
+            Some(search_allocation_blocks_begin) => {
+                let search_begin_bitmap_word_index = u64::from(search_allocation_blocks_begin) >> BITMAP_WORD_BITS_LOG2;
+                if optimize_placement {
+                    // Go back by the optimization search distance, the second best fit might have
+                    // been skipped over and we want to favor allocations towards the beginning of
+                    // the storage in general.
+                    search_begin_bitmap_word_index
+                        .saturating_sub(PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS - 1)
+                } else {
+                    // Assume the previous block had too been searched for with placement
+                    // optimization disabled, i.e. it's been the first free
+                    // block found.
+                    search_begin_bitmap_word_index
+                }
+            }
+            None => 0,
+        };
+        debug_assert!(search_begin_bitmap_word_index < image_bitmap_words);
+
         let word_blocks_lsbs_mask_table = BitmapWordBlocksLsbsMaskTable::new();
         let word_blocks_lsbs_mask = word_blocks_lsbs_mask_table.get_blocks_lsbs_mask(block_allocation_blocks_log2);
-        let bitmaps_words_iter =
-            AllocBitmapWordIterator::new_at_bitmap_word_index(self, pending_allocs, pending_frees, 0);
         let mut next_allocated_fullword_chunk: Option<layout::PhysicalAllocBlockRange> = None;
         struct FoundCandidate {
             bitmap_word_index: u64,
@@ -1370,14 +1402,37 @@ impl AllocBitmap {
             split_block_allocation_blocks_log2: u32, // Minimize.
         }
         let mut best: Option<FoundCandidate> = None;
-        for (bitmap_word_index, mut bitmap_word) in
-            bitmaps_words_iter.take(usize::try_from(image_bitmap_words).unwrap_or(usize::MAX))
-        {
+        // While nothing has been found, keep going. The increment cannot overflow,
+        // image_bitmap_words has the upper BITMAP_WORD_BITS_LOG2 clear.
+        let mut remaining_optimization_search_distance = image_bitmap_words + 1;
+
+        let mut bitmaps_words_iter = AllocBitmapWordIterator::new_at_bitmap_word_index(
+            self,
+            pending_allocs,
+            pending_frees,
+            search_begin_bitmap_word_index,
+        )
+        .take(usize::try_from(image_bitmap_words - search_begin_bitmap_word_index).unwrap_or(usize::MAX));
+        while let Some((bitmap_word_index, mut bitmap_word)) = bitmaps_words_iter.next() {
+            remaining_optimization_search_distance -= 1;
+            if remaining_optimization_search_distance == 0 {
+                // Placement optimization search distance exhausted. Return what we have.
+                debug_assert!(optimize_placement && best.is_some());
+                break;
+            }
+
             if bitmap_word_index + 1 == image_bitmap_words {
                 // Set the excess high bits not backed by any actual storage.
                 bitmap_word |= !BitmapWord::trailing_bits_mask(
                     BitmapWord::BITS - ((u64::from(image_size).wrapping_neg() & (BitmapWord::BITS as u64 - 1)) as u32),
                 );
+
+                // Prepare the bitmap_words_iter for wrap-around in the next iteration, if any.
+                if search_begin_bitmap_word_index != 0 {
+                    bitmaps_words_iter =
+                        AllocBitmapWordIterator::new_at_bitmap_word_index(self, pending_allocs, pending_frees, 0)
+                            .take(usize::try_from(search_begin_bitmap_word_index).unwrap_or(usize::MAX));
+                }
             }
 
             // Don't bother examining any further if all allocation blocks tracked by this
@@ -1414,6 +1469,15 @@ impl AllocBitmap {
                         allocated_fullword_chunks = None;
                     }
 
+                    if !optimize_placement {
+                        // Found something and no placement optimization requested, bail out.
+                        return Some(layout::PhysicalAllocBlockIndex::from(
+                            bitmap_word_index << BITMAP_WORD_BITS_LOG2,
+                        ));
+                    }
+                    // Something's been found, arm the placement optimization search distance limit.
+                    remaining_optimization_search_distance = PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+
                     best = Some(FoundCandidate {
                         bitmap_word_index,
                         bitmap_word,
@@ -1427,6 +1491,14 @@ impl AllocBitmap {
                 Self::bitmap_word_free_blocks_lsbs(bitmap_word, block_allocation_blocks_log2, word_blocks_lsbs_mask);
             if free_blocks_lsbs == 0 {
                 continue;
+            }
+
+            if !optimize_placement {
+                // Not interested in placement optimizations and there is at least one free
+                // block in the current bitmap word. Take that.
+                return Some(layout::PhysicalAllocBlockIndex::from(
+                    (bitmap_word_index << BITMAP_WORD_BITS_LOG2) + free_blocks_lsbs.trailing_zeros() as u64,
+                ));
             }
 
             // It is possible to allocate the block from the range tracked by the current
@@ -1452,7 +1524,7 @@ impl AllocBitmap {
             if split_block_allocation_blocks_log2 == block_allocation_blocks_log2 {
                 // It's a perfect fit.
                 return Some(layout::PhysicalAllocBlockIndex::from(
-                    bitmap_word_index * BitmapWord::BITS as u64
+                    (bitmap_word_index << BITMAP_WORD_BITS_LOG2)
                         + Self::bitmap_word_block_alloc_select_block(
                             free_blocks_lsbs,
                             block_allocation_blocks_log2,
@@ -1472,6 +1544,11 @@ impl AllocBitmap {
                 )
                 .unwrap_or(true)
             {
+                if best.is_none() {
+                    // Something's been found, arm the placement optimization search distance limit.
+                    remaining_optimization_search_distance = PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+                }
+
                 best = Some(FoundCandidate {
                     bitmap_word_index,
                     bitmap_word,
@@ -1543,12 +1620,17 @@ impl AllocBitmap {
     ///  * `image_size` - The filesystem image size. No [Allocation
     ///    Block](layout::ImageLayout::allocation_block_size_128b_log2) beyond
     ///    it will be considered for the allocation.
+    ///  * `optimize_placement` - Whether to attempt to optimize extent
+    ///    placement in order to reduce fragmentation. Doing that is relatively
+    ///    costly, so it may be set to false when allocating blocks with a
+    ///    limited lifetime, such as for the journal staging copies.
     pub fn find_free_extents<const AN: usize, const FN: usize>(
         &self,
         allocation_request: &ExtentsAllocationRequest,
         pending_allocs: &SparseAllocBitmapUnion<'_, AN>,
         pending_frees: &SparseAllocBitmapUnion<'_, FN>,
         image_size: layout::AllocBlockCount,
+        optimize_placement: bool,
     ) -> Result<Option<(extents::PhysicalExtents, u64)>, NvFsError> {
         debug_assert!(
             allocation_request.layout.extent_alignment_allocation_blocks_log2 as u32 <= BITMAP_WORD_BITS_LOG2
@@ -1577,6 +1659,7 @@ impl AllocBitmap {
                     pending_allocs,
                     pending_frees,
                     image_size,
+                    optimize_placement,
                 ) {
                     Some(extent_allocation_blocks_begin) => {
                         let extent = layout::PhysicalAllocBlockRange::from((
@@ -1594,6 +1677,7 @@ impl AllocBitmap {
                 pending_allocs,
                 pending_frees,
                 image_size,
+                optimize_placement,
             ) {
                 let extent = layout::PhysicalAllocBlockRange::from((
                     extent_allocation_blocks_begin,
@@ -1635,6 +1719,7 @@ impl AllocBitmap {
                     pending_allocs,
                     pending_frees,
                     image_size,
+                    optimize_placement,
                 ) {
                     Some(remainder_extent_allocation_blocks_begin) => layout::PhysicalAllocBlockRange::from((
                         remainder_extent_allocation_blocks_begin,
@@ -1768,6 +1853,7 @@ impl AllocBitmap {
                         pending_allocs,
                         pending_frees,
                         image_size,
+                        optimize_placement,
                     ) {
                         Some(subword_extent_allocation_blocks_begin) => layout::PhysicalAllocBlockRange::from((
                             subword_extent_allocation_blocks_begin,
@@ -1899,6 +1985,11 @@ impl AllocBitmap {
     ///  * `image_size` - The filesystem image size. No [Allocation
     ///    Block](layout::ImageLayout::allocation_block_size_128b_log2) beyond
     ///    it will be considered for the allocation.
+    ///  * `optimize_placement` - Whether to attempt to optimize extent
+    ///    placement in order to reduce fragmentation. Doing that is relatively
+    ///    costly, so it may be set to false when allocating blocks with a
+    ///    limited lifetime, such as for the journal staging copies.
+    #[allow(clippy::too_many_arguments)]
     fn find_free_subword_chunk<const AN: usize, const FN: usize>(
         &self,
         chunk_allocation_blocks: u32,
@@ -1907,6 +1998,7 @@ impl AllocBitmap {
         pending_allocs: &SparseAllocBitmapUnion<'_, AN>,
         pending_frees: &SparseAllocBitmapUnion<'_, FN>,
         image_size: layout::AllocBlockCount,
+        optimize_placement: bool,
     ) -> Option<layout::PhysicalAllocBlockIndex> {
         debug_assert_ne!(chunk_allocation_blocks, 0);
         debug_assert_eq!(
@@ -1925,6 +2017,8 @@ impl AllocBitmap {
                 pending_allocs,
                 pending_frees,
                 image_size,
+                None,
+                optimize_placement,
             );
         }
         debug_assert!(chunk_allocation_blocks >= 3);
@@ -1965,9 +2059,19 @@ impl AllocBitmap {
         // all block fields in a bitmap word.
         let containing_blocks_min_maxstr_len = word_containing_blocks_lsbs_mask * chunk_allocation_blocks as BitmapWord;
         let mut best: Option<FoundCandidate> = None;
+        // While nothing has been found, keep going. The increment cannot overflow,
+        // image_bitmap_words has the upper BITMAP_WORD_BITS_LOG2 clear.
+        let mut remaining_optimization_search_distance = image_bitmap_words + 1;
         for (bitmap_word_index, mut bitmap_word) in
             bitmaps_words_iter.take(usize::try_from(image_bitmap_words).unwrap_or(usize::MAX))
         {
+            remaining_optimization_search_distance -= 1;
+            if remaining_optimization_search_distance == 0 {
+                // Placement optimization search distance exhausted. Return what we have.
+                debug_assert!(optimize_placement && best.is_some());
+                break;
+            }
+
             if bitmap_word_index + 1 == image_bitmap_words {
                 // Set the excess high bits not backed by any actual storage.
                 bitmap_word |= !BitmapWord::trailing_bits_mask(
@@ -2009,6 +2113,15 @@ impl AllocBitmap {
                         allocated_fullword_chunks = None;
                     }
 
+                    if !optimize_placement {
+                        // Found something and no placement optimization requested, bail out.
+                        return Some(layout::PhysicalAllocBlockIndex::from(
+                            bitmap_word_index << BITMAP_WORD_BITS_LOG2,
+                        ));
+                    }
+                    // Something's been found, arm the placement optimization search distance limit.
+                    remaining_optimization_search_distance = PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+
                     best = Some(FoundCandidate::FreeContainingBlock {
                         bitmap_word_index,
                         bitmap_word,
@@ -2019,6 +2132,25 @@ impl AllocBitmap {
                     });
                 }
                 continue;
+            }
+
+            if !optimize_placement {
+                // Not interested in placement optimizations. Go the easy, not so costly route
+                // and just check whether there's any properly aligned 0-string
+                // of sufficient length.
+                match Self::bitmap_word_find_str_with_min_len(
+                    !bitmap_word,
+                    chunk_allocation_blocks,
+                    chunk_alignment_allocation_blocks_log2,
+                    word_chunk_alignment_anchors_mask,
+                ) {
+                    Some(begin_in_bitmap_word) => {
+                        return Some(layout::PhysicalAllocBlockIndex::from(
+                            (bitmap_word_index << BITMAP_WORD_BITS_LOG2) + begin_in_bitmap_word as u64,
+                        ));
+                    }
+                    None => continue,
+                }
             }
 
             let (containing_blocks_max_aligned_maxstr_len, containing_blocks_aligned_maxstr_lens) =
@@ -2078,11 +2210,13 @@ impl AllocBitmap {
                     containing_block_allocation_blocks_log2,
                     word_containing_blocks_lsbs_mask,
                 );
+                debug_assert_ne!(free_containing_blocks_lsbs, 0);
                 // The fully free blocks are a subset of all candidates.
                 debug_assert_eq!(
                     containing_blocks_candidates_lsbs & free_containing_blocks_lsbs,
                     free_containing_blocks_lsbs
                 );
+
                 if free_containing_blocks_lsbs == containing_blocks_candidates_lsbs {
                     // All candidates are fully free blocks.
                     // The case that the full range covered by the bitmap_word is free has been
@@ -2115,6 +2249,12 @@ impl AllocBitmap {
                         })
                         .unwrap_or(true)
                     {
+                        if best.is_none() {
+                            // Something's been found, arm the placement optimization search distance limit.
+                            remaining_optimization_search_distance =
+                                PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+                        }
+
                         best = Some(FoundCandidate::FreeContainingBlock {
                             bitmap_word_index,
                             bitmap_word,
@@ -2180,10 +2320,10 @@ impl AllocBitmap {
                     containing_block_candidate_aligned_maxstr_len as u32;
                 debug_assert!(containing_block_candidate_aligned_maxstr_len >= chunk_allocation_blocks);
 
-                let containing_block_candidate_maxstr_end_bit =
+                let containing_block_candidate_maxstr_end_bits =
                     (containing_blocks_maxstr_end_bits >> containing_block_begin) & word_containing_block_field_mask;
-                debug_assert_ne!(containing_block_candidate_maxstr_end_bit, 0);
-                let containing_block_candidate_maxstr_end = containing_block_candidate_maxstr_end_bit.ilog2() + 1;
+                debug_assert_ne!(containing_block_candidate_maxstr_end_bits, 0);
+                let containing_block_candidate_maxstr_end = containing_block_candidate_maxstr_end_bits.ilog2() + 1;
                 debug_assert!(containing_block_candidate_maxstr_end >= containing_block_candidate_aligned_maxstr_len);
                 let containing_block_candidate_aligned_maxstr_end =
                     containing_block_candidate_maxstr_end.round_down_pow2(chunk_alignment_allocation_blocks_log2);
@@ -2315,7 +2455,14 @@ impl AllocBitmap {
                     )
                 };
                 let chunk_begin = chunk_begin + containing_block_begin;
+                debug_assert!(excess_allocation_blocks < containing_block_allocation_blocks);
+                debug_assert!(best_excess_allocation_blocks == containing_block_allocation_blocks || best.is_some());
                 if excess_allocation_blocks < best_excess_allocation_blocks {
+                    if best.is_none() {
+                        // Something's been found, arm the placement optimization search distance limit.
+                        remaining_optimization_search_distance = PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+                    }
+
                     best = Some(FoundCandidate::ChunkInPartialContainingBlock {
                         bitmap_word_index,
                         chunk_begin,
@@ -2329,6 +2476,8 @@ impl AllocBitmap {
                         word_containing_blocks_lsbs_mask * best_excess_allocation_blocks as BitmapWord;
                 } else {
                     debug_assert_eq!(best_excess_allocation_blocks, excess_allocation_blocks);
+                    debug_assert!(best_excess_allocation_blocks < containing_block_allocation_blocks);
+                    debug_assert!(best.is_some());
                     let best_excess_aligned_blocks_set = match best.as_ref().unwrap() {
                         FoundCandidate::ChunkInPartialContainingBlock {
                             excess_aligned_blocks_set,
@@ -2428,6 +2577,7 @@ impl AllocBitmap {
         pending_allocs: &SparseAllocBitmapUnion<'_, AN>,
         pending_frees: &SparseAllocBitmapUnion<'_, FN>,
         image_size: layout::AllocBlockCount,
+        optimize_placement: bool,
     ) -> Option<layout::PhysicalAllocBlockIndex> {
         debug_assert!(chunk_allocation_blocks > BitmapWord::BITS);
         debug_assert!(chunk_allocation_blocks < 2 * BitmapWord::BITS);
@@ -2450,9 +2600,19 @@ impl AllocBitmap {
             excess_allocation_blocks: u32, // Minimize.
         }
         let mut best: Option<FoundCandidate> = None;
+        // While nothing has been found, keep going. The increment cannot overflow,
+        // image_bitmap_words has the upper BITMAP_WORD_BITS_LOG2 clear.
+        let mut remaining_optimization_search_distance = image_bitmap_words + 1;
         for (bitmap_word_index, mut bitmap_word) in
             bitmaps_words_iter.take(usize::try_from(image_bitmap_words).unwrap_or(usize::MAX))
         {
+            remaining_optimization_search_distance -= 1;
+            if remaining_optimization_search_distance == 0 {
+                // Placement optimization search distance exhausted. Return what we have.
+                debug_assert!(optimize_placement && best.is_some());
+                break;
+            }
+
             if bitmap_word_index + 1 == image_bitmap_words {
                 // Set the excess high bits not backed by any actual storage.
                 bitmap_word |= !BitmapWord::trailing_bits_mask(
@@ -2470,7 +2630,18 @@ impl AllocBitmap {
             if bitmap_word == 0 {
                 match previous_bitmap_word {
                     Some(0) => {
+                        if !optimize_placement {
+                            // Found something and no placement optimization requested, bail out.
+                            return Some(layout::PhysicalAllocBlockIndex::from(
+                                (bitmap_word_index - 1) << BITMAP_WORD_BITS_LOG2,
+                            ));
+                        }
+
                         if best.is_none() {
+                            // Something's been found, arm the placement optimization search distance limit.
+                            remaining_optimization_search_distance =
+                                PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+
                             best = Some(FoundCandidate {
                                 bitmap_word_index: bitmap_word_index - 1,
                                 first_bitmap_word: 0,
@@ -2480,6 +2651,14 @@ impl AllocBitmap {
                     }
                     Some(previous_bitmap_word) => {
                         debug_assert_eq!(previous_bitmap_word & subword_rem_free_tail_word_mask, 0);
+                        if !optimize_placement {
+                            // Found something and no placement optimization requested, bail out.
+                            return Some(layout::PhysicalAllocBlockIndex::from(
+                                ((bitmap_word_index - 1) << BITMAP_WORD_BITS_LOG2)
+                                    + (previous_bitmap_word & subword_rem_free_tail_word_mask).trailing_zeros() as u64,
+                            ));
+                        }
+
                         let excess_allocation_blocks =
                             previous_bitmap_word.leading_zeros() - subword_rem_allocation_blocks;
                         if best
@@ -2487,6 +2666,12 @@ impl AllocBitmap {
                             .map(|best| best.excess_allocation_blocks > excess_allocation_blocks)
                             .unwrap_or(true)
                         {
+                            if best.is_none() {
+                                // Something's been found, arm the placement optimization search distance limit.
+                                remaining_optimization_search_distance =
+                                    PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+                            }
+
                             best = Some(FoundCandidate {
                                 bitmap_word_index: bitmap_word_index - 1,
                                 first_bitmap_word: previous_bitmap_word,
@@ -2504,12 +2689,25 @@ impl AllocBitmap {
                 continue;
             } else if bitmap_word & subword_rem_free_head_word_mask == 0 {
                 if let Some(0) = previous_bitmap_word {
+                    if !optimize_placement {
+                        // Found something and no placement optimization requested, bail out.
+                        return Some(layout::PhysicalAllocBlockIndex::from(
+                            (bitmap_word_index - 1) << BITMAP_WORD_BITS_LOG2,
+                        ));
+                    }
+
                     let excess_allocation_blocks = bitmap_word.trailing_zeros() - subword_rem_allocation_blocks;
                     if best
                         .as_ref()
                         .map(|best| best.excess_allocation_blocks > excess_allocation_blocks)
                         .unwrap_or(true)
                     {
+                        if best.is_none() {
+                            // Something's been found, arm the placement optimization search distance limit.
+                            remaining_optimization_search_distance =
+                                PLACEMENT_OPTIMIZATION_SEARCH_DISTANCE_BITMAP_WORDS;
+                        }
+
                         best = Some(FoundCandidate {
                             bitmap_word_index: bitmap_word_index - 1,
                             first_bitmap_word: 0,
@@ -3504,6 +3702,52 @@ impl AllocBitmap {
         }
 
         (s_max, s_per_block)
+    }
+
+    /// Find a 1-string of specified minimum length in a [`BitmapWord`], if any.
+    ///
+    /// Return the position, counted from the least significant bit, of the
+    /// first string of `min_str_len` consecutive 1-bits in `bitmap_word`
+    /// starting at an alignment boundary as determined by
+    /// `str_alignment_allocation_blocks_log2`. If no such 1-string is found,
+    /// `None` is returned.
+    ///
+    /// # Arguments:
+    ///
+    /// * `bitmap_word` - The [`BitmapWord`] value to examine.
+    /// * `min_str_len` - The 1-string length to search for. Must be a multiple
+    ///   of the alignment as determined by
+    ///   `str_alignment_allocation_blocks_log2` and strictly less than
+    ///   [`BitmapWord::BITS`].
+    /// * `str_alignment_allocation_blocks_log2` - Alignment constrained on the
+    ///   1-string.
+    /// * `bitmap_word_str_alignment_anchors_mask` - Mask of equidistant set
+    ///   bits, separated by two to the power of
+    ///   `str_alignment_allocation_blocks_log2` each.
+    fn bitmap_word_find_str_with_min_len(
+        mut bitmap_word: BitmapWord,
+        min_str_len: u32,
+        str_alignment_allocation_blocks_log2: u32,
+        bitmap_word_str_alignment_anchors_mask: BitmapWord,
+    ) -> Option<u32> {
+        debug_assert!(str_alignment_allocation_blocks_log2 < BITMAP_WORD_BITS_LOG2);
+        debug_assert!(min_str_len.is_aligned_pow2(str_alignment_allocation_blocks_log2));
+        debug_assert!(min_str_len < 64);
+        // This is the the algorithm from Hacker's Delight, 2nd
+        // edition, 6-2 ("Find first string of 1-Bits of a Given Length").
+        let mut n = min_str_len;
+        while n > 1 {
+            let s = n >> 1;
+            bitmap_word &= bitmap_word << s;
+            n -= s;
+        }
+        bitmap_word &= bitmap_word_str_alignment_anchors_mask << ((1 << str_alignment_allocation_blocks_log2) - 1);
+
+        if bitmap_word != 0 {
+            Some(bitmap_word.trailing_zeros() - (min_str_len - 1))
+        } else {
+            None
+        }
     }
 
     /// Packed integer `<=` comparison.

@@ -2130,9 +2130,10 @@ enum CommittingTransactionState<ST: sync_types::SyncTypes, C: chip::NvChip> {
     },
 }
 
-// Unfortunately rustc runs into a recursion limit when trying to prove this. The reason seems to be
-// that CommittingTransactionState contains a CocoonFsSyncStateMemberWriteWeakGuard, which
-// ultimately contains a CocoonFsSyncRcPtrType::WeakSyncRcPtr and CocoonFs (the pointed to type)
+// Unfortunately rustc runs into a recursion limit when trying to prove this.
+// The reason seems to be that CommittingTransactionState contains a
+// CocoonFsSyncStateMemberWriteWeakGuard, which ultimately contains a
+// CocoonFsSyncRcPtrType::WeakSyncRcPtr and CocoonFs (the pointed to type)
 // contains the CommittingTransactionState.
 // SAFETY: all members are Send.
 unsafe impl<ST: sync_types::SyncTypes, C: chip::NvChip> marker::Send for CommittingTransactionState<ST, C> {}
@@ -3582,6 +3583,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> asynchronous::QueuedFuture<Coco
                     &pending_allocs,
                     &pending_frees,
                     fs_sync_state.image_size,
+                    true,
                 );
                 let result = match result {
                     Ok(Some(result)) => {
@@ -3650,6 +3652,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> asynchronous::QueuedFuture<Coco
                     &pending_allocs,
                     &pending_frees,
                     fs_sync_state.image_size,
+                    None,
+                    true,
                 );
                 let result = match result {
                     Some(allocated_block) => {
@@ -3732,8 +3736,10 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> asynchronous::QueuedFuture<Coco
                         &pending_allocs,
                         &pending_frees,
                         fs_sync_state.image_size,
+                        allocated_blocks.last().copied(),
+                        true,
                     ) {
-                        Some(allocated_block_allocations_begin) => allocated_block_allocations_begin,
+                        Some(allocated_block_allocation_blocks_begin) => allocated_block_allocation_blocks_begin,
                         None => {
                             *this = Self::Done(marker::PhantomData);
                             return task::Poll::Ready(PendingTransactionsSyncFutureResult::AllocateBlocks {

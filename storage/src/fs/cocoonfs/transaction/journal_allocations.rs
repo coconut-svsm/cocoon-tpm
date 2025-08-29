@@ -297,6 +297,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             ];
                             let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
 
+                            // Mutable access to the filesystem instance's sync state means that there
+                            // will be no subsequent allocations for long-living entities with placement
+                            // optimization enabled. So disabling placement optimization here is fine..
                             let allocated_block_allocation_blocks_begin =
                                 match fs_instance_sync_state_write_guard.alloc_bitmap.find_free_block(
                                     journal_block_allocation_blocks_log2,
@@ -304,6 +307,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     &pending_allocs,
                                     &pending_frees,
                                     fs_instance_sync_state_write_guard.image_size,
+                                    allocated_blocks.last().copied(),
+                                    false,
                                 ) {
                                     Some(allocated_block_allocations_begin) => allocated_block_allocations_begin,
                                     None => {
@@ -698,11 +703,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         let pending_allocs = [&transaction.allocs.pending_allocs, &transaction.allocs.journal_allocs];
                         let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
 
+                        // Mutable access to the filesystem instance's sync state means that there
+                        // will be no subsequent allocations for long-lived entities with placement
+                        // optimization enabled. So disabling placement optimization here is fine.
                         let allocated_extents = match fs_instance_sync_state_write_guard.alloc_bitmap.find_free_extents(
                             allocation_request,
                             &pending_allocs,
                             &pending_frees,
                             fs_instance_sync_state_write_guard.image_size,
+                            false,
                         ) {
                             Ok(Some((allocated_extents, _))) => allocated_extents,
                             Ok(None) => {
