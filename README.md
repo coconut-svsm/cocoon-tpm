@@ -2,8 +2,9 @@
 
 Rust workspace for developing a software TPM. **Work in progess!**
 
-Everything is `[no_std]` and has been developed with constrained
-execution environments in mind, in partiuclar with regard to stack usage.
+Everything, except for CLI helper utilities, is `[no_std]` and has
+been developed with constrained execution environments in mind, in
+partiuclar with regard to stack usage.
 
 ## Available crates
 * [`cocoon-tpm-utils-common`](utils-common/README.md) - Utilities used
@@ -17,3 +18,5 @@ execution environments in mind, in partiuclar with regard to stack usage.
   in part implementations of) all cryptography primitives needed by a
   TPM.
 * [`cocoon-tpm-storage`](storage/README.md) - Secure persistent storage.
+* [`cocoonfs-cli`](cocoonfs-cli/README.md) - CLI utility for accessing
+  CocoonFs images.

@@ -1,0 +1,39 @@
+[package]
+name = "cocoonfs-cli"
+version = "0.1.0"
+edition = "2024"
+
+license = "Apache-2.0"
+description = "Cocoon TPM project - CLI utility for accessing CocoonFs images"
+homepage = "https://github.com/coconut-svsm/cocoon-tpm"
+repository = "https://github.com/coconut-svsm/cocoon-tpm"
+readme = "README.md"
+
+[[bin]]
+name = "cocoonfs"
+path = "src/main.rs"
+
+[features]
+default = ["aes", "camellia", "sha2", "sha3", "sm3", "sm4"]
+
+# Hashes
+sha2 = ["cocoon-tpm-crypto/sha256", "cocoon-tpm-crypto/sha384", "cocoon-tpm-crypto/sha512"]
+sha3 = ["cocoon-tpm-crypto/sha3_256", "cocoon-tpm-crypto/sha3_384", "cocoon-tpm-crypto/sha3_512"]
+sm3 = ["cocoon-tpm-crypto/sm3_256"]
+
+# Block ciphers
+aes = ["cocoon-tpm-crypto/aes"]
+camellia = ["cocoon-tpm-crypto/camellia"]
+sm4 = ["cocoon-tpm-crypto/sm4"]
+
+[dependencies]
+cocoon-tpm-crypto = { version = "0.1.2", default-features = false, features = ["enable_arch_math_asm", "zeroize"] }
+cocoon-tpm-storage = { version = "0.1.1", default-features = false, features = ["zeroize"] }
+cocoon-tpm-tpm2-interface = { version = "0.1.0", default-features = false }
+cocoon-tpm-utils-common = { version = "0.1.1", features = ["zeroize"] }
+cocoon-tpm-utils-async = { version = "0.1.1" }
+
+clap = { version = "4.5.45", features = ["derive", "wrap_help"] }
+clap_derive = "4.5.45"
+getrandom = "0.3.3"
+pollster = "0.4.0"

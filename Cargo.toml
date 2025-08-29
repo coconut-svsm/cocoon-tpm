@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+	"cocoonfs-cli",
 	"crypto",
 	"bssl-bare-sys",
 	"bssl-bare-sys-target-integration",
