@@ -44,10 +44,6 @@ pub(super) type CocoonFsSyncRcPtrRefType<'a, ST, C> =
 
 /// A CocoonFs instance in operational state.
 ///
-/// CocoonFs is a special purpose filesystem format designed for the secure
-/// storage of sensitive data in e.g. a TEE setting. For the format
-/// specification, refer to file `cocoonfs-format.md` distributed with the code.
-///
 /// A [`CocoonFs`] instance may be obtained either by
 /// [opening](super::CocoonFsOpenFsFuture) an existing filesystem on storage, or
 /// by [creating a new one](super::CocoonFsMkFsFuture).

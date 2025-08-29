@@ -6,11 +6,15 @@ Most importantly, it defines the `NvFs` trait as a common interface to
 filesystem functionality required by other crates in the project, and
 an implementation for the CocoonFs filesystem format thereof.
 
-CocoonFs is a special purpose filesystem format designed to meet the
-security demands for protecting sensitive data, like TPM state or UEFI
-variables, when stored outside the security boundary of e.g. a TEE.
+CocoonFs is a special purpose filesystem format designed for the
+secure storage of sensitive data in e.g. a TEE setting. In addition to
+its primary design focus on strong security properties, the format
+implements support for some features of particular relevance to the
+intended use-case, such as support for keyless storage volume
+provisiong and robustness against service interruptions by means of a
+journal.
 
-For full details about the CocoonFs format, please refer to its
-specification to be found at `src/fs/cooonfs/cocoonfs-format.md`, a
-HTML rendered version is available
-[here](https://nicst.de/cocoonfs-format.html).
+For the format specification, refer to file `cocoonfs-format.md`
+distributed with the code, see
+[here](https://coconut-svsm.github.io/cocoon-tpm/cocoonfs/cocoonfs-format.html)
+for a rendered version.

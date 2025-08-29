@@ -3,6 +3,19 @@
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! [`CocoonFs`] -- a secure [`NvFs`](crate::fs::NvFs) implementation.
+//!
+//! CocoonFs is a special purpose filesystem format designed for the secure
+//! storage of sensitive data in e.g. a TEE setting. In addition to its primary
+//! design focus on strong security properties, the format implements support
+//! for some features of particular relevance to the intended use-case, such as
+//! support for [keyless storage volume
+//! provisiong](CocoonFsWriteMkfsInfoHeaderFuture) and robustness against service
+//! interruptions by means of a journal.
+//!
+//! For the format specification, refer to file `cocoonfs-format.md` distributed
+//! with the code, see
+//! [here](https://coconut-svsm.github.io/cocoon-tpm/cocoonfs/cocoonfs-format.html)
+//! for a rendered version.
 
 mod alloc_bitmap;
 mod auth_subject_ids;
