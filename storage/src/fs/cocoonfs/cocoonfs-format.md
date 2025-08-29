@@ -3,14 +3,14 @@
 body { max-width: 72em !important; }
 </style>
 ```
-# CocoonFS format specification
+# CocoonFs format specification
 
 Copyright 2023-2025 SUSE LLC
 
 Licensed under CC BY-SA 4.0
 
 ## [Introduction]{#sec-introduction}
-CocoonFS is a special purpose filesystem format designed for securely storing small items of highly sensitive data such
+CocoonFs is a special purpose filesystem format designed for securely storing small items of highly sensitive data such
 as, but not limited to, a software TPM's state and UEFI variables in a confidential Trusted Execution Environment (TEE)
 setting.
 
@@ -21,7 +21,7 @@ storage volume provisioning](#sec-introduction-online-mkfs) and robustness again
 
 
 ### [Security properties]{#sec-introduction-security}
-The most noteworthy features distinguishing CocoonFS from common existing Full Disk Encryption (FDE) solutions designed
+The most noteworthy features distinguishing CocoonFs from common existing Full Disk Encryption (FDE) solutions designed
 primarily for mass storage deployments are:
 
 * The use of fresh, random Initialization Vectors (IV) for each encryption operation.
@@ -29,7 +29,7 @@ primarily for mass storage deployments are:
 * The use of subkeys derived from a single (full-entropy) root key for each unique combination of filesystem entity and
   purpose as a means to confine wear-out.
 
-Regarding cryptographic algorithms, the CocoonFS format supports the full set of block cipher and hash algorithms
+Regarding cryptographic algorithms, the CocoonFs format supports the full set of block cipher and hash algorithms
 specified by the TCG Algorithm Registry \[[TCGALG25](#bib-tcgalg25)\], with implementations explicitly being permitted
 to support a subset thereof only.
 
@@ -50,13 +50,13 @@ between two plaintexts encrypted successively to the same sector: e.g. whether t
 (CBC-ESSIV) or some common data (XTS) at block cipher block granularity. Note that this is not much of a concern for
 data at rest, because an adversary cannot observe two consecutive ciphertexts by definition.
 
-The TEE threat model assumed for CocoonFS deployments is different in that respect though, in that an eavesdropper might
+The TEE threat model assumed for CocoonFs deployments is different in that respect though, in that an eavesdropper might
 be capable of recording any individual storage write request issued from a TEE. Therefore a fresh, random IV is getting
 generated for each encryption operation. Storing those random IVs for individual blocks would be too much overhead,
 hence they are associated with logical filesystem entities -- either some metadata structure or a file -- instead. More
 specifically, each entity is encrypted with a random IV in Cipher Block Chaining (CBC) mode. This does imply that
 partial file updates are not possible, and neither are seeks for reading because of the choice of CBC mode. With the
-kind of files anticipated to get typically stored on a CocoonFS target, i.e. small ones, the potential overhead incurred
+kind of files anticipated to get typically stored on a CocoonFs target, i.e. small ones, the potential overhead incurred
 with full file reads or writes is expected to be bearable though.
 
 #### Authentication
@@ -86,22 +86,22 @@ Both alternatives have some pros and cons each. The authentication of individual
 efficient, in terms of storage space as well as computational work required (even though the inline storage of
 authentication tags would inevitably introduce some significant padding waste to align allocations to an integral
 multiple of the unit of allocation, which is 128B at least). A Merkle tree based scheme is more appealing from a
-security property point of view, because it yields a single authentication tag binding the state of the CocoonFS
+security property point of view, because it yields a single authentication tag binding the state of the CocoonFs
 instance as a whole. This enables applications to distribute their state across multiple files while still being
 guaranteed a globally coherent view. Note that in particular, that would allow for moving frequently written data, like
 a software TPM's current time value, into a dedicated file, thereby avoiding the need to write out the complete, mostly
 unchanged state upon each and every update. Furthermore, having a single root authentication digest for the whole
-CocoonFS image available might perhaps serve as a basis for interesting future research projects in the area of rollback
+CocoonFs image available might perhaps serve as a basis for interesting future research projects in the area of rollback
 protection protocols: any digest updates could get sent to and recorded at a trusted remote party (with the journal to
 be introduced later providing a means to reliably recover from lost ACKs due to network failures).
 
-It's expected that the storage backing CocoonFS deployments will typically be relatively small, i.e. that the height of
+It's expected that the storage backing CocoonFs deployments will typically be relatively small, i.e. that the height of
 the Merkle tree will remain within affordable bounds. To get a rough idea on the numbers: five levels with an assumed
 node size of 1kB and fanout of 16 would cover 128MB worth of data already. Moreover tree node caches can certainly help
 with mitigating the overhead at the read side, as they can get organized such that especially the nodes at the upper
 layers will have a good probability of cache residency.
 
-With these considerations, the design choice made for CocoonFS is to accept the additional cost inherent to the Merkle
+With these considerations, the design choice made for CocoonFs is to accept the additional cost inherent to the Merkle
 tree approach in favor of achieving better security guarantees.
 
 As a minor technical detail, note that a few filesystem metadata items still need additional inline authentication tags
@@ -109,37 +109,37 @@ for preserving IND-CCA when e.g. finding the location of the authentication tree
 bootstrap, i.e. when opening the filesystem.
 
 #### Key derivation
-Some of the data stored on a CocoonFS instance will have low entropy, which might perhaps enable adversaries to acquire
+Some of the data stored on a CocoonFs instance will have low entropy, which might perhaps enable adversaries to acquire
 plaintext-ciphertext pairs to conduct a cryptanalysis on. Examples would include e.g. the filesystem metadata
 structures, but also certain application files' contents. In order to confine the effects of key wear-out, a unique
 subkey is derived from a root key for each combination of filesystem entity and cryptographic purpose. The Key
 Derivation Function (KDF) used for that is the `KDFa()` specified in \[[TCGTPM19A](#bib-tcgtpm19a)\].
 
 The initially mentioned algorithm agility support, i.e. the possibility to use any of the algorithms from the TCG
-Algorithm Registry \[[TCGALG25](#bib-tcgalg25)\] with CocoonFS, introduces a potential risk of downgrade attacks: by
-overwriting algorithms with weak ones in the CocoonFS header, an adversary might perhaps be able to recover some subkey
+Algorithm Registry \[[TCGALG25](#bib-tcgalg25)\] with CocoonFs, introduces a potential risk of downgrade attacks: by
+overwriting algorithms with weak ones in the CocoonFs header, an adversary might perhaps be able to recover some subkey
 or even the root key. In order to thwart such attacks, the externally supplied raw root key material, assumed to have
 full entropy, is not taken as is, but first run through the `KDFa()` with a fixed hash algorithm, namely SHA-512, with
 the other algorithms as found in the image header as additional input.
 
 
 ### Filesystem model
-The filesystem model implemented by CocoonFS is a very limited one: there's no directory hierarchy and "file names" are
+The filesystem model implemented by CocoonFs is a very limited one: there's no directory hierarchy and "file names" are
 simply 32 bit integers, i.e. inode numbers.
 
 It is expected that some inode numbers or ranges thereof get statically assigned to a specific application purpose. For
 example, when storing a software TPM's state, it would be natural to reserve the ranges 0x01000000-0x01ffffff for the
 storage of NV indices and 0x81000000-0x81ffffff for persistent objects, c.f. \[[TCGTPM19B](#bib-tcgtpm19b)\].
 
-Note that for the anticipated CocoonFS usage scenarios, i.e. the storage of core TEE state, it will likely always be
+Note that for the anticipated CocoonFs usage scenarios, i.e. the storage of core TEE state, it will likely always be
 possible to make such static assignments at development time and thus, it is certainly desirable to avoid the overhead
 of updating directory metadata structures.
 
 ### [Journal]{#sec-introduction-journal}
-For robustness against service interruptions, e.g. power cuts, crashes and alike, CocoonFS implements a journal.
+For robustness against service interruptions, e.g. power cuts, crashes and alike, CocoonFs implements a journal.
 
 In fact, it is not so much of a journal in the traditional sense as in "a journal with multiple update records": the
-CocoonFS journal's capacity is limited to tracking a single pending transaction at a time, where that single transaction
+CocoonFs journal's capacity is limited to tracking a single pending transaction at a time, where that single transaction
 can comprise an arbitrary number of accumulated filesystem operations.
 
 Unlike it's the case with other journal implementations, there's no dedicated, preallocated journal area except for a
@@ -174,7 +174,7 @@ well-defined security semantics with respect to the confidentiality of the overa
 whenever a given block is read or written, an adversary observing the IO may readily infer it's allocated at that point
 in time.
 
-For that reason, CocoonFS does not define any security guarantees regarding the confidentiality of allocations with
+For that reason, CocoonFs does not define any security guarantees regarding the confidentiality of allocations with
 respect to adversaries able to eavesdrop or even alter IO communication.
 
 As a side note: this relaxation is a prerequisite for the support of a dynamically allocated journal: the blocks used
@@ -183,7 +183,7 @@ generally, unallocated block's contents cannot get considered as input for the a
 are unallocated can, but this implies that a given block's authentication tag returns to a previous value when
 deallocated, something which would otherwise have been highly unlikely.
 
-CocoonFS does however provide optional confidentiality of allocations in the "data at rest model". If enabled, certain
+CocoonFs does however provide optional confidentiality of allocations in the "data at rest model". If enabled, certain
 additional measures with some computational overhead need to get taken -- most notably a
 [reencryption](#sec-journal-staging-copy-disguise) of data copies in the journal in order to prevent the identification
 of journal blocks by matching them to duplicates.
@@ -197,10 +197,10 @@ In some use-cases, e.g. TEEs running in a public cloud, it might be desirable to
 TEE itself upon first use: the initial filesystem creation requires access to the root key, and, as the TEE would need
 that anyway, such a setup scheme would allow for limiting the trust boundary to the bare minimum.
 
-However, a TEE should certainly not start to randomly create CocoonFS instances on any attached volumes whose formats it
-doesn't recognize and some sort of storage volume tagging mechanism is due. The CocoonFS format implements this by means
+However, a TEE should certainly not start to randomly create CocoonFs instances on any attached volumes whose formats it
+doesn't recognize and some sort of storage volume tagging mechanism is due. The CocoonFs format implements this by means
 of a special [filesystem creation header](#sec-mkfsinfo-header) marking the containing volume as intended for formatting
-with a CocoonFS instance at first use in the first place, and specifying all the core configuration parameters required
+with a CocoonFs instance at first use in the first place, and specifying all the core configuration parameters required
 for the filesystem creation.
 
 **Attention**: the [filesystem creation header](#sec-mkfsinfo-header) is not authenticated at all, and thus, to thwart
@@ -218,7 +218,7 @@ the presence of the backup [filesystem creation header](#sec-mkfsinfo-header) an
 appropriate.
 
 ## Fundamental structures and encodings
-The core CocoonFS metadata structures are:
+The core CocoonFs metadata structures are:
 
 * The [image header](#sec-image-header) defining filesystem properties, split into an
   [immutable](#sec-static-image-header) and a [mutable](#sec-mutable-image-header) part. The immutable part contains all
@@ -230,7 +230,7 @@ The core CocoonFS metadata structures are:
 * The [inode index](#sec-inode-index), organized as a B+-tree.
 * The [journal](#sec-journal).
 
-Inodes 0 to 5 (inclusive) are reserved for CocoonFS internal use. The [authentication tree](#sec-auth-tree), the
+Inodes 0 to 5 (inclusive) are reserved for CocoonFs internal use. The [authentication tree](#sec-auth-tree), the
 [allocation bitmap](#sec-allocation-bitmap) and the [inode index](#sec-inode-index) root have entries in the inode index
 and are assigned inode numbers 1, 2 and 3 respectively. The [journal log](#sec-journal) has inode number 5 associated
 with it, but there's no explicit entry for it in the inode index -- the number is used only for key derivation subject
@@ -454,14 +454,14 @@ implements an integrity protection measure for the sequence of chained extents a
 which is good to have from a robustness perspective, especially for the journal log.
 
 ### [Image header]{#sec-image-header}
-The CocoonFS format defines two mutually exclusive header types to be placed at the containing storage volume's
+The CocoonFs format defines two mutually exclusive header types to be placed at the containing storage volume's
 beginning:
 
-- In the regular case, after the filesystem has been created on storage and is operational, the [regular CocoonFS
+- In the regular case, after the filesystem has been created on storage and is operational, the [regular CocoonFs
   filesystem header](#sec-filesystem-header) is stored at that location.
 - Alternatively, to drive [online filesystem creation](#sec-introduction-online-mkfs) upon first use, a [filesystem
   creation info header](#sec-mkfsinfo-header) may be placed there. It is expected that implementations will conduct the
-  filesystem creation upon encountering such one, eventually replacing the header with a [regular CocoonFS
+  filesystem creation upon encountering such one, eventually replacing the header with a [regular CocoonFs
   filesystem header](#sec-filesystem-header) in the course.
 
 Both header types are protected by a checksum each. If no valid header of either type passing checksum verification is
@@ -470,8 +470,8 @@ presence of a filesystem creation info header [backup copy](#def-mkfsinfo-backup
 determined exclusively from the backing storage volume's dimensions, and proceed with the online filesystem creation if
 one is found.
 
-#### [Regular CocoonFS filesystem header]{#sec-filesystem-header}
-The regular CocoonFS filesystem image header is split into two parts: a [static](#sec-static-image-header) and a
+#### [Regular CocoonFs filesystem header]{#sec-filesystem-header}
+The regular CocoonFs filesystem image header is split into two parts: a [static](#sec-static-image-header) and a
 [mutable](#sec-mutable-image-header) one.  The static image header is located at the beginning of the image, padded to
 an integral multiple of the [IO Block](#def-io-block) size so that no neighboring writes will ever alter its
 contents. This is important, as the configuration found in the static image header is needed for determining the
@@ -649,7 +649,7 @@ The mutable image header's format is:
 
 #### [Filesystem creation info header]{#sec-mkfsinfo-header}
 As discussed in the introductionary section about [online filesystem creation support](#sec-introduction-online-mkfs),
-parties not in possession of the root key may mark a storage volume for formatting with a CocoonFS instance upon first
+parties not in possession of the root key may mark a storage volume for formatting with a CocoonFs instance upon first
 use by writing a special filesystem creation info header to its beginning. This header provides all the information
 required for the actual filesystem creation and is of the following format:
 
@@ -683,7 +683,7 @@ Upon encountering such a filesystem creation header passing the checksum verific
 when attempting to open a filesystem, implementations are supposed to conduct the filesystem creation.
 
 The filesystem creation process inevitably involves a replacement of the filesystem creation info header at the
-storage's beginning with the [regular CocoonFS image header](#sec-filesystem-header) at some point. For robustness
+storage's beginning with the [regular CocoonFs image header](#sec-filesystem-header) at some point. For robustness
 against service interruptions encountered during that write, a [backup copy]{#def-mkfsinfo-backup-header} of the former
 is made at a specific location on storage beforehand. The location is determined exlusively from the storage volume's
 dimensions as follows: find the largest possible power of two not less than $4\cdot 128\textrm{B}$ such that the storage
@@ -697,7 +697,7 @@ reporting in case the underlying hardware is not compatible with the selected [I
 
 In either case, if no valid [image header](#sec-image-header) of either type passing the respective checksum
 verification is found at the storage volume's beginning when attempting to open a filesystem, neither a [regular
-CocoonFS static image header](#sec-static-image-header) nor a filesystem creation info header, then implementations are
+CocoonFs static image header](#sec-static-image-header) nor a filesystem creation info header, then implementations are
 expected to check for the presence of a filesystem creation info header backup copy at the specified location. If one is
 found, and it passes its checksum verification, then the online filesystem creation procedure is supposed to get
 restarted from scratch.

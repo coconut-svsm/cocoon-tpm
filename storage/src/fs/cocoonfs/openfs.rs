@@ -26,7 +26,7 @@ use core::{future, marker, mem, pin, task};
 
 use super::mkfs::MkFsFuture;
 
-/// Open a CocoonFS instance.
+/// Open a CocoonFs instance.
 ///
 /// If a filesystem creation info header is found on the storage, the filesystem
 /// will get created ("mkfs") first.

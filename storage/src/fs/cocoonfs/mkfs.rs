@@ -31,7 +31,7 @@ use crate::{
 };
 use core::{future, iter, marker, mem, pin, task};
 
-/// Format a CocoonFS filesystem instance.
+/// Format a CocoonFs filesystem instance.
 ///
 /// Directly format a filesystem instance, without considering any
 /// filesystem creation info header existing on storage, if any.
