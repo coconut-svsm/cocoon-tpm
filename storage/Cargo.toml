@@ -1,6 +1,6 @@
 [package]
 name = "cocoon-tpm-storage"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 license = "Apache-2.0"
@@ -15,10 +15,12 @@ zeroize = [
 ]
 
 [dependencies]
-# CocoonFs needs CBC and also, ECB for the Journal disguise IV generation.
-cocoon-tpm-crypto = { version = "0.1.0", features = ["cbc", "ecb"] }
+# CocoonFs needs CBC and also, ECB for the Journal disguise IV
+# generation. It uses TCG KDFa() with hardcoded SHA-512 to transform
+# externally supplied key material into a root key.
+cocoon-tpm-crypto = { version = "0.1.2", features = ["cbc", "ecb", "sha512"] }
 cocoon-tpm-tpm2-interface = { version = "0.1.0", default-features = false }
-cocoon-tpm-utils-async = { version = "0.1.0" }
-cocoon-tpm-utils-common = { version = "0.1.0" }
+cocoon-tpm-utils-async = { version = "0.1.1" }
+cocoon-tpm-utils-common = { version = "0.1.1" }
 
 zeroize = { version = "1.8.1", optional = true, default-features = false, features= ["alloc"] }
