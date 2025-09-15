@@ -23,7 +23,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use super::{GenericSyncRcPtrRef, SyncRcPtr, SyncRcPtrFactory, SyncRcPtrRef, SyncRcPtrTryNewError, WeakSyncRcPtr};
-use crate::utils_common::alloc::{box_try_new, TryNewError};
+use crate::utils_common::alloc::{TryNewError, box_try_new};
 use core::{
     marker::{self, PhantomData},
     mem::{self, ManuallyDrop},
@@ -122,7 +122,7 @@ impl<T> Arc<T> {
     /// Provides a raw pointer to the data.
     fn as_ptr(this: &Self) -> *const T {
         let ptr: *mut ArcInner<T> = NonNull::as_ptr(this.ptr);
-        unsafe { &*ptr }.data.as_ptr()
+        (unsafe { &raw const (*ptr).data }) as *const T
     }
 
     /// Creates a new [`Weak`] pointer to this allocation.
@@ -317,7 +317,7 @@ impl<T> Weak<T> {
     /// Returns a raw pointer to the object `T` pointed to by this `Weak<T>`.
     fn as_ptr(&self) -> *const T {
         let ptr: *mut ArcInner<T> = NonNull::as_ptr(self.ptr);
-        unsafe { (*ptr).data.as_ptr() }
+        (unsafe { &raw const (*ptr).data }) as *const T
     }
 
     /// Consumes the `Weak<T>` and turns it into a raw pointer.
