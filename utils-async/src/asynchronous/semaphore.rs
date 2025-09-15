@@ -1593,9 +1593,9 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::
     ///
     /// # Safety
     ///
-    /// The pair of pair of raw pointer to the protected value and granted
-    /// leases count must have been previously obtained from
-    /// [`from_raw()`](Self::from_raw).
+    /// The pair of raw pointer to the protected value and granted leases count
+    /// must have been previously obtained from
+    /// [`into_raw()`](Self::into_raw).
     pub(super) unsafe fn from_raw(data_ptr: *const T, leases_granted: usize) -> Self {
         // UnsafeCell<T> is transmutable to T.
         let data_ptr = data_ptr as *const cell::UnsafeCell<T>;
@@ -1733,9 +1733,9 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::
     ///
     /// # Safety
     ///
-    /// The pair of pair of raw pointer to the protected value and granted
-    /// leases count must have been previously obtained from
-    /// [`from_raw()`](Self::from_raw).
+    /// The pair of raw pointer to the protected value and granted leases count
+    /// must have been previously obtained from
+    /// [`into_raw()`](Self::into_raw).
     pub(super) unsafe fn from_raw(data_ptr: *const T, leases_granted: usize) -> Self {
         // UnsafeCell<T> is transmutable to T.
         let data_ptr = data_ptr as *const cell::UnsafeCell<T>;
