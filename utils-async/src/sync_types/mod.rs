@@ -704,13 +704,16 @@ macro_rules! impl_deref_inner_by_tag {
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
         fn to_inner_ptr(outer: *const Self) -> *const Self::Output {
             use core::ptr;
-            // This is safe, even if outer does not point to initialized memory: the usage
-            // pattern is among the explicitly documented examples for addr_of!().
+            // SAFETY: this is safe, even if outer does not point to initialized memory: the
+            // usage pattern is among the explicitly documented examples for addr_of!().
             unsafe { ptr::addr_of!((*outer).$field) }
         }
 
         unsafe fn container_of(inner: *const Self::Output) -> *const Self {
             use core::mem;
+            // SAFETY: inner has previously been obtained from Self::to_inner_ptr(), as per
+            // this function's documented safety constraints, and the pointer arithmetic
+            // below simply transforms it back.
             unsafe {
                 inner
                     .cast::<u8>()
