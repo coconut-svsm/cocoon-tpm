@@ -348,7 +348,7 @@ unsafe fn broadcast_raw_waker_drop<
 >(
     data: *const (),
 ) {
-    let data = unsafe { &*(data as *const BroadcastWakerSubscriptions<ST>) };
+    let data = data as *const BroadcastWakerSubscriptions<ST>;
     let subscriptions = unsafe { SP::WeakSyncRcPtr::from_raw(data) };
     drop(subscriptions)
 }
