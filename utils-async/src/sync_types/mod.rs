@@ -687,8 +687,7 @@ pub trait DerefInnerByTag<TAG> {
     /// # Safety
     ///
     /// The `inner` pointer must have previously been obtained from
-    /// [`to_inner_ptr()`](Self::to_inner_ptr) or by a cast of the the reference
-    /// obtained from [`deref_inner()`](Self::deref_inner) to pointer type.
+    /// [`to_inner_ptr()`](Self::to_inner_ptr).
     unsafe fn container_of(inner: *const Self::Output) -> *const Self;
 }
 
