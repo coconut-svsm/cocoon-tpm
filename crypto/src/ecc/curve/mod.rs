@@ -428,7 +428,7 @@ impl Curve {
     }
 
     /// Get the `CurveOps` for the curve.
-    pub fn curve_ops(&self) -> Result<CurveOps, CryptoError> {
+    pub fn curve_ops(&self) -> Result<CurveOps<'_>, CryptoError> {
         CurveOps::try_new(self)
     }
 

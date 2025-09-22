@@ -125,7 +125,7 @@ pub struct EccPrivateKey {
 
 impl EccPrivateKey {
     /// Get the private scalar.
-    pub fn get_d(&self) -> cmpa::MpBigEndianUIntByteSlice {
+    pub fn get_d(&self) -> cmpa::MpBigEndianUIntByteSlice<'_> {
         cmpa::MpBigEndianUIntByteSlice::from_bytes(&self.d)
     }
 }

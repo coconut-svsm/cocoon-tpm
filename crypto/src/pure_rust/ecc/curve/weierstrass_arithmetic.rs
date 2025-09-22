@@ -73,12 +73,12 @@ impl WeierstrassCurveOps {
     }
 
     /// Get the *a* coefficient in Montgomery form.
-    fn get_mg_a(&self) -> cmpa::MpNativeEndianUIntLimbsSlice {
+    fn get_mg_a(&self) -> cmpa::MpNativeEndianUIntLimbsSlice<'_> {
         cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_a)
     }
 
     /// Get the *b* coefficient in Montgomery form.
-    fn get_mg_b(&self) -> cmpa::MpNativeEndianUIntLimbsSlice {
+    fn get_mg_b(&self) -> cmpa::MpNativeEndianUIntLimbsSlice<'_> {
         cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_b)
     }
 

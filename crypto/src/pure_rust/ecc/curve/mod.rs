@@ -52,7 +52,7 @@ impl CurveFieldOps {
 
     /// Get the scalar field's prime.
     #[allow(unused)]
-    pub fn get_p(&self) -> &cmpa::MpBigEndianUIntByteSlice {
+    pub fn get_p(&self) -> &cmpa::MpBigEndianUIntByteSlice<'_> {
         &self.p
     }
 
@@ -101,7 +101,7 @@ impl CurveFieldOps {
     }
 
     /// Get *(Montgomery radix)<sup>2</sup> mod p*.
-    fn get_mg_radix2_mod_p(&self) -> cmpa::MpNativeEndianUIntLimbsSlice {
+    fn get_mg_radix2_mod_p(&self) -> cmpa::MpNativeEndianUIntLimbsSlice<'_> {
         cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_radix2_mod_p)
     }
 
@@ -263,7 +263,7 @@ impl AffinePoint {
     }
 
     /// Access the coordinates in Montgomery form.
-    fn get_mg_coordinates(&self) -> (cmpa::MpNativeEndianUIntLimbsSlice, cmpa::MpNativeEndianUIntLimbsSlice) {
+    fn get_mg_coordinates(&self) -> (cmpa::MpNativeEndianUIntLimbsSlice<'_>, cmpa::MpNativeEndianUIntLimbsSlice<'_>) {
         (
             cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_x),
             cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_y),
@@ -342,9 +342,9 @@ impl ProjectivePoint {
     fn get_mg_coordinates(
         &self,
     ) -> (
-        cmpa::MpNativeEndianUIntLimbsSlice,
-        cmpa::MpNativeEndianUIntLimbsSlice,
-        cmpa::MpNativeEndianUIntLimbsSlice,
+        cmpa::MpNativeEndianUIntLimbsSlice<'_>,
+        cmpa::MpNativeEndianUIntLimbsSlice<'_>,
+        cmpa::MpNativeEndianUIntLimbsSlice<'_>,
     ) {
         (
             cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_x),
@@ -357,9 +357,9 @@ impl ProjectivePoint {
     fn get_mg_coordinates_mut(
         &mut self,
     ) -> (
-        cmpa::MpMutNativeEndianUIntLimbsSlice,
-        cmpa::MpMutNativeEndianUIntLimbsSlice,
-        cmpa::MpMutNativeEndianUIntLimbsSlice,
+        cmpa::MpMutNativeEndianUIntLimbsSlice<'_>,
+        cmpa::MpMutNativeEndianUIntLimbsSlice<'_>,
+        cmpa::MpMutNativeEndianUIntLimbsSlice<'_>,
     ) {
         (
             cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(&mut self.mg_x),
