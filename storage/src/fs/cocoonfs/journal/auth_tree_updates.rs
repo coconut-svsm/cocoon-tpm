@@ -140,11 +140,7 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
                 alloc_bitmap_file_block_indices.push(alloc_bitmap_file_block_index);
 
                 covered_physical_allocation_blocks_end = layout::PhysicalAllocBlockIndex::from(
-                    (alloc_bitmap_file_block_index + 1)
-                        .checked_mul(
-                            alloc_bitmap_file.get_bitmap_words_per_file_block() << alloc_bitmap::BITMAP_WORD_BITS_LOG2,
-                        )
-                        .unwrap_or(u64::MAX),
+                    (alloc_bitmap_file_block_index + 1).saturating_mul(alloc_bitmap_file.get_bitmap_words_per_file_block() << alloc_bitmap::BITMAP_WORD_BITS_LOG2),
                 );
             }
         }
