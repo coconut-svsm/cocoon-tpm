@@ -5,7 +5,7 @@
 //! Functionality related to the filesystem image header.
 
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError, NvChipIoError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError, NvBlkDevIoError},
     crypto::hash,
     fs::{
         NvFsError, NvFsIoError,
@@ -451,30 +451,30 @@ impl MutableImageHeader {
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`ReadCoreImageHeaderFuture`] and
 /// [`ReadMutableImageHeaderFuture`] for reading parts of the image header.
-struct ReadImageHeaderPartChipRequest {
+struct ReadImageHeaderPartNvBlkDevRequest {
     region: ChunkedIoRegion,
     dst: FixedVec<u8, 7>,
 }
 
-impl ReadImageHeaderPartChipRequest {
+impl ReadImageHeaderPartNvBlkDevRequest {
     pub fn new(
-        read_region_begin_chip_io_blocks: u64,
-        read_region_chip_io_blocks: u64,
-        chip_io_block_size_128b_log2: u32,
+        read_region_begin_blkdev_io_blocks: u64,
+        read_region_blkdev_io_blocks: u64,
+        blkdev_io_block_size_128b_log2: u32,
     ) -> Result<Self, NvFsError> {
-        if chip_io_block_size_128b_log2 >= u64::BITS - 7 {
+        if blkdev_io_block_size_128b_log2 >= u64::BITS - 7 {
             return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
         }
 
-        let read_region_begin_128b = read_region_begin_chip_io_blocks << chip_io_block_size_128b_log2;
-        if read_region_begin_128b >> chip_io_block_size_128b_log2 != read_region_begin_chip_io_blocks {
+        let read_region_begin_128b = read_region_begin_blkdev_io_blocks << blkdev_io_block_size_128b_log2;
+        if read_region_begin_128b >> blkdev_io_block_size_128b_log2 != read_region_begin_blkdev_io_blocks {
             return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
         }
-        let read_region_len_128b = read_region_chip_io_blocks << chip_io_block_size_128b_log2;
-        if read_region_len_128b >> chip_io_block_size_128b_log2 != read_region_chip_io_blocks {
+        let read_region_len_128b = read_region_blkdev_io_blocks << blkdev_io_block_size_128b_log2;
+        if read_region_len_128b >> blkdev_io_block_size_128b_log2 != read_region_blkdev_io_blocks {
             return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
         }
         let read_region_end_128b = read_region_begin_128b
@@ -484,7 +484,7 @@ impl ReadImageHeaderPartChipRequest {
         let read_region = ChunkedIoRegion::new(
             read_region_begin_128b,
             read_region_end_128b,
-            chip_io_block_size_128b_log2,
+            blkdev_io_block_size_128b_log2,
         )
         .map_err(|e| match e {
             ChunkedIoRegionError::ChunkSizeOverflow | ChunkedIoRegionError::ChunkIndexOverflow => {
@@ -507,7 +507,7 @@ impl ReadImageHeaderPartChipRequest {
     }
 }
 
-impl chip::NvChipReadRequest for ReadImageHeaderPartChipRequest {
+impl blkdev::NvBlkDevReadRequest for ReadImageHeaderPartNvBlkDevRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
@@ -515,10 +515,10 @@ impl chip::NvChipReadRequest for ReadImageHeaderPartChipRequest {
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
-        let request_chip_io_block_index = range.chunk().decompose_to_hierarchic_indices::<0>([]).0;
-        let chip_io_block_size_log2 = self.region.chunk_size_128b_log2();
-        let dst_begin = request_chip_io_block_index << (chip_io_block_size_log2 + 7);
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
+        let request_blkdev_io_block_index = range.chunk().decompose_to_hierarchic_indices::<0>([]).0;
+        let blkdev_io_block_size_log2 = self.region.chunk_size_128b_log2();
+        let dst_begin = request_blkdev_io_block_index << (blkdev_io_block_size_log2 + 7);
         Ok(Some(&mut self.dst[dst_begin..][range.range_in_chunk().clone()]))
     }
 }
@@ -538,20 +538,20 @@ pub enum ReadCoreImageHeaderFutureResult {
 }
 
 /// Read the core filesystem header.
-pub struct ReadCoreImageHeaderFuture<C: chip::NvChip> {
-    fut_state: ReadCoreImageHeaderFutureState<C>,
+pub struct ReadCoreImageHeaderFuture<B: blkdev::NvBlkDev> {
+    fut_state: ReadCoreImageHeaderFutureState<B>,
 }
 
 /// [`ReadCoreImageHeaderFuture`] state-machine state.
-enum ReadCoreImageHeaderFutureState<C: chip::NvChip> {
+enum ReadCoreImageHeaderFutureState<B: blkdev::NvBlkDev> {
     Init {
-        _phantom: marker::PhantomData<fn() -> *const C>,
+        _phantom: marker::PhantomData<fn() -> *const B>,
     },
     ReadMinHeader {
-        read_fut: C::ReadFuture<ReadImageHeaderPartChipRequest>,
+        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
     },
     ReadStaticImageHeaderRemainder {
-        read_fut: C::ReadFuture<ReadImageHeaderPartChipRequest>,
+        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
         min_header: MinStaticImageHeader,
         static_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
@@ -563,7 +563,7 @@ enum ReadCoreImageHeaderFutureState<C: chip::NvChip> {
         second_header_part: FixedVec<u8, 7>,
     },
     ReadMkFsInfoHeaderRemainder {
-        read_fut: C::ReadFuture<ReadImageHeaderPartChipRequest>,
+        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
         min_header: MinMkFsInfoHeader,
         mkfsinfo_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
@@ -580,14 +580,14 @@ enum ReadCoreImageHeaderFutureState<C: chip::NvChip> {
         first_error: NvFsError,
     },
     ReadBackupMinMkFsInfoHeader {
-        read_fut: C::ReadFuture<ReadImageHeaderPartChipRequest>,
-        backup_location_chip_io_blocks_begin: u64,
+        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
+        backup_location_blkdev_io_blocks_begin: u64,
         first_error: NvFsError,
     },
     Done,
 }
 
-impl<C: chip::NvChip> ReadCoreImageHeaderFuture<C> {
+impl<B: blkdev::NvBlkDev> ReadCoreImageHeaderFuture<B> {
     pub fn new() -> Self {
         Self {
             fut_state: ReadCoreImageHeaderFutureState::Init {
@@ -597,31 +597,32 @@ impl<C: chip::NvChip> ReadCoreImageHeaderFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFuture<B> {
     type Output = Result<ReadCoreImageHeaderFutureResult, NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
 
         loop {
             match &mut this.fut_state {
                 ReadCoreImageHeaderFutureState::Init { _phantom } => {
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
 
-                    // Read the first Chip minimum IO Block, which is always >= 128 bytes by
-                    // definition, which suffices to store the MinStaticImageHeader as well as the
-                    // MinMkFsInfoHeader, which in turn contain all information
-                    // to subsequently deduce the full header size.
+                    // Read the first Device IO Block, which is always >= 128 bytes by definition,
+                    // which suffices to store the MinStaticImageHeader as well as the
+                    // MinMkFsInfoHeader, which in turn contain all information to subsequently
+                    // deduce the full header size.
                     const _: () = assert!(MinStaticImageHeader::encoded_len() <= 128);
                     const _: () = assert!(MinMkFsInfoHeader::encoded_len() <= 128);
-                    let read_request = match ReadImageHeaderPartChipRequest::new(0, 1, chip_io_block_size_128b_log2) {
-                        Ok(read_request) => read_request,
-                        Err(e) => {
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let read_fut = chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
+                    let read_request =
+                        match ReadImageHeaderPartNvBlkDevRequest::new(0, 1, blkdev_io_block_size_128b_log2) {
+                            Ok(read_request) => read_request,
+                            Err(e) => {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+                    let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
                     let read_fut = match read_fut {
                         Ok(read_fut) => read_fut,
                         Err(e) => {
@@ -632,9 +633,9 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                     this.fut_state = ReadCoreImageHeaderFutureState::ReadMinHeader { read_fut };
                 }
                 ReadCoreImageHeaderFutureState::ReadMinHeader { read_fut } => {
-                    let first_header_part = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let first_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartChipRequest { region: _, dst } = read_request;
+                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
                             dst
                         }
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
@@ -651,10 +652,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                             // Now that the MinStaticImageHeader has been read and decoded, deduce the total
                             // header length from it, read the remainder, if any, and continue with the
                             // decoding.
-                            let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                            debug_assert_eq!(first_header_part.len(), 1usize << (chip_io_block_size_128b_log2 + 7));
+                            let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                            debug_assert_eq!(first_header_part.len(), 1usize << (blkdev_io_block_size_128b_log2 + 7));
                             let static_header_len = StaticImageHeader::encoded_len(min_static_image_header.salt_len);
-                            // Remember from above: it is known by now that the Chip IO Block size fits an
+                            // Remember from above: it is known by now that the Device IO Block size fits an
                             // u64.
                             let remaining_static_header_len =
                                 (static_header_len as u64).saturating_sub(first_header_part.len() as u64);
@@ -668,17 +669,17 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                 continue;
                             }
 
-                            let mut remaining_header_chip_io_blocks =
-                                remaining_static_header_len >> (chip_io_block_size_128b_log2 + 7);
-                            if remaining_header_chip_io_blocks << (chip_io_block_size_128b_log2 + 7)
+                            let mut remaining_header_blkdev_io_blocks =
+                                remaining_static_header_len >> (blkdev_io_block_size_128b_log2 + 7);
+                            if remaining_header_blkdev_io_blocks << (blkdev_io_block_size_128b_log2 + 7)
                                 != remaining_static_header_len
                             {
-                                remaining_header_chip_io_blocks += 1;
+                                remaining_header_blkdev_io_blocks += 1;
                             };
-                            let read_request = match ReadImageHeaderPartChipRequest::new(
+                            let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
                                 1,
-                                remaining_header_chip_io_blocks,
-                                chip_io_block_size_128b_log2,
+                                remaining_header_blkdev_io_blocks,
+                                blkdev_io_block_size_128b_log2,
                             ) {
                                 Ok(read_request) => read_request,
                                 Err(e) => {
@@ -686,17 +687,17 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                     return task::Poll::Ready(Err(e));
                                 }
                             };
-                            let read_fut = chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
+                            let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
                             let read_fut = match read_fut {
                                 Ok(read_fut) => read_fut,
-                                Err(NvChipIoError::IoBlockNotMapped) => {
+                                Err(NvBlkDevIoError::IoBlockNotMapped) => {
                                     // There is a static image header magic, but the IO request
                                     // setup failed. This can only happen if the encoded salt length
                                     // determining the total header size is invalid. Try to read the
                                     // backup MkFsInfoHeader, if any, instead.
                                     this.fut_state =
                                         ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                            first_error: NvFsError::from(NvChipIoError::IoBlockNotMapped),
+                                            first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
                                         };
                                     continue;
                                 }
@@ -722,13 +723,13 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                 Ok(min_mkfsinfo_header) => {
                                     // Ok, there is something which seems to be a
                                     // MkFsInfoHeader. Try to read its remainder, if any.
-                                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                                     debug_assert_eq!(
                                         first_header_part.len(),
-                                        1usize << (chip_io_block_size_128b_log2 + 7)
+                                        1usize << (blkdev_io_block_size_128b_log2 + 7)
                                     );
                                     let mkfsinfo_header_len = MkFsInfoHeader::encoded_len(min_mkfsinfo_header.salt_len);
-                                    // Remember from above: it is known by now that the Chip IO Block size fits an
+                                    // Remember from above: it is known by now that the Device IO Block size fits an
                                     // u64.
                                     let remaining_mkfsinfo_header_len =
                                         (mkfsinfo_header_len as u64).saturating_sub(first_header_part.len() as u64);
@@ -744,17 +745,17 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                         continue;
                                     }
 
-                                    let mut remaining_header_chip_io_blocks =
-                                        remaining_mkfsinfo_header_len >> (chip_io_block_size_128b_log2 + 7);
-                                    if remaining_header_chip_io_blocks << (chip_io_block_size_128b_log2 + 7)
+                                    let mut remaining_header_blkdev_io_blocks =
+                                        remaining_mkfsinfo_header_len >> (blkdev_io_block_size_128b_log2 + 7);
+                                    if remaining_header_blkdev_io_blocks << (blkdev_io_block_size_128b_log2 + 7)
                                         != remaining_mkfsinfo_header_len
                                     {
-                                        remaining_header_chip_io_blocks += 1;
+                                        remaining_header_blkdev_io_blocks += 1;
                                     };
-                                    let read_request = match ReadImageHeaderPartChipRequest::new(
+                                    let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
                                         1,
-                                        remaining_header_chip_io_blocks,
-                                        chip_io_block_size_128b_log2,
+                                        remaining_header_blkdev_io_blocks,
+                                        blkdev_io_block_size_128b_log2,
                                     ) {
                                         Ok(read_request) => read_request,
                                         Err(e) => {
@@ -762,10 +763,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                             return task::Poll::Ready(Err(e));
                                         }
                                     };
-                                    let read_fut = chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
+                                    let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
                                     let read_fut = match read_fut {
                                         Ok(read_fut) => read_fut,
-                                        Err(NvChipIoError::IoBlockNotMapped) => {
+                                        Err(NvBlkDevIoError::IoBlockNotMapped) => {
                                             // There is a MkFsInfoHeader magic, but the IO request setup
                                             // failed.  This can only happen if the
                                             // encoded salt length determining the total header size is invalid. Try to
@@ -773,7 +774,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                             // instead.
                                             this.fut_state =
                                                 ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                                    first_error: NvFsError::from(NvChipIoError::IoBlockNotMapped),
+                                                    first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
                                                 };
                                             continue;
                                         }
@@ -821,14 +822,14 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                     static_header_len,
                     first_header_part,
                 } => {
-                    let second_header_part = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartChipRequest { region: _, dst } = read_request;
+                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
                             dst
                         }
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             match e {
-                                NvChipIoError::IoBlockNotMapped => {
+                                NvBlkDevIoError::IoBlockNotMapped => {
                                     // There is a static image header magic, but the IO request to
                                     // read the remainder failed. This can only happen if the
                                     // encoded salt length determining the total header size is
@@ -836,7 +837,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                     // instead.
                                     this.fut_state =
                                         ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                            first_error: NvFsError::from(NvChipIoError::IoBlockNotMapped),
+                                            first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
                                         };
                                     continue;
                                 }
@@ -970,12 +971,12 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
 
                     // Verify at this point that the backend storage's minimum IO size is <= the one
                     // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
-                    // an usize as well), this will henceforth apply to the Chip IO Block size as
+                    // an usize as well), this will henceforth apply to the Device IO Block size as
                     // well then.
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     if (image_layout.io_block_allocation_blocks_log2 as u32
                         + image_layout.allocation_block_size_128b_log2 as u32)
-                        < chip_io_block_size_128b_log2
+                        < blkdev_io_block_size_128b_log2
                     {
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
                         return task::Poll::Ready(Err(NvFsError::from(
@@ -1021,14 +1022,14 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                     first_header_part,
                     first_error,
                 } => {
-                    let second_header_part = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartChipRequest { region: _, dst } = read_request;
+                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
                             dst
                         }
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             match e {
-                                NvChipIoError::IoBlockNotMapped => {
+                                NvBlkDevIoError::IoBlockNotMapped => {
                                     match *first_error {
                                         None => {
                                             // Reading the MkFsInfoHeader remainder at the image's
@@ -1039,7 +1040,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                             // backup MkFsInfoHeader, if any, instead.
                                             this.fut_state =
                                                 ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                                    first_error: NvFsError::from(NvChipIoError::IoBlockNotMapped),
+                                                    first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
                                                 };
                                             continue;
                                         }
@@ -1192,12 +1193,12 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
 
                     // Verify at this point that the backend storage's minimum IO size is <= the one
                     // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
-                    // an usize as well), this will henceforth apply to the Chip IO Block size as
+                    // an usize as well), this will henceforth apply to the Device IO Block size as
                     // well then.
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     if (image_layout.io_block_allocation_blocks_log2 as u32
                         + image_layout.allocation_block_size_128b_log2 as u32)
-                        < chip_io_block_size_128b_log2
+                        < blkdev_io_block_size_128b_log2
                     {
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
                         return task::Poll::Ready(Err(NvFsError::from(
@@ -1244,15 +1245,15 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                     }));
                 }
                 ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader { first_error } => {
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                    let chip_io_blocks = chip.chip_io_blocks();
-                    let chip_io_blocks = chip_io_blocks.min(u64::MAX >> (chip_io_block_size_128b_log2 + 7));
-                    let backup_location_chip_io_blocks_begin =
-                        match MkFsInfoHeader::physical_backup_location_chip_io_blocks_begin(
-                            chip_io_blocks,
-                            chip_io_block_size_128b_log2,
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_blocks = blkdev.io_blocks();
+                    let blkdev_io_blocks = blkdev_io_blocks.min(u64::MAX >> (blkdev_io_block_size_128b_log2 + 7));
+                    let backup_location_blkdev_io_blocks_begin =
+                        match MkFsInfoHeader::physical_backup_location_blkdev_io_blocks_begin(
+                            blkdev_io_blocks,
+                            blkdev_io_block_size_128b_log2,
                         ) {
-                            Ok(backup_location_chip_io_blocks_begin) => backup_location_chip_io_blocks_begin,
+                            Ok(backup_location_blkdev_io_blocks_begin) => backup_location_blkdev_io_blocks_begin,
                             Err(_) => {
                                 // Failure to deduce the backup location from the storage dimensions
                                 // indicates that they're invalid/unusable anyway.
@@ -1262,15 +1263,15 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                             }
                         };
 
-                    // Read the first Chip minimum IO Block at the backup location, which is always
-                    // >= 128 bytes by definition, which suffices to store the MinMkFsInfoHeader,
-                    // which in turn contain all information to subsequently deduce the full header
-                    // size.
+                    // Read the first Device minimum IO Block at the backup location, which is
+                    // always >= 128 bytes by definition, which suffices to
+                    // store the MinMkFsInfoHeader, which in turn contain all
+                    // information to subsequently deduce the full header size.
                     const _: () = assert!(MinMkFsInfoHeader::encoded_len() <= 128);
-                    let read_request = match ReadImageHeaderPartChipRequest::new(
-                        backup_location_chip_io_blocks_begin,
+                    let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
+                        backup_location_blkdev_io_blocks_begin,
                         1,
-                        chip_io_block_size_128b_log2,
+                        blkdev_io_block_size_128b_log2,
                     ) {
                         Ok(read_request) => read_request,
                         Err(e) => {
@@ -1278,10 +1279,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let read_fut = chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
+                    let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
                     let read_fut = match read_fut {
                         Ok(read_fut) => read_fut,
-                        Err(NvChipIoError::IoBlockNotMapped) => {
+                        Err(NvBlkDevIoError::IoBlockNotMapped) => {
                             // There doesn't seem to be a backup.
                             let first_error = *first_error;
                             this.fut_state = ReadCoreImageHeaderFutureState::Done;
@@ -1294,23 +1295,23 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                     };
                     this.fut_state = ReadCoreImageHeaderFutureState::ReadBackupMinMkFsInfoHeader {
                         read_fut,
-                        backup_location_chip_io_blocks_begin,
+                        backup_location_blkdev_io_blocks_begin,
                         first_error: *first_error,
                     };
                 }
                 ReadCoreImageHeaderFutureState::ReadBackupMinMkFsInfoHeader {
                     read_fut,
-                    backup_location_chip_io_blocks_begin,
+                    backup_location_blkdev_io_blocks_begin,
                     first_error,
                 } => {
-                    let first_header_part = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let first_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartChipRequest { region: _, dst } = read_request;
+                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
                             dst
                         }
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             match e {
-                                NvChipIoError::IoBlockNotMapped => {
+                                NvBlkDevIoError::IoBlockNotMapped => {
                                     // There doesn't seem to be a backup.
                                     let first_error = *first_error;
                                     this.fut_state = ReadCoreImageHeaderFutureState::Done;
@@ -1330,10 +1331,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                         Ok(min_mkfsinfo_header) => {
                             // Ok, there is something which seems to be a
                             // MkFsInfoHeader. Try to read its remainder, if any.
-                            let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                            debug_assert_eq!(first_header_part.len(), 1usize << (chip_io_block_size_128b_log2 + 7));
+                            let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                            debug_assert_eq!(first_header_part.len(), 1usize << (blkdev_io_block_size_128b_log2 + 7));
                             let mkfsinfo_header_len = MkFsInfoHeader::encoded_len(min_mkfsinfo_header.salt_len);
-                            // Remember from above: it is known by now that the Chip IO Block size fits an
+                            // Remember from above: it is known by now that the Device IO Block size fits an
                             // u64.
                             let remaining_mkfsinfo_header_len =
                                 (mkfsinfo_header_len as u64).saturating_sub(first_header_part.len() as u64);
@@ -1349,17 +1350,17 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                 continue;
                             }
 
-                            let mut remaining_header_chip_io_blocks =
-                                remaining_mkfsinfo_header_len >> (chip_io_block_size_128b_log2 + 7);
-                            if remaining_header_chip_io_blocks << (chip_io_block_size_128b_log2 + 7)
+                            let mut remaining_header_blkdev_io_blocks =
+                                remaining_mkfsinfo_header_len >> (blkdev_io_block_size_128b_log2 + 7);
+                            if remaining_header_blkdev_io_blocks << (blkdev_io_block_size_128b_log2 + 7)
                                 != remaining_mkfsinfo_header_len
                             {
-                                remaining_header_chip_io_blocks += 1;
+                                remaining_header_blkdev_io_blocks += 1;
                             };
-                            let read_request = match ReadImageHeaderPartChipRequest::new(
-                                *backup_location_chip_io_blocks_begin + 1,
-                                remaining_header_chip_io_blocks,
-                                chip_io_block_size_128b_log2,
+                            let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
+                                *backup_location_blkdev_io_blocks_begin + 1,
+                                remaining_header_blkdev_io_blocks,
+                                blkdev_io_block_size_128b_log2,
                             ) {
                                 Ok(read_request) => read_request,
                                 Err(e) => {
@@ -1367,10 +1368,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
                                     return task::Poll::Ready(Err(e));
                                 }
                             };
-                            let read_fut = chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
+                            let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
                             let read_fut = match read_fut {
                                 Ok(read_fut) => read_fut,
-                                Err(NvChipIoError::IoBlockNotMapped) => {
+                                Err(NvBlkDevIoError::IoBlockNotMapped) => {
                                     // There is a MkFsInfoHeader magic, but the IO request setup
                                     // failed.  This can only happen if the encoded salt length
                                     // determining the total header size is invalid.
@@ -1410,24 +1411,24 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadCoreImageHeaderFuture<C> {
 }
 
 /// Read the [`MutableImageHeader`].
-pub struct ReadMutableImageHeaderFuture<C: chip::NvChip> {
+pub struct ReadMutableImageHeaderFuture<B: blkdev::NvBlkDev> {
     image_layout: layout::ImageLayout,
     salt_len: u8,
-    fut_state: ReadMutableImageHeaderFutureState<C>,
+    fut_state: ReadMutableImageHeaderFutureState<B>,
 }
 
 /// [`ReadMutableImageHeaderFuture`] state-machine state.
-enum ReadMutableImageHeaderFutureState<C: chip::NvChip> {
+enum ReadMutableImageHeaderFutureState<B: blkdev::NvBlkDev> {
     Init {
-        _phantom: marker::PhantomData<fn() -> *const C>,
+        _phantom: marker::PhantomData<fn() -> *const B>,
     },
     ReadHeader {
-        read_fut: C::ReadFuture<ReadImageHeaderPartChipRequest>,
+        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> ReadMutableImageHeaderFuture<C> {
+impl<B: blkdev::NvBlkDev> ReadMutableImageHeaderFuture<B> {
     pub fn new(static_image_header: &StaticImageHeader) -> Result<Self, NvFsError> {
         let salt_len = u8::try_from(static_image_header.salt.len())
             .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?;
@@ -1442,10 +1443,10 @@ impl<C: chip::NvChip> ReadMutableImageHeaderFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadMutableImageHeaderFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadMutableImageHeaderFuture<B> {
     type Output = Result<MutableImageHeader, NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
 
         loop {
@@ -1455,7 +1456,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadMutableImageHeaderFuture<C> 
                     let mutable_header_allocation_blocks_range =
                         MutableImageHeader::physical_location(image_layout, this.salt_len);
                     // The mutable header's beginning is aligned to an IO Block boundary, which
-                    // means it's also aligned to a Chip IO block boundary.
+                    // means it's also aligned to a Device IO block boundary.
                     debug_assert_eq!(
                         mutable_header_allocation_blocks_range
                             .begin()
@@ -1463,32 +1464,33 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadMutableImageHeaderFuture<C> 
                         mutable_header_allocation_blocks_range.begin()
                     );
 
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                    let chip_io_block_allocation_blocks_log2 = chip_io_block_size_128b_log2
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 = blkdev_io_block_size_128b_log2
                         .saturating_sub(image_layout.allocation_block_size_128b_log2 as u32);
-                    let allocation_block_chip_io_blocks_log2 = (image_layout.allocation_block_size_128b_log2 as u32)
-                        .saturating_sub(chip_io_block_allocation_blocks_log2);
-                    let mutable_header_chip_io_blocks_begin = u64::from(mutable_header_allocation_blocks_range.begin())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let mutable_header_chip_io_blocks_count =
+                    let allocation_block_blkdev_io_blocks_log2 = (image_layout.allocation_block_size_128b_log2 as u32)
+                        .saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                    let mutable_header_blkdev_io_blocks_begin =
+                        u64::from(mutable_header_allocation_blocks_range.begin())
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
+                    let mutable_header_blkdev_io_blocks_count =
                         ((u64::from(mutable_header_allocation_blocks_range.block_count()) - 1)
-                            >> chip_io_block_allocation_blocks_log2)
+                            >> blkdev_io_block_allocation_blocks_log2)
                             + 1;
-                    if mutable_header_chip_io_blocks_count << allocation_block_chip_io_blocks_log2
-                        >> allocation_block_chip_io_blocks_log2
-                        != mutable_header_chip_io_blocks_count
+                    if mutable_header_blkdev_io_blocks_count << allocation_block_blkdev_io_blocks_log2
+                        >> allocation_block_blkdev_io_blocks_log2
+                        != mutable_header_blkdev_io_blocks_count
                     {
                         this.fut_state = ReadMutableImageHeaderFutureState::Done;
                         return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
                     }
-                    let mutable_header_chip_io_blocks_count =
-                        mutable_header_chip_io_blocks_count << allocation_block_chip_io_blocks_log2;
+                    let mutable_header_blkdev_io_blocks_count =
+                        mutable_header_blkdev_io_blocks_count << allocation_block_blkdev_io_blocks_log2;
 
-                    let read_request = match ReadImageHeaderPartChipRequest::new(
-                        mutable_header_chip_io_blocks_begin,
-                        mutable_header_chip_io_blocks_count,
-                        chip_io_block_size_128b_log2,
+                    let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
+                        mutable_header_blkdev_io_blocks_begin,
+                        mutable_header_blkdev_io_blocks_count,
+                        blkdev_io_block_size_128b_log2,
                     ) {
                         Ok(read_request) => read_request,
                         Err(e) => {
@@ -1496,7 +1498,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadMutableImageHeaderFuture<C> 
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let read_fut = match chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
+                    let read_fut = match blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
                         Ok(read_fut) => read_fut,
                         Err(e) => {
                             this.fut_state = ReadMutableImageHeaderFutureState::Done;
@@ -1506,9 +1508,9 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadMutableImageHeaderFuture<C> 
                     this.fut_state = ReadMutableImageHeaderFutureState::ReadHeader { read_fut };
                 }
                 ReadMutableImageHeaderFutureState::ReadHeader { read_fut } => {
-                    let encoded_header = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let encoded_header = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartChipRequest { region: _, dst } = read_request;
+                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
                             dst
                         }
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
@@ -1630,8 +1632,8 @@ impl MinMkFsInfoHeader {
 /// checksum verification fails during the [`core header
 /// read`](ReadCoreImageHeaderFuture), that routine will attempt to
 /// load a `MkFsInfoHeader` from that backup location instead. For
-/// interoperability with hardware having a possibly larger native [IO block
-/// size](chip::NvChip::chip_io_block_size_128b_log2), meaningful error
+/// interoperability with hardware having a possibly larger native [Device IO
+/// block size](blkdev::NvBlkDev::io_block_size_128b_log2), meaningful error
 /// reporting in particular, the location is chosen such that it has a large
 /// alignment. More specifically: the largest possible power of two is chosen
 /// such that the storage can accomodate at least 16 blocks of that size. The
@@ -1682,77 +1684,77 @@ impl MkFsInfoHeader {
     ///
     /// # Arguments:
     ///
-    /// * `chip_io_blocks` - Value of
-    ///   [`NvChip::chip_io_blocks()`](chip::NvChip::chip_io_blocks).
-    /// * `chip_io_block_size_128b_log2` - Value of
-    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+    /// * `blkdev_io_blocks` - Value of
+    ///   [`NvBlkDev::io_blocks()`](blkdev::NvBlkDev::io_blocks).
+    /// * `blkdev_io_block_size_128b_log2` - Value of
+    ///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
     fn physical_backup_location_begin_128b(
-        chip_io_blocks: u64,
-        chip_io_block_size_128b_log2: u32,
+        blkdev_io_blocks: u64,
+        blkdev_io_block_size_128b_log2: u32,
     ) -> Result<(u64, u32), NvFsError> {
-        if chip_io_block_size_128b_log2 >= u64::BITS - 7 {
+        if blkdev_io_block_size_128b_log2 >= u64::BITS - 7 {
             return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
         }
 
-        let chip_size_128b = chip_io_blocks << chip_io_block_size_128b_log2;
-        if chip_size_128b == 0 || chip_size_128b >> chip_io_block_size_128b_log2 != chip_io_blocks {
+        let blkdev_size_128b = blkdev_io_blocks << blkdev_io_block_size_128b_log2;
+        if blkdev_size_128b == 0 || blkdev_size_128b >> blkdev_io_block_size_128b_log2 != blkdev_io_blocks {
             return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
         }
 
         // Partition the image into blocks of largest possible alignment, such that
         // there are at least 16 of these and take the last.
-        let chip_size_128b_log2 = chip_size_128b.ilog2();
+        let blkdev_size_128b_log2 = blkdev_size_128b.ilog2();
         // The aligned blocks should be able to contain the MkfsInfoHeader in full,
         // which may need 3 * 128b < 2^2 * 128b.
-        if chip_size_128b_log2 < 4 + 2 {
+        if blkdev_size_128b_log2 < 4 + 2 {
             return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
         }
 
-        let backup_location_begin_alignment_128b_log2 = chip_size_128b_log2 - 4;
+        let backup_location_begin_alignment_128b_log2 = blkdev_size_128b_log2 - 4;
         // The last aligned block on storage.
-        let backup_location_begin_128b = ((chip_size_128b >> backup_location_begin_alignment_128b_log2) - 1)
+        let backup_location_begin_128b = ((blkdev_size_128b >> backup_location_begin_alignment_128b_log2) - 1)
             << backup_location_begin_alignment_128b_log2;
-        debug_assert!(backup_location_begin_128b < chip_size_128b);
-        debug_assert!(chip_size_128b - backup_location_begin_128b >= 4);
+        debug_assert!(backup_location_begin_128b < blkdev_size_128b);
+        debug_assert!(blkdev_size_128b - backup_location_begin_128b >= 4);
         // The backup is in the storage's last octile.
-        debug_assert!(backup_location_begin_128b >= chip_size_128b - chip_size_128b.div_ceil(8));
+        debug_assert!(backup_location_begin_128b >= blkdev_size_128b - blkdev_size_128b.div_ceil(8));
         Ok((backup_location_begin_128b, backup_location_begin_alignment_128b_log2))
     }
 
     /// Determine the beginning of the backup [`MkFsInfoHeader`]'s location in
-    /// units of [Chip IO Blocks](chip::NvChip::chip_io_block_size_128b_log2).
+    /// units of [Device IO Blocks](blkdev::NvBlkDev::io_block_size_128b_log2).
     ///
-    /// Returns the backup header's beginning on storage in units of [Chip IO
-    /// Blocks](chip::NvChip::chip_io_block_size_128b_log2). The location is
-    /// guaranteed to be aligned by the [`Chip IO
-    /// Block`](chip::NvChip::chip_io_block_size_128b_log2) size,
+    /// Returns the backup header's beginning on storage in units of [Device IO
+    /// Blocks](blkdev::NvBlkDev::io_block_size_128b_log2). The location is
+    /// guaranteed to be aligned by the [`Device IO
+    /// Block`](blkdev::NvBlkDev::io_block_size_128b_log2) size,
     /// and there will be at least one block of that size or 512B available at
     /// that location on storage, whichever is larger.
     ///
     /// # Arguments:
     ///
-    /// * `chip_io_blocks` - Value of
-    ///   [`NvChip::chip_io_blocks()`](chip::NvChip::chip_io_blocks).
-    /// * `chip_io_block_size_128b_log2` - Value of
-    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
-    fn physical_backup_location_chip_io_blocks_begin(
-        chip_io_blocks: u64,
-        chip_io_block_size_128b_log2: u32,
+    /// * `blkdev_io_blocks` - Value of
+    ///   [`NvBlkDev::io_blocks()`](blkdev::NvBlkDev::io_blocks).
+    /// * `io_block_size_128b_log2` - Value of
+    ///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
+    fn physical_backup_location_blkdev_io_blocks_begin(
+        blkdev_io_blocks: u64,
+        blkdev_io_block_size_128b_log2: u32,
     ) -> Result<u64, NvFsError> {
         let (backup_location_begin_128b, backup_location_begin_alignment_128b_log2) =
-            Self::physical_backup_location_begin_128b(chip_io_blocks, chip_io_block_size_128b_log2)?;
-        if backup_location_begin_alignment_128b_log2 < chip_io_block_size_128b_log2 {
+            Self::physical_backup_location_begin_128b(blkdev_io_blocks, blkdev_io_block_size_128b_log2)?;
+        if backup_location_begin_alignment_128b_log2 < blkdev_io_block_size_128b_log2 {
             return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
         }
-        debug_assert!(backup_location_begin_128b.is_aligned_pow2(chip_io_block_size_128b_log2));
-        Ok(backup_location_begin_128b >> chip_io_block_size_128b_log2)
+        debug_assert!(backup_location_begin_128b.is_aligned_pow2(blkdev_io_block_size_128b_log2));
+        Ok(backup_location_begin_128b >> blkdev_io_block_size_128b_log2)
     }
 
     /// Determine the backup [`MkFsInfoHeader`]'s location on storage.
     ///
     /// Returns the backup header's [extent](layout::PhysicalAllocBlockRange) on
     /// storage. The returned extent is guaranteed to be aligned by the
-    /// [`Chip IO Block`](chip::NvChip::chip_io_block_size_128b_log2) size,
+    /// [`Device IO Block`](blkdev::NvBlkDev::io_block_size_128b_log2) size,
     /// and within the bounds of the backing storage.
     ///
     /// The extent's beginning, but not necessarily its end, is also aligned to
@@ -1765,24 +1767,24 @@ impl MkFsInfoHeader {
     ///
     /// * `salt_len` - Length of the filesystem salt to be stored in the
     ///   [`MkFsInfoHeader`].
-    /// * `chip_io_blocks` - Value of
-    ///   [`NvChip::chip_io_blocks()`](chip::NvChip::chip_io_blocks).
-    /// * `chip_io_block_size_128b_log2` - Value of
-    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+    /// * `blkdev_io_blocks` - Value of
+    ///   [`NvBlkDev::io_blocks()`](blkdev::NvBlkDev::io_blocks).
+    /// * `blkdev_io_block_size_128b_log2` - Value of
+    ///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
     /// * `io_block_allocation_blocks_log2` - Verbatim value of
     ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     /// * `allocation_block_size_128b_log2` - Verbatim value of
     ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn physical_backup_location(
         salt_len: u8,
-        chip_io_blocks: u64,
-        chip_io_block_size_128b_log2: u32,
+        blkdev_io_blocks: u64,
+        blkdev_io_block_size_128b_log2: u32,
         io_block_allocation_blocks_log2: u32,
         allocation_block_size_128b_log2: u32,
     ) -> Result<layout::PhysicalAllocBlockRange, NvFsError> {
         let (backup_location_begin_128b, backup_location_begin_alignment_128b_log2) =
-            Self::physical_backup_location_begin_128b(chip_io_blocks, chip_io_block_size_128b_log2)?;
-        // Any HW with a compatible chip_io_block_size_128b_log2 should be guaranteed
+            Self::physical_backup_location_begin_128b(blkdev_io_blocks, blkdev_io_block_size_128b_log2)?;
+        // Any HW with a compatible blkdev_io_block_size_128b_log2 should be guaranteed
         // to arrive at the same location and discover the backup.
         if backup_location_begin_alignment_128b_log2 < io_block_allocation_blocks_log2 + allocation_block_size_128b_log2
         {
@@ -1796,16 +1798,16 @@ impl MkFsInfoHeader {
             layout::PhysicalAllocBlockIndex::from(backup_location_begin_128b >> allocation_block_size_128b_log2);
 
         let encoded_len = Self::encoded_len(salt_len);
-        // Make the returned extent to align with the Chip IO Block size. There will be
-        // enough room at the end of the storage: one block of size as specified
-        // by backup_location_begin_alignment_128b_log2 is large enough to hold
-        // the MkFsInfoHeader.
-        let chip_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-        let header_chip_io_blocks =
-            ((encoded_len - 1) >> (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7)) + 1;
+        // Make the returned extent to align with the Device IO Block size. There will
+        // be enough room at the end of the storage: one block of size as
+        // specified by backup_location_begin_alignment_128b_log2 is large
+        // enough to hold the MkFsInfoHeader.
+        let blkdev_io_block_allocation_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+        let header_blkdev_io_blocks =
+            ((encoded_len - 1) >> (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7)) + 1;
         let header_allocation_blocks =
-            layout::AllocBlockCount::from((header_chip_io_blocks as u64) << chip_io_block_allocation_blocks_log2);
+            layout::AllocBlockCount::from((header_blkdev_io_blocks as u64) << blkdev_io_block_allocation_blocks_log2);
 
         Ok(layout::PhysicalAllocBlockRange::from((
             backup_location_allocation_blocks_begin,

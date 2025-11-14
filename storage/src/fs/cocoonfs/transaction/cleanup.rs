@@ -10,7 +10,7 @@ use alloc::boxed::Box;
 
 use super::{Transaction, auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndex};
 use crate::{
-    chip::{self, NvChipIoError},
+    blkdev::{self, NvBlkDevIoError},
     fs::{
         NvFsError,
         cocoonfs::{
@@ -29,55 +29,55 @@ use core::{pin, task};
 #[cfg(doc)]
 use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
 
-/// [Trim](chip::NvChip::trim) any [IO
+/// [Trim](blkdev::NvBlkDev::trim) any [IO
 /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) occupied by the
 /// journal.
-pub(super) struct TransactionTrimJournalFuture<C: chip::NvChip> {
+pub(super) struct TransactionTrimJournalFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
     transaction: Option<Box<Transaction>>,
     retain_in_place_writes: bool,
-    fut_state: TransactionTrimJournalFutureState<C>,
+    fut_state: TransactionTrimJournalFutureState<B>,
 }
 
 /// [`TransactionTrimJournalFuture`] state-machine state.
-enum TransactionTrimJournalFutureState<C: chip::NvChip> {
+enum TransactionTrimJournalFutureState<B: blkdev::NvBlkDev> {
     Init,
     WriteBarrier {
-        write_barrier_fut: C::WriteBarrierFuture,
+        write_barrier_fut: B::WriteBarrierFuture,
     },
     TrimJournalStagingCopyRegionPrepare {
         next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
     },
     TrimJournalStagingCopyRegion {
-        region_trim_fut: C::TrimFuture,
+        region_trim_fut: B::TrimFuture,
         next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
     },
     TrimJournalLogTailExtentsPrepare {
         next_extent_index: usize,
     },
     TrimJournalLogTailExtents {
-        region_trim_fut: C::TrimFuture,
+        region_trim_fut: B::TrimFuture,
         next_extent_index: usize,
     },
     TrimAbandonedJournalStagingCopyPrepare {
         next_abandandoned_journal_staging_copy_block_index: usize,
     },
     TrimAbandonedJournalStagingCopy {
-        region_trim_fut: C::TrimFuture,
+        region_trim_fut: B::TrimFuture,
         next_abandandoned_journal_staging_copy_block_index: usize,
     },
     TrimPendingTransactionsSyncStateAllocsPrepare {
         next_io_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     },
     TrimPendingTransactionsSyncStateAllocs {
-        region_trim_fut: C::TrimFuture,
+        region_trim_fut: B::TrimFuture,
         next_io_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     },
     Done,
 }
 
-impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
     /// Instantiate a [`TransactionTrimJournalFuture`].
     ///
     /// The [`TransactionTrimJournalFuture`] assumes ownership of the
@@ -114,7 +114,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<Transaction>, NvFsError>> {
         let this = pin::Pin::into_inner(self);
@@ -131,24 +131,24 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
         let journal_block_allocation_blocks_log2 =
             auth_tree_data_block_allocation_blocks_log2.max(io_block_allocation_blocks_log2);
 
-        let chip_io_block_size_128b_log2 = fs_instance.chip.chip_io_block_size_128b_log2();
-        let preferred_chip_io_blocks_bulk_log2 = fs_instance.chip.preferred_chip_io_blocks_bulk_log2();
+        let blkdev_io_block_size_128b_log2 = fs_instance.blkdev.io_block_size_128b_log2();
+        let preferred_blkdev_io_blocks_bulk_log2 = fs_instance.blkdev.preferred_io_blocks_bulk_log2();
 
         // Trimming is done on a best-effort basis and any failure in doing so is
         // non-fatal.
-        if chip_io_block_size_128b_log2 > io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 {
+        if blkdev_io_block_size_128b_log2 > io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 {
             this.fut_state = TransactionTrimJournalFutureState::Done;
             return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
         }
-        let chip_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-        let allocation_block_chip_io_blocks_log2 =
-            allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
-        debug_assert!(chip_io_block_allocation_blocks_log2 == 0 || allocation_block_chip_io_blocks_log2 == 0);
+        let blkdev_io_block_allocation_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+        let allocation_block_blkdev_io_blocks_log2 =
+            allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+        debug_assert!(blkdev_io_block_allocation_blocks_log2 == 0 || allocation_block_blkdev_io_blocks_log2 == 0);
 
-        let preferred_bulk_allocation_blocks_log2 = (preferred_chip_io_blocks_bulk_log2
-            + chip_io_block_allocation_blocks_log2)
-            .saturating_sub(allocation_block_chip_io_blocks_log2);
+        let preferred_bulk_allocation_blocks_log2 = (preferred_blkdev_io_blocks_bulk_log2
+            + blkdev_io_block_allocation_blocks_log2)
+            .saturating_sub(allocation_block_blkdev_io_blocks_log2);
 
         loop {
             match &mut this.fut_state {
@@ -208,7 +208,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                         return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
                     }
 
-                    let write_barrier_fut = match fs_instance.chip.write_barrier() {
+                    let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(_) => {
                             // Can't trim without a write barrier, but failure to trim is considered
@@ -221,7 +221,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                     this.fut_state = TransactionTrimJournalFutureState::WriteBarrier { write_barrier_fut };
                 }
                 TransactionTrimJournalFutureState::WriteBarrier { write_barrier_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Pending => return task::Poll::Pending,
                         task::Poll::Ready(Ok(_)) => {
                             this.fut_state = TransactionTrimJournalFutureState::TrimJournalStagingCopyRegionPrepare {
@@ -283,7 +283,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                         };
                     let trim_region_allocation_blocks_begin =
                         first_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
-                            .align_down(chip_io_block_allocation_blocks_log2);
+                            .align_down(blkdev_io_block_allocation_blocks_log2);
                     let mut last_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin =
                         first_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin;
                     while usize::from(*next_update_states_index) != update_states.len() {
@@ -314,7 +314,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                                 cur_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
                                     - last_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin,
                             ) >> auth_tree_data_block_allocation_blocks_log2
-                                .max(chip_io_block_allocation_blocks_log2)
+                                .max(blkdev_io_block_allocation_blocks_log2)
                                 > 1
                         {
                             // There's a gap, stop and process anything up to it.
@@ -340,8 +340,9 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                         match (last_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
                             - trim_region_allocation_blocks_begin
                             + layout::AllocBlockCount::from(1))
-                        .align_up(auth_tree_data_block_allocation_blocks_log2.max(chip_io_block_allocation_blocks_log2))
-                        {
+                        .align_up(
+                            auth_tree_data_block_allocation_blocks_log2.max(blkdev_io_block_allocation_blocks_log2),
+                        ) {
                             Some(trim_region_allocation_blocks_count) => trim_region_allocation_blocks_count,
                             None => {
                                 // Cannot happen, but any failure to trim is considered non-fatal anyway.
@@ -350,22 +351,22 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                             }
                         };
 
-                    let trim_region_chip_io_blocks_begin = u64::from(trim_region_allocation_blocks_begin)
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count = u64::from(trim_region_allocation_blocks_count)
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_begin = u64::from(trim_region_allocation_blocks_begin)
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count = u64::from(trim_region_allocation_blocks_count)
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
                     let region_trim_fut = match fs_instance
-                        .chip
-                        .trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count)
+                        .blkdev
+                        .trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count)
                     {
                         Ok(region_trim_fut) => region_trim_fut,
                         Err(e) => {
                             // Failure to trim is considered non-fatal. Simply proceed to the next
                             // region, unless the storage backend indicates that trimming is not
                             // supported at all.
-                            if e == NvChipIoError::OperationNotSupported {
+                            if e == NvBlkDevIoError::OperationNotSupported {
                                 this.fut_state = TransactionTrimJournalFutureState::Done;
                                 return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
                             }
@@ -381,7 +382,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                     region_trim_fut,
                     next_update_states_index,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Pending => return task::Poll::Pending,
                         task::Poll::Ready(Ok(_)) | task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal. So proceed to the next
@@ -412,22 +413,22 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                         .journal_log_tail_extents
                         .get_extent_range(*next_extent_index);
                     *next_extent_index += 1;
-                    let trim_region_chip_io_blocks_begin = u64::from(extent.begin())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count = u64::from(extent.block_count())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_begin = u64::from(extent.begin())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count = u64::from(extent.block_count())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
                     let region_trim_fut = match fs_instance
-                        .chip
-                        .trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count)
+                        .blkdev
+                        .trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count)
                     {
                         Ok(region_trim_fut) => region_trim_fut,
                         Err(e) => {
                             // Failure to trim is considered non-fatal. Simply proceed to the next
                             // region, unless the storage backend indicates that trimming is not
                             // supported at all.
-                            if e == NvChipIoError::OperationNotSupported {
+                            if e == NvBlkDevIoError::OperationNotSupported {
                                 this.fut_state = TransactionTrimJournalFutureState::Done;
                                 return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
                             }
@@ -443,7 +444,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                     region_trim_fut,
                     next_extent_index,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Pending => return task::Poll::Pending,
                         task::Poll::Ready(Ok(_)) | task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal. So proceed to the next
@@ -513,22 +514,22 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                     let trim_region_allocation_blocks_count = last_abandoned_journal_block_allocation_blocks_begin
                         - trim_region_allocation_blocks_begin
                         + layout::AllocBlockCount::from(1u64 << journal_block_allocation_blocks_log2);
-                    let trim_region_chip_io_blocks_begin = u64::from(trim_region_allocation_blocks_begin)
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count = u64::from(trim_region_allocation_blocks_count)
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_begin = u64::from(trim_region_allocation_blocks_begin)
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count = u64::from(trim_region_allocation_blocks_count)
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
                     let region_trim_fut = match fs_instance
-                        .chip
-                        .trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count)
+                        .blkdev
+                        .trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count)
                     {
                         Ok(region_trim_fut) => region_trim_fut,
                         Err(e) => {
                             // Failure to trim is considered non-fatal. Simply proceed to the next
                             // region, unless the storage backend indicates that trimming is not
                             // supported at all.
-                            if e == NvChipIoError::OperationNotSupported {
+                            if e == NvBlkDevIoError::OperationNotSupported {
                                 this.fut_state = TransactionTrimJournalFutureState::Done;
                                 return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
                             }
@@ -545,7 +546,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                     region_trim_fut,
                     next_abandandoned_journal_staging_copy_block_index,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Pending => return task::Poll::Pending,
                         task::Poll::Ready(Ok(_)) | task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal. So proceed to the next
@@ -619,23 +620,23 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                         + layout::AllocBlockCount::from(1u64 << io_block_allocation_blocks_log2);
                     *next_io_block_allocation_blocks_begin = trim_region_allocation_blocks_end;
 
-                    let trim_region_chip_io_blocks_begin = u64::from(trim_region_allocation_blocks_begin)
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count =
+                    let trim_region_blkdev_io_blocks_begin = u64::from(trim_region_allocation_blocks_begin)
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count =
                         u64::from(trim_region_allocation_blocks_end - trim_region_allocation_blocks_begin)
-                            >> chip_io_block_allocation_blocks_log2
-                            << allocation_block_chip_io_blocks_log2;
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
                     let region_trim_fut = match fs_instance
-                        .chip
-                        .trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count)
+                        .blkdev
+                        .trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count)
                     {
                         Ok(region_trim_fut) => region_trim_fut,
                         Err(e) => {
                             // Failure to trim is considered non-fatal. Simply proceed to the next
                             // region, unless the storage backend indicates that trimming is not
                             // supported at all.
-                            if e == NvChipIoError::OperationNotSupported {
+                            if e == NvBlkDevIoError::OperationNotSupported {
                                 this.fut_state = TransactionTrimJournalFutureState::Done;
                                 return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
                             }
@@ -651,7 +652,7 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
                     region_trim_fut,
                     next_io_block_allocation_blocks_begin,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Pending => return task::Poll::Pending,
                         task::Poll::Ready(Ok(_)) | task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal. So proceed to the next
@@ -674,11 +675,11 @@ impl<C: chip::NvChip> TransactionTrimJournalFuture<C> {
 ///
 /// Cleanup after a [`Transaction`] cancelled before the journal log head extent
 /// got written to.
-pub struct TransactionCleanupPreCommitCancelledFuture<C: chip::NvChip> {
-    trim_journal_fut: TransactionTrimJournalFuture<C>,
+pub struct TransactionCleanupPreCommitCancelledFuture<B: blkdev::NvBlkDev> {
+    trim_journal_fut: TransactionTrimJournalFuture<B>,
 }
 
-impl<C: chip::NvChip> TransactionCleanupPreCommitCancelledFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionCleanupPreCommitCancelledFuture<B> {
     /// Instantiate a [`TransactionCleanupPreCommitCancelledFuture`].
     ///
     /// The [`TransactionCleanupPreCommitCancelledFuture`] consumes the
@@ -705,7 +706,7 @@ impl<C: chip::NvChip> TransactionCleanupPreCommitCancelledFuture<C> {
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         mut self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<()> {
         // Trimming failures are getting ignored deliberately.
@@ -721,12 +722,12 @@ impl<C: chip::NvChip> TransactionCleanupPreCommitCancelledFuture<C> {
 ///
 /// Cleanup after a [`Transaction`] for which the final the journal log head
 /// extent write failed, leaving it in an indeterminate state.
-pub struct TransactionAbortJournalFuture<C: chip::NvChip> {
-    fut_state: TransactionAbortJournalFutureState<C>,
+pub struct TransactionAbortJournalFuture<B: blkdev::NvBlkDev> {
+    fut_state: TransactionAbortJournalFutureState<B>,
 }
 
 /// [`TransactionAbortJournalFuture`] state-machine state.
-enum TransactionAbortJournalFutureState<C: chip::NvChip> {
+enum TransactionAbortJournalFutureState<B: blkdev::NvBlkDev> {
     Init {
         // Is optional, but None only on internal error or memory allocation failures.
         transaction: Option<Box<Transaction>>,
@@ -738,15 +739,15 @@ enum TransactionAbortJournalFutureState<C: chip::NvChip> {
     InvalidateJournalLog {
         // Is optional, but None only on internal error or memory allocation failures.
         transaction: Option<Box<Transaction>>,
-        invalidate_journal_log_fut: journal::log::JournalLogInvalidateFuture<C>,
+        invalidate_journal_log_fut: journal::log::JournalLogInvalidateFuture<B>,
     },
     TrimJournal {
-        trim_journal_fut: TransactionTrimJournalFuture<C>,
+        trim_journal_fut: TransactionTrimJournalFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> TransactionAbortJournalFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionAbortJournalFuture<B> {
     /// Instantiate a [`TransactionAbortJournalFuture`].
     ///
     /// The [`TransactionAbortJournalFuture`] assumes ownership of
@@ -763,7 +764,7 @@ impl<C: chip::NvChip> TransactionAbortJournalFuture<C> {
     /// * `low_memory` - Whether the system is in a low memory condition.
     pub fn new<ST: sync_types::SyncTypes>(
         mut transaction: Option<Box<Transaction>>,
-        _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         low_memory: bool,
     ) -> Result<Self, (Option<Box<Transaction>>, NvFsError)> {
         if low_memory {
@@ -789,7 +790,7 @@ impl<C: chip::NvChip> TransactionAbortJournalFuture<C> {
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<(), (Option<Box<Transaction>>, NvFsError)>> {
         let this = pin::Pin::into_inner(self);
@@ -815,7 +816,7 @@ impl<C: chip::NvChip> TransactionAbortJournalFuture<C> {
                     let fs_config = &fs_instance.fs_config;
                     match journal::log::JournalLogInvalidateFuture::poll(
                         pin::Pin::new(invalidate_journal_log_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_config.image_layout,
                         fs_config.image_header_end,
                         cx,

@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::rng,
     fs::{
         NvFsError,
@@ -67,11 +67,11 @@ pub struct Transaction {
     /// Verbatim value of [`ImageLayout::io_block_allocation_blocks_log2`].
     io_block_allocation_blocks_log2: u8,
     /// Cached value of
-    /// [NvChip::chip_io_block_size_128b_log2()](chip::NvChip::chip_io_block_size_128b_log2).
-    chip_io_block_size_128b_log2: u32,
+    /// [NvBlkDev::io_block_size_128b_log2()](blkdev::NvBlkDev::io_block_size_128b_log2).
+    blkdev_io_block_size_128b_log2: u32,
     /// Cached value of
-    /// [NvChip::preferred_chip_io_blocks_bulk_log2()](chip::NvChip::preferred_chip_io_blocks_bulk_log2).
-    preferred_chip_io_blocks_bulk_log2: u32,
+    /// [NvBlkDev::preferred_io_blocks_bulk_log2()](blkdev::NvBlkDev::preferred_io_blocks_bulk_log2).
+    preferred_blkdev_io_blocks_bulk_log2: u32,
 
     /// Allocations and deallocations staged on behalf of the [`Transaction`].
     pub(super) allocs: TransactionAllocations,
@@ -131,8 +131,8 @@ impl Transaction {
     ///   for generating the [journal staging copy
     ///   disguising](journal::staging_copy_disguise::JournalStagingCopyDisguise)
     ///   key.
-    pub fn new<ST: sync_types::SyncTypes, C: chip::NvChip>(
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+    pub fn new<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev>(
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         is_primary_pending: bool,
         rng: &mut dyn rng::RngCoreDispatchable,
     ) -> Result<Self, NvFsError> {
@@ -144,9 +144,9 @@ impl Transaction {
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
         let auth_tree_data_block_allocation_blocks_log2 = image_layout.auth_tree_data_block_allocation_blocks_log2;
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2;
-        let chip = &fs_instance.chip;
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-        let preferred_chip_io_blocks_bulk_log2 = chip.preferred_chip_io_blocks_bulk_log2();
+        let blkdev = &fs_instance.blkdev;
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+        let preferred_blkdev_io_blocks_bulk_log2 = blkdev.preferred_io_blocks_bulk_log2();
 
         Ok(Self {
             auth_tree_data_blocks_update_states: AuthTreeDataBlocksUpdateStates::new(
@@ -158,8 +158,8 @@ impl Transaction {
             allocation_block_size_128b_log2,
             auth_tree_data_block_allocation_blocks_log2,
             io_block_allocation_blocks_log2,
-            chip_io_block_size_128b_log2,
-            preferred_chip_io_blocks_bulk_log2,
+            blkdev_io_block_size_128b_log2,
+            preferred_blkdev_io_blocks_bulk_log2,
             allocs: TransactionAllocations::new(),
             abandoned_journal_staging_copy_blocks: Vec::new(),
             is_primary_pending,

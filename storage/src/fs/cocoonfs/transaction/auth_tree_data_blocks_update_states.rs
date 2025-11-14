@@ -92,8 +92,8 @@ pub(super) struct AllocationBlockUpdateNvSyncStateAllocatedUnmodified {
     /// Staging
     /// Copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin) already.
     ///
-    /// All of a [Chip IO
-    /// block's](crate::chip::NvChip::chip_io_block_size_128b_log2) [Allocation
+    /// All of a [Device IO
+    /// block's](crate::blkdev::NvBlkDev::io_block_size_128b_log2) [Allocation
     /// Blocks](ImageLayout::allocation_block_size_128b_log2) are homogenous in
     /// that regard.
     pub copied_to_journal: bool,
@@ -113,8 +113,8 @@ pub(super) enum AllocationBlockUpdateNvSyncStateAllocatedModified {
     /// [authentication digest](AuthTreeDataBlockUpdateState::auth_digest),
     /// if any and if needed. The main motivation for having this
     /// intermediate state is the ability to selectively write out
-    /// updates or e.g.  discard unmodified buffers at a [Chip IO
-    /// block](crate::chip::NvChip::chip_io_block_size_128b_log2) granularity in
+    /// updates or e.g.  discard unmodified buffers at a [Device IO
+    /// block](crate::blkdev::NvBlkDev::io_block_size_128b_log2) granularity in
     /// case a single [Authentication Tree Data
     /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// comprises several such ones.
@@ -696,7 +696,7 @@ impl<'a> Iterator for AuthTreeDataBlockUpdateStateAuthDigestAllocationBlocksIter
 /// - possibly unmodified [Authentication Tree Data
 ///   Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) part of
 ///   a larger modified [IO Block](ImageLayout::io_block_allocation_blocks_log2)
-///   or [Chip IO Block](crate::chip::NvChip::chip_io_block_size_128b_log2) have
+///   or [Device IO Block](crate::blkdev::NvBlkDev::io_block_size_128b_log2) have
 ///   associated entries.
 ///
 /// For each [Allocation Block level entry](AllocationBlockUpdateState), the
@@ -2035,8 +2035,8 @@ impl AuthTreeDataBlocksUpdateStates {
     ///
     /// This is commonly used for finding stop-gaps when preparing potentially
     /// sparsely populated ranges for subsequent processing in units of a
-    /// certain block size, such as that of [Chip IO
-    /// blocks](crate::chip::NvChip::chip_io_block_size_128b_log2).
+    /// certain block size, such as that of [Device IO
+    /// blocks](crate::blkdev::NvBlkDev::io_block_size_128b_log2).
     ///
     /// # Arguments:
     ///

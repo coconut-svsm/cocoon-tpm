@@ -5,10 +5,10 @@
 extern crate alloc;
 
 use super::{
-    cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_enumerate_inodes_op_collect,
-    cocoonfs_test_fs_instance_into_chip_helper, cocoonfs_test_mkfs_op_helper, cocoonfs_test_openfs_op_helper,
+    CocoonFsTestConfigs, cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_enumerate_inodes_op_collect,
+    cocoonfs_test_fs_instance_into_blkdev_helper, cocoonfs_test_mkfs_op_helper, cocoonfs_test_openfs_op_helper,
     cocoonfs_test_read_inode_op_helper, cocoonfs_test_start_transaction_op_helper,
-    cocoonfs_test_unlink_inodes_op_uncond, cocoonfs_test_write_inode_op_helper, CocoonFsTestConfigs,
+    cocoonfs_test_unlink_inodes_op_uncond, cocoonfs_test_write_inode_op_helper,
 };
 use crate::fs;
 
@@ -82,8 +82,8 @@ fn enumerate_inodes() {
             assert!(inodes.iter().copied().eq(0x11u32..=0x18));
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate the full range.
             let (_read_context, inodes) =
@@ -160,8 +160,8 @@ fn create_many_inodes_forward() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -246,8 +246,8 @@ fn create_many_inodes_forward_sliced() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -322,8 +322,8 @@ fn create_many_inodes_backward() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -408,8 +408,8 @@ fn create_many_inodes_backward_sliced() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -486,8 +486,8 @@ fn create_many_inodes_inner_to_outer() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -575,8 +575,8 @@ fn create_many_inodes_inner_to_outer_sliced() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -653,8 +653,8 @@ fn create_many_inodes_outer_to_inner() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -742,8 +742,8 @@ fn create_many_inodes_outer_to_inner_sliced() {
             }
 
             // Close the FS, open and try to enumerate + read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
@@ -810,8 +810,8 @@ fn unlink_uncommitted_inodes() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -866,8 +866,8 @@ fn unlink_committed_inodes() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -951,8 +951,8 @@ fn unlink_many_inodes_forward() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -1057,8 +1057,8 @@ fn unlink_many_inodes_forward_sliced() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -1142,8 +1142,8 @@ fn unlink_many_inodes_backward() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -1248,8 +1248,8 @@ fn unlink_many_inodes_backward_sliced() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -1336,8 +1336,8 @@ fn unlink_many_inodes_inner_to_outer() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -1446,8 +1446,8 @@ fn unlink_many_inodes_inner_to_outer_sliced() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -1534,8 +1534,8 @@ fn unlink_many_inodes_outer_to_inner() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
@@ -1644,8 +1644,8 @@ fn unlink_many_inodes_outer_to_inner_sliced() {
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();

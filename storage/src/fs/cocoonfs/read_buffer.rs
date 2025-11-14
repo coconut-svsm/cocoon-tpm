@@ -8,12 +8,12 @@
 extern crate alloc;
 
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     fs::{
         NvFsError,
         cocoonfs::{CocoonFsFormatError, alloc_bitmap, auth_tree, layout},
     },
-    nvchip_err_internal, nvfs_err_internal,
+    nvblkdev_err_internal, nvfs_err_internal,
     utils_async::sync_types::{self, ConstructibleLock as _, Lock as _},
     utils_common::{bitmanip::BitManip as _, fixed_vec::FixedVec},
 };
@@ -51,7 +51,7 @@ pub enum ReadBufferAllocationBlockUpdate {
 /// The [`ReadBuffer`] maintains one [`BlockAllocationBlocksReadBuffer`] for the
 /// most recently read [Authentication Tree Data
 /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) as well as
-/// [Chip IO Block](chip::NvChip::chip_io_block_size_128b_log2) respectively
+/// [Device IO Block](blkdev::NvBlkDev::io_block_size_128b_log2) respectively
 /// each.
 struct BlockAllocationBlocksReadBuffer {
     /// Beginning of the currently buffered block on storage, if any.
@@ -320,8 +320,8 @@ impl BlockAllocationBlocksReadBuffer {
 
 /// A [`ReadBuffer`]'s buffered data.
 struct ReadBufferBufferedData {
-    /// Unauthenticated data buffered from most recently read [Chip IO
-    /// block](chip::NvChip::chip_io_block_size_128b_log2).
+    /// Unauthenticated data buffered from most recently read [Device IO
+    /// block](blkdev::NvBlkDev::io_block_size_128b_log2).
     min_io_block_buf: BlockAllocationBlocksReadBuffer,
     /// Authenticated data buffered from the most recently read and
     /// authenticated [Authentication
@@ -334,9 +334,10 @@ impl ReadBufferBufferedData {
     ///
     /// # Arguments:
     ///
-    /// * `min_io_block_allocation_blocks_log2` - Base-2 logarithm of the [Chip
-    ///   IO Block](chip::NvChip::chip_io_block_size_128b_log2) size in units of
-    ///   [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
+    /// * `min_io_block_allocation_blocks_log2` - Base-2 logarithm of the
+    ///   [Device IO Block](blkdev::NvBlkDev::io_block_size_128b_log2) size in
+    ///   units of [Allocation
+    ///   Blocks](ImageLayout::allocation_block_size_128b_log2).
     /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
     ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     fn new(
@@ -354,8 +355,8 @@ impl ReadBufferBufferedData {
 
 /// Data read buffer.
 ///
-/// In general, read requests don't align with [Chip IO
-/// Block](chip::NvChip::chip_io_block_size_128b_log2) or [Authentication Tree
+/// In general, read requests don't align with [Device IO
+/// Block](blkdev::NvBlkDev::io_block_size_128b_log2) or [Authentication Tree
 /// Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
 /// boundaries, yet reads from physical storage must get processed at a
 /// granularity of the former, and authentication at that of the latter.
@@ -366,8 +367,8 @@ impl ReadBufferBufferedData {
 /// More specifically, it maintains a buffer of [Allocation
 /// Blocks](ImageLayout::allocation_block_size_128b_log2) authenticated in the
 /// course of proecessing a prior read request but not consumed yet.
-/// Furthermore, if the [Chip IO
-/// Block](chip::NvChip::chip_io_block_size_128b_log2) happens to exceed the
+/// Furthermore, if the [Device IO
+/// Block](blkdev::NvBlkDev::io_block_size_128b_log2) happens to exceed the
 /// [Authentication Tree
 /// Data Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) size,
 /// then it also buffers not yet authenticated [Allocation
@@ -387,7 +388,7 @@ pub struct ReadBuffer<ST: sync_types::SyncTypes> {
     /// Verbatim copy of
     /// [`ImageLayout::allocation_block_size_128b_log2`].
     allocation_block_size_128b_log2: u8,
-    /// Value of [`NvChip::chip_io_block_size_128b_log2`](chip::NvChip::chip_io_block_size_128b_log2) converted to units
+    /// Value of [`NvBlKDev::io_block_size_128b_log2`](blkdev::NvBlkDev::io_block_size_128b_log2) converted to units
     /// of [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
     min_io_block_allocation_blocks_log2: u8,
     /// Verbatim copy of
@@ -423,13 +424,13 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     /// # Arguments:
     ///
     /// * `image_layout` - The filesystem's [`ImageLayout`].
-    /// * `chip` - The filesystem image backing storage.
-    pub fn new<C: chip::NvChip>(image_layout: &layout::ImageLayout, chip: &C) -> Result<Self, NvFsError> {
+    /// * `blkdev` - The filesystem image backing storage.
+    pub fn new<B: blkdev::NvBlkDev>(image_layout: &layout::ImageLayout, blkdev: &B) -> Result<Self, NvFsError> {
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
 
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
         let min_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2 as u32);
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2 as u32);
         let min_io_block_allocation_blocks_log2 =
             u8::try_from(min_io_block_allocation_blocks_log2).map_err(|_| nvfs_err_internal!())?;
 
@@ -853,8 +854,8 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
     }
 
     /// Determine whether unauthenticated data from read
-    /// [Chip IO Blocks](chip::NvChip::chip_io_block_size_128b_log2) reads is to
-    /// be buffered.
+    /// [Device IO Blocks](blkdev::NvBlkDev::io_block_size_128b_log2) reads is
+    /// to be buffered.
     fn min_io_blocks_are_buffered(&self) -> bool {
         self.min_io_block_allocation_blocks_log2 > self.auth_tree_data_block_allocation_blocks_log2
     }
@@ -942,11 +943,11 @@ impl<ST: sync_types::SyncTypes> ReadBuffer<ST> {
 }
 
 /// Read and authenticate committed data through a [`ReadBuffer`].
-pub struct BufferedReadAuthenticateDataFuture<C: chip::NvChip> {
+pub struct BufferedReadAuthenticateDataFuture<B: blkdev::NvBlkDev> {
     /// All other data bundled together to allow for independenr borrowing from
     /// [`fut_state`](Self::fut_state).
     d: BufferedReadAuthenticatedDataFutureData,
-    fut_state: BufferedReadAuthenticateDataFutureState<C>,
+    fut_state: BufferedReadAuthenticateDataFutureState<B>,
 }
 
 /// Internal [`BufferedReadAuthenticateDataFuture`] state.
@@ -961,8 +962,8 @@ struct BufferedReadAuthenticatedDataFutureData {
     /// as represented in the Authentication Tree Data domain.
     request_range_auth_tree_data_allocation_blocks_begin: auth_tree::AuthTreeDataAllocBlockIndex,
 
-    /// The request range aligned to the larger of a [Chip IO
-    /// Block](chip::NvChip::chip_io_block_size_128b_log2)) and an
+    /// The request range aligned to the larger of a [Device IO
+    /// Block](blkdev::NvBlkDev::io_block_size_128b_log2)) and an
     /// [Authentication Tree Data
     /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2).
     ///
@@ -993,13 +994,13 @@ struct BufferedReadAuthenticatedDataFutureData {
     /// head subrange authenticated so far.
     authenticated_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
 
-    /// [Chip IO Block](chip::NvChip::chip_io_block_size_128b_log2) in units of
+    /// [Device IO Block](blkdev::NvBlkDev::io_block_size_128b_log2) in units of
     /// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
     min_io_block_allocation_blocks_log2: u8,
-    /// [Preferred Chip IO bulk
-    /// size](chip::NvChip::preferred_chip_io_blocks_bulk_log2) in units of
+    /// [Preferred Device IO bulk
+    /// size](blkdev::NvBlkDev::preferred_io_blocks_bulk_log2) in units of
     /// [Allocation Blocks](ImageLayout::allocation_block_size_128b_log2).
-    preferred_chip_io_bulk_allocation_blocks_log2: u8,
+    preferred_blkdev_io_bulk_allocation_blocks_log2: u8,
     /// Verbatim value of
     /// [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     auth_tree_data_block_allocation_blocks_log2: u8,
@@ -1007,7 +1008,7 @@ struct BufferedReadAuthenticatedDataFutureData {
     allocation_block_size_128b_log2: u8,
 }
 
-impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
+impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
     /// Instantiate a [`BufferedReadAuthenticateDataFuture`].
     ///
     /// # Arguments:
@@ -1017,12 +1018,12 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
     /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `auth_tree_config` - The filesystem's
     ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     pub fn new(
         request_range: &layout::PhysicalAllocBlockRange,
         image_layout: &layout::ImageLayout,
         auth_tree_config: &auth_tree::AuthTreeConfig,
-        chip: &C,
+        blkdev: &B,
     ) -> Result<Self, NvFsError> {
         let request_range_allocation_blocks = match usize::try_from(u64::from(request_range.block_count())) {
             Ok(request_range_allocation_blocks) => request_range_allocation_blocks,
@@ -1031,17 +1032,17 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
 
         let auth_tree_data_block_allocation_blocks_log2 = image_layout.auth_tree_data_block_allocation_blocks_log2;
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
-        let chip_io_block_size_128b = chip.chip_io_block_size_128b_log2();
-        let preferred_chip_io_blocks_bulk_log2 = chip.preferred_chip_io_blocks_bulk_log2();
+        let blkdev_io_block_size_128b = blkdev.io_block_size_128b_log2();
+        let preferred_bkdev_io_blocks_bulk_log2 = blkdev.preferred_io_blocks_bulk_log2();
 
         let min_io_block_allocation_blocks_log2 =
-            u8::try_from(chip_io_block_size_128b.saturating_sub(allocation_block_size_128b_log2 as u32))
+            u8::try_from(blkdev_io_block_size_128b.saturating_sub(allocation_block_size_128b_log2 as u32))
                 .map_err(|_| nvfs_err_internal!())?;
-        // Determine the preferred Chip IO request block size in units of Allocation
+        // Determine the preferred Device IO request block size in units of Allocation
         // Blocks. Possibly ramp it up to some reasonable value to the reduce
         // the overall number of IO requests.
-        let preferred_chip_io_bulk_allocation_blocks_log2 = preferred_chip_io_blocks_bulk_log2
-            .saturating_add(chip_io_block_size_128b)
+        let preferred_blkdev_io_bulk_allocation_blocks_log2 = preferred_bkdev_io_blocks_bulk_log2
+            .saturating_add(blkdev_io_block_size_128b)
             .min(usize::BITS - 1 + allocation_block_size_128b_log2 as u32)
             .saturating_sub(allocation_block_size_128b_log2 as u32)
             .max(auth_tree_data_block_allocation_blocks_log2 as u32)
@@ -1062,7 +1063,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                 auth_tree_data_block_allocation_blocks_log2 as u32,
             );
 
-        // The request range aligned to the larger of the Chip IO Block and
+        // The request range aligned to the larger of the Device IO Block and
         // Authenication Tree Data Block size, this is the area of operation.
         let aligned_request_range =
             match auth_tree_data_block_aligned_request_range.align(min_io_block_allocation_blocks_log2 as u32) {
@@ -1096,7 +1097,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                 unauthenticated_subrange_from_read_buf: None,
                 authenticated_allocation_blocks_end: auth_tree_data_block_aligned_request_range.begin(),
                 min_io_block_allocation_blocks_log2,
-                preferred_chip_io_bulk_allocation_blocks_log2,
+                preferred_blkdev_io_bulk_allocation_blocks_log2,
                 auth_tree_data_block_allocation_blocks_log2,
                 allocation_block_size_128b_log2,
             },
@@ -1113,7 +1114,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `image_header_end` - [End of the filesystem image header on
     ///   storage](super::image_header::MutableImageHeader::physical_location).
@@ -1128,7 +1129,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
     #[allow(clippy::too_many_arguments)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         image_layout: &layout::ImageLayout,
         image_header_end: layout::PhysicalAllocBlockIndex,
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
@@ -1192,14 +1193,14 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
 
                     // Try to obtain unauthenticated data overlapping with the request range from
                     // the read buffer. Note that in practice this is relevant only
-                    // - if the Chip IO Block size is larger than an Authentication Tree Data Block
-                    //   and
+                    // - if the Device IO Block size is larger than an Authentication Tree Data
+                    //   Block and
                     // - only for the range's head and tail regions, as it is (almost) impossible to
-                    //   find a complete Chip IO block still in the read buffer -- in the common
+                    //   find a complete Device IO block still in the read buffer -- in the common
                     //   case, parts of it would have been consumed already at insertion time.
                     // So try to gather any unauthenticated data for the
                     // auth_tree_data_block_aligned_request_range, which in general is not aligned
-                    // to the Chip IO Block size.
+                    // to the Device IO Block size.
                     let (
                         head_auth_tree_data_block_alignment_scratch_allocation_blocks_bufs,
                         tail_auth_tree_data_block_alignment_scratch_allocation_blocks_bufs,
@@ -1220,7 +1221,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                                 .chain(tail_auth_tree_data_block_alignment_scratch_allocation_blocks_bufs),
                         )
                     {
-                        // Some unauthenticated Allocation Blocks from a certain Chip IO Block
+                        // Some unauthenticated Allocation Blocks from a certain Device IO Block
                         // overlapping with the request range had been found in the read buffer.
                         // Note that this implies that the Minimum IO Block size is larger than the
                         // Authentication Tree Data Block size, because otherwise unauthenticated
@@ -1390,7 +1391,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
 
                     // The read request assumes ownership of all IO buffers for the duration it's
                     // pending.  hey'll get returned upon completion.
-                    let read_request = BufferedReadAuthenticateDataFutureNvChipReadRequest {
+                    let read_request = BufferedReadAuthenticateDataFutureNvBlkDevReadRequest {
                         aligned_request_range_allocation_blocks_begin: this.d.aligned_request_range.begin(),
                         dst_allocation_blocks_bufs: mem::take(&mut this.d.dst_allocation_blocks_bufs),
                         alignment_scratch_allocation_blocks_bufs: mem::take(
@@ -1404,7 +1405,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                         read_request_io_region,
                     };
 
-                    let read_fut = match chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
+                    let read_fut = match blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
                         Ok(read_fut) => read_fut,
                         Err(e) => {
                             this.fut_state = BufferedReadAuthenticateDataFutureState::Done;
@@ -1414,7 +1415,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                     this.fut_state = BufferedReadAuthenticateDataFutureState::ReadSubrangeData { read_range, read_fut };
                 }
                 BufferedReadAuthenticateDataFutureState::ReadSubrangeData { read_range, read_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Pending => return task::Poll::Pending,
                         task::Poll::Ready(Ok((mut completed_read_request, Ok(())))) => {
                             // Return IO buffer ownership back from the request.
@@ -1519,7 +1520,7 @@ impl<C: chip::NvChip> BufferedReadAuthenticateDataFuture<C> {
                                 fs_sync_state_auth_tree.destructure_borrow();
                             let leaf_node = match auth_tree::AuthTreeNodeLoadFuture::poll(
                                 pin::Pin::new(auth_tree_leaf_node_load_fut),
-                                chip,
+                                blkdev,
                                 auth_tree_config,
                                 auth_tree_root_hmac_digest,
                                 &mut auth_tree_node_cache,
@@ -1977,7 +1978,7 @@ impl BufferedReadAuthenticatedDataFutureData {
         aligned_request_range: &layout::PhysicalAllocBlockRange,
     ) -> (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]) {
         // The aligned_request_range is the request_range aligned to the larger of the
-        // Chip IO Block and the Authentication Tree Data Block size. Return the
+        // Device IO Block and the Authentication Tree Data Block size. Return the
         // head and tail scratch buffer portions needed for aligning to the
         // larger of the two.
         // Note that the complete aligned_request_range length in units of Allocation
@@ -2072,7 +2073,7 @@ impl BufferedReadAuthenticatedDataFutureData {
         // Likewise, if some authenticated data had been obtained from the read buffer
         // and that authenticated range aligns to either the beginning or the
         // end of the request range, and that range's boundary within the
-        // interior of the request range happens to be aligned to the Chip IO
+        // interior of the request range happens to be aligned to the Device IO
         // Block size, then the alignment scratch buffers for that end will not
         // be neeeded either.
         let (head_scratch_is_unused, tail_scratch_is_unused) = authenticated_subrange_from_read_buf
@@ -2135,7 +2136,7 @@ impl BufferedReadAuthenticatedDataFutureData {
         aligned_request_range: &layout::PhysicalAllocBlockRange,
     ) -> (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]) {
         // The aligned_request_range is the request_range aligned to the larger of the
-        // Chip IO Block and the Authentication Tree Data Block size. Obtain
+        // Device IO Block and the Authentication Tree Data Block size. Obtain
         // only the head and tail portions needed to align the request_range to
         // the Authentication Tree Data Block size.
         // Note that the complete aligned_request_range length in units of Allocation
@@ -2198,7 +2199,8 @@ impl BufferedReadAuthenticatedDataFutureData {
         );
 
         let min_io_block_allocation_blocks_log2 = self.min_io_block_allocation_blocks_log2 as u32;
-        let preferred_chip_io_bulk_allocation_blocks_log2 = self.preferred_chip_io_bulk_allocation_blocks_log2 as u32;
+        let preferred_blkdev_io_bulk_allocation_blocks_log2 =
+            self.preferred_blkdev_io_bulk_allocation_blocks_log2 as u32;
         let auth_tree_data_block_allocation_blocks_log2 = self.auth_tree_data_block_allocation_blocks_log2 as u32;
 
         let auth_tree_covered_data_blocks_per_leaf_node_log2 =
@@ -2220,10 +2222,11 @@ impl BufferedReadAuthenticatedDataFutureData {
         }
 
         // Start by skipping over regions which
-        // - correspond to fully unallocated Chip IO Blocks, possible only if the Chip
-        //   IO Block size is less than that of an Authentication Tree Data Block,
+        // - correspond to fully unallocated Device IO Blocks, possible only if the
+        //   Device IO Block size is less than that of an Authentication Tree Data
+        //   Block,
         // - over the head alignment scratch if unneeded (because an authenticated area
-        //   whose end aligns with Chip IO Block size had been retrieved from the read
+        //   whose end aligns with Device IO Block size had been retrieved from the read
         //   buffer),
         // - over any authenticated or unauthenticated regions initially retrieved from
         //   the read buffer.
@@ -2298,7 +2301,7 @@ impl BufferedReadAuthenticatedDataFutureData {
             } else if let Some(unauthenticated_subrange_from_read_buf) =
                 self.unauthenticated_subrange_from_read_buf.as_ref()
             {
-                // The read buffer retains unauthenticated data only if the Chip IO Block size
+                // The read buffer retains unauthenticated data only if the Device IO Block size
                 // exceeds that of an Authentication Tree Data Block.
                 debug_assert!(min_io_block_allocation_blocks_log2 > auth_tree_data_block_allocation_blocks_log2);
                 debug_assert!(
@@ -2382,8 +2385,8 @@ impl BufferedReadAuthenticatedDataFutureData {
             0
         );
 
-        // It is known that the Chip IO block cur_request_allocation_block_index points
-        // into needs a read by now.
+        // It is known that the Device IO block cur_request_allocation_block_index
+        // points into needs a read by now.
         let read_range_allocation_blocks_begin =
             cur_request_allocation_block_index.align_down(min_io_block_allocation_blocks_log2);
         // Be extra cautious to never ever invalidate any authentication status by
@@ -2404,7 +2407,7 @@ impl BufferedReadAuthenticatedDataFutureData {
                 .unwrap_or(true)
         );
         // Search for the read range's end. Advance the current position to past the
-        // first Chip IO Block.
+        // first Device IO Block.
         cur_request_allocation_block_index = read_range_allocation_blocks_begin
             + layout::AllocBlockCount::from(1u64 << (min_io_block_allocation_blocks_log2));
         debug_assert!(cur_request_allocation_block_index <= self.aligned_request_range.end());
@@ -2450,7 +2453,7 @@ impl BufferedReadAuthenticatedDataFutureData {
             ))) >> auth_tree_covered_allocation_blocks_per_leaf_node_log2
                 != 0
                 || (u64::from(read_range_allocation_blocks_end) ^ u64::from(read_range_allocation_blocks_begin))
-                    >> preferred_chip_io_bulk_allocation_blocks_log2
+                    >> preferred_blkdev_io_bulk_allocation_blocks_log2
                     != 0
             {
                 // Don't cross preferred bulk IO block boundaries or leave a region covered by a
@@ -2503,7 +2506,7 @@ impl BufferedReadAuthenticatedDataFutureData {
                     // The Allocation Block destination buffer is not empty, meaning the Allocation
                     // Block is allocated and needs a read.
                     read_range_allocation_blocks_end = cur_min_io_block_allocation_blocks_end;
-                    // Advance the allocation_blocks_bufs iterator to past the current Chip IO
+                    // Advance the allocation_blocks_bufs iterator to past the current Device IO
                     // block. One entry has already been popped right above.
                     cur_request_allocation_block_index += layout::AllocBlockCount::from(1);
                     // Iterator::advance_by() is unstable.
@@ -2516,7 +2519,7 @@ impl BufferedReadAuthenticatedDataFutureData {
                 cur_request_allocation_block_index += layout::AllocBlockCount::from(1);
             }
             if read_range_allocation_blocks_end != cur_min_io_block_allocation_blocks_end {
-                // The current Chip IO block doesn't need a read, stop and let the caller read
+                // The current Device IO block doesn't need a read, stop and let the caller read
                 // what's missing up the current point.
                 break;
             }
@@ -2530,17 +2533,17 @@ impl BufferedReadAuthenticatedDataFutureData {
 }
 
 /// [`BufferedReadAuthenticateDataFuture`] state-machine state.
-enum BufferedReadAuthenticateDataFutureState<C: chip::NvChip> {
+enum BufferedReadAuthenticateDataFutureState<B: blkdev::NvBlkDev> {
     Init,
     PrepareNextSubrangeDataRead {
         read_subrange_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     },
     ReadSubrangeData {
         read_range: layout::PhysicalAllocBlockRange,
-        read_fut: C::ReadFuture<BufferedReadAuthenticateDataFutureNvChipReadRequest>,
+        read_fut: B::ReadFuture<BufferedReadAuthenticateDataFutureNvBlkDevReadRequest>,
     },
     AuthenticateSubrange {
-        auth_subrange_fut_state: BufferedReadAuthenticateDataFutureAuthenticateState<C>,
+        auth_subrange_fut_state: BufferedReadAuthenticateDataFutureAuthenticateState<B>,
     },
     Finish,
     Done,
@@ -2548,17 +2551,17 @@ enum BufferedReadAuthenticateDataFutureState<C: chip::NvChip> {
 
 /// [`BufferedReadAuthenticateDataFutureState::AuthenticateSubrange`]
 /// sub-state-machine state.
-enum BufferedReadAuthenticateDataFutureAuthenticateState<C: chip::NvChip> {
+enum BufferedReadAuthenticateDataFutureAuthenticateState<B: blkdev::NvBlkDev> {
     Init,
     LoadAuthTreeLeafNode {
         auth_tree_data_block_index: auth_tree::AuthTreeDataBlockIndex,
-        auth_tree_leaf_node_load_fut: auth_tree::AuthTreeNodeLoadFuture<C>,
+        auth_tree_leaf_node_load_fut: auth_tree::AuthTreeNodeLoadFuture<B>,
     },
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlKDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`BufferedReadAuthenticateDataFuture`].
-struct BufferedReadAuthenticateDataFutureNvChipReadRequest {
+struct BufferedReadAuthenticateDataFutureNvBlkDevReadRequest {
     aligned_request_range_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     dst_allocation_blocks_bufs: FixedVec<FixedVec<u8, 7>, 0>,
     alignment_scratch_allocation_blocks_bufs: FixedVec<FixedVec<u8, 7>, 0>,
@@ -2569,7 +2572,7 @@ struct BufferedReadAuthenticateDataFutureNvChipReadRequest {
     read_request_io_region: ChunkedIoRegion,
 }
 
-impl chip::NvChipReadRequest for BufferedReadAuthenticateDataFutureNvChipReadRequest {
+impl blkdev::NvBlkDevReadRequest for BufferedReadAuthenticateDataFutureNvBlkDevReadRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.read_request_io_region
     }
@@ -2577,7 +2580,7 @@ impl chip::NvChipReadRequest for BufferedReadAuthenticateDataFutureNvChipReadReq
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
         let (allocation_block_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
         let allocation_block_index =
             self.read_request_allocation_blocks_begin + layout::AllocBlockCount::from(allocation_block_index as u64);
@@ -2627,7 +2630,7 @@ impl chip::NvChipReadRequest for BufferedReadAuthenticateDataFutureNvChipReadReq
                     - head_alignment_scratch_allocation_blocks]
                     .as_mut_slice()
             } else {
-                return Err(nvchip_err_internal!());
+                return Err(nvblkdev_err_internal!());
             };
 
         if allocation_block_buf.is_empty() {

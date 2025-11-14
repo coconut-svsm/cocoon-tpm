@@ -23,7 +23,7 @@ use super::{
     read_missing_data::TransactionReadMissingDataFuture,
 };
 use crate::{
-    chip,
+    blkdev,
     fs::{
         NvFsError,
         cocoonfs::{alloc_bitmap, auth_tree, fs::CocoonFsConfig, layout},
@@ -58,17 +58,17 @@ use super::auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStates;
 /// Additional ones may get inserted and populated as a byproduct
 /// for [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
 /// alignment purposes in the course though.
-pub(in super::super) struct TransactionReadAuthenticateDataFuture<C: chip::NvChip> {
+pub(in super::super) struct TransactionReadAuthenticateDataFuture<B: blkdev::NvBlkDev> {
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
     remaining_states_index_range: AuthTreeDataBlocksUpdateStatesIndexRange,
     remaining_auth_tree_data_blocks_head_skip_mask: alloc_bitmap::BitmapWord,
-    fut_state: TransactionReadAuthenticateDataFutureState<C>,
+    fut_state: TransactionReadAuthenticateDataFutureState<B>,
     consider_staged_updates: bool,
     only_allocated: bool,
 }
 
-impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionReadAuthenticateDataFuture<B> {
     /// Instantiate a new [`TransactionReadAuthenticateDataFuture`].
     ///
     /// The [`TransactionReadAuthenticateDataFuture`] assumes
@@ -80,13 +80,16 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
     ///
     /// * `transaction` - The [`Transaction`] whose [storage tracking
     ///   states](AllocationBlockUpdateNvSyncState)' buffers to populate.
-    /// * `request_states_allocation_blocks_index_range` - The [Allocation Block level entry index
-    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to populate the [storage
-    ///   tracking states](AllocationBlockUpdateNvSyncState)' buffers within.  Applicable
-    ///   [correction offsets](AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets) will get
-    ///   returned from [`poll()`](Self::poll) upon completion in case additional state entries had
-    ///   to get inserted in order to [fill alignment
-    ///   gaps](AuthTreeDataBlocksUpdateStates::fill_states_index_range_regions_alignment_gaps).
+    /// * `request_states_allocation_blocks_index_range` - The [Allocation Block
+    ///   level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) to
+    ///   populate the [storage tracking
+    ///   states](AllocationBlockUpdateNvSyncState)' buffers within.  Applicable
+    ///   [correction
+    ///   offsets](AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets)
+    ///   will get returned from [`poll()`](Self::poll) upon completion in case
+    ///   additional state entries had to get inserted in order to [fill
+    ///   alignment gaps](AuthTreeDataBlocksUpdateStates::fill_states_index_range_regions_alignment_gaps).
     /// * `consider_staged_updates` - Whether or not to consider [staged
     ///   updates](AllocationBlockUpdateStagedUpdate) when determining if some
     ///   [Allocation
@@ -147,7 +150,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
     /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
     ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
@@ -158,7 +161,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         fs_config: &CocoonFsConfig,
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
         fs_sync_state_auth_tree: &mut auth_tree::AuthTreeRef<'_, ST>,
@@ -278,7 +281,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
                     let (transaction, read_subrange_states_index_range_offsets, result) =
                         match TransactionReadMissingDataFuture::poll(
                             pin::Pin::new(read_missing_data_fut),
-                            chip,
+                            blkdev,
                             fs_sync_state_alloc_bitmap,
                             cx,
                         ) {
@@ -484,7 +487,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
                                     fs_sync_state_auth_tree.destructure_borrow();
                                 let leaf_node = match auth_tree::AuthTreeNodeLoadFuture::poll(
                                     pin::Pin::new(auth_tree_leaf_node_load_fut),
-                                    chip,
+                                    blkdev,
                                     auth_tree_config,
                                     auth_tree_root_hmac_digest,
                                     &mut auth_tree_node_cache, cx
@@ -748,12 +751,12 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
-        let preferred_chip_io_blocks_bulk_log2 = transaction.preferred_chip_io_blocks_bulk_log2;
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
+        let preferred_blkdev_io_blocks_bulk_log2 = transaction.preferred_blkdev_io_blocks_bulk_log2;
         let preferred_read_block_allocation_blocks_log2 =
-            TransactionReadMissingDataFuture::<C>::preferred_read_block_allocation_blocks_log2(
-                chip_io_block_size_128b_log2,
-                preferred_chip_io_blocks_bulk_log2,
+            TransactionReadMissingDataFuture::<B>::preferred_read_block_allocation_blocks_log2(
+                blkdev_io_block_size_128b_log2,
+                preferred_blkdev_io_blocks_bulk_log2,
                 allocation_block_size_128b_log2,
                 auth_tree_data_block_allocation_blocks_log2,
             );
@@ -1197,7 +1200,7 @@ impl<C: chip::NvChip> TransactionReadAuthenticateDataFuture<C> {
 }
 
 /// [`TransactionReadAuthenticateDataFuture`] state-machine state.
-enum TransactionReadAuthenticateDataFutureState<C: chip::NvChip> {
+enum TransactionReadAuthenticateDataFutureState<B: blkdev::NvBlkDev> {
     Init {
         transaction: Option<Box<Transaction>>,
     },
@@ -1208,26 +1211,26 @@ enum TransactionReadAuthenticateDataFutureState<C: chip::NvChip> {
             AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsetsTransformToContaining,
         remaining_states_index_range_offsets_transform:
             AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsetsTransformToAfter,
-        read_missing_data_fut: TransactionReadMissingDataFuture<C>,
+        read_missing_data_fut: TransactionReadMissingDataFuture<B>,
     },
     AuthenticateSubrange {
         transaction: Option<Box<Transaction>>,
         auth_subrange_states_index_range: AuthTreeDataBlocksUpdateStatesIndexRange,
         auth_subrange_auth_tree_data_blocks_skip_mask: alloc_bitmap::BitmapWord,
         last_physical_auth_tree_data_block: Option<u64>,
-        auth_subrange_fut_state: TransactionReadAuthenticateDataFutureAuthenticateSubrangeState<C>,
+        auth_subrange_fut_state: TransactionReadAuthenticateDataFutureAuthenticateSubrangeState<B>,
     },
     Done,
 }
 
 /// [`TransactionReadAuthenticateDataFutureState::AuthenticateSubrange`]
 /// sub-state-machine state.
-enum TransactionReadAuthenticateDataFutureAuthenticateSubrangeState<C: chip::NvChip> {
+enum TransactionReadAuthenticateDataFutureAuthenticateSubrangeState<B: blkdev::NvBlkDev> {
     AuthenticateNextDataBlock {
         saved_auth_tree_data_block_index: Option<auth_tree::AuthTreeDataBlockIndex>,
     },
     LoadAuthTreeLeafNode {
         auth_tree_data_block_index: auth_tree::AuthTreeDataBlockIndex,
-        auth_tree_leaf_node_load_fut: auth_tree::AuthTreeNodeLoadFuture<C>,
+        auth_tree_leaf_node_load_fut: auth_tree::AuthTreeNodeLoadFuture<B>,
     },
 }

@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip::test::TestNvChip,
+    blkdev::test::TestNvBlkDev,
     crypto::{hash, rng, symcipher},
     fs::{
         self,
@@ -22,8 +22,8 @@ use crate::{
 use core::{marker, ops, pin, slice, task};
 
 struct CocoonFsTestLayoutConfig {
-    chip_io_block_size_128b_log2: u8,
-    preferred_chip_io_blocks_bulk_log2: u8,
+    blkdev_io_block_size_128b_log2: u8,
+    preferred_blkdev_io_blocks_bulk_log2: u8,
 
     allocation_block_size_128b_log2: u8,
     io_block_allocation_blocks_log2: u8,
@@ -38,8 +38,8 @@ struct CocoonFsTestLayoutConfig {
 const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
     // Base.
     CocoonFsTestLayoutConfig {
-        chip_io_block_size_128b_log2: 0,
-        preferred_chip_io_blocks_bulk_log2: 2,
+        blkdev_io_block_size_128b_log2: 0,
+        preferred_blkdev_io_blocks_bulk_log2: 2,
         allocation_block_size_128b_log2: 0,
         io_block_allocation_blocks_log2: 0,
         auth_tree_node_io_blocks_log2: 0,
@@ -48,10 +48,10 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         index_tree_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
-    // Chip IO Block size > Authentication Tree Data Block.
+    // Device IO Block size > Authentication Tree Data Block.
     CocoonFsTestLayoutConfig {
-        chip_io_block_size_128b_log2: 4,
-        preferred_chip_io_blocks_bulk_log2: 0,
+        blkdev_io_block_size_128b_log2: 4,
+        preferred_blkdev_io_blocks_bulk_log2: 0,
         allocation_block_size_128b_log2: 0,
         io_block_allocation_blocks_log2: 4,
         auth_tree_node_io_blocks_log2: 0,
@@ -60,10 +60,10 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         index_tree_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
-    // Chip IO Block size < Authentication Tree Data Block.
+    // Device IO Block size < Authentication Tree Data Block.
     CocoonFsTestLayoutConfig {
-        chip_io_block_size_128b_log2: 2,
-        preferred_chip_io_blocks_bulk_log2: 0,
+        blkdev_io_block_size_128b_log2: 2,
+        preferred_blkdev_io_blocks_bulk_log2: 0,
         allocation_block_size_128b_log2: 0,
         io_block_allocation_blocks_log2: 2,
         auth_tree_node_io_blocks_log2: 0,
@@ -72,10 +72,10 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         index_tree_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
-    // Chip IO Block size < Allocation Block.
+    // Device IO Block size < Allocation Block.
     CocoonFsTestLayoutConfig {
-        chip_io_block_size_128b_log2: 0,
-        preferred_chip_io_blocks_bulk_log2: 0,
+        blkdev_io_block_size_128b_log2: 0,
+        preferred_blkdev_io_blocks_bulk_log2: 0,
         allocation_block_size_128b_log2: 2,
         io_block_allocation_blocks_log2: 0,
         auth_tree_node_io_blocks_log2: 0,
@@ -86,8 +86,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
     },
     // Realistic.
     CocoonFsTestLayoutConfig {
-        chip_io_block_size_128b_log2: 2,                        //  512B
-        preferred_chip_io_blocks_bulk_log2: 3,                  // 4096B
+        blkdev_io_block_size_128b_log2: 2,                      //  512B
+        preferred_blkdev_io_blocks_bulk_log2: 3,                // 4096B
         allocation_block_size_128b_log2: 0,                     //  128B
         io_block_allocation_blocks_log2: 2,                     //  512B
         auth_tree_node_io_blocks_log2: 1,                       // 1024B
@@ -128,7 +128,7 @@ struct CocoonFsTestConfig<'a> {
 }
 
 impl<'a> CocoonFsTestConfig<'a> {
-    fn instantiate(&self, image_size: usize) -> (TestNvChip, layout::ImageLayout, FixedVec<u8, 4>) {
+    fn instantiate(&self, image_size: usize) -> (TestNvBlkDev, layout::ImageLayout, FixedVec<u8, 4>) {
         let image_layout = layout::ImageLayout::new(
             self.layout.allocation_block_size_128b_log2,
             self.layout.io_block_allocation_blocks_log2,
@@ -145,12 +145,12 @@ impl<'a> CocoonFsTestConfig<'a> {
         )
         .unwrap();
 
-        let image_chip_io_blocks_count =
-            u64::try_from(image_size).unwrap() >> (self.layout.chip_io_block_size_128b_log2 as u32 + 7);
-        let chip = TestNvChip::new(
-            self.layout.chip_io_block_size_128b_log2 as u32,
-            image_chip_io_blocks_count,
-            self.layout.preferred_chip_io_blocks_bulk_log2 as u32,
+        let image_blkdev_io_blocks_count =
+            u64::try_from(image_size).unwrap() >> (self.layout.blkdev_io_block_size_128b_log2 as u32 + 7);
+        let blkdev = TestNvBlkDev::new(
+            self.layout.blkdev_io_block_size_128b_log2 as u32,
+            image_blkdev_io_blocks_count,
+            self.layout.preferred_blkdev_io_blocks_bulk_log2 as u32,
         );
 
         let mut salt = FixedVec::new_with_default(self.layout.salt_len as usize).unwrap();
@@ -162,7 +162,7 @@ impl<'a> CocoonFsTestConfig<'a> {
             *s.1 = b"SALT"[s.0];
         }
 
-        (chip, image_layout, salt)
+        (blkdev, image_layout, salt)
     }
 }
 
@@ -202,7 +202,7 @@ impl Iterator for CocoonFsTestConfigs {
     }
 }
 
-type TestCocoonFs = CocoonFs<TestNopSyncTypes, TestNvChip>;
+type TestCocoonFs = CocoonFs<TestNopSyncTypes, TestNvBlkDev>;
 
 fn cocoonfs_test_mk_fs_instance_ref<'a>(
     fs_instance: &'a <TestCocoonFs as fs::NvFs>::SyncRcPtr,
@@ -211,9 +211,9 @@ fn cocoonfs_test_mk_fs_instance_ref<'a>(
     <CocoonFsTestSyncRcPtr as sync_types::SyncRcPtr<_>>::as_ref(&fs_instance)
 }
 
-fn cocoonfs_test_fs_instance_into_chip_helper(fs_instance: <TestCocoonFs as fs::NvFs>::SyncRcPtr) -> TestNvChip {
-    let chip = fs_instance.chip.snapshot();
-    chip
+fn cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance: <TestCocoonFs as fs::NvFs>::SyncRcPtr) -> TestNvBlkDev {
+    let blkdev = fs_instance.blkdev.snapshot();
+    blkdev
 }
 
 fn cocoonfs_test_mkfs_op_helper(
@@ -222,9 +222,9 @@ fn cocoonfs_test_mkfs_op_helper(
     enable_trimming: bool,
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
-    let (chip, image_layout, salt) = test_config.instantiate(image_size);
+    let (blkdev, image_layout, salt) = test_config.instantiate(image_size);
     let mkfs_fut = CocoonFsMkFsFuture::<TestNopSyncTypes, _>::new(
-        chip,
+        blkdev,
         &image_layout,
         salt,
         None,
@@ -232,7 +232,7 @@ fn cocoonfs_test_mkfs_op_helper(
         enable_trimming,
         rng,
     )
-    .map_err(|(_chip, _rng, e)| e)
+    .map_err(|(_blkdev, _rng, e)| e)
     .unwrap();
 
     let executor = TestAsyncExecutor::new();
@@ -240,51 +240,53 @@ fn cocoonfs_test_mkfs_op_helper(
     TestAsyncExecutor::run_to_completion(&executor);
     let mkfs_result = mkfs_waiter.take().unwrap();
     let (_rng, mkfs_result) = mkfs_result.unwrap();
-    mkfs_result.map_err(|(_chip, e)| e)
+    mkfs_result.map_err(|(_blkdev, e)| e)
 }
 
 fn cocoonfs_test_write_mkfsinfo_header_op_helper(
     test_config: &CocoonFsTestConfig,
     image_size: usize,
-) -> Result<TestNvChip, fs::NvFsError> {
-    let (chip, image_layout, salt) = test_config.instantiate(0);
+) -> Result<TestNvBlkDev, fs::NvFsError> {
+    let (blkdev, image_layout, salt) = test_config.instantiate(0);
     let image_size = image_size as u64;
     let write_mkfsinfo_header_fut =
-        CocoonFsWriteMkfsInfoHeaderFuture::new(chip, &image_layout, salt, Some(image_size), false)
-            .map_err(|(_chip, e)| e)?;
+        CocoonFsWriteMkfsInfoHeaderFuture::new(blkdev, &image_layout, salt, Some(image_size), false)
+            .map_err(|(_blkdev, e)| e)?;
 
     let executor = TestAsyncExecutor::new();
     let write_mkfsinfo_header_waiter = TestAsyncExecutor::spawn(&executor, write_mkfsinfo_header_fut);
     TestAsyncExecutor::run_to_completion(&executor);
     let write_mkfsinfo_header_result = write_mkfsinfo_header_waiter.take().unwrap();
-    let (chip, result) = write_mkfsinfo_header_result.unwrap();
+    let (blkdev, result) = write_mkfsinfo_header_result.unwrap();
     match result {
-        Ok(()) => Ok(chip),
+        Ok(()) => Ok(blkdev),
         Err(e) => Err(e),
     }
 }
 
-fn cocoonfs_test_openfs_op_helper(chip: TestNvChip) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
+fn cocoonfs_test_openfs_op_helper(
+    blkdev: TestNvBlkDev,
+) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
-    let openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(chip, root_key, false, rng)
-        .map_err(|(_chip, _root_key, _rng, e)| e)
+    let openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+        .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     let executor = TestAsyncExecutor::new();
     let openfs_waiter = TestAsyncExecutor::spawn(&executor, openfs_fut);
     TestAsyncExecutor::run_to_completion(&executor);
     let openfs_result = openfs_waiter.take().unwrap();
     let (_rng, openfs_result) = openfs_result.unwrap();
-    openfs_result.map_err(|(_chip, _root_key, e)| e)
+    openfs_result.map_err(|(_blkdev, _root_key, e)| e)
 }
 
 fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
-    chip: TestNvChip,
-) -> Result<TestNvChip, fs::NvFsError> {
+    blkdev: TestNvBlkDev,
+) -> Result<TestNvBlkDev, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
-    let mut openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(chip, root_key, false, rng)
-        .map_err(|(_chip, _root_key, _rng, e)| e)
+    let mut openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+        .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     // Simulate IO failure when writing the regular static image header.
     openfs_fut.test_fail_apply_mkfsinfo_header = true;
@@ -299,8 +301,8 @@ fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
             // was none, presumably because the test is buggy.
             Err(nvfs_err_internal!())
         }
-        Err((chip, _root_key, fs::NvFsError::IoError(fs::NvFsIoError::IoFailure))) => Ok(chip),
-        Err((_chip, _root_key, e)) => Err(e),
+        Err((blkdev, _root_key, fs::NvFsError::IoError(fs::NvFsIoError::IoFailure))) => Ok(blkdev),
+        Err((_blkdev, _root_key, e)) => Err(e),
     }
 }
 

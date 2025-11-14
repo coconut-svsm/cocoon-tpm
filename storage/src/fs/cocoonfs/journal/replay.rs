@@ -14,7 +14,7 @@ use super::{
     staging_copy_disguise::JournalStagingCopyUndisguise,
 };
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError, NvChipIoError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError, NvBlkDevIoError},
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
@@ -36,7 +36,7 @@ use core::{mem, pin, task};
 ///
 /// Check if the journal is active and needs replay. If so, do that and cleanup
 /// afterwards, including an invalidation of the journal.
-pub struct JournalReplayFuture<C: chip::NvChip> {
+pub struct JournalReplayFuture<B: blkdev::NvBlkDev> {
     enable_trimming: bool,
 
     // Populated after the Journal Log has been read.
@@ -57,13 +57,13 @@ pub struct JournalReplayFuture<C: chip::NvChip> {
     // Populated after the mutable image header has been read.
     auth_tree_config: Option<auth_tree::AuthTreeConfig>,
 
-    fut_state: JournalReplayFutureState<C>,
+    fut_state: JournalReplayFutureState<B>,
 }
 
 /// [`JournalReplayFuture`] state-machine state.
-enum JournalReplayFutureState<C: chip::NvChip> {
+enum JournalReplayFutureState<B: blkdev::NvBlkDev> {
     ReadLog {
-        read_log_fut: JournalLogReadFuture<C>,
+        read_log_fut: JournalLogReadFuture<B>,
     },
     ReadMutableImageHeader {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
@@ -76,29 +76,30 @@ enum JournalReplayFutureState<C: chip::NvChip> {
         // Self.
         alloc_bitmap_file_fragments_auth_digests: Option<ExtentsCoveringAuthDigests>,
 
-        read_mutable_image_header_fut: JournalReadMutableImageHeaderFuture<C>,
+        read_mutable_image_header_fut: JournalReadMutableImageHeaderFuture<B>,
     },
     ReadAllocBitmapJournalFragments {
         alloc_bitmap_file: alloc_bitmap::AllocBitmapFile,
         image_header_end: layout::PhysicalAllocBlockIndex,
-        read_alloc_bitmap_journal_fragments_fut: alloc_bitmap::AllocBitmapFileReadJournalFragmentsFuture<C>,
+        read_alloc_bitmap_journal_fragments_fut: alloc_bitmap::AllocBitmapFileReadJournalFragmentsFuture<B>,
     },
     ReplayWrites {
-        replay_writes_fut: JournalReplayWritesFuture<C>,
+        replay_writes_fut: JournalReplayWritesFuture<B>,
     },
     Cleanup {
-        cleanup_fut: JournalCleanupFuture<C>,
+        cleanup_fut: JournalCleanupFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> JournalReplayFuture<C> {
+impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
     /// Instantiate a [`JournalReplayFuture`].
     ///
     /// # Arguments:
     ///
     /// * `enable_trimming` - Whether or not to submit [trim
-    ///   commands](chip::NvChip::trim) to the underlying storage for cleanup.
+    ///   commands](blkdev::NvBlkDev::trim) to the underlying storage for
+    ///   cleanup.
     pub fn new(enable_trimming: bool) -> Self {
         let read_log_fut = JournalLogReadFuture::new();
         Self {
@@ -118,7 +119,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `salt_len` - Length of the salt found in the filesystem's
@@ -130,7 +131,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         image_layout: &layout::ImageLayout,
         salt_len: u8,
         root_key: &keys::RootKey,
@@ -143,7 +144,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
                 JournalReplayFutureState::ReadLog { read_log_fut } => {
                     let journal_log = match JournalLogReadFuture::poll(
                         pin::Pin::new(read_log_fut),
-                        chip,
+                        blkdev,
                         image_layout,
                         salt_len,
                         root_key,
@@ -182,7 +183,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
                     this.journal_staging_copy_undisguise = journal_staging_copy_undisguise;
 
                     let read_mutable_image_header_fut =
-                        match JournalReadMutableImageHeaderFuture::new(chip, image_layout, salt_len) {
+                        match JournalReadMutableImageHeaderFuture::new(blkdev, image_layout, salt_len) {
                             Ok(read_mutable_image_header_fut) => read_mutable_image_header_fut,
                             Err(e) => {
                                 this.fut_state = JournalReplayFutureState::Done;
@@ -212,7 +213,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
                     };
                     let mutable_image_header = match JournalReadMutableImageHeaderFuture::poll(
                         pin::Pin::new(read_mutable_image_header_fut),
-                        chip,
+                        blkdev,
                         image_layout,
                         apply_writes_script,
                         this.journal_staging_copy_undisguise.as_ref(),
@@ -278,7 +279,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
 
                     let read_alloc_bitmap_journal_fragments_fut =
                         match alloc_bitmap::AllocBitmapFileReadJournalFragmentsFuture::new(
-                            chip,
+                            blkdev,
                             alloc_bitmap_file_fragments_auth_digests,
                             &alloc_bitmap_file,
                             image_layout,
@@ -321,7 +322,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
                     let alloc_bitmap_journal_fragments =
                         match alloc_bitmap::AllocBitmapFileReadJournalFragmentsFuture::poll(
                             pin::Pin::new(read_alloc_bitmap_journal_fragments_fut),
-                            chip,
+                            blkdev,
                             alloc_bitmap_file,
                             image_layout,
                             auth_tree_config,
@@ -364,7 +365,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
                     };
 
                     let replay_writes_fut = match JournalReplayWritesFuture::new(
-                        chip,
+                        blkdev,
                         image_layout,
                         auth_tree_config,
                         *image_header_end,
@@ -399,7 +400,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
 
                     match JournalReplayWritesFuture::poll(
                         pin::Pin::new(replay_writes_fut),
-                        chip,
+                        blkdev,
                         auth_tree_config,
                         apply_writes_script,
                         this.journal_staging_copy_undisguise.as_ref(),
@@ -434,7 +435,7 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
 
                     match JournalCleanupFuture::poll(
                         pin::Pin::new(cleanup_fut),
-                        chip,
+                        blkdev,
                         image_layout,
                         salt_len,
                         journal_log_extents,
@@ -466,52 +467,52 @@ impl<C: chip::NvChip> JournalReplayFuture<C> {
 /// Read the filesystem's
 /// [`MutableImageHeader`](image_header::MutableImageHeader) in the state as if
 /// the any updates to it recorded in the journal had been applied already.
-struct JournalReadMutableImageHeaderFuture<C: chip::NvChip> {
+struct JournalReadMutableImageHeaderFuture<B: blkdev::NvBlkDev> {
     mutable_image_header_allocation_blocks_range: layout::PhysicalAllocBlockRange,
     cur_target_allocation_block_index: layout::PhysicalAllocBlockIndex,
     apply_writes_script_index: usize,
     buffer: FixedVec<u8, 7>,
-    fut_state: JournalReadMutableImageHeaderFutureState<C>,
+    fut_state: JournalReadMutableImageHeaderFutureState<B>,
 }
 
 /// [`JournalReadMutableImageHeaderFuture`] state-machine state.
-enum JournalReadMutableImageHeaderFutureState<C: chip::NvChip> {
+enum JournalReadMutableImageHeaderFutureState<B: blkdev::NvBlkDev> {
     PrepareReadPart,
     ReadPart {
         cur_read_range_allocation_blocks: layout::AllocBlockCount,
-        read_fut: C::ReadFuture<JournalReadMutableImageHeaderPartNvChipRequest>,
+        read_fut: B::ReadFuture<JournalReadMutableImageHeaderPartNvBlkDevRequest>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
+impl<B: blkdev::NvBlkDev> JournalReadMutableImageHeaderFuture<B> {
     /// Instantiate a [`JournalReadMutableImageHeaderFuture`].
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `salt_len` - Length of the salt found in the filesystem's
     ///   [`StaticImageHeader`](image_header::StaticImageHeader).
-    fn new(chip: &C, image_layout: &layout::ImageLayout, salt_len: u8) -> Result<Self, NvFsError> {
+    fn new(blkdev: &B, image_layout: &layout::ImageLayout, salt_len: u8) -> Result<Self, NvFsError> {
         let mutable_image_header_allocation_blocks_range =
             image_header::MutableImageHeader::physical_location(image_layout, salt_len);
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-        let chip_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+        let blkdev_io_block_allocation_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
         // The mutable header's beginning is aligned to the IO Block size, hence to the
-        // Chip IO Block size.
+        // Device IO Block size.
         debug_assert_eq!(
             mutable_image_header_allocation_blocks_range
                 .begin()
-                .align_down(chip_io_block_allocation_blocks_log2),
+                .align_down(blkdev_io_block_allocation_blocks_log2),
             mutable_image_header_allocation_blocks_range.begin()
         );
         let aligned_mutable_image_header_allocation_blocks_end = mutable_image_header_allocation_blocks_range
             .end()
-            .align_up(chip_io_block_allocation_blocks_log2)
+            .align_up(blkdev_io_block_allocation_blocks_log2)
             .ok_or(NvFsError::IoError(NvFsIoError::RegionOutOfRange))?;
         if u64::from(aligned_mutable_image_header_allocation_blocks_end)
             > u64::MAX >> (allocation_block_size_128b_log2 + 7)
@@ -543,7 +544,7 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `apply_writes_script` - The [`JournalLog::apply_writes_script`].
@@ -553,7 +554,7 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
     ///   is being polled.
     fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         image_layout: &layout::ImageLayout,
         apply_writes_script: &JournalApplyWritesScript,
         journal_staging_copy_undisguise: Option<&JournalStagingCopyUndisguise>,
@@ -615,11 +616,11 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
                     };
 
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let request_region = match ChunkedIoRegion::new(
                         u64::from(read_range.begin()) << allocation_block_size_128b_log2,
                         u64::from(read_range.end()) << allocation_block_size_128b_log2,
-                        chip_io_block_size_128b_log2,
+                        blkdev_io_block_size_128b_log2,
                     )
                     .map_err(|e| match e {
                         ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
@@ -629,7 +630,7 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
                             nvfs_err_internal!()
                         }
                         ChunkedIoRegionError::RegionUnaligned => {
-                            // All read requests are aligned to the Chip IO block size.
+                            // All read requests are aligned to the Device IO block size.
                             nvfs_err_internal!()
                         }
                     }) {
@@ -639,22 +640,22 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let chip_io_block_allocation_blocks_log2 =
-                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-                    let allocation_bock_chip_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
-                    let chip_io_block_index_offset = (u64::from(
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_bock_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                    let blkdev_io_block_index_offset = (u64::from(
                         this.cur_target_allocation_block_index
                             - this.mutable_image_header_allocation_blocks_range.begin(),
-                    ) >> chip_io_block_allocation_blocks_log2
-                        << allocation_bock_chip_io_blocks_log2)
+                    ) >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_bock_blkdev_io_blocks_log2)
                         as usize;
-                    let read_request = JournalReadMutableImageHeaderPartNvChipRequest {
+                    let read_request = JournalReadMutableImageHeaderPartNvBlkDevRequest {
                         region: request_region,
                         buffer: mem::take(&mut this.buffer),
-                        chip_io_block_index_offset,
+                        blkdev_io_block_index_offset,
                     };
-                    let read_fut = match chip.read(read_request) {
+                    let read_fut = match blkdev.read(read_request) {
                         Ok(Ok(read_fut)) => read_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = JournalReadMutableImageHeaderFutureState::Done;
@@ -670,7 +671,7 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
                     cur_read_range_allocation_blocks,
                     read_fut,
                 } => {
-                    let read_request = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = JournalReadMutableImageHeaderFutureState::Done;
@@ -678,10 +679,10 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let JournalReadMutableImageHeaderPartNvChipRequest {
+                    let JournalReadMutableImageHeaderPartNvBlkDevRequest {
                         region: _,
                         buffer,
-                        chip_io_block_index_offset: _,
+                        blkdev_io_block_index_offset: _,
                     } = read_request;
                     this.buffer = buffer;
 
@@ -747,15 +748,15 @@ impl<C: chip::NvChip> JournalReadMutableImageHeaderFuture<C> {
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlKDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`JournalReadMutableImageHeaderFuture`].
-struct JournalReadMutableImageHeaderPartNvChipRequest {
+struct JournalReadMutableImageHeaderPartNvBlkDevRequest {
     region: ChunkedIoRegion,
     buffer: FixedVec<u8, 7>,
-    chip_io_block_index_offset: usize,
+    blkdev_io_block_index_offset: usize,
 }
 
-impl chip::NvChipReadRequest for JournalReadMutableImageHeaderPartNvChipRequest {
+impl blkdev::NvBlkDevReadRequest for JournalReadMutableImageHeaderPartNvBlkDevRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
@@ -763,19 +764,20 @@ impl chip::NvChipReadRequest for JournalReadMutableImageHeaderPartNvChipRequest 
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
-        let chip_io_block_index = self.chip_io_block_index_offset + range.chunk().decompose_to_hierarchic_indices([]).0;
-        let chip_io_block_size_128b_log2 = self.region.chunk_size_128b_log2();
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
+        let blkdev_io_block_index =
+            self.blkdev_io_block_index_offset + range.chunk().decompose_to_hierarchic_indices([]).0;
+        let blkdev_io_block_size_128b_log2 = self.region.chunk_size_128b_log2();
         Ok(Some(
-            &mut self.buffer[chip_io_block_index << (chip_io_block_size_128b_log2 + 7)
-                ..(chip_io_block_index + 1) << (chip_io_block_size_128b_log2 + 7)][range.range_in_chunk().clone()],
+            &mut self.buffer[blkdev_io_block_index << (blkdev_io_block_size_128b_log2 + 7)
+                ..(blkdev_io_block_index + 1) << (blkdev_io_block_size_128b_log2 + 7)][range.range_in_chunk().clone()],
         ))
     }
 }
 
 /// Replay the data writes recorded in [`JournalLog::apply_writes_script`] and
 /// update the authentication tree in the course.
-struct JournalReplayWritesFuture<C: chip::NvChip> {
+struct JournalReplayWritesFuture<B: blkdev::NvBlkDev> {
     image_size: layout::AllocBlockCount,
     apply_writes_script_index: usize,
     next_target_allocation_block_index: layout::PhysicalAllocBlockIndex,
@@ -783,44 +785,44 @@ struct JournalReplayWritesFuture<C: chip::NvChip> {
     // Self.
     auth_tree_updates_replay_cursor: Option<Box<auth_tree::AuthTreeReplayJournalUpdateScriptCursor>>,
     buffers: FixedVec<FixedVec<u8, 7>, 0>,
-    fut_state: JournalReplayWritesFutureState<C>,
+    fut_state: JournalReplayWritesFutureState<B>,
     allocation_block_size_128b_log2: u8,
-    chip_io_block_allocation_blocks_log2: u8,
-    preferred_chip_io_bulk_allocation_blocks_log2: u8,
+    blkdev_io_block_allocation_blocks_log2: u8,
+    preferred_blkdev_io_bulk_allocation_blocks_log2: u8,
 }
 
 /// [`JournalReplayWritesFuture`] state-machine state.
-enum JournalReplayWritesFutureState<C: chip::NvChip> {
+enum JournalReplayWritesFutureState<B: blkdev::NvBlkDev> {
     Init,
     AdvanceAuthTreeCursor {
-        advance_auth_tree_cursor_fut: auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C>,
+        advance_auth_tree_cursor_fut: auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B>,
     },
     PrepareReadStagingCopy,
     ReadStagingCopy {
         cur_target_range: layout::PhysicalAllocBlockRange,
-        read_fut: C::ReadFuture<ReadJournalStagingCopyNvChipRequest>,
+        read_fut: B::ReadFuture<ReadJournalStagingCopyNvBlkDevRequest>,
     },
     WriteToTarget {
         cur_target_range_allocation_blocks: layout::AllocBlockCount,
-        write_fut: C::WriteFuture<WriteTargetNvChipRequest>,
+        write_fut: B::WriteFuture<WriteTargetNvBlkDevRequest>,
     },
     UpdateAuthTree {
         next_allocation_block_index_in_cur_target_range: layout::AllocBlockCount,
         cur_target_range_allocation_blocks: layout::AllocBlockCount,
-        auth_tree_write_part_fut: Option<auth_tree::AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C>>,
+        auth_tree_write_part_fut: Option<auth_tree::AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B>>,
     },
     FinalizeAuthTreeUpdatesReplay {
-        auth_tree_replay_remainder_fut: auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C>,
+        auth_tree_replay_remainder_fut: auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
+impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
     /// Instantiate a [`JournalReplayWritesFuture`].
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `auth_tree_config` - The filesystem's
@@ -838,7 +840,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
     ///   [`JournalLog::update_auth_digests_script`].
     #[allow(clippy::too_many_arguments)]
     fn new(
-        chip: &C,
+        blkdev: &B,
         image_layout: &layout::ImageLayout,
         auth_tree_config: &auth_tree::AuthTreeConfig,
         image_header_end: layout::PhysicalAllocBlockIndex,
@@ -861,24 +863,24 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
         let auth_tree_data_block_allocation_blocks_log2 =
             image_layout.auth_tree_data_block_allocation_blocks_log2 as u32;
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-        let chip_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-        // Determine the chip's preferred bulk IO block size, ramp it up to a reasonable
-        // value.
-        let preferred_chip_io_bulk_allocation_blocks_log2 = (chip.preferred_chip_io_blocks_bulk_log2()
-            + chip_io_block_size_128b_log2)
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+        let blkdev_io_block_allocation_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+        // Determine the device's preferred bulk IO block size, ramp it up to a
+        // reasonable value.
+        let preferred_blkdev_io_bulk_allocation_blocks_log2 = (blkdev.preferred_io_blocks_bulk_log2()
+            + blkdev_io_block_size_128b_log2)
             .saturating_sub(allocation_block_size_128b_log2)
-            .min(usize::BITS - 1 + chip_io_block_allocation_blocks_log2)
+            .min(usize::BITS - 1 + blkdev_io_block_allocation_blocks_log2)
             .max(io_block_allocation_blocks_log2)
             .max(auth_tree_data_block_allocation_blocks_log2);
 
         let mut buffers = FixedVec::new_with_default(
-            1usize << (preferred_chip_io_bulk_allocation_blocks_log2 - chip_io_block_allocation_blocks_log2),
+            1usize << (preferred_blkdev_io_bulk_allocation_blocks_log2 - blkdev_io_block_allocation_blocks_log2),
         )?;
         for buffer in buffers.iter_mut() {
             *buffer = FixedVec::new_with_default(
-                1usize << (chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7),
+                1usize << (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7),
             )?;
         }
 
@@ -890,8 +892,8 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
             buffers,
             fut_state: JournalReplayWritesFutureState::Init,
             allocation_block_size_128b_log2: image_layout.allocation_block_size_128b_log2,
-            chip_io_block_allocation_blocks_log2: chip_io_block_allocation_blocks_log2 as u8,
-            preferred_chip_io_bulk_allocation_blocks_log2: preferred_chip_io_bulk_allocation_blocks_log2 as u8,
+            blkdev_io_block_allocation_blocks_log2: blkdev_io_block_allocation_blocks_log2 as u8,
+            preferred_blkdev_io_bulk_allocation_blocks_log2: preferred_blkdev_io_bulk_allocation_blocks_log2 as u8,
         })
     }
 
@@ -899,7 +901,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `auth_tree_config` - The filesystem's
     ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
     /// * `apply_writes_script` - The [`JournalLog::apply_writes_script`].
@@ -909,7 +911,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
     ///   is being polled.
     fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         auth_tree_config: &auth_tree::AuthTreeConfig,
         apply_writes_script: &JournalApplyWritesScript,
         journal_staging_copy_undisguise: Option<&JournalStagingCopyUndisguise>,
@@ -941,7 +943,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                             }
                         };
                         let auth_tree_replay_remainder_fut = match auth_tree_updates_replay_cursor.advance_to(
-                            chip,
+                            blkdev,
                             layout::PhysicalAllocBlockIndex::from(0u64) + this.image_size,
                             auth_tree_config,
                         ) {
@@ -979,7 +981,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                             }
                         };
                         let advance_auth_tree_cursor_fut = match auth_tree_updates_replay_cursor.advance_to(
-                            chip,
+                            blkdev,
                             cur_apply_writes_script_entry.get_target_range().begin(),
                             auth_tree_config,
                         ) {
@@ -1002,7 +1004,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     let auth_tree_updates_replay_cursor =
                         match auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::poll(
                             pin::Pin::new(advance_auth_tree_cursor_fut),
-                            chip,
+                            blkdev,
                             auth_tree_config,
                             cx,
                         ) {
@@ -1018,12 +1020,12 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                 }
                 JournalReplayWritesFutureState::PrepareReadStagingCopy => {
                     let allocation_block_size_128b_log2 = this.allocation_block_size_128b_log2 as u32;
-                    let chip_io_block_allocation_blocks_log2 = this.chip_io_block_allocation_blocks_log2 as u32;
-                    let preferred_chip_io_bulk_allocation_blocks_log2 =
-                        this.preferred_chip_io_bulk_allocation_blocks_log2 as u32;
+                    let blkdev_io_block_allocation_blocks_log2 = this.blkdev_io_block_allocation_blocks_log2 as u32;
+                    let preferred_blkdev_io_bulk_allocation_blocks_log2 =
+                        this.preferred_blkdev_io_bulk_allocation_blocks_log2 as u32;
                     debug_assert!(
                         u64::from(this.next_target_allocation_block_index)
-                            .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                            .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
                     );
                     debug_assert!(this.apply_writes_script_index < apply_writes_script.len());
                     let cur_apply_writes_script_entry = &apply_writes_script[this.apply_writes_script_index];
@@ -1037,7 +1039,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                             | u64::from(
                                 cur_apply_writes_script_entry.get_journal_staging_copy_allocation_blocks_begin()
                             ))
-                        .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                        .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
                     );
                     debug_assert!(
                         this.next_target_allocation_block_index
@@ -1050,7 +1052,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                         continue;
                     }
                     let mut cur_target_range_allocation_blocks_end = this.next_target_allocation_block_index
-                        + layout::AllocBlockCount::from(1u64 << chip_io_block_allocation_blocks_log2);
+                        + layout::AllocBlockCount::from(1u64 << blkdev_io_block_allocation_blocks_log2);
                     debug_assert!(
                         cur_target_range_allocation_blocks_end
                             <= cur_apply_writes_script_entry.get_target_range().end()
@@ -1060,15 +1062,15 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     {
                         if (u64::from(this.next_target_allocation_block_index)
                             ^ u64::from(cur_target_range_allocation_blocks_end))
-                            >> preferred_chip_io_bulk_allocation_blocks_log2
+                            >> preferred_blkdev_io_bulk_allocation_blocks_log2
                             != 0
                         {
-                            // Crossing a preferred Chip IO bulk boundary, stop
+                            // Crossing a preferred Device IO bulk boundary, stop
                             // and process what's been found so far.
                             break;
                         }
                         cur_target_range_allocation_blocks_end +=
-                            layout::AllocBlockCount::from(1u64 << chip_io_block_allocation_blocks_log2);
+                            layout::AllocBlockCount::from(1u64 << blkdev_io_block_allocation_blocks_log2);
                     }
                     let cur_target_range = layout::PhysicalAllocBlockRange::new(
                         this.next_target_allocation_block_index,
@@ -1087,20 +1089,20 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     let request_region = match ChunkedIoRegion::new(
                         u64::from(cur_journal_staging_copy_range.begin()) << allocation_block_size_128b_log2,
                         u64::from(cur_journal_staging_copy_range.end()) << allocation_block_size_128b_log2,
-                        chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2,
+                        blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2,
                     )
                     .map_err(|e| {
                         match e {
                             ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
                             ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
                             ChunkedIoRegionError::ChunkIndexOverflow => {
-                                // The preferred_chip_io_bulk_allocation_blocks_log2
+                                // The preferred_blkdev_io_bulk_allocation_blocks_log2
                                 // had been chosen such that it would not overflow an usize in
                                 // units of Allocation Blocks.
                                 nvfs_err_internal!()
                             }
                             ChunkedIoRegionError::RegionUnaligned => {
-                                // All read requests are aligned to the Chip IO block size.
+                                // All read requests are aligned to the Device IO block size.
                                 nvfs_err_internal!()
                             }
                         }
@@ -1111,11 +1113,11 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let read_request = ReadJournalStagingCopyNvChipRequest {
+                    let read_request = ReadJournalStagingCopyNvBlkDevRequest {
                         region: request_region,
                         buffers: mem::take(&mut this.buffers),
                     };
-                    let read_fut = match chip.read(read_request) {
+                    let read_fut = match blkdev.read(read_request) {
                         Ok(Ok(read_fut)) => read_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = JournalReplayWritesFutureState::Done;
@@ -1131,7 +1133,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     cur_target_range,
                     read_fut,
                 } => {
-                    let read_request = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = JournalReplayWritesFutureState::Done;
@@ -1139,11 +1141,11 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let ReadJournalStagingCopyNvChipRequest { region: _, mut buffers } = read_request;
+                    let ReadJournalStagingCopyNvBlkDevRequest { region: _, mut buffers } = read_request;
 
                     // Undisguise the Journal Staging Copy in case it's been disguised.
                     let allocation_block_size_128b_log2 = this.allocation_block_size_128b_log2 as u32;
-                    let chip_io_block_allocation_blocks_log2 = this.chip_io_block_allocation_blocks_log2 as u32;
+                    let blkdev_io_block_allocation_blocks_log2 = this.blkdev_io_block_allocation_blocks_log2 as u32;
                     if let Some(journal_staging_copy_undisguise) = journal_staging_copy_undisguise {
                         let mut undisguise_processor = match journal_staging_copy_undisguise.instantiate_processor() {
                             Ok(undisguise_processor) => undisguise_processor,
@@ -1161,16 +1163,16 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                                 - cur_apply_writes_script_entry.get_target_range().begin());
 
                         while cur_target_allocation_block_index != cur_target_range.end() {
-                            let chip_io_block_index =
+                            let blkdev_io_block_index =
                                 (u64::from(cur_target_allocation_block_index - cur_target_range.begin())
-                                    >> chip_io_block_allocation_blocks_log2) as usize;
-                            let chip_io_block_buf = &mut buffers[chip_io_block_index];
-                            for allocation_block_in_chip_io_block_index in
-                                0..1usize << chip_io_block_allocation_blocks_log2
+                                    >> blkdev_io_block_allocation_blocks_log2) as usize;
+                            let blkdev_io_block_buf = &mut buffers[blkdev_io_block_index];
+                            for allocation_block_in_blkdev_io_block_index in
+                                0..1usize << blkdev_io_block_allocation_blocks_log2
                             {
-                                let allocation_block_buf = &mut chip_io_block_buf
-                                    [allocation_block_in_chip_io_block_index << (allocation_block_size_128b_log2 + 7)
-                                        ..(allocation_block_in_chip_io_block_index + 1)
+                                let allocation_block_buf = &mut blkdev_io_block_buf
+                                    [allocation_block_in_blkdev_io_block_index << (allocation_block_size_128b_log2 + 7)
+                                        ..(allocation_block_in_blkdev_io_block_index + 1)
                                             << (allocation_block_size_128b_log2 + 7)];
                                 if let Err(e) = undisguise_processor.undisguise_journal_staging_copy_allocation_block(
                                     cur_journal_staging_copy_allocation_block_index,
@@ -1189,20 +1191,20 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     let request_region = match ChunkedIoRegion::new(
                         u64::from(cur_target_range.begin()) << allocation_block_size_128b_log2,
                         u64::from(cur_target_range.end()) << allocation_block_size_128b_log2,
-                        chip_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2,
+                        blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2,
                     )
                     .map_err(|e| {
                         match e {
                             ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
                             ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
                             ChunkedIoRegionError::ChunkIndexOverflow => {
-                                // The preferred_chip_io_bulk_allocation_blocks_log2
+                                // The preferred_blkdev_io_bulk_allocation_blocks_log2
                                 // had been chosen such that it would not overflow an usize in
                                 // units of Allocation Blocks.
                                 nvfs_err_internal!()
                             }
                             ChunkedIoRegionError::RegionUnaligned => {
-                                // All read requests are aligned to the Chip IO block size.
+                                // All read requests are aligned to the Device IO block size.
                                 nvfs_err_internal!()
                             }
                         }
@@ -1213,11 +1215,11 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let write_request = WriteTargetNvChipRequest {
+                    let write_request = WriteTargetNvBlkDevRequest {
                         region: request_region,
                         buffers,
                     };
-                    let write_fut = match chip.write(write_request) {
+                    let write_fut = match blkdev.write(write_request) {
                         Ok(Ok(write_fut)) => write_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = JournalReplayWritesFutureState::Done;
@@ -1233,7 +1235,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     cur_target_range_allocation_blocks,
                     write_fut,
                 } => {
-                    let write_request = match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
+                    let write_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((write_request, Ok(())))) => write_request,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = JournalReplayWritesFutureState::Done;
@@ -1241,7 +1243,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let WriteTargetNvChipRequest { region: _, buffers } = write_request;
+                    let WriteTargetNvBlkDevRequest { region: _, buffers } = write_request;
                     this.buffers = buffers;
 
                     this.fut_state = JournalReplayWritesFutureState::UpdateAuthTree {
@@ -1259,7 +1261,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                         Some(auth_tree_write_part_fut) => {
                             match auth_tree::AuthTreeReplayJournalUpdateScriptCursorWritePartFuture::poll(
                                 pin::Pin::new(auth_tree_write_part_fut),
-                                chip,
+                                blkdev,
                                 auth_tree_config,
                                 cx,
                             ) {
@@ -1284,21 +1286,21 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                     };
 
                     let allocation_block_size_128b_log2 = this.allocation_block_size_128b_log2 as u32;
-                    let chip_io_block_allocation_blocks_log2 = this.chip_io_block_allocation_blocks_log2 as u32;
+                    let blkdev_io_block_allocation_blocks_log2 = this.blkdev_io_block_allocation_blocks_log2 as u32;
                     while next_allocation_block_index_in_cur_target_range != cur_target_range_allocation_blocks {
-                        let chip_io_block_index = u64::from(*next_allocation_block_index_in_cur_target_range)
-                            >> chip_io_block_allocation_blocks_log2;
-                        let allocation_block_in_chip_io_block_index =
+                        let blkdev_io_block_index = u64::from(*next_allocation_block_index_in_cur_target_range)
+                            >> blkdev_io_block_allocation_blocks_log2;
+                        let allocation_block_in_blkdev_io_block_index =
                             (u64::from(*next_allocation_block_index_in_cur_target_range)
-                                - (chip_io_block_index << chip_io_block_allocation_blocks_log2))
+                                - (blkdev_io_block_index << blkdev_io_block_allocation_blocks_log2))
                                 as usize;
-                        let chip_io_block_index = chip_io_block_index as usize;
+                        let blkdev_io_block_index = blkdev_io_block_index as usize;
                         *next_allocation_block_index_in_cur_target_range =
                             *next_allocation_block_index_in_cur_target_range + layout::AllocBlockCount::from(1u64);
 
-                        let allocation_block_buf = &this.buffers[chip_io_block_index]
-                            [allocation_block_in_chip_io_block_index << (allocation_block_size_128b_log2 + 7)
-                                ..(allocation_block_in_chip_io_block_index + 1)
+                        let allocation_block_buf = &this.buffers[blkdev_io_block_index]
+                            [allocation_block_in_blkdev_io_block_index << (allocation_block_size_128b_log2 + 7)
+                                ..(allocation_block_in_blkdev_io_block_index + 1)
                                     << (allocation_block_size_128b_log2 + 7)];
                         auth_tree_updates_replay_cursor = match auth_tree_updates_replay_cursor
                             .update(auth_tree_config, allocation_block_buf)
@@ -1329,7 +1331,7 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
                 } => {
                     match auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::poll(
                         pin::Pin::new(auth_tree_replay_remainder_fut),
-                        chip,
+                        blkdev,
                         auth_tree_config,
                         cx,
                     ) {
@@ -1349,94 +1351,94 @@ impl<C: chip::NvChip> JournalReplayWritesFuture<C> {
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`JournalReplayWritesFuture`].
-struct ReadJournalStagingCopyNvChipRequest {
+struct ReadJournalStagingCopyNvBlkDevRequest {
     region: ChunkedIoRegion,
     buffers: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
-impl chip::NvChipReadRequest for ReadJournalStagingCopyNvChipRequest {
-    fn region(&self) -> &chip::ChunkedIoRegion {
+impl blkdev::NvBlkDevReadRequest for ReadJournalStagingCopyNvBlkDevRequest {
+    fn region(&self) -> &blkdev::ChunkedIoRegion {
         &self.region
     }
 
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
-        let chip_io_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
+        let blkdev_io_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
         Ok(Some(
-            &mut self.buffers[chip_io_block_index][range.range_in_chunk().clone()],
+            &mut self.buffers[blkdev_io_block_index][range.range_in_chunk().clone()],
         ))
     }
 }
 
-/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
 /// internally by [`JournalReplayWritesFuture`].
-struct WriteTargetNvChipRequest {
-    region: chip::ChunkedIoRegion,
+struct WriteTargetNvBlkDevRequest {
+    region: blkdev::ChunkedIoRegion,
     buffers: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
-impl chip::NvChipWriteRequest for WriteTargetNvChipRequest {
+impl blkdev::NvBlkDevWriteRequest for WriteTargetNvBlkDevRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
 
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], chip::NvChipIoError> {
-        let chip_io_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
-        Ok(&self.buffers[chip_io_block_index][range.range_in_chunk().clone()])
+    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
+        let blkdev_io_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
+        Ok(&self.buffers[blkdev_io_block_index][range.range_in_chunk().clone()])
     }
 }
 
 /// Invalidate and cleanup the journal after replay.
-struct JournalCleanupFuture<C: chip::NvChip> {
+struct JournalCleanupFuture<B: blkdev::NvBlkDev> {
     enable_trimming: bool,
-    fut_state: JournalCleanupFutureState<C>,
+    fut_state: JournalCleanupFutureState<B>,
 }
 
 /// [`JournalCleanupFuture`] state-machine state.
-enum JournalCleanupFutureState<C: chip::NvChip> {
+enum JournalCleanupFutureState<B: blkdev::NvBlkDev> {
     Init,
     InvalidateJournalLogHead {
         image_header_end: layout::PhysicalAllocBlockIndex,
-        invalidate_journal_log_fut: JournalLogInvalidateFuture<C>,
+        invalidate_journal_log_fut: JournalLogInvalidateFuture<B>,
     },
     WriteBarrierBeforeTrim {
-        write_barrier_fut: C::WriteBarrierFuture,
+        write_barrier_fut: B::WriteBarrierFuture,
     },
     TrimJournalLogExtentPrepare {
         journal_log_extents_index: usize,
     },
     TrimJournalLogExtent {
         next_journal_log_extents_index: usize,
-        trim_fut: C::TrimFuture,
+        trim_fut: B::TrimFuture,
     },
     TrimJournalStagingCopyPrepare {
         apply_writes_script_index: usize,
     },
     TrimJournalStagingCopy {
         next_apply_writes_script_index: usize,
-        trim_fut: C::TrimFuture,
+        trim_fut: B::TrimFuture,
     },
     TrimTrimScriptEntryPrepare {
         trim_script_index: usize,
     },
     TrimTrimScriptEntry {
         next_trim_script_index: usize,
-        trim_fut: C::TrimFuture,
+        trim_fut: B::TrimFuture,
     },
     Done,
 }
 
-impl<C: chip::NvChip> JournalCleanupFuture<C> {
+impl<B: blkdev::NvBlkDev> JournalCleanupFuture<B> {
     /// Instantiate a [`JournalCleanupFuture`].
     ///
     /// # Arguments:
     ///
     /// * `enable_trimming` - Whether or not to submit [trim
-    ///   commands](chip::NvChip::trim) to the underlying storage.
+    ///   commands](blkdev::NvBlkDev::trim) to the underlying storage.
     fn new(enable_trimming: bool) -> Self {
         Self {
             enable_trimming,
@@ -1448,7 +1450,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `salt_len` - Length of the salt found in the filesystem's
@@ -1461,7 +1463,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
     #[allow(clippy::too_many_arguments)]
     fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         image_layout: &layout::ImageLayout,
         salt_len: u8,
         journal_log_extents: &extents::PhysicalExtents,
@@ -1488,7 +1490,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                 } => {
                     match JournalLogInvalidateFuture::poll(
                         pin::Pin::new(invalidate_journal_log_fut),
-                        chip,
+                        blkdev,
                         image_layout,
                         *image_header_end,
                         cx,
@@ -1507,7 +1509,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                         return task::Poll::Ready(Ok(()));
                     }
 
-                    let write_barrier_fut = match chip.write_barrier() {
+                    let write_barrier_fut = match blkdev.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(_) => {
                             // A write barrier is needed before trimming, but failure to trim is considered
@@ -1519,7 +1521,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                     this.fut_state = JournalCleanupFutureState::WriteBarrierBeforeTrim { write_barrier_fut };
                 }
                 JournalCleanupFutureState::WriteBarrierBeforeTrim { write_barrier_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(_)) => {
                             // A write barrier is needed before trimming, but failure to trim is considered
@@ -1545,33 +1547,34 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                         continue;
                     }
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                    let chip_io_block_allocation_blocks_log2 =
-                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-                    let allocation_block_chip_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
                     let journal_log_extent = journal_log_extents.get_extent_range(*journal_log_extents_index);
-                    let trim_region_chip_io_blocks_begin = u64::from(journal_log_extent.begin())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count = u64::from(journal_log_extent.block_count())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_fut = match chip.trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count) {
-                        Ok(trim_fut) => trim_fut,
-                        Err(e) => {
-                            if e == NvChipIoError::OperationNotSupported {
-                                // If the operation is not supported, don't even bother to submit
-                                // any more trim requests.
-                                this.fut_state = JournalCleanupFutureState::Done;
-                                return task::Poll::Ready(Ok(()));
-                            } else {
-                                // Failure to trim is considered non-fatal. Advance to the next region.
-                                *journal_log_extents_index += 1;
-                                continue;
+                    let trim_region_blkdev_io_blocks_begin = u64::from(journal_log_extent.begin())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count = u64::from(journal_log_extent.block_count())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_fut =
+                        match blkdev.trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count) {
+                            Ok(trim_fut) => trim_fut,
+                            Err(e) => {
+                                if e == NvBlkDevIoError::OperationNotSupported {
+                                    // If the operation is not supported, don't even bother to submit
+                                    // any more trim requests.
+                                    this.fut_state = JournalCleanupFutureState::Done;
+                                    return task::Poll::Ready(Ok(()));
+                                } else {
+                                    // Failure to trim is considered non-fatal. Advance to the next region.
+                                    *journal_log_extents_index += 1;
+                                    continue;
+                                }
                             }
-                        }
-                    };
+                        };
                     this.fut_state = JournalCleanupFutureState::TrimJournalLogExtent {
                         next_journal_log_extents_index: *journal_log_extents_index + 1,
                         trim_fut,
@@ -1581,7 +1584,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                     next_journal_log_extents_index,
                     trim_fut,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(trim_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(trim_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal, advance
@@ -1611,35 +1614,36 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                         continue;
                     }
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                    let chip_io_block_allocation_blocks_log2 =
-                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-                    let allocation_block_chip_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
                     let apply_writes_script_entry = &apply_writes_script[*apply_writes_script_index];
-                    let trim_region_chip_io_blocks_begin =
+                    let trim_region_blkdev_io_blocks_begin =
                         u64::from(apply_writes_script_entry.get_journal_staging_copy_allocation_blocks_begin())
-                            >> chip_io_block_allocation_blocks_log2
-                            << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count =
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count =
                         u64::from(apply_writes_script_entry.get_target_range().block_count())
-                            >> chip_io_block_allocation_blocks_log2
-                            << allocation_block_chip_io_blocks_log2;
-                    let trim_fut = match chip.trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count) {
-                        Ok(trim_fut) => trim_fut,
-                        Err(e) => {
-                            if e == NvChipIoError::OperationNotSupported {
-                                // If the operation is not supported, don't even bother to submit
-                                // any more trim requests.
-                                this.fut_state = JournalCleanupFutureState::Done;
-                                return task::Poll::Ready(Ok(()));
-                            } else {
-                                // Failure to trim is considered non-fatal. Advance to the next region.
-                                *apply_writes_script_index += 1;
-                                continue;
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
+                    let trim_fut =
+                        match blkdev.trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count) {
+                            Ok(trim_fut) => trim_fut,
+                            Err(e) => {
+                                if e == NvBlkDevIoError::OperationNotSupported {
+                                    // If the operation is not supported, don't even bother to submit
+                                    // any more trim requests.
+                                    this.fut_state = JournalCleanupFutureState::Done;
+                                    return task::Poll::Ready(Ok(()));
+                                } else {
+                                    // Failure to trim is considered non-fatal. Advance to the next region.
+                                    *apply_writes_script_index += 1;
+                                    continue;
+                                }
                             }
-                        }
-                    };
+                        };
                     this.fut_state = JournalCleanupFutureState::TrimJournalStagingCopy {
                         next_apply_writes_script_index: *apply_writes_script_index + 1,
                         trim_fut,
@@ -1649,7 +1653,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                     next_apply_writes_script_index,
                     trim_fut,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(trim_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(trim_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal, advance
@@ -1675,34 +1679,35 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                         return task::Poll::Ready(Ok(()));
                     }
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                    let chip_io_block_allocation_blocks_log2 =
-                        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-                    let allocation_block_chip_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
                     let trim_script_entry = &trim_script[*trim_script_index];
-                    let trim_region_chip_io_blocks_begin = u64::from(trim_script_entry.get_target_range().begin())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count =
+                    let trim_region_blkdev_io_blocks_begin = u64::from(trim_script_entry.get_target_range().begin())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count =
                         u64::from(trim_script_entry.get_target_range().block_count())
-                            >> chip_io_block_allocation_blocks_log2
-                            << allocation_block_chip_io_blocks_log2;
-                    let trim_fut = match chip.trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count) {
-                        Ok(trim_fut) => trim_fut,
-                        Err(e) => {
-                            if e == NvChipIoError::OperationNotSupported {
-                                // If the operation is not supported, don't even bother to submit
-                                // any more trim requests.
-                                this.fut_state = JournalCleanupFutureState::Done;
-                                return task::Poll::Ready(Ok(()));
-                            } else {
-                                // Failure to trim is considered non-fatal. Advance to the next region.
-                                *trim_script_index += 1;
-                                continue;
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
+                    let trim_fut =
+                        match blkdev.trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count) {
+                            Ok(trim_fut) => trim_fut,
+                            Err(e) => {
+                                if e == NvBlkDevIoError::OperationNotSupported {
+                                    // If the operation is not supported, don't even bother to submit
+                                    // any more trim requests.
+                                    this.fut_state = JournalCleanupFutureState::Done;
+                                    return task::Poll::Ready(Ok(()));
+                                } else {
+                                    // Failure to trim is considered non-fatal. Advance to the next region.
+                                    *trim_script_index += 1;
+                                    continue;
+                                }
                             }
-                        }
-                    };
+                        };
                     this.fut_state = JournalCleanupFutureState::TrimTrimScriptEntry {
                         next_trim_script_index: *trim_script_index + 1,
                         trim_fut,
@@ -1712,7 +1717,7 @@ impl<C: chip::NvChip> JournalCleanupFuture<C> {
                     next_trim_script_index,
                     trim_fut,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(trim_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(trim_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal, advance

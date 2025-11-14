@@ -21,7 +21,7 @@ use super::{
     write_dirty_data::min_write_block_allocation_blocks_log2,
 };
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
     fs::{
         NvFsError,
         cocoonfs::{alloc_bitmap, layout},
@@ -62,17 +62,17 @@ use layout::ImageLayout;
 /// Additional ones may get inserted and populated as a byproduct
 /// for [IO Block](ImageLayout::io_block_allocation_blocks_log2) alignment
 /// purposes in the course though.
-pub(super) struct TransactionReadMissingDataFuture<C: chip::NvChip> {
+pub(super) struct TransactionReadMissingDataFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference
     // on Self.
     transaction: Option<Box<Transaction>>,
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_index_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
     remaining_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-    cur_region_read_fut: Option<C::ReadFuture<TransactionReadMissingDataFutureNvChipReadRequest>>,
+    cur_region_read_fut: Option<B::ReadFuture<TransactionReadMissingDataFutureNvBlkDevReadRequest>>,
 }
 
-impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
     /// Instantiate a [`TransactionReadMissingDataFuture`].
     ///
     /// The [`TransactionReadMissingDataFuture`] assumes
@@ -99,12 +99,14 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     ) -> Result<Self, (Box<Transaction>, NvFsError)> {
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
 
         // Possibly extend the range to also cover all already present states within the
         // reach of its Minimum Read Block alignment padding, if any.
-        let min_read_block_allocation_blocks_log2 =
-            Self::min_read_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2);
+        let min_read_block_allocation_blocks_log2 = Self::min_read_block_allocation_blocks_log2(
+            blkdev_io_block_size_128b_log2,
+            allocation_block_size_128b_log2,
+        );
         let remaining_states_allocation_blocks_index_range = transaction
             .auth_tree_data_blocks_update_states
             .extend_states_allocation_blocks_index_range_within_alignment(
@@ -141,7 +143,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
     ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
     /// * `cx` - The context of the asynchronous task on whose behalf the future
@@ -149,7 +151,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
     #[allow(clippy::type_complexity)]
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
         cx: &mut core::task::Context<'_>,
     ) -> task::Poll<
@@ -166,7 +168,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         loop {
             let transaction = this.transaction.as_mut().ok_or_else(|| nvfs_err_internal!())?;
             if let Some(cur_region_read_fut) = this.cur_region_read_fut.as_mut() {
-                match chip::NvChipFuture::poll(pin::Pin::new(cur_region_read_fut), chip, cx) {
+                match blkdev::NvBlkDevFuture::poll(pin::Pin::new(cur_region_read_fut), blkdev, cx) {
                     task::Poll::Pending => {
                         return task::Poll::Pending;
                     }
@@ -241,7 +243,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
                 }
             };
 
-            this.cur_region_read_fut = Some(match chip.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
+            this.cur_region_read_fut = Some(match blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
                 Ok(next_region_read_fut) => next_region_read_fut,
                 Err(e) => {
                     return task::Poll::Ready(
@@ -268,17 +270,17 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip_io_block_size_128b_log2` - Value of
-    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+    /// * `blkdev_io_block_size_128b_log2` - Value of
+    ///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
     /// * `allocation_block_size_128b_log2` - Verbatim value of
     ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn min_read_block_allocation_blocks_log2(
-        chip_io_block_size_128b_log2: u32,
+        blkdev_io_block_size_128b_log2: u32,
         allocation_block_size_128b_log2: u32,
     ) -> u32 {
-        // The minimum IO unit is the maximum of the Chip IO block and the Allocation
+        // The minimum IO unit is the maximum of the Device IO block and the Allocation
         // Block sizes.
-        chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2)
+        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2)
     }
 
     /// Determine the preferred IO block size.
@@ -288,24 +290,24 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip_io_block_size_128b_log2` - Value of
-    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
-    /// * `preferred_chip_io_blocks_bulk_log2` - Value of
-    ///   [`NvChip::preferred_chip_io_blocks_bulk_log2()`](chip::NvChip::preferred_chip_io_blocks_bulk_log2).
+    /// * `blkdev_io_block_size_128b_log2` - Value of
+    ///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
+    /// * `preferred_blkdev_io_blocks_bulk_log2` - Value of
+    ///   [`NvBlkDev::preferred_io_blocks_bulk_log2()`](blkdev::NvBlkDev::preferred_io_blocks_bulk_log2).
     /// * `allocation_block_size_128b_log2` - Verbatim value of
     ///   [`ImageLayout::allocation_block_size_128b_log2`].
     /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
     ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
     pub fn preferred_read_block_allocation_blocks_log2(
-        chip_io_block_size_128b_log2: u32,
-        preferred_chip_io_blocks_bulk_log2: u32,
+        blkdev_io_block_size_128b_log2: u32,
+        preferred_blkdev_io_blocks_bulk_log2: u32,
         allocation_block_size_128b_log2: u32,
         auth_tree_data_block_allocation_blocks_log2: u32,
     ) -> u32 {
         // Determine the preferred Bulk IO size: consider the value announced by the
-        // NvChip, but ramp it up to some larger reasonable value in order to
+        // NvBlkDev, but ramp it up to some larger reasonable value in order to
         // reduce the overall number of IO requests.
-        (preferred_chip_io_blocks_bulk_log2 + chip_io_block_size_128b_log2)
+        (preferred_blkdev_io_blocks_bulk_log2 + blkdev_io_block_size_128b_log2)
             .saturating_sub(allocation_block_size_128b_log2)
             .min(usize::BITS - 1)
             .max(auth_tree_data_block_allocation_blocks_log2)
@@ -346,30 +348,32 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
         let io_block_allocation_blocks_log2 = transaction.io_block_allocation_blocks_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
-        let preferred_chip_io_blocks_bulk_log2 = transaction.preferred_chip_io_blocks_bulk_log2;
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
+        let preferred_blkdev_io_blocks_bulk_log2 = transaction.preferred_blkdev_io_blocks_bulk_log2;
 
         let mut remaining_states_allocation_blocks_index_range = remaining_states_allocation_blocks_index_range.clone();
         let states = &transaction.auth_tree_data_blocks_update_states;
-        let min_read_block_allocation_blocks_log2 =
-            Self::min_read_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2);
+        let min_read_block_allocation_blocks_log2 = Self::min_read_block_allocation_blocks_log2(
+            blkdev_io_block_size_128b_log2,
+            allocation_block_size_128b_log2,
+        );
         // The logic below assumes that a Minimum Read Block has either been written
         // fully to the Journal or not at all, which is implied by the
         // requirement that a Minimum Write Block is >= a Minimum Read Block.
         debug_assert!(
             min_read_block_allocation_blocks_log2
                 <= min_write_block_allocation_blocks_log2(
-                    chip_io_block_size_128b_log2,
+                    blkdev_io_block_size_128b_log2,
                     allocation_block_size_128b_log2
                 )
         );
 
         // Determine the preferred Bulk IO size: consider the value announced by the
-        // NvChip, but ramp it up to some larger reasonable value in order to
+        // NvBlkDev, but ramp it up to some larger reasonable value in order to
         // reduce the overall number of IO requests.
         let preferred_read_block_allocation_blocks_log2 = Self::preferred_read_block_allocation_blocks_log2(
-            chip_io_block_size_128b_log2,
-            preferred_chip_io_blocks_bulk_log2,
+            blkdev_io_block_size_128b_log2,
+            preferred_blkdev_io_blocks_bulk_log2,
             allocation_block_size_128b_log2,
             auth_tree_data_block_allocation_blocks_log2,
         );
@@ -578,7 +582,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
             debug_assert!(!cur_min_read_block_any_unitialized || !cur_min_read_block_any_not_unitialized);
 
             if cur_min_read_block_any_unitialized {
-                // Never ever request the NvChip to read uninitialized data. Skip over it one
+                // Never ever request the NvBlkDev to read uninitialized data. Skip over it one
                 // way or another.
                 cur_min_read_block_states_allocation_blocks_index_range_begin =
                     cur_min_read_block_states_allocation_blocks_index_range_end;
@@ -654,7 +658,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
                     {
                         cur_min_read_block_can_read_from_journal = false;
                     } else {
-                        // We know at this point that we're at most one Chip IO block ahead, as
+                        // We know at this point that we're at most one Device IO block ahead, as
                         // per the initial loop condition stopping the search at Minimum Read
                         // Block sized gaps. As the Minimum Read Block is less or equal than an
                         // IO block in size, it follows that the current position is at most one
@@ -766,17 +770,19 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
         read_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
         read_from_target: bool,
-    ) -> Result<TransactionReadMissingDataFutureNvChipReadRequest, NvFsError> {
+    ) -> Result<TransactionReadMissingDataFutureNvBlkDevReadRequest, NvFsError> {
         let transaction = self.transaction.as_mut().ok_or_else(|| nvfs_err_internal!())?;
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
         let allocation_block_size = 1usize << (allocation_block_size_128b_log2 + 7);
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
-        // The minimum IO unit is the maximum of the Chip IO block and the Allocation
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
+        // The minimum IO unit is the maximum of the Device IO block and the Allocation
         // Block sizes.
-        let min_read_block_allocation_blocks_log2 =
-            Self::min_read_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2);
+        let min_read_block_allocation_blocks_log2 = Self::min_read_block_allocation_blocks_log2(
+            blkdev_io_block_size_128b_log2,
+            allocation_block_size_128b_log2,
+        );
 
         let states = &mut transaction.auth_tree_data_blocks_update_states;
         // Fill alignment gaps in the current read region, adjust the original input
@@ -999,7 +1005,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
         {
             let needs_read = match &states[update_states_allocation_block_index].nv_sync_state {
                 AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => {
-                    // Completely uninitialized Chip IO Blocks would have been filtered by
+                    // Completely uninitialized Device IO Blocks would have been filtered by
                     // Self::determine_next_read_range().
                     debug_assert!(
                         unallocated_state.target_state.is_initialized() || unallocated_state.copied_to_journal
@@ -1025,7 +1031,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
             }
         }
 
-        Ok(TransactionReadMissingDataFutureNvChipReadRequest {
+        Ok(TransactionReadMissingDataFutureNvBlkDevReadRequest {
             read_region_states_allocation_blocks_index_range: aligned_read_region_states_allocation_blocks_index_range,
             read_from_target,
             request_io_region: ChunkedIoRegion::new(
@@ -1046,12 +1052,12 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
     /// * `completed_read_request` - The completed storage read request.
     fn apply_read_request_result(
         transaction: &mut Transaction,
-        completed_read_request: TransactionReadMissingDataFutureNvChipReadRequest,
+        completed_read_request: TransactionReadMissingDataFutureNvBlkDevReadRequest,
     ) -> Result<(), NvFsError> {
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
 
-        let TransactionReadMissingDataFutureNvChipReadRequest {
+        let TransactionReadMissingDataFutureNvBlkDevReadRequest {
             read_region_states_allocation_blocks_index_range,
             read_from_target,
             request_io_region: _,
@@ -1110,7 +1116,7 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
 
             match &mut states[i].nv_sync_state {
                 AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => {
-                    // Completely uninitialized Chip IO Blocks would have been filtered by
+                    // Completely uninitialized Device IO Blocks would have been filtered by
                     // Self::determine_next_read_range().
                     debug_assert!(
                         unallocated_state.target_state.is_initialized() || unallocated_state.copied_to_journal
@@ -1158,16 +1164,16 @@ impl<C: chip::NvChip> TransactionReadMissingDataFuture<C> {
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`TransactionReadMissingDataFuture`].
-struct TransactionReadMissingDataFutureNvChipReadRequest {
+struct TransactionReadMissingDataFutureNvBlkDevReadRequest {
     read_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     read_from_target: bool,
     request_io_region: ChunkedIoRegion,
     dst_allocation_block_buffers: FixedVec<Option<FixedVec<u8, 7>>, 0>,
 }
 
-impl chip::NvChipReadRequest for TransactionReadMissingDataFutureNvChipReadRequest {
+impl blkdev::NvBlkDevReadRequest for TransactionReadMissingDataFutureNvBlkDevReadRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.request_io_region
     }
@@ -1175,7 +1181,7 @@ impl chip::NvChipReadRequest for TransactionReadMissingDataFutureNvChipReadReque
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
         let (allocation_block_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
         Ok(self.dst_allocation_block_buffers[allocation_block_index]
             .as_mut()

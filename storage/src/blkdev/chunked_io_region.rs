@@ -25,8 +25,8 @@ pub enum ChunkedIoRegionError {
 /// storage.
 ///
 /// In general the size of logical entities to read or write from an IO request
-/// doesn't match the physical unit of IO, i.e. a [Chip IO
-/// Block](super::NvChip::chip_io_block_size_128b_log2) -- the former may be a
+/// doesn't match the physical unit of IO, i.e. a [Device IO
+/// Block](super::NvBlkDev::io_block_size_128b_log2) -- the former may be a
 /// multiple of the former and vice-versa.
 ///
 /// A [`ChunkedIoRegion`] provides a means to track the association between a
@@ -39,9 +39,9 @@ pub enum ChunkedIoRegionError {
 ///
 /// Even though not required by the [`ChunkedIoRegion`] implementation itself,
 /// it is assumed that the beginning and extents of the physical region would be
-/// commonly [aligned](Self::is_aligned) to the [Chip IO
-/// Block](super::NvChip::chip_io_block_size_128b_log2) size so that
-/// [`super::NvChip`] implementations can
+/// commonly [aligned](Self::is_aligned) to the [Device IO
+/// Block](super::NvBlkDev::io_block_size_128b_log2) size so that
+/// [`super::NvBlkDev`] implementations can
 /// [iterate](Self::aligned_blocks_iter) over the region in steps of that unit.
 ///
 /// The "chunks" however must all be of equal size, which is in turn constrained

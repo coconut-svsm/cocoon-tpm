@@ -13,7 +13,7 @@ use super::{
     staging_copy_disguise::JournalStagingCopyUndisguise,
 };
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     crypto::{CryptoError, hash, symcipher},
     fs::{
         NvFsError, NvFsIoError,
@@ -1210,34 +1210,34 @@ impl JournalLog {
 /// Overwrite the filesystem's [journal log
 /// head](JournalLog::head_extent_physical_location) such that no more attempts
 /// to replay it will be made.
-pub struct JournalLogInvalidateFuture<C: chip::NvChip> {
-    fut_state: JournalLogInvalidateFutureState<C>,
+pub struct JournalLogInvalidateFuture<B: blkdev::NvBlkDev> {
+    fut_state: JournalLogInvalidateFutureState<B>,
     issue_sync: bool,
 }
 
 /// [`JournalLogInvalidateFuture`] state-machine state.
-enum JournalLogInvalidateFutureState<C: chip::NvChip> {
+enum JournalLogInvalidateFutureState<B: blkdev::NvBlkDev> {
     Init,
     WriteBarrierBeforeInvalidate {
-        write_barrier_fut: C::WriteBarrierFuture,
+        write_barrier_fut: B::WriteBarrierFuture,
     },
     InvalidateJournalLogHead {
-        overwrite_journal_log_head_fut: C::WriteFuture<JournalLogInvalidateNvChipWriteRequest>,
+        overwrite_journal_log_head_fut: B::WriteFuture<JournalLogInvalidateNvBlkDevWriteRequest>,
     },
     WriteSyncAfterInvalidate {
-        write_sync_fut: C::WriteSyncFuture,
+        write_sync_fut: B::WriteSyncFuture,
     },
     Done,
 }
 
-impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
+impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
     /// Instantiate a [`JournalLogInvalidateFuture`].
     ///
     /// # Arguments:
     ///
     /// * `issue_sync` - Whether or not to submit a [synchronization
-    ///   barrier](chip::NvChip::write_sync) to the backing storage after the
-    ///   journal log invalidation.
+    ///   barrier](blkdev::NvBlkDev::write_sync) to the backing storage after
+    ///   the journal log invalidation.
     pub fn new(issue_sync: bool) -> Self {
         Self {
             fut_state: JournalLogInvalidateFutureState::Init,
@@ -1249,7 +1249,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `image_header_end` - [End of the filesystem image header on
@@ -1258,7 +1258,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
     ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         image_layout: &layout::ImageLayout,
         image_header_end: layout::PhysicalAllocBlockIndex,
         cx: &mut task::Context<'_>,
@@ -1268,7 +1268,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
         loop {
             match &mut this.fut_state {
                 JournalLogInvalidateFutureState::Init => {
-                    let write_barrier_fut = match chip.write_barrier() {
+                    let write_barrier_fut = match blkdev.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(e) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
@@ -1279,7 +1279,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
                         JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate { write_barrier_fut };
                 }
                 JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate { write_barrier_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
@@ -1296,10 +1296,10 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
                                 return task::Poll::Ready(Err(e));
                             }
                         };
-                    let overwrite_journal_log_head_request = match JournalLogInvalidateNvChipWriteRequest::new(
+                    let overwrite_journal_log_head_request = match JournalLogInvalidateNvBlkDevWriteRequest::new(
                         &journal_log_head_extent,
                         image_layout.allocation_block_size_128b_log2 as u32,
-                        chip,
+                        blkdev,
                     ) {
                         Ok(overwrite_journal_log_head_request) => overwrite_journal_log_head_request,
                         Err(e) => {
@@ -1307,7 +1307,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let overwrite_journal_log_head_fut = match chip
+                    let overwrite_journal_log_head_fut = match blkdev
                         .write(overwrite_journal_log_head_request)
                         .and_then(|r| r.map_err(|(_, e)| e))
                     {
@@ -1324,7 +1324,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
                 JournalLogInvalidateFutureState::InvalidateJournalLogHead {
                     overwrite_journal_log_head_fut,
                 } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(overwrite_journal_log_head_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(overwrite_journal_log_head_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
@@ -1333,7 +1333,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let write_sync_fut = match chip.write_sync() {
+                    let write_sync_fut = match blkdev.write_sync() {
                         Ok(write_sync_fut) => write_sync_fut,
                         Err(e) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
@@ -1348,7 +1348,7 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
                     }
                 }
                 JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_sync_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_sync_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
@@ -1365,31 +1365,31 @@ impl<C: chip::NvChip> JournalLogInvalidateFuture<C> {
     }
 }
 
-/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
 /// internally by [`JournalLogInvalidateFuture`].
-struct JournalLogInvalidateNvChipWriteRequest {
+struct JournalLogInvalidateNvBlkDevWriteRequest {
     region: ChunkedIoRegion,
     overwrite_buf: FixedVec<u8, 7>,
 }
 
-impl JournalLogInvalidateNvChipWriteRequest {
-    fn new<C: chip::NvChip>(
+impl JournalLogInvalidateNvBlkDevWriteRequest {
+    fn new<B: blkdev::NvBlkDev>(
         journal_log_head_extent: &layout::PhysicalAllocBlockRange,
         allocation_block_size_128b_log2: u32,
-        chip: &C,
+        blkdev: &B,
     ) -> Result<Self, NvFsError> {
         // Allocate a buffer of the minimum length filled with zeroes. 128 Bytes is the
         // minimum chunk size.
         let overwrite_buf = FixedVec::new_with_value(128, 0u8)?;
 
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
         let journal_log_head_extent_begin_128b =
             u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
         // Only the magic needs to get invalidated. Overwrite the minimum possible IO
         // unit at the beginning of the journal log.
         let journal_log_head_extent_overwrite_end_128b = journal_log_head_extent_begin_128b
-            .checked_add(1u64 << chip_io_block_size_128b_log2)
-            .ok_or(NvFsError::from(chip::NvChipIoError::IoBlockOutOfRange))?;
+            .checked_add(1u64 << blkdev_io_block_size_128b_log2)
+            .ok_or(NvFsError::from(blkdev::NvBlkDevIoError::IoBlockOutOfRange))?;
         let region = ChunkedIoRegion::new(
             journal_log_head_extent_begin_128b,
             journal_log_head_extent_overwrite_end_128b,
@@ -1400,12 +1400,12 @@ impl JournalLogInvalidateNvChipWriteRequest {
     }
 }
 
-impl chip::NvChipWriteRequest for JournalLogInvalidateNvChipWriteRequest {
+impl blkdev::NvBlkDevWriteRequest for JournalLogInvalidateNvBlkDevWriteRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
 
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], chip::NvChipIoError> {
+    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
         // The chunk size is 128 Bytes, i.e. the size of overwrite_buf. Ignore the chunk
         // index and provide the corresponding region from zero-filled
         // overwrite_buf.
@@ -1414,23 +1414,23 @@ impl chip::NvChipWriteRequest for JournalLogInvalidateNvChipWriteRequest {
 }
 
 /// Read the journal log at filesystem opening time.
-pub struct JournalLogReadFuture<C: chip::NvChip> {
-    fut_state: JournalLogReadFutureState<C>,
+pub struct JournalLogReadFuture<B: blkdev::NvBlkDev> {
+    fut_state: JournalLogReadFutureState<B>,
     log_extents: extents::PhysicalExtents,
     extents_decryption_instance: Option<EncryptedChainedExtentsDecryptionInstance>,
     decrypted_journal_log_extents: Vec<zeroize::Zeroizing<Vec<u8>>>,
 }
 
 /// [`JournalLogReadFuture`] state-machine state.
-enum JournalLogReadFutureState<C: chip::NvChip> {
+enum JournalLogReadFutureState<B: blkdev::NvBlkDev> {
     Init,
     ReadJournalLogHeadExtentHead {
-        read_fut: C::ReadFuture<JournalLogReadExtentNvChipReadRequest>,
+        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
         journal_log_head_extent_effective_payload_len: usize,
     },
     ReadJournalLogHeadExtentTail {
-        read_fut: C::ReadFuture<JournalLogReadExtentNvChipReadRequest>,
+        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
         journal_log_head_extent_head: FixedVec<u8, 7>,
         journal_log_head_extent_allocation_blocks: layout::AllocBlockCount,
         journal_log_head_extent_effective_payload_len: usize,
@@ -1445,14 +1445,14 @@ enum JournalLogReadFutureState<C: chip::NvChip> {
         next_journal_log_tail_extent: layout::PhysicalAllocBlockRange,
     },
     ReadNextJournalLogTailExtent {
-        read_fut: C::ReadFuture<JournalLogReadExtentNvChipReadRequest>,
+        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
         next_journal_log_tail_extent_allocation_blocks: layout::AllocBlockCount,
     },
     DecodeJournalLog,
     Done,
 }
 
-impl<C: chip::NvChip> JournalLogReadFuture<C> {
+impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
     /// Instantiate a [`JournalLogReadFuture`].
     pub fn new() -> Self {
         Self {
@@ -1471,7 +1471,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
     /// * `salt_len` - Length of the salt found in the filesystem's
@@ -1483,7 +1483,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         image_layout: &layout::ImageLayout,
         salt_len: u8,
         root_key: &keys::RootKey,
@@ -1523,16 +1523,16 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                         return task::Poll::Ready(Err(e));
                     }
 
-                    // Read the very first Chip IO block from the Journal log and check if the magic
-                    // is there, otherwise the Journal is not active.
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    // Read the very first Device IO block from the Journal log and check if the
+                    // magic is there, otherwise the Journal is not active.
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let journal_log_head_extent_begin_128b =
                         u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
-                    let journal_log_head_extent_head_read_request = match JournalLogReadExtentNvChipReadRequest::new(
+                    let journal_log_head_extent_head_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
                         journal_log_head_extent_begin_128b,
-                        journal_log_head_extent_begin_128b + (1 << chip_io_block_size_128b_log2),
-                        chip_io_block_size_128b_log2,
+                        journal_log_head_extent_begin_128b + (1 << blkdev_io_block_size_128b_log2),
+                        blkdev_io_block_size_128b_log2,
                     ) {
                         Ok(journal_log_head_extent_head_read_request) => journal_log_head_extent_head_read_request,
                         Err(e) => {
@@ -1540,7 +1540,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let read_fut = match chip.read(journal_log_head_extent_head_read_request) {
+                    let read_fut = match blkdev.read(journal_log_head_extent_head_read_request) {
                         Ok(Ok(read_fut)) => read_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = JournalLogReadFutureState::Done;
@@ -1559,7 +1559,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                     journal_log_head_extent_effective_payload_len,
                 } => {
                     let journal_log_head_extent_head_read_request =
-                        match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                             task::Poll::Ready(Ok((journal_log_head_extent_head_read_request, Ok(())))) => {
                                 journal_log_head_extent_head_read_request
                             }
@@ -1577,12 +1577,12 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                     }
 
                     // Read the remainder from the log's head extent.
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let journal_log_head_extent_begin_128b =
                         u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
                     let journal_log_head_extent_tail_begin_128b =
-                        journal_log_head_extent_begin_128b + (1 << chip_io_block_size_128b_log2);
+                        journal_log_head_extent_begin_128b + (1 << blkdev_io_block_size_128b_log2);
                     let journal_log_head_extent_end_128b =
                         u64::from(journal_log_head_extent.end()) << allocation_block_size_128b_log2;
                     if journal_log_head_extent_tail_begin_128b == journal_log_head_extent_end_128b {
@@ -1595,10 +1595,10 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                         };
                         continue;
                     }
-                    let journal_log_head_extent_tail_read_request = match JournalLogReadExtentNvChipReadRequest::new(
+                    let journal_log_head_extent_tail_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
                         journal_log_head_extent_tail_begin_128b,
                         journal_log_head_extent_end_128b,
-                        chip_io_block_size_128b_log2,
+                        blkdev_io_block_size_128b_log2,
                     ) {
                         Ok(journal_log_head_extent_tail_read_request) => journal_log_head_extent_tail_read_request,
                         Err(e) => {
@@ -1606,7 +1606,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let read_fut = match chip.read(journal_log_head_extent_tail_read_request) {
+                    let read_fut = match blkdev.read(journal_log_head_extent_tail_read_request) {
                         Ok(Ok(read_fut)) => read_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = JournalLogReadFutureState::Done;
@@ -1627,7 +1627,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                     journal_log_head_extent_effective_payload_len,
                 } => {
                     let journal_log_head_extent_tail_read_request =
-                        match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                             task::Poll::Ready(Ok((journal_log_head_extent_tail_read_request, Ok(())))) => {
                                 journal_log_head_extent_tail_read_request
                             }
@@ -1746,7 +1746,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                         u64::from(next_journal_log_tail_extent.begin()) << allocation_block_size_128b_log2;
                     let next_journal_log_tail_extent_end_128b =
                         u64::from(next_journal_log_tail_extent.end()) << allocation_block_size_128b_log2;
-                    let next_journal_log_tail_extent_read_request = match JournalLogReadExtentNvChipReadRequest::new(
+                    let next_journal_log_tail_extent_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
                         next_journal_log_tail_extent_begin_128b,
                         next_journal_log_tail_extent_end_128b,
                         journal_block_allocation_blocks_log2,
@@ -1757,7 +1757,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let read_fut = match chip.read(next_journal_log_tail_extent_read_request) {
+                    let read_fut = match blkdev.read(next_journal_log_tail_extent_read_request) {
                         Ok(Ok(read_fut)) => read_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = JournalLogReadFutureState::Done;
@@ -1774,7 +1774,7 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
                     next_journal_log_tail_extent_allocation_blocks,
                 } => {
                     let next_journal_log_tail_extent_read_request =
-                        match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                             task::Poll::Ready(Ok((journal_log_read_next_tail_extent_request, Ok(())))) => {
                                 journal_log_read_next_tail_extent_request
                             }
@@ -1923,14 +1923,14 @@ impl<C: chip::NvChip> JournalLogReadFuture<C> {
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`JournalLogReadFuture`].
-struct JournalLogReadExtentNvChipReadRequest {
+struct JournalLogReadExtentNvBlkDevReadRequest {
     region: ChunkedIoRegion,
     dst: FixedVec<u8, 7>,
 }
 
-impl JournalLogReadExtentNvChipReadRequest {
+impl JournalLogReadExtentNvBlkDevReadRequest {
     fn new(physical_begin_128b: u64, physical_end_128b: u64, chunk_size_128b_log2: u32) -> Result<Self, NvFsError> {
         debug_assert!(chunk_size_128b_log2 < u64::BITS - 7);
         let region_len_128b = physical_end_128b - physical_begin_128b;
@@ -1940,15 +1940,13 @@ impl JournalLogReadExtentNvChipReadRequest {
         }
         let region_len = usize::try_from(region_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
         let dst = FixedVec::new_with_default(region_len)?;
-        let region =
-            chip::ChunkedIoRegion::new(physical_begin_128b, physical_end_128b, chunk_size_128b_log2).map_err(|e| {
-                match e {
-                    ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
-                    ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
-                    ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
-                    ChunkedIoRegionError::RegionUnaligned => {
-                        NvFsError::FsFormatError(CocoonFsFormatError::UnalignedJournalExtents as isize)
-                    }
+        let region = blkdev::ChunkedIoRegion::new(physical_begin_128b, physical_end_128b, chunk_size_128b_log2)
+            .map_err(|e| match e {
+                ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
+                ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
+                ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
+                ChunkedIoRegionError::RegionUnaligned => {
+                    NvFsError::FsFormatError(CocoonFsFormatError::UnalignedJournalExtents as isize)
                 }
             })?;
         Ok(Self { region, dst })
@@ -1960,7 +1958,7 @@ impl JournalLogReadExtentNvChipReadRequest {
     }
 }
 
-impl chip::NvChipReadRequest for JournalLogReadExtentNvChipReadRequest {
+impl blkdev::NvBlkDevReadRequest for JournalLogReadExtentNvBlkDevReadRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
@@ -1968,7 +1966,7 @@ impl chip::NvChipReadRequest for JournalLogReadExtentNvChipReadRequest {
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
         let chunk_size_128b_log2 = self.region.chunk_size_128b_log2();
         let (chunk_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
         let dst_chunk =

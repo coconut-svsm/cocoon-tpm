@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{
-    CocoonFsTestConfigs, cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_fs_instance_into_chip_helper,
+    CocoonFsTestConfigs, cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_fs_instance_into_blkdev_helper,
     cocoonfs_test_mkfs_op_helper, cocoonfs_test_openfs_op_helper, cocoonfs_test_read_inode_op_helper,
     cocoonfs_test_start_transaction_op_helper, cocoonfs_test_write_inode_op_helper,
 };
@@ -45,8 +45,8 @@ fn write_read_one_small() {
             assert_eq!(inode_write_data.as_slice(), inode_read_data.unwrap().as_slice());
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -107,8 +107,8 @@ fn write_read_one_small_uncommitted_overwrite() {
             assert_eq!(inode_write_data.as_slice(), inode_read_data.unwrap().as_slice());
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -151,8 +151,8 @@ fn write_read_one_small_committed_overwrite() {
             assert_eq!(inode_write_data.as_slice(), inode_read_data.unwrap().as_slice());
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -186,8 +186,8 @@ fn write_read_one_small_committed_overwrite() {
             assert_eq!(inode_write_data.as_slice(), inode_read_data.unwrap().as_slice());
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -236,8 +236,8 @@ fn write_read_one_medium() {
             assert_eq!(inode_write_data.as_slice(), inode_read_data.unwrap().as_slice());
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -344,8 +344,8 @@ fn write_read_two_large_interleaved_growth() {
             assert_eq!(inode1_write_data.as_slice(), inode1_read_data.unwrap().as_slice());
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode0_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();

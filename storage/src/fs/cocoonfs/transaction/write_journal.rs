@@ -19,7 +19,7 @@ use super::{
     write_dirty_data::TransactionWriteDirtyDataFuture,
 };
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
     crypto::{hash, rng},
     fs::{
         NvFsError,
@@ -53,21 +53,21 @@ use crate::fs::cocoonfs::fs::CocoonFs;
 use journal::extents_covering_auth_digests::ExtentsCoveringAuthDigests;
 
 /// Write the journal for a to be committed [`Transaction`].
-pub struct TransactionWriteJournalFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: TransactionWriteJournalFutureState<ST, C>,
+pub struct TransactionWriteJournalFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: TransactionWriteJournalFutureState<ST, B>,
     encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction: FixedVec<u8, 0>,
     issue_sync: bool,
 }
 
 /// [`TransactionWriteJournalFuture`] state-machine state.
-enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
     },
     InodeIndexApplyStagedUpdates {
-        update_root_inode_fut: inode_index::InodeIndexUpdateRootNodeInodeFuture<ST, C>,
+        update_root_inode_fut: inode_index::InodeIndexUpdateRootNodeInodeFuture<ST, B>,
     },
     Canonicalize {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -75,26 +75,26 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvCh
         transaction: Option<Box<Transaction>>,
     },
     UpdateStatesApplyStagedUpdates {
-        prepare_staged_updates_application_fut: TransactionPrepareStagedUpdatesApplicationFuture<ST, C>,
+        prepare_staged_updates_application_fut: TransactionPrepareStagedUpdatesApplicationFuture<ST, B>,
     },
     AllocateJournalStagingCopies {
-        allocate_journal_staging_copies_fut: TransactionAllocateJournalStagingCopiesFuture<ST, C>,
+        allocate_journal_staging_copies_fut: TransactionAllocateJournalStagingCopiesFuture<ST, B>,
     },
     UpdateStatesWriteDirtyData {
-        write_dirty_data_fut: TransactionWriteDirtyDataFuture<ST, C>,
+        write_dirty_data_fut: TransactionWriteDirtyDataFuture<ST, B>,
     },
     CollectAllocBitmapFileAuthDigestsForAuthTreeReconstruction {
-        collect_auth_digests_fut: TransactionCollectExtentsCoveringAuthDigestsFuture<C>,
+        collect_auth_digests_fut: TransactionCollectExtentsCoveringAuthDigestsFuture<B>,
     },
     PrepareAuthTreeUpdates {
         prepare_auth_tree_updates_fut:
-            auth_tree::AuthTreePrepareUpdatesFuture<ST, C, TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, C>>,
+            auth_tree::AuthTreePrepareUpdatesFuture<ST, B, TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, B>>,
     },
     WriteHeaderUpdates {
-        write_dirty_data_fut: TransactionWriteDirtyDataFuture<ST, C>,
+        write_dirty_data_fut: TransactionWriteDirtyDataFuture<ST, B>,
     },
     AllocateJournalLog {
-        allocate_fut: TransactionAllocateJournalExtentsFuture<ST, C>,
+        allocate_fut: TransactionAllocateJournalExtentsFuture<ST, B>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
         journal_log_encode_buf_layout: journal::log::JournalLogEncodeBufferLayout,
     },
@@ -122,7 +122,7 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvCh
         journal_log_head_extent_buf: FixedVec<u8, 7>,
         journal_log_tail_extents_bufs: FixedVec<FixedVec<u8, 7>, 0>,
         cur_tail_extent_index: usize,
-        write_extent_fut: C::WriteFuture<WriteJournalLogExtentChipRequest>,
+        write_extent_fut: B::WriteFuture<WriteJournalLogExtentNvBlkDevRequest>,
     },
     WriteBarrierBeforeJournalLogHeadWrite {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -130,31 +130,31 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, C: chip::NvCh
         transaction: Option<Box<Transaction>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
         journal_log_head_extent_buf: FixedVec<u8, 7>,
-        write_barrier_fut: C::WriteBarrierFuture,
+        write_barrier_fut: B::WriteBarrierFuture,
     },
     WriteJournalLogHeadExtent {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        write_extent_fut: C::WriteFuture<WriteJournalLogExtentChipRequest>,
+        write_extent_fut: B::WriteFuture<WriteJournalLogExtentNvBlkDevRequest>,
     },
     WriteSyncAfterJournalLogHeadWrite {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        write_sync_fut: C::WriteSyncFuture,
+        write_sync_fut: B::WriteSyncFuture,
     },
     WriteBarrierAfterJournalLogHeadWrite {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        write_barrier_fut: C::WriteBarrierFuture,
+        write_barrier_fut: B::WriteBarrierFuture,
     },
 
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFuture<ST, B> {
     /// Instantiate a [`TransactionWriteJournalFuture`].
     ///
     /// The [`TransactionWriteJournalFuture`] assumes
@@ -166,8 +166,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
     ///
     /// * `transaction` - The committing [`Transaction`].
     /// * `issue_sync` - Whether or not to submit a [synchronization
-    ///   barrier](chip::NvChip::write_sync) to the backing storage after the
-    ///   journal has been written.
+    ///   barrier](blkdev::NvBlkDev::write_sync) to the backing storage after
+    ///   the journal has been written.
     /// * `_fs_instance_sync_state` - Reference to [`CocoonFs::sync_state`].
     /// * `accumulated_pending_transactions_sync_state` - The accumulated
     ///   [`CocoonFsPendingTransactionsSyncState`] taken from
@@ -176,7 +176,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
     pub fn new(
         mut transaction: Box<Transaction>,
         issue_sync: bool,
-        _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         accumulated_pending_transactions_sync_state: CocoonFsPendingTransactionsSyncState,
     ) -> Result<Self, (Box<Transaction>, NvFsError)> {
         transaction.accumulated_fs_instance_pending_transactions_sync_state =
@@ -224,7 +224,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
     #[allow(clippy::type_complexity)]
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         mut rng: &mut dyn rng::RngCoreDispatchable,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<Transaction>, (bool, Option<Box<Transaction>>, NvFsError)>> {
@@ -1081,7 +1081,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
                     let journal_log_tail_extents = &transaction.journal_log_tail_extents;
                     if *next_tail_extent_index == journal_log_tail_extents.len() {
-                        let write_barrier_fut = match fs_instance.chip.write_barrier() {
+                        let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
                             Ok(write_barrier_fut) => write_barrier_fut,
                             Err(e) => break (false, Some(transaction), NvFsError::from(e)),
                         };
@@ -1092,7 +1092,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                             write_barrier_fut,
                         };
                     } else {
-                        let write_extent_request = match WriteJournalLogExtentChipRequest::new(
+                        let write_extent_request = match WriteJournalLogExtentNvBlkDevRequest::new(
                             &journal_log_tail_extents.get_extent_range(*next_tail_extent_index),
                             mem::take(&mut journal_log_tail_extents_bufs[*next_tail_extent_index]),
                             fs_instance.fs_config.image_layout.allocation_block_size_128b_log2,
@@ -1101,7 +1101,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                             Err(e) => break (false, Some(transaction), e),
                         };
                         let write_extent_fut = match fs_instance
-                            .chip
+                            .blkdev
                             .write(write_extent_request)
                             .and_then(|r| r.map_err(|(_, e)| e))
                         {
@@ -1127,7 +1127,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     write_extent_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_extent_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_extent_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             break (false, transaction.take(), NvFsError::from(e));
@@ -1149,13 +1149,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     write_barrier_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break (false, transaction.take(), NvFsError::from(e)),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let write_extent_request = match WriteJournalLogExtentChipRequest::new(
+                    let write_extent_request = match WriteJournalLogExtentNvBlkDevRequest::new(
                         journal_log_head_extent,
                         mem::take(journal_log_head_extent_buf),
                         fs_instance.fs_config.image_layout.allocation_block_size_128b_log2,
@@ -1164,7 +1164,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                         Err(e) => break (false, transaction.take(), e),
                     };
                     let write_extent_fut = match fs_instance
-                        .chip
+                        .blkdev
                         .write(write_extent_request)
                         .and_then(|r| r.map_err(|(_, e)| e))
                     {
@@ -1181,7 +1181,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     write_extent_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_extent_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_extent_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             break (true, transaction.take(), NvFsError::from(e));
@@ -1190,7 +1190,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     };
 
                     if this.issue_sync {
-                        let write_sync_fut = match fs_instance.chip.write_sync() {
+                        let write_sync_fut = match fs_instance.blkdev.write_sync() {
                             Ok(write_sync_fut) => write_sync_fut,
                             Err(e) => break (true, transaction.take(), NvFsError::from(e)),
                         };
@@ -1199,7 +1199,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                             write_sync_fut,
                         };
                     } else {
-                        let write_barrier_fut = match fs_instance.chip.write_barrier() {
+                        let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
                             Ok(write_barrier_fut) => write_barrier_fut,
                             Err(e) => break (true, transaction.take(), NvFsError::from(e)),
                         };
@@ -1214,7 +1214,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     write_sync_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_sync_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_sync_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break (true, transaction.take(), NvFsError::from(e)),
                         task::Poll::Pending => return task::Poll::Pending,
@@ -1233,7 +1233,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
                     write_barrier_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break (true, transaction.take(), NvFsError::from(e)),
                         task::Poll::Pending => return task::Poll::Pending,
@@ -1291,7 +1291,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteJournalFuture<S
 }
 
 /// Collect and encode some [`ExtentsCoveringAuthDigests`].
-struct TransactionCollectExtentsCoveringAuthDigestsFuture<C: chip::NvChip> {
+struct TransactionCollectExtentsCoveringAuthDigestsFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
     transaction: Option<Box<Transaction>>,
@@ -1300,11 +1300,11 @@ struct TransactionCollectExtentsCoveringAuthDigestsFuture<C: chip::NvChip> {
     last_auth_tree_data_block_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
     out_buffer: FixedVec<u8, 0>,
     out_buffer_pos: usize,
-    fut_state: TransactionCollectExtentsCoveringAuthDigestsFutureState<C>,
+    fut_state: TransactionCollectExtentsCoveringAuthDigestsFutureState<B>,
 }
 
 /// [`TransactionCollectExtentsCoveringAuthDigestsFuture`] state-machine state.
-enum TransactionCollectExtentsCoveringAuthDigestsFutureState<C: chip::NvChip> {
+enum TransactionCollectExtentsCoveringAuthDigestsFutureState<B: blkdev::NvBlkDev> {
     Init,
     LookupModified,
     LoadAuthTreeLeafNode {
@@ -1312,12 +1312,12 @@ enum TransactionCollectExtentsCoveringAuthDigestsFutureState<C: chip::NvChip> {
         cur_auth_tree_data_block_index: auth_tree::AuthTreeDataBlockIndex,
         next_transaction_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
         auth_tree_leaf_node_id: auth_tree::AuthTreeNodeId,
-        auth_tree_leaf_node_load_fut: auth_tree::AuthTreeNodeLoadFuture<C>,
+        auth_tree_leaf_node_load_fut: auth_tree::AuthTreeNodeLoadFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> {
     /// Instantiate a [`TransactionCollectExtentsCoveringAuthDigestsFuture`].
     ///
     /// The [`TransactionCollectExtentsCoveringAuthDigestsFuture`] assumes
@@ -1373,7 +1373,7 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<(
         FixedVec<u8, 0>,
@@ -1563,7 +1563,7 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
                         fs_sync_state_auth_tree.destructure_borrow();
                     let leaf_node = match auth_tree::AuthTreeNodeLoadFuture::poll(
                         pin::Pin::new(auth_tree_leaf_node_load_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         auth_tree_config,
                         auth_tree_root_hmac_digest,
                         &mut auth_tree_node_cache,
@@ -1843,15 +1843,15 @@ impl<C: chip::NvChip> TransactionCollectExtentsCoveringAuthDigestsFuture<C> {
     }
 }
 
-/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
 /// internally by [`TransactionWriteJournalFuture`].
-struct WriteJournalLogExtentChipRequest {
+struct WriteJournalLogExtentNvBlkDevRequest {
     region: ChunkedIoRegion,
     src: FixedVec<u8, 7>,
     allocation_block_size_128b_log2: u8,
 }
 
-impl WriteJournalLogExtentChipRequest {
+impl WriteJournalLogExtentNvBlkDevRequest {
     pub fn new(
         extent: &layout::PhysicalAllocBlockRange,
         src: FixedVec<u8, 7>,
@@ -1882,12 +1882,12 @@ impl WriteJournalLogExtentChipRequest {
     }
 }
 
-impl chip::NvChipWriteRequest for WriteJournalLogExtentChipRequest {
+impl blkdev::NvBlkDevWriteRequest for WriteJournalLogExtentNvBlkDevRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
 
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], chip::NvChipIoError> {
+    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
         let allocation_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
         let allocation_block_offset_in_src =
             allocation_block_index << (self.allocation_block_size_128b_log2 as u32 + 7);

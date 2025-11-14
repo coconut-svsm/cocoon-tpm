@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::{self, hash, rng, symcipher},
     fs::{
         NvFsError,
@@ -39,7 +39,7 @@ use crate::{
         io_slices::{self, IoSlicesIterCommon as _, PeekableIoSlicesIter as _},
     },
 };
-use core::{default, mem, pin, task, cmp};
+use core::{cmp, default, mem, pin, task};
 
 #[cfg(doc)]
 use transaction::Transaction;
@@ -289,28 +289,28 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
 /// latter case, the `InodeExtentsListReadFuture` assumes ownership of the
 /// [`Transaction`] and eventually returns it back from [`poll()`](Self::poll)
 /// upon future completion.
-pub struct InodeExtentsListReadFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeExtentsListReadFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode_extents_list_decryption_instance: EncryptedChainedExtentsDecryptionInstance,
     inode_extents_list_extents: extents::PhysicalExtents,
     decrypted_inode_extents_list_extents: Vec<Vec<u8>>,
-    fut_state: InodeExtentsListReadFutureState<ST, C>,
+    fut_state: InodeExtentsListReadFutureState<ST, B>,
 }
 
 /// [`InodeExtentsListReadFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeExtentsListReadFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeExtentsListReadFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     ReadExtentsListExtentPrepare {
         transaction: Option<Box<transaction::Transaction>>,
         next_inode_extents_list_extent: layout::PhysicalAllocBlockRange,
     },
     ReadExtentsListExtent {
         cur_inode_extents_list_extent_allocation_blocks: layout::AllocBlockCount,
-        read_fut: ReadAuthenticateExtentFuture<ST, C>,
+        read_fut: ReadAuthenticateExtentFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListReadFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeExtentsListReadFuture<ST, B> {
     /// Instantiate a [`InodeExtentsListReadFuture`].
     ///
     /// # Arguments:
@@ -404,8 +404,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListReadFuture<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeExtentsListReadFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeExtentsListReadFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -424,7 +424,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: core::pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -586,11 +586,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 ///
 /// Authentication is done via preauthentication CCA protection tags stored
 /// inline to the encrypted chained extents each.
-pub struct InodeExtentsListReadPreAuthFuture<C: chip::NvChip> {
-    read_extents_list_extents_fut: read_preauth::ReadChainedExtentsPreAuthCcaProtectedFuture<C>,
+pub struct InodeExtentsListReadPreAuthFuture<B: blkdev::NvBlkDev> {
+    read_extents_list_extents_fut: read_preauth::ReadChainedExtentsPreAuthCcaProtectedFuture<B>,
 }
 
-impl<C: chip::NvChip> InodeExtentsListReadPreAuthFuture<C> {
+impl<B: blkdev::NvBlkDev> InodeExtentsListReadPreAuthFuture<B> {
     /// Instantiate a [`InodeExtentsListReadPreAuthFuture`].
     ///
     /// # Arguments:
@@ -659,13 +659,13 @@ impl<C: chip::NvChip> InodeExtentsListReadPreAuthFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for InodeExtentsListReadPreAuthFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for InodeExtentsListReadPreAuthFuture<B> {
     type Output = Result<extents::PhysicalExtents, NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
         let decrypted_inode_extents_list_extents =
-            match chip::NvChipFuture::poll(pin::Pin::new(&mut this.read_extents_list_extents_fut), chip, cx) {
+            match blkdev::NvBlkDevFuture::poll(pin::Pin::new(&mut this.read_extents_list_extents_fut), blkdev, cx) {
                 task::Poll::Ready(Ok(decrypted_inode_extents_list_extents)) => decrypted_inode_extents_list_extents,
                 task::Poll::Ready(Err(e)) => return task::Poll::Ready(Err(e)),
                 task::Poll::Pending => return task::Poll::Pending,
@@ -720,15 +720,15 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for InodeExtentsListReadPreAuthFutur
 /// completion. Likewise for the inode's
 /// [`PhysicalExtents`](extents::PhysicalExtents) to encode in the extents
 /// lists.
-pub struct InodeExtentsListWriteFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeExtentsListWriteFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
     inode_extents: extents::PhysicalExtents,
-    fut_state: InodeExtentsListWriteFutureState<ST, C>,
+    fut_state: InodeExtentsListWriteFutureState<ST, B>,
 }
 
 /// [`InodeExtentsListWriteFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -743,7 +743,7 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
         next_preexisting_inode_extents_list_extent_index: usize,
     },
     PreparePreexistingInodeExtentsListExtents {
-        prepare_staged_updates_application_fut: transaction::TransactionPrepareStagedUpdatesApplicationFuture<ST, C>,
+        prepare_staged_updates_application_fut: transaction::TransactionPrepareStagedUpdatesApplicationFuture<ST, B>,
         preexisting_inode_extents_list_extents: extents::PhysicalExtents,
         cur_preexisting_inode_extents_list_extent_index: usize,
         cur_update_states_allocation_blocks_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -758,7 +758,7 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
         preexisting_inode_extents_list_extents: Option<extents::PhysicalExtents>,
         encoded_inode_extents_list_len: usize,
         inode_extents_list_encryption_layout: EncryptedChainedExtentsLayout,
-        allocate_fut: CocoonFsAllocateExtentsFuture<ST, C>,
+        allocate_fut: CocoonFsAllocateExtentsFuture<ST, B>,
     },
     StageInodeExtentsListUpdates {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -771,7 +771,7 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListWriteFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeExtentsListWriteFuture<ST, B> {
     /// Instantiate a new [`InodeExtentsListWriteFuture`].
     ///
     /// # Arguments:
@@ -802,8 +802,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListWriteFuture<ST,
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeExtentsListWriteFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeExtentsListWriteFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -836,7 +836,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {

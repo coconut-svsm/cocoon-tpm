@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::hash,
     fs::{
         NvFsError, NvFsIoError,
@@ -40,7 +40,7 @@ use core::{cmp, convert, iter, marker, mem, ops, pin, task};
 use ops::{Deref as _, DerefMut as _};
 
 #[cfg(doc)]
-use crate::chip::NvChipFuture as _;
+use crate::blkdev::NvBlkDevFuture as _;
 #[cfg(doc)]
 use crate::fs::cocoonfs::image_header::MutableImageHeader;
 #[cfg(doc)]
@@ -1875,7 +1875,7 @@ impl AuthTreeConfig {
     ///
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node whose storage
     ///   location to determine.
-    fn node_io_region(&self, node_id: &AuthTreeNodeId) -> Result<chip::ChunkedIoRegion, NvFsError> {
+    fn node_io_region(&self, node_id: &AuthTreeNodeId) -> Result<blkdev::ChunkedIoRegion, NvFsError> {
         debug_assert!(node_id.level < self.auth_tree_levels);
         if u64::from(node_id.covered_data_blocks_begin) >= self.max_covered_data_block_count {
             return Err(CocoonFsFormatError::BlockOutOfRange.into());
@@ -1902,7 +1902,7 @@ impl AuthTreeConfig {
             return Err(nvfs_err_internal!());
         }
         let physical_range = extent.physical_range();
-        chip::ChunkedIoRegion::new(
+        blkdev::ChunkedIoRegion::new(
             u64::from(physical_range.begin()) << self.allocation_block_size_128b_log2,
             u64::from(physical_range.end()) << self.allocation_block_size_128b_log2,
             (self.node_allocation_blocks_log2 + self.allocation_block_size_128b_log2) as u32,
@@ -2743,20 +2743,20 @@ impl<'a> Iterator for AuthTreePathNodesIterator<'a> {
 }
 
 /// Read an authentication tree node from storage.
-struct AuthTreeNodeReadFuture<C: chip::NvChip> {
-    read_fut: C::ReadFuture<AuthTreeNodeReadNvChipRequest>,
+struct AuthTreeNodeReadFuture<B: blkdev::NvBlkDev> {
+    read_fut: B::ReadFuture<AuthTreeNodeReadNvBlkDevRequest>,
 }
 
-impl<C: chip::NvChip> AuthTreeNodeReadFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeNodeReadFuture<B> {
     /// Instantiate an [`AuthTreeNodeReadFuture`].
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to read.
-    fn new(chip: &C, tree_config: &AuthTreeConfig, node_id: &AuthTreeNodeId) -> Result<Self, NvFsError> {
-        Self::new_with_buf(chip, tree_config, node_id, FixedVec::new_empty())
+    fn new(blkdev: &B, tree_config: &AuthTreeConfig, node_id: &AuthTreeNodeId) -> Result<Self, NvFsError> {
+        Self::new_with_buf(blkdev, tree_config, node_id, FixedVec::new_empty())
     }
 
     /// Instantiate an [`AuthTreeNodeReadFuture`] with destination buffer
@@ -2767,12 +2767,12 @@ impl<C: chip::NvChip> AuthTreeNodeReadFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to read.
     /// * `dst_buf` - The node data destination buffer to get repurposed.
     fn new_with_buf(
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
         mut dst_buf: FixedVec<u8, 7>,
@@ -2783,8 +2783,8 @@ impl<C: chip::NvChip> AuthTreeNodeReadFuture<C> {
         }
 
         let io_region = tree_config.node_io_region(node_id)?;
-        let request = AuthTreeNodeReadNvChipRequest { dst_buf, io_region };
-        let read_fut = chip
+        let request = AuthTreeNodeReadNvBlkDevRequest { dst_buf, io_region };
+        let read_fut = blkdev
             .read(request)
             .and_then(|r| r.map_err(|(_, e)| e))
             .map_err(NvFsError::from)?;
@@ -2792,14 +2792,14 @@ impl<C: chip::NvChip> AuthTreeNodeReadFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeReadFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for AuthTreeNodeReadFuture<B> {
     type Output = Result<FixedVec<u8, 7>, NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
-        match chip::NvChipFuture::poll(pin::Pin::new(&mut this.read_fut), chip, cx) {
+        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(&mut this.read_fut), blkdev, cx) {
             task::Poll::Ready(Ok((request, Ok(())))) => {
-                let AuthTreeNodeReadNvChipRequest { dst_buf, .. } = request;
+                let AuthTreeNodeReadNvBlkDevRequest { dst_buf, .. } = request;
                 task::Poll::Ready(Ok(dst_buf))
             }
             task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => task::Poll::Ready(Err(NvFsError::from(e))),
@@ -2808,49 +2808,49 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeReadFuture<C> {
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`AuthTreeNodeReadFuture`].
-struct AuthTreeNodeReadNvChipRequest {
+struct AuthTreeNodeReadNvBlkDevRequest {
     dst_buf: FixedVec<u8, 7>,
-    io_region: chip::ChunkedIoRegion,
+    io_region: blkdev::ChunkedIoRegion,
 }
 
-impl chip::NvChipReadRequest for AuthTreeNodeReadNvChipRequest {
-    fn region(&self) -> &chip::ChunkedIoRegion {
+impl blkdev::NvBlkDevReadRequest for AuthTreeNodeReadNvBlkDevRequest {
+    fn region(&self) -> &blkdev::ChunkedIoRegion {
         &self.io_region
     }
 
     fn get_destination_buffer(
         &mut self,
-        range: &chip::ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
+        range: &blkdev::ChunkedIoRegionChunkRange,
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
         debug_assert_eq!(range.chunk().decompose_to_hierarchic_indices::<0>([]).0, 0);
         Ok(Some(&mut self.dst_buf[range.range_in_chunk().clone()]))
     }
 }
 
 /// Write an authentication tree node to storage.
-struct AuthTreeNodeWriteFuture<C: chip::NvChip> {
-    write_fut: C::WriteFuture<AuthTreeNodeWriteNvChipRequest>,
+struct AuthTreeNodeWriteFuture<B: blkdev::NvBlkDev> {
+    write_fut: B::WriteFuture<AuthTreeNodeWriteNvBlkDevRequest>,
 }
 
-impl<C: chip::NvChip> AuthTreeNodeWriteFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
     /// Instantiate an [`AuthTreeNodeWriteFuture`].
     ///
     /// The [`AuthTreeNodeWriteFuture`] assumes ownership of the `src_buf` for
     /// the duration of the write operation, and eventually returns it back
-    /// upon [future](chip::NvChipFuture) completion.
+    /// upon [future](blkdev::NvBlkDevFuture) completion.
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to write.
     /// * `src_buf` - The node data to get written. Its length must match the
     ///   [`node size`](AuthTreeConfig::node_size) exactly. Returned back from
     ///   [`poll()`](Self::poll) upon future completion.
     fn new(
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
         src_buf: FixedVec<u8, 7>,
@@ -2860,8 +2860,8 @@ impl<C: chip::NvChip> AuthTreeNodeWriteFuture<C> {
         }
 
         let io_region = tree_config.node_io_region(node_id)?;
-        let request = AuthTreeNodeWriteNvChipRequest { src_buf, io_region };
-        let write_fut = match chip.write(request).map_err(NvFsError::from)? {
+        let request = AuthTreeNodeWriteNvBlkDevRequest { src_buf, io_region };
+        let write_fut = match blkdev.write(request).map_err(NvFsError::from)? {
             Ok(write_fut) => write_fut,
             Err((request, e)) => return Ok(Err((request.src_buf, NvFsError::from(e)))),
         };
@@ -2869,10 +2869,10 @@ impl<C: chip::NvChip> AuthTreeNodeWriteFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeWriteFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for AuthTreeNodeWriteFuture<B> {
     /// Output type of [`poll()`](Self::poll).
     ///
-    /// A two-level [`Result`] is returned upon [future](chip::NvChipFuture)
+    /// A two-level [`Result`] is returned upon [future](blkdev::NvBlkDevFuture)
     /// completion.
     /// * `Err(e)` -  The outer level [`Result`] is set to [`Err`] upon
     ///   encountering an internal error causing the input buffer to get lost.
@@ -2885,11 +2885,11 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeWriteFuture<C> {
     ///       for the operation result on success.
     type Output = Result<(FixedVec<u8, 7>, Result<(), NvFsError>), NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
-        match chip::NvChipFuture::poll(pin::Pin::new(&mut this.write_fut), chip, cx) {
+        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(&mut this.write_fut), blkdev, cx) {
             task::Poll::Ready(Ok((request, result))) => {
-                let AuthTreeNodeWriteNvChipRequest { src_buf, .. } = request;
+                let AuthTreeNodeWriteNvBlkDevRequest { src_buf, .. } = request;
                 task::Poll::Ready(Ok((src_buf, result.map_err(NvFsError::from))))
             }
             task::Poll::Ready(Err(e)) => task::Poll::Ready(Err(NvFsError::from(e))),
@@ -2898,19 +2898,19 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for AuthTreeNodeWriteFuture<C> {
     }
 }
 
-/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
 /// internally by [`AuthTreeNodeWriteFuture`].
-struct AuthTreeNodeWriteNvChipRequest {
+struct AuthTreeNodeWriteNvBlkDevRequest {
     src_buf: FixedVec<u8, 7>,
-    io_region: chip::ChunkedIoRegion,
+    io_region: blkdev::ChunkedIoRegion,
 }
 
-impl chip::NvChipWriteRequest for AuthTreeNodeWriteNvChipRequest {
-    fn region(&self) -> &chip::ChunkedIoRegion {
+impl blkdev::NvBlkDevWriteRequest for AuthTreeNodeWriteNvBlkDevRequest {
+    fn region(&self) -> &blkdev::ChunkedIoRegion {
         &self.io_region
     }
 
-    fn get_source_buffer(&self, range: &chip::ChunkedIoRegionChunkRange) -> Result<&[u8], chip::NvChipIoError> {
+    fn get_source_buffer(&self, range: &blkdev::ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
         debug_assert_eq!(range.chunk().decompose_to_hierarchic_indices::<0>([]).0, 0);
         Ok(&self.src_buf[range.range_in_chunk().clone()])
     }
@@ -2925,12 +2925,12 @@ impl chip::NvChipWriteRequest for AuthTreeNodeWriteNvChipRequest {
 /// processed in the course) will eventually get placed in the
 /// [`AuthTreeNodeCache`] and a reference to the entry returned upon future
 /// completion.
-pub struct AuthTreeNodeLoadFuture<C: chip::NvChip> {
-    fut_state: AuthTreeNodeLoadFutureState<C>,
+pub struct AuthTreeNodeLoadFuture<B: blkdev::NvBlkDev> {
+    fut_state: AuthTreeNodeLoadFutureState<B>,
 }
 
 /// Internal [`AuthTreeNodeLoadFuture::poll()`] state-machine state.
-enum AuthTreeNodeLoadFutureState<C: chip::NvChip> {
+enum AuthTreeNodeLoadFutureState<B: blkdev::NvBlkDev> {
     Init {
         request_node_id: AuthTreeNodeId,
     },
@@ -2943,12 +2943,12 @@ enum AuthTreeNodeLoadFutureState<C: chip::NvChip> {
         request_node_id: AuthTreeNodeId,
         cur_node_id: AuthTreeNodeId,
         cur_node_expected_digest: FixedVec<u8, 5>,
-        node_read_fut: AuthTreeNodeReadFuture<C>,
+        node_read_fut: AuthTreeNodeReadFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeNodeLoadFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeNodeLoadFuture<B> {
     /// Instantiate a new [`AuthTreeNodeLoadFuture`].
     ///
     /// # Arguments:
@@ -2965,7 +2965,7 @@ impl<C: chip::NvChip> AuthTreeNodeLoadFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTree`]'s [`AuthTreeConfig`].
     /// * `root_hmac_digest` - The filesystem's [`AuthTree`]'s root digest.
     /// * `node_cache` - The filesystem's [`AuthTree`]'s [`AuthTreeNodeCache`].
@@ -2973,7 +2973,7 @@ impl<C: chip::NvChip> AuthTreeNodeLoadFuture<C> {
     ///   is being polled.
     pub fn poll<'a, 'b, ST: sync_types::SyncTypes>(
         mut self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         root_hmac_digest: &[u8],
         node_cache: &'a mut AuthTreeNodeCacheRef<'b, ST>,
@@ -3054,7 +3054,7 @@ impl<C: chip::NvChip> AuthTreeNodeLoadFuture<C> {
                     cur_node_id,
                     cur_node_expected_digest,
                 } => {
-                    let node_read_fut = match AuthTreeNodeReadFuture::new(chip, tree_config, cur_node_id) {
+                    let node_read_fut = match AuthTreeNodeReadFuture::new(blkdev, tree_config, cur_node_id) {
                         Ok(node_read_fut) => node_read_fut,
                         Err(e) => {
                             this.fut_state = AuthTreeNodeLoadFutureState::Done;
@@ -3074,7 +3074,7 @@ impl<C: chip::NvChip> AuthTreeNodeLoadFuture<C> {
                     cur_node_expected_digest,
                     node_read_fut,
                 } => {
-                    let cur_node_data = match chip::NvChipFuture::poll(pin::Pin::new(node_read_fut), chip, cx) {
+                    let cur_node_data = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(node_read_fut), blkdev, cx) {
                         task::Poll::Pending => return task::Poll::Pending,
                         task::Poll::Ready(Ok(cur_node_data)) => cur_node_data,
                         task::Poll::Ready(Err(e)) => {
@@ -3461,7 +3461,7 @@ pub struct PhysicalAuthTreeDataBlockUpdate {
 /// For this reason, the primitive for obtaining the next iterator item,
 /// [`poll_for_next()`](Self::poll_for_next), implements
 /// [`Future::poll()`](core::future::Future::poll)-like semantics.
-pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     /// Poll the iterator for the next [Authentication Tree Data
     /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
     /// level digest update.
@@ -3474,7 +3474,7 @@ pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::
     ///   is being polled.
     fn poll_for_next(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Option<PhysicalAuthTreeDataBlockUpdate>, NvFsError>>;
 
@@ -3529,8 +3529,8 @@ pub trait AuthTreeDataBlocksUpdatesIterator<ST: sync_types::SyncTypes, C: chip::
 /// the operation and eventually returns it back when done.
 pub struct AuthTreePrepareUpdatesFuture<
     ST: sync_types::SyncTypes,
-    C: chip::NvChip,
-    DUI: AuthTreeDataBlocksUpdatesIterator<ST, C> + marker::Unpin,
+    B: blkdev::NvBlkDev,
+    DUI: AuthTreeDataBlocksUpdatesIterator<ST, B> + marker::Unpin,
 > {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
@@ -3540,27 +3540,27 @@ pub struct AuthTreePrepareUpdatesFuture<
     /// [`pending_nodes_updates`](Self::pending_nodes_updates), sorted by
     /// distance from the root.
     cursor: Vec<usize>,
-    fut_state: AuthTreePrepareUpdatesFutureState<C>,
+    fut_state: AuthTreePrepareUpdatesFutureState<B>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
 /// Internal [`AuthTreePrepareUpdatesFuture::poll()`] state-machine state.
-enum AuthTreePrepareUpdatesFutureState<C: chip::NvChip> {
+enum AuthTreePrepareUpdatesFutureState<B: blkdev::NvBlkDev> {
     Init,
     ObtainNextUpdatedDataBlock,
     AdvanceCursor {
         next_updated_data_block: Option<LogicalAuthTreeDataBlockUpdate>,
     },
     LoadAuthTreeNode {
-        load_original_node_fut: AuthTreeNodeLoadFuture<C>,
+        load_original_node_fut: AuthTreeNodeLoadFuture<B>,
         next_updated_data_block: Option<LogicalAuthTreeDataBlockUpdate>,
         node_digest_dst: FixedVec<u8, 5>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesIterator<ST, C> + marker::Unpin>
-    AuthTreePrepareUpdatesFuture<ST, C, DUI>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpdatesIterator<ST, B> + marker::Unpin>
+    AuthTreePrepareUpdatesFuture<ST, B, DUI>
 {
     /// Instantiate a new [`AuthTreePrepareUpdatesFuture`].
     ///
@@ -3662,8 +3662,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesIterator<ST, C> + marker::Unpin>
-    CocoonFsSyncStateReadFuture<ST, C> for AuthTreePrepareUpdatesFuture<ST, C, DUI>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpdatesIterator<ST, B> + marker::Unpin>
+    CocoonFsSyncStateReadFuture<ST, B> for AuthTreePrepareUpdatesFuture<ST, B, DUI>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -3687,7 +3687,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -3929,7 +3929,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip, DUI: AuthTreeDataBlocksUpdatesI
                         fs_sync_state_auth_tree.destructure_borrow();
                     let popped_node_original = match AuthTreeNodeLoadFuture::poll(
                         pin::Pin::new(load_original_node_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         auth_tree_config,
                         auth_tree_root_hmac_digest,
                         &mut auth_tree_node_cache,
@@ -4133,22 +4133,22 @@ impl<'a> Iterator for AuthTreeNodeUpdatedDigestsIterator<'a> {
 /// Apply authentication tree updates from an [`AuthTreePendingNodeUpdates`].
 ///
 /// Write the updates to storage and also, update the caches as appropriate.
-pub struct AuthTreeApplyUpdatesFuture<C: chip::NvChip> {
+pub struct AuthTreeApplyUpdatesFuture<B: blkdev::NvBlkDev> {
     pending_nodes_updates: AuthTreePendingNodesUpdates,
     cur_pending_nodes_updates_index: usize,
-    fut_state: AuthTreeApplyUpdatesFutureState<C>,
+    fut_state: AuthTreeApplyUpdatesFutureState<B>,
 }
 
 /// Internal [`AuthTreeApplyUpdatesFuture::poll()`] state-machine state.
-enum AuthTreeApplyUpdatesFutureState<C: chip::NvChip> {
+enum AuthTreeApplyUpdatesFutureState<B: blkdev::NvBlkDev> {
     Init { node_data_buf: FixedVec<u8, 7> },
-    ReadUnmodifiedNode { read_node_fut: AuthTreeNodeReadFuture<C> },
+    ReadUnmodifiedNode { read_node_fut: AuthTreeNodeReadFuture<B> },
     WriteUpdatedNodePrepare { updated_node_data: FixedVec<u8, 7> },
-    WriteUpdatedNode { write_node_fut: AuthTreeNodeWriteFuture<C> },
+    WriteUpdatedNode { write_node_fut: AuthTreeNodeWriteFuture<B> },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     /// Instantiate a new [`AuthTreeApplyUpdatesFuture`].
     ///
     /// # Arguments:
@@ -4172,7 +4172,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree` - Exclusive reference to the filesystem's [`AuthTree`]
     ///   instance.
     /// * `updated_root_hmac_digest` - The updated root digest.
@@ -4180,7 +4180,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree: &mut AuthTree<ST>,
         updated_root_hmac_digest: &[u8],
         cx: &mut task::Context<'_>,
@@ -4245,7 +4245,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
                         // Some of the nodes' entries are retained unmodified. Read the original
                         // node data to fill in the pending updates into.
                         let read_node_fut = match AuthTreeNodeReadFuture::new_with_buf(
-                            chip,
+                            blkdev,
                             &tree.config,
                             &cur_pending_node_updates.node_id,
                             mem::take(node_data_buf),
@@ -4257,7 +4257,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
                     }
                 }
                 AuthTreeApplyUpdatesFutureState::ReadUnmodifiedNode { read_node_fut } => {
-                    let mut node_data = match chip::NvChipFuture::poll(pin::Pin::new(read_node_fut), chip, cx) {
+                    let mut node_data = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_node_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(unmodified_node_data)) => unmodified_node_data,
                         task::Poll::Ready(Err(e)) => break Err(e),
                         task::Poll::Pending => return task::Poll::Pending,
@@ -4275,7 +4275,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
                     let cur_pending_node_updates =
                         &this.pending_nodes_updates.nodes_updates[this.cur_pending_nodes_updates_index];
                     let write_node_fut = match AuthTreeNodeWriteFuture::new(
-                        chip,
+                        blkdev,
                         &tree.config,
                         &cur_pending_node_updates.node_id,
                         mem::take(updated_node_data),
@@ -4288,7 +4288,7 @@ impl<C: chip::NvChip> AuthTreeApplyUpdatesFuture<C> {
                     this.fut_state = AuthTreeApplyUpdatesFutureState::WriteUpdatedNode { write_node_fut };
                 }
                 AuthTreeApplyUpdatesFutureState::WriteUpdatedNode { write_node_fut } => {
-                    let node_data_buf = match chip::NvChipFuture::poll(pin::Pin::new(write_node_fut), chip, cx) {
+                    let node_data_buf = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_node_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((node_data_buf, Ok(())))) => node_data_buf,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => break Err(e),
                         task::Poll::Pending => return task::Poll::Pending,
@@ -5464,10 +5464,10 @@ impl AuthTreeInitializationCursor {
     ///
     /// * `to_physical_allocation_block_index` - Target position to advance the
     ///   cursor to.
-    pub fn advance_to<C: chip::NvChip>(
+    pub fn advance_to<B: blkdev::NvBlkDev>(
         self: Box<Self>,
         to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
-    ) -> Result<AuthTreeInitializationCursorAdvanceFuture<C>, (Box<Self>, NvFsError)> {
+    ) -> Result<AuthTreeInitializationCursorAdvanceFuture<B>, (Box<Self>, NvFsError)> {
         AuthTreeInitializationCursorAdvanceFuture::new(self, to_physical_allocation_block_index)
     }
 
@@ -5486,11 +5486,11 @@ impl AuthTreeInitializationCursor {
     ///   completion will eventually yield the cursor back.
     /// * Otherwise the cursor is returned directly, wrapped in a
     ///   [`AuthTreeInitializationCursorUpdateResult::Done`].
-    pub fn update<C: chip::NvChip>(
+    pub fn update<B: blkdev::NvBlkDev>(
         mut self: Box<Self>,
         tree_config: &AuthTreeConfig,
         allocation_block_data: &[u8],
-    ) -> Result<AuthTreeInitializationCursorUpdateResult<C>, NvFsError> {
+    ) -> Result<AuthTreeInitializationCursorUpdateResult<B>, NvFsError> {
         if self.cur_physical_allocation_block_index >= layout::PhysicalAllocBlockIndex::from(0u64) + self.image_size {
             return Err(nvfs_err_internal!());
         }
@@ -5664,38 +5664,38 @@ impl AuthTreeInitializationCursor {
 }
 
 /// Return value of [`AuthTreeInitializationCursor::update()`].
-pub enum AuthTreeInitializationCursorUpdateResult<C: chip::NvChip> {
+pub enum AuthTreeInitializationCursorUpdateResult<B: blkdev::NvBlkDev> {
     /// No subtree got completed and the [`AuthTreeInitializationCursor`] is
     /// returned back directly.
     Done { cursor: Box<AuthTreeInitializationCursor> },
     /// Some completed parts of the authentication tree need to get written,
     /// implemented by polling `write_fut` to completion.
     NeedAuthTreePartWrite {
-        write_fut: AuthTreeInitializationCursorWritePartFuture<C>,
+        write_fut: AuthTreeInitializationCursorWritePartFuture<B>,
     },
 }
 
 /// Future returned by [`AuthTreeInitializationCursor::advance_to()`].
-pub struct AuthTreeInitializationCursorAdvanceFuture<C: chip::NvChip> {
+pub struct AuthTreeInitializationCursorAdvanceFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     cursor: Option<Box<AuthTreeInitializationCursor>>,
     to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
-    fut_state: AuthTreeInitializationCursorAdvanceFutureState<C>,
+    fut_state: AuthTreeInitializationCursorAdvanceFutureState<B>,
 }
 
 /// Internal [`AuthTreeInitializationCursorAdvanceFuture::poll()`] state-machine
 /// state.
-enum AuthTreeInitializationCursorAdvanceFutureState<C: chip::NvChip> {
+enum AuthTreeInitializationCursorAdvanceFutureState<B: blkdev::NvBlkDev> {
     Init,
     SkipCurAuthTreeDataBlockRemainder,
     WriteAuthTreePart {
-        write_fut: AuthTreeInitializationCursorWritePartFuture<C>,
+        write_fut: AuthTreeInitializationCursorWritePartFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeInitializationCursorAdvanceFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeInitializationCursorAdvanceFuture<B> {
     /// Instantiate a [`AuthTreeInitializationCursorAdvanceFuture`].
     ///
     /// On error, a pair of the input `cursor` and the error reason wrapped in
@@ -5738,13 +5738,13 @@ impl<C: chip::NvChip> AuthTreeInitializationCursorAdvanceFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The to be created filesystem's [`AuthTreeConfig`].
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<AuthTreeInitializationCursor>, NvFsError>> {
@@ -5889,7 +5889,7 @@ impl<C: chip::NvChip> AuthTreeInitializationCursorAdvanceFuture<C> {
                 AuthTreeInitializationCursorAdvanceFutureState::WriteAuthTreePart { write_fut } => {
                     let cursor = match AuthTreeInitializationCursorWritePartFuture::poll(
                         pin::Pin::new(write_fut),
-                        chip,
+                        blkdev,
                         tree_config,
                         cx,
                     ) {
@@ -5914,25 +5914,25 @@ impl<C: chip::NvChip> AuthTreeInitializationCursorAdvanceFuture<C> {
 ///
 /// Write out any completed subtrees' remaining parts and return the
 /// [`AuthTreeInitializationCursor`] back.
-pub struct AuthTreeInitializationCursorWritePartFuture<C: chip::NvChip> {
+pub struct AuthTreeInitializationCursorWritePartFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     cursor: Option<Box<AuthTreeInitializationCursor>>,
     to_data_block_index: AuthTreeDataBlockIndex,
     write_full_path: bool,
     cur_level: u8,
-    fut_state: AuthTreeInitializationCursorWritePartFutureState<C>,
+    fut_state: AuthTreeInitializationCursorWritePartFutureState<B>,
 }
 
 /// Internal [`AuthTreeInitializationCursorWritePartFuture::poll()`]
 /// state-machine state.
-enum AuthTreeInitializationCursorWritePartFutureState<C: chip::NvChip> {
+enum AuthTreeInitializationCursorWritePartFutureState<B: blkdev::NvBlkDev> {
     Init,
-    WriteNode { write_fut: AuthTreeNodeWriteFuture<C> },
+    WriteNode { write_fut: AuthTreeNodeWriteFuture<B> },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeInitializationCursorWritePartFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeInitializationCursorWritePartFuture<B> {
     /// Instantiate a [`AuthTreeInitializationCursorWritePartFuture`].
     ///
     /// # Arguments:
@@ -5960,13 +5960,13 @@ impl<C: chip::NvChip> AuthTreeInitializationCursorWritePartFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The to be created filesystem's [`AuthTreeConfig`].
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<AuthTreeInitializationCursor>, NvFsError>> {
@@ -6028,7 +6028,8 @@ impl<C: chip::NvChip> AuthTreeInitializationCursorWritePartFuture<C> {
                     };
 
                     // And write it out.
-                    let write_fut = match AuthTreeNodeWriteFuture::new(chip, tree_config, &cur_node_id, cur_node_data) {
+                    let write_fut = match AuthTreeNodeWriteFuture::new(blkdev, tree_config, &cur_node_id, cur_node_data)
+                    {
                         Ok(Ok(write_fut)) => write_fut,
                         Ok(Err((_, e))) | Err(e) => {
                             this.fut_state = AuthTreeInitializationCursorWritePartFutureState::Done;
@@ -6038,7 +6039,7 @@ impl<C: chip::NvChip> AuthTreeInitializationCursorWritePartFuture<C> {
                     this.fut_state = AuthTreeInitializationCursorWritePartFutureState::WriteNode { write_fut };
                 }
                 AuthTreeInitializationCursorWritePartFutureState::WriteNode { write_fut } => {
-                    let mut cur_node_data = match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
+                    let mut cur_node_data = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((cur_node_data, Ok(())))) => cur_node_data,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             this.fut_state = AuthTreeInitializationCursorWritePartFutureState::Done;
@@ -6198,14 +6199,14 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///
     /// * `to_physical_allocation_block_index` - Target position to advance the
     ///   cursor to.
-    pub fn advance_to<C: chip::NvChip>(
+    pub fn advance_to<B: blkdev::NvBlkDev>(
         self: Box<Self>,
-        chip: &C,
+        blkdev: &B,
         to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
         tree_config: &AuthTreeConfig,
-    ) -> Result<AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C>, NvFsError> {
+    ) -> Result<AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B>, NvFsError> {
         AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::new(
-            chip,
+            blkdev,
             self,
             to_physical_allocation_block_index,
             tree_config,
@@ -6227,11 +6228,11 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///   back.
     /// * Otherwise the cursor is returned directly, wrapped in a
     ///   [`AuthTreeReplayJournalUpdateScriptCursorUpdateResult::Done`].
-    pub fn update<C: chip::NvChip>(
+    pub fn update<B: blkdev::NvBlkDev>(
         mut self: Box<Self>,
         tree_config: &AuthTreeConfig,
         allocation_block_data: &[u8],
-    ) -> Result<AuthTreeReplayJournalUpdateScriptCursorUpdateResult<C>, NvFsError> {
+    ) -> Result<AuthTreeReplayJournalUpdateScriptCursorUpdateResult<B>, NvFsError> {
         if self.cur_data_allocation_block_index >= self.cur_contiguous_data_allocation_blocks_range_end {
             self.update_physical_position(tree_config)?;
         }
@@ -6370,7 +6371,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
 }
 
 /// Return value of [`AuthTreeReplayJournalUpdateScriptCursor::update()`].
-pub enum AuthTreeReplayJournalUpdateScriptCursorUpdateResult<C: chip::NvChip> {
+pub enum AuthTreeReplayJournalUpdateScriptCursorUpdateResult<B: blkdev::NvBlkDev> {
     /// No subtree got completed and the
     /// [`AuthTreeReplayJournalUpdateScriptCursor`] is returned back
     /// directly.
@@ -6380,17 +6381,17 @@ pub enum AuthTreeReplayJournalUpdateScriptCursorUpdateResult<C: chip::NvChip> {
     /// Some completed parts of the authentication tree need to get written,
     /// implemented by polling `write_fut` to completion.
     NeedAuthTreePartWrite {
-        write_fut: AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C>,
+        write_fut: AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B>,
     },
 }
 
 /// Future returned by
 /// [`AuthTreeReplayJournalUpdateScriptCursor::advance_to()`].
-pub struct AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C: chip::NvChip> {
+pub struct AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     cursor: Option<Box<AuthTreeReplayJournalUpdateScriptCursor>>,
-    fut_state: AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState<C>,
+    fut_state: AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState<B>,
     to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
     to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
     node_read_buf: FixedVec<u8, 7>,
@@ -6398,41 +6399,41 @@ pub struct AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C: chip::NvChip>
 
 /// Internal [`AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::poll()`]
 /// state-machine state.
-enum AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState<C: chip::NvChip> {
+enum AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState<B: blkdev::NvBlkDev> {
     Init,
     WriteNode {
         node_id: AuthTreeNodeId,
-        write_fut: AuthTreeNodeWriteFuture<C>,
+        write_fut: AuthTreeNodeWriteFuture<B>,
     },
     ReconstructLeafNodePart {
-        reconstruct_node_part_fut: AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<C>,
+        reconstruct_node_part_fut: AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<B>,
     },
     ReconstructInternalNodePart {
-        reconstruct_node_part_fut: AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture<C>,
+        reconstruct_node_part_fut: AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B> {
     /// Instantiate a [`AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture`].
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `cursor` - The [`AuthTreeReplayJournalUpdateScriptCursor`] to advance.
     /// * `to_physical_allocation_block_index` - Target position to advance the
     ///   cursor to.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     fn new(
-        chip: &C,
+        blkdev: &B,
         cursor: Box<AuthTreeReplayJournalUpdateScriptCursor>,
         mut to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
         tree_config: &AuthTreeConfig,
     ) -> Result<Self, NvFsError> {
-        let chip_io_block_allocation_blocks_log2 = chip
-            .chip_io_block_size_128b_log2()
+        let blkdev_io_block_allocation_blocks_log2 = blkdev
+            .io_block_size_128b_log2()
             .saturating_sub(tree_config.allocation_block_size_128b_log2 as u32);
-        if !u64::from(to_physical_allocation_block_index).is_aligned_pow2(chip_io_block_allocation_blocks_log2) {
+        if !u64::from(to_physical_allocation_block_index).is_aligned_pow2(blkdev_io_block_allocation_blocks_log2) {
             return Err(nvfs_err_internal!());
         }
         let to_data_allocation_block_index =
@@ -6472,13 +6473,13 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTree`]'s [`AuthTreeConfig`].
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<AuthTreeReplayJournalUpdateScriptCursor>, NvFsError>> {
@@ -6548,7 +6549,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                             },
                         );
                         cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
-                        let write_fut = match AuthTreeNodeWriteFuture::new(chip, tree_config, &node_id, node) {
+                        let write_fut = match AuthTreeNodeWriteFuture::new(blkdev, tree_config, &node_id, node) {
                             Ok(Ok(write_fut)) => write_fut,
                             Err(e) | Ok(Err((_, e))) => break Err(e),
                         };
@@ -6647,7 +6648,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                             };
                             let reconstruct_node_part_fut =
                                 match AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture::new(
-                                    chip,
+                                    blkdev,
                                     cursor,
                                     reconstruct_to_data_allocation_block_index,
                                     tree_config,
@@ -6699,12 +6700,12 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                         if cursor.journal_update_script_index != cursor.journal_update_script.len() {
                             let journal_update_script_entry_range =
                                 *cursor.journal_update_script[cursor.journal_update_script_index].get_target_range();
-                            let chip_io_block_allocation_blocks_log2 = chip
-                                .chip_io_block_size_128b_log2()
+                            let blkdev_io_block_allocation_blocks_log2 = blkdev
+                                .io_block_size_128b_log2()
                                 .saturating_sub(tree_config.allocation_block_size_128b_log2 as u32);
                             let journal_update_script_entry_range_begin = journal_update_script_entry_range
                                 .begin()
-                                .align_down(chip_io_block_allocation_blocks_log2);
+                                .align_down(blkdev_io_block_allocation_blocks_log2);
 
                             if this.to_physical_allocation_block_index <= journal_update_script_entry_range_begin {
                                 this.to_data_allocation_block_index
@@ -6747,13 +6748,13 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                                         let journal_update_script_entry_range_end =
                                             match journal_update_script_entry_range
                                                 .end()
-                                                .align_up(chip_io_block_allocation_blocks_log2)
+                                                .align_up(blkdev_io_block_allocation_blocks_log2)
                                             {
                                                 Some(journal_update_script_entry_end) => {
                                                     journal_update_script_entry_end
                                                 }
                                                 None => {
-                                                    // The aligned_image_size is aligned to the Chip IO Block size,
+                                                    // The aligned_image_size is aligned to the Device IO Block size,
                                                     // therefore the update script entry's end must be larger than that,
                                                     // thus it's invalid.
                                                     break Err(NvFsError::from(
@@ -6800,7 +6801,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                                     };
                                     let reconstruct_node_part_fut =
                                         match AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture::new(
-                                            chip,
+                                            blkdev,
                                             cursor,
                                             next_stop_data_allocation_block_index,
                                             tree_config,
@@ -6867,7 +6868,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                             if cur_node_level == 0 {
                                 let reconstruct_node_part_fut =
                                     match AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture::new(
-                                        chip,
+                                        blkdev,
                                         cursor,
                                         reconstruct_to_data_allocation_block_index,
                                         tree_config,
@@ -6963,7 +6964,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                         };
                         let reconstruct_node_part_fut =
                             match AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture::new(
-                                chip,
+                                blkdev,
                                 cursor,
                                 reconstruct_to_data_allocation_block_index,
                                 tree_config,
@@ -7003,7 +7004,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                     }
                 }
                 AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState::WriteNode { node_id, write_fut } => {
-                    let node = match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
+                    let node = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((node, Ok(())))) => node,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => break Err(e),
                         task::Poll::Pending => return task::Poll::Pending,
@@ -7049,7 +7050,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                 } => {
                     let cursor = match AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture::poll(
                         pin::Pin::new(reconstruct_node_part_fut),
-                        chip,
+                        blkdev,
                         tree_config,
                         cx,
                     ) {
@@ -7066,7 +7067,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
                     let (cursor, node_read_buf) =
                         match AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture::poll(
                             pin::Pin::new(reconstruct_node_part_fut),
-                            chip,
+                            blkdev,
                             tree_config,
                             cx,
                         ) {
@@ -7091,33 +7092,33 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<C> {
 /// the course of
 /// [advancing](AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture) a
 /// [`AuthTreeReplayJournalUpdateScriptCursor`].
-struct AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<C: chip::NvChip> {
+struct AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     cursor: Option<Box<AuthTreeReplayJournalUpdateScriptCursor>>,
-    fut_state: AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState<C>,
+    fut_state: AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState<B>,
     to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
     read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
-    preferred_chip_io_bulk_allocation_blocks_log2: u8,
+    preferred_blkdev_io_bulk_allocation_blocks_log2: u8,
 }
 
 /// Internal [`AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture::poll()`] state-machine state.
-enum AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState<C: chip::NvChip> {
+enum AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState<B: blkdev::NvBlkDev> {
     PrepareReadData,
     ReadData {
-        read_fut: C::ReadFuture<AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest>,
+        read_fut: B::ReadFuture<AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest>,
         read_region_physical_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<B> {
     /// Instantiate a new
     /// [`AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture`]
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `cursor` - The [`AuthTreeReplayJournalUpdateScriptCursor`] to advance.
     /// * `to_data_allocation_block_index` - Target position to advance the
     ///   cursor to. Must be located at some [Authentication Tree Data
@@ -7126,14 +7127,14 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
     ///   a leaf.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     fn new(
-        chip: &C,
+        blkdev: &B,
         cursor: Box<AuthTreeReplayJournalUpdateScriptCursor>,
         to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
         tree_config: &AuthTreeConfig,
     ) -> Result<Self, NvFsError> {
         let allocation_block_size_128b_log2 = tree_config.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_allocation_blocks_log2 = chip
-            .chip_io_block_size_128b_log2()
+        let blkdev_io_block_allocation_blocks_log2 = blkdev
+            .io_block_size_128b_log2()
             .saturating_sub(allocation_block_size_128b_log2);
         let data_block_allocation_blocks_log2 = tree_config.data_block_allocation_blocks_log2 as u32;
 
@@ -7153,16 +7154,18 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
         debug_assert!(
             cursor.cur_data_allocation_block_index >= cursor.cur_contiguous_data_allocation_blocks_range_end
                 || u64::from(cursor.cur_physical_allocation_block_index)
-                    .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                    .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
         );
         // The Authentication Tree extents are aligned to the larger of the IO Block and
         // Authentication Tree Data Block size. Thus, any physical index alignment
         // constraints <= than that translate to the Authentication Tree data index
         // domain.
         debug_assert!(
-            u64::from(cursor.cur_data_allocation_block_index).is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+            u64::from(cursor.cur_data_allocation_block_index).is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
         );
-        debug_assert!(u64::from(to_data_allocation_block_index).is_aligned_pow2(chip_io_block_allocation_blocks_log2));
+        debug_assert!(
+            u64::from(to_data_allocation_block_index).is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
+        );
         debug_assert!(to_data_allocation_block_index >= cursor.cur_data_allocation_block_index);
         debug_assert!(
             u64::from(to_data_allocation_block_index)
@@ -7188,30 +7191,31 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                 )
         );
 
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-        let chip_io_block_allocations_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-        let preferred_chip_io_bulk_allocation_blocks_log2 = (chip.preferred_chip_io_blocks_bulk_log2()
-            + chip_io_block_size_128b_log2)
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+        let blkdev_io_block_allocations_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+        let preferred_blkdev_io_bulk_allocation_blocks_log2 = (blkdev.preferred_io_blocks_bulk_log2()
+            + blkdev_io_block_size_128b_log2)
             .saturating_sub(allocation_block_size_128b_log2)
-            .max(chip_io_block_allocation_blocks_log2)
-            .min(usize::BITS - 1 + chip_io_block_allocations_blocks_log2);
+            .max(blkdev_io_block_allocation_blocks_log2)
+            .min(usize::BITS - 1 + blkdev_io_block_allocations_blocks_log2);
 
-        // Allocate read buffers with one entry for each Chip IO Block in the preferred
-        // bulk range. However, if the total range to read is less than that, allocate
-        // only what's needed for reading it all at once.
-        let read_buffers_len =
-            (1usize << (preferred_chip_io_bulk_allocation_blocks_log2 - chip_io_block_allocations_blocks_log2)).min(
+        // Allocate read buffers with one entry for each Device IO Block in the
+        // preferred bulk range. However, if the total range to read is less
+        // than that, allocate only what's needed for reading it all at once.
+        let read_buffers_len = (1usize
+            << (preferred_blkdev_io_bulk_allocation_blocks_log2 - blkdev_io_block_allocations_blocks_log2))
+            .min(
                 usize::try_from(
                     u64::from(to_data_allocation_block_index - cursor.cur_data_allocation_block_index)
-                        >> chip_io_block_allocations_blocks_log2,
+                        >> blkdev_io_block_allocations_blocks_log2,
                 )
                 .unwrap_or(usize::MAX),
             );
         let mut read_buffers = FixedVec::new_with_default(read_buffers_len)?;
         for read_buffer in read_buffers.iter_mut() {
             *read_buffer = FixedVec::new_with_default(
-                1usize << (chip_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2 + 7),
+                1usize << (blkdev_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2 + 7),
             )?;
         }
 
@@ -7220,7 +7224,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
             fut_state: AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState::PrepareReadData,
             to_data_allocation_block_index,
             read_buffers,
-            preferred_chip_io_bulk_allocation_blocks_log2: preferred_chip_io_bulk_allocation_blocks_log2 as u8,
+            preferred_blkdev_io_bulk_allocation_blocks_log2: preferred_blkdev_io_bulk_allocation_blocks_log2 as u8,
         })
     }
 
@@ -7231,13 +7235,13 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTree`]'s [`AuthTreeConfig`].
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
     fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<AuthTreeReplayJournalUpdateScriptCursor>, NvFsError>> {
@@ -7254,17 +7258,17 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
         let result = 'outer: loop {
             match &mut this.fut_state {
                 AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState::PrepareReadData => {
-                    // Digest the leading sequence of completely unallocated Chip IO Blocks at the
+                    // Digest the leading sequence of completely unallocated Device IO Blocks at the
                     // current position, if any, as such. Then determine the maximum possible
-                    // sequence of Chip IO Blocks with some allocations within them to read.
+                    // sequence of Device IO Blocks with some allocations within them to read.
                     let allocation_block_size_128b_log2 = tree_config.allocation_block_size_128b_log2 as u32;
                     let data_block_allocation_blocks_log2 = tree_config.data_block_allocation_blocks_log2 as u32;
-                    let chip_io_block_allocations_blocks_log2 = chip
-                        .chip_io_block_size_128b_log2()
+                    let blkdev_io_block_allocations_blocks_log2 = blkdev
+                        .io_block_size_128b_log2()
                         .saturating_sub(allocation_block_size_128b_log2);
                     debug_assert!(
                         u64::from(cursor.cur_data_allocation_block_index)
-                            .is_aligned_pow2(chip_io_block_allocations_blocks_log2)
+                            .is_aligned_pow2(blkdev_io_block_allocations_blocks_log2)
                     );
 
                     if cursor.cur_data_allocation_block_index == this.to_data_allocation_block_index {
@@ -7280,12 +7284,12 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
 
                     let empty_pending_allocs = SparseAllocBitmapUnion::new(&[]);
                     let empty_pending_frees = SparseAllocBitmapUnion::new(&[]);
-                    let mut chip_io_block_chunked_alloc_bitmap_iter =
+                    let mut blkdev_io_block_chunked_alloc_bitmap_iter =
                         cursor.alloc_bitmap_journal_fragments.iter_chunked_at_allocation_block(
                             &empty_pending_allocs,
                             &empty_pending_frees,
                             cursor.cur_physical_allocation_block_index,
-                            1u32 << chip_io_block_allocations_blocks_log2,
+                            1u32 << blkdev_io_block_allocations_blocks_log2,
                         );
                     loop {
                         debug_assert_eq!(
@@ -7294,15 +7298,15 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                             cursor.digest_cur_data_block_context.is_none()
                         );
 
-                        let cur_chip_io_block_alloc_bitmap =
-                            chip_io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
-                        if cur_chip_io_block_alloc_bitmap != 0 {
-                            // Some of the Chip IO Block's Allocation Blocks are allocated and the Chip IO
-                            // block needs to get read.
+                        let cur_blkdev_io_block_alloc_bitmap =
+                            blkdev_io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
+                        if cur_blkdev_io_block_alloc_bitmap != 0 {
+                            // Some of the Device IO Block's Allocation Blocks are allocated and the Device
+                            // IO block needs to get read.
                             break;
                         }
 
-                        for _ in 0..1u64 << chip_io_block_allocations_blocks_log2 {
+                        for _ in 0..1u64 << blkdev_io_block_allocations_blocks_log2 {
                             let digest_cur_data_block_context = match cursor.digest_cur_data_block_context.as_mut() {
                                 Some(digest_cur_data_block_context) => digest_cur_data_block_context,
                                 None => {
@@ -7395,12 +7399,12 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                                 break 'outer Err(e);
                             }
 
-                            chip_io_block_chunked_alloc_bitmap_iter =
+                            blkdev_io_block_chunked_alloc_bitmap_iter =
                                 cursor.alloc_bitmap_journal_fragments.iter_chunked_at_allocation_block(
                                     &empty_pending_allocs,
                                     &empty_pending_frees,
                                     cursor.cur_physical_allocation_block_index,
-                                    1u32 << chip_io_block_allocations_blocks_log2,
+                                    1u32 << blkdev_io_block_allocations_blocks_log2,
                                 );
                         }
                     }
@@ -7422,56 +7426,56 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                     );
                     let read_region_physical_allocation_blocks_begin = cursor.cur_physical_allocation_block_index;
                     let mut read_region_physical_allocation_blocks_end = read_region_physical_allocation_blocks_begin
-                        + layout::AllocBlockCount::from(1u64 << chip_io_block_allocations_blocks_log2);
+                        + layout::AllocBlockCount::from(1u64 << blkdev_io_block_allocations_blocks_log2);
                     let mut cur_data_allocation_block_index = cursor.cur_data_allocation_block_index
-                        + layout::AllocBlockCount::from(1u64 << chip_io_block_allocations_blocks_log2);
+                        + layout::AllocBlockCount::from(1u64 << blkdev_io_block_allocations_blocks_log2);
                     while cur_data_allocation_block_index != this.to_data_allocation_block_index
                         && cur_data_allocation_block_index != cursor.cur_contiguous_data_allocation_blocks_range_end
                     {
-                        // If crossing a preferred Chip IO boundary, stop.
+                        // If crossing a preferred Device IO boundary, stop.
                         if (u64::from(read_region_physical_allocation_blocks_begin)
                             ^ u64::from(read_region_physical_allocation_blocks_end))
-                            >> (this.preferred_chip_io_bulk_allocation_blocks_log2 as u32)
+                            >> (this.preferred_blkdev_io_bulk_allocation_blocks_log2 as u32)
                             != 0
                         {
                             break;
                         }
 
-                        // If all of the next Chip IO block's Allocation Blocks are unallocated, it
+                        // If all of the next Device IO block's Allocation Blocks are unallocated, it
                         // doesn't need to get read. Stop then.
-                        let cur_chip_io_block_alloc_bitmap =
-                            chip_io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
-                        if cur_chip_io_block_alloc_bitmap == 0 {
+                        let cur_blkdev_io_block_alloc_bitmap =
+                            blkdev_io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
+                        if cur_blkdev_io_block_alloc_bitmap == 0 {
                             break;
                         }
 
                         read_region_physical_allocation_blocks_end +=
-                            layout::AllocBlockCount::from(1u64 << chip_io_block_allocations_blocks_log2);
+                            layout::AllocBlockCount::from(1u64 << blkdev_io_block_allocations_blocks_log2);
                         cur_data_allocation_block_index +=
-                            layout::AllocBlockCount::from(1u64 << chip_io_block_allocations_blocks_log2);
+                            layout::AllocBlockCount::from(1u64 << blkdev_io_block_allocations_blocks_log2);
                     }
 
-                    let read_request_region = match chip::ChunkedIoRegion::new(
+                    let read_request_region = match blkdev::ChunkedIoRegion::new(
                         u64::from(read_region_physical_allocation_blocks_begin) << allocation_block_size_128b_log2,
                         u64::from(read_region_physical_allocation_blocks_end) << allocation_block_size_128b_log2,
-                        chip_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2,
+                        blkdev_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2,
                     ) {
                         Ok(read_request_region) => read_request_region,
                         Err(e) => {
                             break Err(match e {
-                                chip::ChunkedIoRegionError::ChunkSizeOverflow => {
-                                    // The Chip IO block size fits an usize.
+                                blkdev::ChunkedIoRegionError::ChunkSizeOverflow => {
+                                    // The Device IO block size fits an usize.
                                     nvfs_err_internal!()
                                 }
-                                chip::ChunkedIoRegionError::InvalidBounds => {
+                                blkdev::ChunkedIoRegionError::InvalidBounds => {
                                     nvfs_err_internal!()
                                 }
-                                chip::ChunkedIoRegionError::ChunkIndexOverflow => {
-                                    // No more that the preferred Chip IO block size is ever read at once and
-                                    // that in units of Chip IO Blocks has been capped to fit an usize.
+                                blkdev::ChunkedIoRegionError::ChunkIndexOverflow => {
+                                    // No more that the preferred Device IO block size is ever read at once and
+                                    // that in units of Device IO Blocks has been capped to fit an usize.
                                     nvfs_err_internal!()
                                 }
-                                chip::ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
+                                blkdev::ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
                             });
                         }
                     };
@@ -7479,7 +7483,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                         region: read_request_region,
                         read_buffers: mem::take(&mut this.read_buffers),
                     };
-                    let read_fut = match chip.read(read_request) {
+                    let read_fut = match blkdev.read(read_request) {
                         Ok(Ok(read_fut)) => read_fut,
                         Err(e) | Ok(Err((_, e))) => break Err(NvFsError::from(e)),
                     };
@@ -7495,11 +7499,11 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                 } => {
                     let allocation_block_size_128b_log2 = tree_config.allocation_block_size_128b_log2 as u32;
                     let data_block_allocation_blocks_log2 = tree_config.data_block_allocation_blocks_log2 as u32;
-                    let chip_io_block_allocations_blocks_log2 = chip
-                        .chip_io_block_size_128b_log2()
+                    let blkdev_io_block_allocations_blocks_log2 = blkdev
+                        .io_block_size_128b_log2()
                         .saturating_sub(allocation_block_size_128b_log2);
 
-                    let read_request = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => break Err(NvFsError::from(e)),
                         task::Poll::Pending => return task::Poll::Pending,
@@ -7512,21 +7516,21 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
 
                     let empty_pending_allocs = SparseAllocBitmapUnion::new(&[]);
                     let empty_pending_frees = SparseAllocBitmapUnion::new(&[]);
-                    let mut chip_io_block_chunked_alloc_bitmap_iter =
+                    let mut blkdev_io_block_chunked_alloc_bitmap_iter =
                         cursor.alloc_bitmap_journal_fragments.iter_chunked_at_allocation_block(
                             &empty_pending_allocs,
                             &empty_pending_frees,
                             cursor.cur_physical_allocation_block_index,
-                            1u32 << chip_io_block_allocations_blocks_log2,
+                            1u32 << blkdev_io_block_allocations_blocks_log2,
                         );
 
-                    let mut chip_io_block_index = 0;
+                    let mut blkdev_io_block_index = 0;
                     while cursor.cur_physical_allocation_block_index != *read_region_physical_allocation_blocks_end {
-                        let chip_io_block = &this.read_buffers[chip_io_block_index];
-                        let mut cur_chip_io_block_alloc_bitmap =
-                            chip_io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
-                        for allocation_block_in_chip_io_block_index in
-                            0..1usize << chip_io_block_allocations_blocks_log2
+                        let blkdev_io_block = &this.read_buffers[blkdev_io_block_index];
+                        let mut cur_blkdev_io_block_alloc_bitmap =
+                            blkdev_io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
+                        for allocation_block_in_blkdev_io_block_index in
+                            0..1usize << blkdev_io_block_allocations_blocks_log2
                         {
                             let digest_cur_data_block_context = match cursor.digest_cur_data_block_context.as_mut() {
                                 Some(digest_cur_data_block_context) => digest_cur_data_block_context,
@@ -7546,17 +7550,17 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                                 }
                             };
 
-                            let allocation_block = &chip_io_block[allocation_block_in_chip_io_block_index
+                            let allocation_block = &blkdev_io_block[allocation_block_in_blkdev_io_block_index
                                 << (allocation_block_size_128b_log2 + 7)
-                                ..(allocation_block_in_chip_io_block_index + 1)
+                                ..(allocation_block_in_blkdev_io_block_index + 1)
                                     << (allocation_block_size_128b_log2 + 7)];
                             if let Err(e) = digest_cur_data_block_context
-                                .update((cur_chip_io_block_alloc_bitmap & 1 != 0).then_some(allocation_block))
+                                .update((cur_blkdev_io_block_alloc_bitmap & 1 != 0).then_some(allocation_block))
                             {
                                 break 'outer Err(e);
                             }
 
-                            cur_chip_io_block_alloc_bitmap >>= 1;
+                            cur_blkdev_io_block_alloc_bitmap >>= 1;
                             cursor.cur_physical_allocation_block_index += layout::AllocBlockCount::from(1);
                             while cursor.journal_update_script_index != cursor.journal_update_script.len()
                                 && cursor.journal_update_script[cursor.journal_update_script_index]
@@ -7596,7 +7600,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
                             }
                         }
 
-                        chip_io_block_index += 1;
+                        blkdev_io_block_index += 1;
                     }
                     this.fut_state =
                         AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState::PrepareReadData;
@@ -7610,22 +7614,22 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDige
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by
 /// [`AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture`].
 struct AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
-    region: chip::ChunkedIoRegion,
+    region: blkdev::ChunkedIoRegion,
     read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
-impl chip::NvChipReadRequest for AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
-    fn region(&self) -> &chip::ChunkedIoRegion {
+impl blkdev::NvBlkDevReadRequest for AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
+    fn region(&self) -> &blkdev::ChunkedIoRegion {
         &self.region
     }
     fn get_destination_buffer(
         &mut self,
-        range: &chip::ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
+        range: &blkdev::ChunkedIoRegionChunkRange,
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
         let (read_buffer_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
         Ok(Some(
             &mut self.read_buffers[read_buffer_index][range.range_in_chunk().clone()],
@@ -7637,26 +7641,26 @@ impl chip::NvChipReadRequest for AuthTreeReplayJournalUpdateScriptCursorReconstr
 /// entries in the course of
 /// [advancing](AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture) a
 /// [`AuthTreeReplayJournalUpdateScriptCursor`].
-struct AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture<C: chip::NvChip> {
+struct AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     cursor: Option<Box<AuthTreeReplayJournalUpdateScriptCursor>>,
-    fut_state: AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFutureState<C>,
+    fut_state: AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFutureState<B>,
     to_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
     node_read_buf: FixedVec<u8, 7>,
 }
 
 /// Internal [`AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture::poll()`] state-machine state.
-enum AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFutureState<C: chip::NvChip> {
+enum AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFutureState<B: blkdev::NvBlkDev> {
     PrepareReadChildNode,
     ReadChildNode {
         child_node_id: AuthTreeNodeId,
-        read_fut: AuthTreeNodeReadFuture<C>,
+        read_fut: AuthTreeNodeReadFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture<B> {
     /// Instantiate a new
     /// [`AuthTreeReplayJournalUpdateScriptCursorReconstructInternalDigestsFuture`]
     ///
@@ -7752,14 +7756,14 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructInternal
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTree`]'s [`AuthTreeConfig`].
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
     #[allow(clippy::type_complexity)]
     fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<(Box<AuthTreeReplayJournalUpdateScriptCursor>, FixedVec<u8, 7>), NvFsError>> {
@@ -7792,7 +7796,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructInternal
                         tree_config.data_digests_per_node_log2,
                     );
                     let read_fut = match AuthTreeNodeReadFuture::new_with_buf(
-                        chip,
+                        blkdev,
                         tree_config,
                         &cur_child_node_id,
                         mem::take(&mut this.node_read_buf),
@@ -7810,7 +7814,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructInternal
                     child_node_id,
                     read_fut,
                 } => {
-                    let child_node_data = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let child_node_data = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(child_node)) => child_node,
                         task::Poll::Ready(Err(e)) => break Err(e),
                         task::Poll::Pending => return task::Poll::Pending,
@@ -7902,25 +7906,25 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorReconstructInternal
 ///
 /// Write out any completed subtrees' remaining parts and return the
 /// [`AuthTreeReplayJournalUpdateScriptCursor`] back.
-pub struct AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C: chip::NvChip> {
+pub struct AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     cursor: Option<Box<AuthTreeReplayJournalUpdateScriptCursor>>,
-    fut_state: AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState<C>,
+    fut_state: AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState<B>,
 }
 
 /// Internal [`AuthTreeReplayJournalUpdateScriptCursorWritePartFuture::poll()`]
 /// state-machine state.
-enum AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState<C: chip::NvChip> {
+enum AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState<B: blkdev::NvBlkDev> {
     Init,
     WriteNode {
         node_id: AuthTreeNodeId,
-        write_fut: AuthTreeNodeWriteFuture<C>,
+        write_fut: AuthTreeNodeWriteFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C> {
+impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B> {
     /// Instantiate a
     /// [`AuthTreeReplayJournalUpdateScriptCursorWritePartFuture`].
     ///
@@ -7943,13 +7947,13 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C> 
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The to be created filesystem's [`AuthTreeConfig`].
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<AuthTreeReplayJournalUpdateScriptCursor>, NvFsError>> {
@@ -8015,7 +8019,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C> 
                         },
                     );
                     cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
-                    let write_fut = match AuthTreeNodeWriteFuture::new(chip, tree_config, &node_id, node) {
+                    let write_fut = match AuthTreeNodeWriteFuture::new(blkdev, tree_config, &node_id, node) {
                         Ok(Ok(write_fut)) => write_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState::Done;
@@ -8026,7 +8030,7 @@ impl<C: chip::NvChip> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<C> 
                         AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState::WriteNode { node_id, write_fut };
                 }
                 AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState::WriteNode { node_id, write_fut } => {
-                    let node = match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
+                    let node = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((node, Ok(())))) => node,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState::Done;

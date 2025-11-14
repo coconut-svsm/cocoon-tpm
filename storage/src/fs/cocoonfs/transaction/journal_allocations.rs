@@ -10,7 +10,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use super::{Transaction, auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndexRange};
 use crate::{
-    chip,
+    blkdev,
     fs::{
         NvFsError,
         cocoonfs::{
@@ -35,12 +35,12 @@ use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
 /// Allocate and assign [journal staging copy
 /// blocks](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin) for a
 /// [`Transaction`]'s [`AuthTreeDataBlockUpdateState`]s.
-pub struct TransactionAllocateJournalStagingCopiesFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: TransactionAllocateJournalStagingCopiesFutureState<ST, C>,
+pub struct TransactionAllocateJournalStagingCopiesFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: TransactionAllocateJournalStagingCopiesFutureState<ST, B>,
 }
 
 /// [`TransactionAllocateJournalStagingCopiesFuture`] state-machine state.
-enum TransactionAllocateJournalStagingCopiesFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum TransactionAllocateJournalStagingCopiesFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -51,7 +51,7 @@ enum TransactionAllocateJournalStagingCopiesFutureState<ST: sync_types::SyncType
     /// CocoonFsSyncState, i.e. coordindate with other pending transactions,
     /// if any.
     AllocateBlocksSync {
-        allocate_journal_staging_copy_blocks_fut: CocoonFsAllocateBlocksFuture<ST, C>,
+        allocate_journal_staging_copy_blocks_fut: CocoonFsAllocateBlocksFuture<ST, B>,
         states_index_range: AuthTreeDataBlocksUpdateStatesIndexRange,
         total_needed_blocks: usize,
     },
@@ -66,7 +66,7 @@ enum TransactionAllocateJournalStagingCopiesFutureState<ST: sync_types::SyncType
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAllocateJournalStagingCopiesFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionAllocateJournalStagingCopiesFuture<ST, B> {
     /// Instantiate a [`TransactionAllocateJournalStagingCopiesFuture`].
     ///
     /// The [`TransactionAllocateJournalStagingCopiesFuture`] assumes ownership
@@ -92,8 +92,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAllocateJournalStagi
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for TransactionAllocateJournalStagingCopiesFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for TransactionAllocateJournalStagingCopiesFuture<ST, B>
 {
     type AuxPollData<'a> = ();
 
@@ -114,7 +114,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -495,12 +495,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 ///
 /// Used for allocating the non-fixed tail of the journal log's chained
 /// encrypted extents.
-pub struct TransactionAllocateJournalExtentsFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: TransactionAllocateJournalExtentsFutureState<ST, C>,
+pub struct TransactionAllocateJournalExtentsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: TransactionAllocateJournalExtentsFutureState<ST, B>,
 }
 
 /// [`TransactionAllocateJournalExtentsFuture`] state-machine state.
-enum TransactionAllocateJournalExtentsFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum TransactionAllocateJournalExtentsFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -511,14 +511,14 @@ enum TransactionAllocateJournalExtentsFutureState<ST: sync_types::SyncTypes, C: 
     /// CocoonFsSyncState, i.e. coordindate with other pending transactions,
     /// if any.
     AllocateExtentsSync {
-        allocate_fut: CocoonFsAllocateExtentsFuture<ST, C>,
+        allocate_fut: CocoonFsAllocateExtentsFuture<ST, B>,
         result_extents: extents::PhysicalExtents,
         transaction_abandoned_journal_staging_copy_blocks_truncated_len: usize,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAllocateJournalExtentsFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionAllocateJournalExtentsFuture<ST, B> {
     /// Instantiate a [`TransactionAllocateJournalExtentsFuture`].
     ///
     /// The [`TransactionAllocateJournalExtentsFuture`] assumes ownership
@@ -541,8 +541,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAllocateJournalExten
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for TransactionAllocateJournalExtentsFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for TransactionAllocateJournalExtentsFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -564,7 +564,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {

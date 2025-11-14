@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::{rng, symcipher},
     fs::{
         NvFsError,
@@ -44,23 +44,23 @@ use transaction::Transaction;
 ///
 /// Used for the implementation of
 /// [`NvFs::write_inode()`](crate::fs::NvFs::write_inode).
-pub struct WriteInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct WriteInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
     data: zeroize::Zeroizing<Vec<u8>>,
-    fut_state: WriteInodeDataFutureState<ST, C>,
+    fut_state: WriteInodeDataFutureState<ST, B>,
 }
 
 /// [`WriteInodeDataFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum WriteInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum WriteInodeDataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     LookupInode {
-        inode_index_lookup_fut: InodeIndexLookupForInsertFuture<ST, C>,
+        inode_index_lookup_fut: InodeIndexLookupForInsertFuture<ST, B>,
     },
     ReadInodeExtentsList {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         inode_index_lookup_result: Option<InodeIndexLookupForInsertResult>,
-        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, C>,
+        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, B>,
     },
     AllocateInodeExtentsPrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -77,7 +77,7 @@ enum WriteInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
         inode_index_lookup_result: Option<InodeIndexLookupForInsertResult>,
         preexisting_inode_extents: Option<PreexistingInodeExtents>,
         inode_extents_encryption_layout: EncryptedExtentsLayout,
-        allocate_fut: CocoonFsAllocateExtentsFuture<ST, C>,
+        allocate_fut: CocoonFsAllocateExtentsFuture<ST, B>,
     },
     WriteInodeDataUpdates {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -96,16 +96,16 @@ enum WriteInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
         // reference on Self.
         inode_index_lookup_result: Option<InodeIndexLookupForInsertResult>,
         pending_inode_extents_reallocation: InodeExtentsPendingReallocation,
-        write_inode_extents_list_fut: InodeExtentsListWriteFuture<ST, C>,
+        write_inode_extents_list_fut: InodeExtentsListWriteFuture<ST, B>,
     },
     UpdateInodeIndex {
         new_inode_extents: extents::PhysicalExtents,
-        inode_index_insert_entry_fut: InodeIndexInsertEntryFuture<ST, C>,
+        inode_index_insert_entry_fut: InodeIndexInsertEntryFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> WriteInodeDataFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeDataFuture<ST, B> {
     /// Instantiate a [`WriteInodeDataFuture`].
     ///
     /// The [`WriteInodeDataFuture`] assumes ownership of the `transaction` for
@@ -134,7 +134,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> WriteInodeDataFuture<ST, C> {
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C> for WriteInodeDataFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for WriteInodeDataFuture<ST, B>
+{
     /// Output type of [`poll()`](Self::poll).
     ///
     /// A two-level [`Result`] is returned upon
@@ -162,7 +164,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
