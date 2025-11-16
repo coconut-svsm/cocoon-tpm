@@ -11,7 +11,7 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap, auth_tree, extents,
+            FormatError, alloc_bitmap, auth_tree, extents,
             journal::apply_script::JournalUpdateAuthDigestsScriptIterator, layout,
         },
     },
@@ -139,9 +139,10 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
                 alloc_bitmap_file_block_indices.try_reserve(1)?;
                 alloc_bitmap_file_block_indices.push(alloc_bitmap_file_block_index);
 
-                covered_physical_allocation_blocks_end = layout::PhysicalAllocBlockIndex::from(
-                    (alloc_bitmap_file_block_index + 1).saturating_mul(alloc_bitmap_file.get_bitmap_words_per_file_block() << alloc_bitmap::BITMAP_WORD_BITS_LOG2),
-                );
+                covered_physical_allocation_blocks_end =
+                    layout::PhysicalAllocBlockIndex::from((alloc_bitmap_file_block_index + 1).saturating_mul(
+                        alloc_bitmap_file.get_bitmap_words_per_file_block() << alloc_bitmap::BITMAP_WORD_BITS_LOG2,
+                    ));
             }
         }
     }
@@ -197,9 +198,7 @@ pub fn alloc_bitmap_file_block_indices_to_physical_extents(
             .block_count()
             < alloc_bitmap_file_block_allocation_blocks
         {
-            return Err(NvFsError::from(
-                CocoonFsFormatError::UnalignedAllocationBitmapFileExtents,
-            ));
+            return Err(NvFsError::from(FormatError::UnalignedAllocationBitmapFileExtents));
         }
 
         let mut alloc_file_blocks_run_physical_allocation_blocks_begin =
@@ -224,9 +223,7 @@ pub fn alloc_bitmap_file_block_indices_to_physical_extents(
                 - cur_alloc_bitmap_file_block_logical_allocation_blocks_begin
                 < alloc_bitmap_file_block_allocation_blocks
             {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::UnalignedAllocationBitmapFileExtents,
-                ));
+                return Err(NvFsError::from(FormatError::UnalignedAllocationBitmapFileExtents));
             }
 
             if alloc_bitmap_file_block_indices[i] != alloc_bitmap_file_block_indices[i - 1] + 1 {

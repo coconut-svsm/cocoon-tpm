@@ -24,7 +24,7 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap, auth_tree,
+            FormatError, alloc_bitmap, auth_tree,
             encryption_entities::EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix,
             extents,
             fs::{
@@ -437,7 +437,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                             break (
                                 false,
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidSaltLength),
+                                NvFsError::from(FormatError::InvalidSaltLength),
                             );
                         }
                     };
@@ -708,7 +708,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                             break (
                                 false,
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidSaltLength),
+                                NvFsError::from(FormatError::InvalidSaltLength),
                             );
                         }
                     };
@@ -829,11 +829,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         {
                             Some(journal_log_total_encoded_len) => journal_log_total_encoded_len,
                             None => {
-                                break (
-                                    false,
-                                    Some(transaction),
-                                    NvFsError::from(CocoonFsFormatError::InvalidFileSize),
-                                );
+                                break (false, Some(transaction), NvFsError::from(FormatError::InvalidFileSize));
                             }
                         };
 

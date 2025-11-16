@@ -13,7 +13,7 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            CocoonFsFormatError,
+            FormatError,
             alloc_bitmap::{AllocBitmap, SparseAllocBitmapUnion},
             auth_subject_ids::AuthSubjectDataSuffix,
             extent_ptr, extents,
@@ -1418,29 +1418,29 @@ impl AuthTreeConfig {
         let node_allocation_blocks_log2 = image_layout
             .auth_tree_node_io_blocks_log2
             .checked_add(image_layout.io_block_allocation_blocks_log2)
-            .ok_or(CocoonFsFormatError::InvalidAuthTreeConfig)?;
+            .ok_or(FormatError::InvalidAuthTreeConfig)?;
         // An Authentication Tree Node's size must fit an usize as well as an
         // u64.
         let node_size_128b_log2 = node_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32;
         let node_size_log2 = node_size_128b_log2 + 7;
         if node_size_log2 >= u64::BITS {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         } else if node_size_log2 >= usize::BITS {
-            return Err(CocoonFsFormatError::UnsupportedAuthTreeConfig.into());
+            return Err(FormatError::UnsupportedAuthTreeConfig.into());
         }
 
         let data_block_allocation_blocks_log2 = image_layout.auth_tree_data_block_allocation_blocks_log2 as u32;
         // A Data Block's Allocation Blocks must be representable in an u64 bitmap (for
         // a Data Block HMAC's authentication context).
         if data_block_allocation_blocks_log2 >= u32::BITS || 1u32 << data_block_allocation_blocks_log2 > u64::BITS {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         }
 
         let node_hash_alg = image_layout.auth_tree_node_hash_alg;
         let node_digest_len = hash::hash_alg_digest_len(node_hash_alg);
         let node_digest_len_log2 = (node_digest_len as u32).round_up_next_pow2().unwrap().ilog2();
         if node_size_log2 <= node_digest_len_log2 {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         }
         let node_digests_per_node_log2 = (node_size_log2 - node_digest_len_log2) as u8;
 
@@ -1448,7 +1448,7 @@ impl AuthTreeConfig {
         let data_digest_len = hash::hash_alg_digest_len(data_hmac_hash_alg);
         let data_digest_len_log2 = (data_digest_len as u32).round_up_next_pow2().unwrap().ilog2();
         if node_size_log2 <= data_digest_len_log2 {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         }
         let data_digests_per_node_log2 = (node_size_log2 - data_digest_len_log2) as u8;
         let data_hmac_key = root_key.derive_key(&keys::KeyId::new(
@@ -1472,15 +1472,15 @@ impl AuthTreeConfig {
                 .is_aligned_pow2(auth_tree_extents_min_alignment_allocation_blocks_log2)
                 || !u64::from(physical_range.block_count()).is_aligned_pow2(io_block_allocation_blocks_log2)
             {
-                return Err(CocoonFsFormatError::UnalignedAuthTreeExtents.into());
+                return Err(FormatError::UnalignedAuthTreeExtents.into());
             }
         }
         let auth_tree_nodes_allocation_block_count = auth_tree_extents.allocation_block_count();
         if u64::from(auth_tree_extents.allocation_block_count()) == 0 {
-            return Err(CocoonFsFormatError::InvalidAuthTreeDimensions.into());
+            return Err(FormatError::InvalidAuthTreeDimensions.into());
         }
         if image_size < auth_tree_nodes_allocation_block_count {
-            return Err(CocoonFsFormatError::InvalidAuthTreeDimensions.into());
+            return Err(FormatError::InvalidAuthTreeDimensions.into());
         }
 
         let auth_tree_data_allocation_blocks_map = AuthTreeDataAllocationBlocksMap::new(&auth_tree_extents)?;
@@ -1514,7 +1514,7 @@ impl AuthTreeConfig {
             image_data_blocks += 1;
         }
         if image_data_blocks > max_covered_data_block_count {
-            return Err(CocoonFsFormatError::InvalidAuthTreeDimensions.into());
+            return Err(FormatError::InvalidAuthTreeDimensions.into());
         }
 
         let root_hmac_hash_alg = image_layout.auth_tree_root_hmac_hash_alg;
@@ -1590,23 +1590,23 @@ impl AuthTreeConfig {
         let node_size_128b_log2 = node_allocation_blocks_log2 + allocation_block_size_128b_log2;
         let node_size_log2 = node_size_128b_log2 + 7;
         if node_size_log2 >= u64::BITS {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         } else if node_size_log2 >= usize::BITS {
-            return Err(CocoonFsFormatError::UnsupportedAuthTreeConfig.into());
+            return Err(FormatError::UnsupportedAuthTreeConfig.into());
         }
 
         let data_block_allocation_blocks_log2 = image_layout.auth_tree_data_block_allocation_blocks_log2 as u32;
         // A Data Block's Allocation Blocks must be representable in an u64 bitmap (for
         // a Data Block HMAC's authentication context).
         if data_block_allocation_blocks_log2 >= u32::BITS || 1u32 << data_block_allocation_blocks_log2 > u64::BITS {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         }
 
         let node_hash_alg = image_layout.auth_tree_node_hash_alg;
         let node_digest_len = hash::hash_alg_digest_len(node_hash_alg);
         let node_digest_len_log2 = (node_digest_len as u32).round_up_next_pow2().unwrap().ilog2();
         if node_size_log2 <= node_digest_len_log2 {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         }
         let node_digests_per_node_log2 = node_size_log2 - node_digest_len_log2;
         let node_digests_per_node_minus_one_inv_mod_u64 =
@@ -1616,7 +1616,7 @@ impl AuthTreeConfig {
         let data_digest_len = hash::hash_alg_digest_len(data_hmac_hash_alg);
         let data_digest_len_log2 = (data_digest_len as u32).round_up_next_pow2().unwrap().ilog2();
         if node_size_log2 <= data_digest_len_log2 {
-            return Err(CocoonFsFormatError::InvalidAuthTreeConfig.into());
+            return Err(FormatError::InvalidAuthTreeConfig.into());
         }
         let data_digests_per_node_log2 = node_size_log2 - data_digest_len_log2;
 
@@ -1878,7 +1878,7 @@ impl AuthTreeConfig {
     fn node_io_region(&self, node_id: &AuthTreeNodeId) -> Result<blkdev::ChunkedIoRegion, NvFsError> {
         debug_assert!(node_id.level < self.auth_tree_levels);
         if u64::from(node_id.covered_data_blocks_begin) >= self.max_covered_data_block_count {
-            return Err(CocoonFsFormatError::BlockOutOfRange.into());
+            return Err(FormatError::BlockOutOfRange.into());
         }
         let dfs_pre_node_index = auth_tree_node_dfs_pre_index(
             node_id.covered_data_blocks_begin,
@@ -2565,7 +2565,7 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
             allocation_bitmap_extents,
         )?;
         if root_hmac_digest.len() != hash::hash_alg_digest_len(config.root_hmac_hash_alg) as usize {
-            return Err(CocoonFsFormatError::InvalidDigestLength.into());
+            return Err(FormatError::InvalidDigestLength.into());
         }
 
         let node_cache = ST::RwLock::from(AuthTreeNodeCache::new(&config)?);
@@ -4536,7 +4536,7 @@ fn image_allocation_blocks_to_auth_tree_levels(
     let node_allocation_blocks = 1u64 << node_allocation_blocks_log2;
 
     if image_allocation_blocks < node_allocation_blocks {
-        return Err(NvFsError::from(CocoonFsFormatError::InvalidAuthTreeDimensions));
+        return Err(NvFsError::from(FormatError::InvalidAuthTreeDimensions));
     }
 
     // Let t(l) denote the collective size in units of allocation blocks occupied by
@@ -4679,7 +4679,7 @@ fn image_allocation_blocks_to_auth_tree_levels(
 fn test_image_allocation_blocks_to_auth_tree_levels() {
     assert_eq!(
         image_allocation_blocks_to_auth_tree_levels(layout::AllocBlockCount::from(0), 1, 1, 1, 0, 0),
-        Err(NvFsError::from(CocoonFsFormatError::InvalidAuthTreeDimensions))
+        Err(NvFsError::from(FormatError::InvalidAuthTreeDimensions))
     );
     for image_allocation_blocks in 1..4 {
         assert_eq!(
@@ -4742,7 +4742,7 @@ fn test_image_allocation_blocks_to_auth_tree_levels() {
                                 node_allocation_blocks_log2,
                                 data_block_allocation_blocks_log2,
                             ),
-                            Err(NvFsError::from(CocoonFsFormatError::InvalidAuthTreeDimensions))
+                            Err(NvFsError::from(FormatError::InvalidAuthTreeDimensions))
                         );
                         continue;
                     }
@@ -4943,7 +4943,7 @@ fn auth_tree_node_count_to_auth_tree_levels(
     data_block_allocation_blocks_log2: u32,
 ) -> Result<u8, NvFsError> {
     if auth_tree_node_count == 0 {
-        return Err(CocoonFsFormatError::InvalidAuthTreeDimensions.into());
+        return Err(FormatError::InvalidAuthTreeDimensions.into());
     }
     debug_assert!(0 < node_digests_per_node_log2 && node_digests_per_node_log2 <= u64::BITS);
 
@@ -5078,7 +5078,7 @@ fn auth_tree_node_count_to_max_covered_data_block_count(
     data_block_allocation_blocks_log2: u32,
 ) -> Result<u64, NvFsError> {
     if auth_tree_node_count == 0 {
-        return Err(CocoonFsFormatError::InvalidAuthTreeDimensions.into());
+        return Err(FormatError::InvalidAuthTreeDimensions.into());
     }
     debug_assert!(0 < node_digests_per_node_log2 && node_digests_per_node_log2 < u64::BITS);
     debug_assert!(0 < data_digests_per_node_log2 && data_digests_per_node_log2 < u64::BITS);
@@ -5423,7 +5423,7 @@ impl AuthTreeInitializationCursor {
                 ),
             ),
             None => {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidAuthTreeDimensions));
+                return Err(NvFsError::from(FormatError::InvalidAuthTreeDimensions));
             }
         };
 
@@ -6131,7 +6131,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
         // The image_size should be aligned to the IO Block size, so that
         // aligned_image_size would as well.
         if !u64::from(image_size).is_aligned_pow2(image_layout.io_block_allocation_blocks_log2 as u32) {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
+            return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
         let aligned_image_size = layout::AllocBlockCount::from(
             u64::from(image_size)
@@ -6147,7 +6147,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
         if image_layout.io_block_allocation_blocks_log2 as u32
             > tree_config.data_digests_per_node_log2 as u32 + tree_config.data_block_allocation_blocks_log2 as u32
         {
-            return Err(NvFsError::from(CocoonFsFormatError::UnsupportedAuthTreeConfig));
+            return Err(NvFsError::from(FormatError::UnsupportedAuthTreeConfig));
         }
 
         // The image header and the Journal Log head extent are tracked as allocated in
@@ -6758,7 +6758,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                                                     // therefore the update script entry's end must be larger than that,
                                                     // thus it's invalid.
                                                     break Err(NvFsError::from(
-                                                        CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
+                                                        FormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
                                                     ));
                                                 }
                                             };

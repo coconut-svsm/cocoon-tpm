@@ -10,7 +10,7 @@ use crate::{
     crypto::{hash, rng, symcipher},
     fs::{
         self,
-        cocoonfs::{CocoonFs, CocoonFsMkFsFuture, CocoonFsOpenFsFuture, CocoonFsWriteMkfsInfoHeaderFuture, layout},
+        cocoonfs::{CocoonFs, MkFsFuture, OpenFsFuture, WriteMkFsInfoHeaderFuture, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::{
@@ -223,17 +223,10 @@ fn cocoonfs_test_mkfs_op_helper(
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let (blkdev, image_layout, salt) = test_config.instantiate(image_size);
-    let mkfs_fut = CocoonFsMkFsFuture::<TestNopSyncTypes, _>::new(
-        blkdev,
-        &image_layout,
-        salt,
-        None,
-        &[0u8; 0],
-        enable_trimming,
-        rng,
-    )
-    .map_err(|(_blkdev, _rng, e)| e)
-    .unwrap();
+    let mkfs_fut =
+        MkFsFuture::<TestNopSyncTypes, _>::new(blkdev, &image_layout, salt, None, &[0u8; 0], enable_trimming, rng)
+            .map_err(|(_blkdev, _rng, e)| e)
+            .unwrap();
 
     let executor = TestAsyncExecutor::new();
     let mkfs_waiter = TestAsyncExecutor::spawn(&executor, mkfs_fut);
@@ -250,7 +243,7 @@ fn cocoonfs_test_write_mkfsinfo_header_op_helper(
     let (blkdev, image_layout, salt) = test_config.instantiate(0);
     let image_size = image_size as u64;
     let write_mkfsinfo_header_fut =
-        CocoonFsWriteMkfsInfoHeaderFuture::new(blkdev, &image_layout, salt, Some(image_size), false)
+        WriteMkFsInfoHeaderFuture::new(blkdev, &image_layout, salt, Some(image_size), false)
             .map_err(|(_blkdev, e)| e)?;
 
     let executor = TestAsyncExecutor::new();
@@ -269,7 +262,7 @@ fn cocoonfs_test_openfs_op_helper(
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
-    let openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+    let openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     let executor = TestAsyncExecutor::new();
@@ -285,7 +278,7 @@ fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
 ) -> Result<TestNvBlkDev, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
-    let mut openfs_fut = CocoonFsOpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+    let mut openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     // Simulate IO failure when writing the regular static image header.

@@ -45,8 +45,8 @@ pub(super) type CocoonFsSyncRcPtrRefType<'a, ST, B> =
 /// A CocoonFs instance in operational state.
 ///
 /// A [`CocoonFs`] instance may be obtained either by
-/// [opening](super::CocoonFsOpenFsFuture) an existing filesystem on storage, or
-/// by [creating a new one](super::CocoonFsMkFsFuture).
+/// [opening](super::OpenFsFuture) an existing filesystem on storage, or by
+/// [creating a new one](super::MkFsFuture).
 ///
 /// Once instantiated, the generic [`NvFs`](fs::NvFs) trait interface is
 /// supposed to be used for operating on it.
@@ -67,13 +67,13 @@ pub struct CocoonFs<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     /// only obtain mere [`CocoonFsSyncStateMemberReadGuard`]s on the
     /// `sync_state`. For robustness against "abandoned" readers, i.e.
     /// readers never polled again for some reason, the
-    /// [`CocoonFsSyncStateMemberReadGuard`] is reacquired upon each
-    /// `poll()` invocation and released again before return. That is, no
+    /// [`CocoonFsSyncStateMemberReadGuard`] is reacquired upon each `poll()`
+    /// invocation and released again before return. That is, no
     /// [`CocoonFsSyncStateMemberReadGuard`] is ever held across multiple
     /// `poll()` invocations. To still establish consistency across multiple
-    /// `poll()` invocations, the reader's associated
-    /// [`CocoonFsConsistentReadSequence`] gets revalidated upon each `poll()`
-    /// entry, c.f. [`CocoonFsConsistentReadSequence::continue_sequence()`].
+    /// `poll()` invocations, the reader's associated [`ConsistentReadSequence`]
+    /// gets revalidated upon each `poll()` entry, c.f.
+    /// [`ConsistentReadSequence::continue_sequence()`].
     sync_state: CocoonFsSyncStateMemberType<ST>,
     /// State to coordinate between multiple transaction in their preparation
     /// phase.
@@ -83,7 +83,7 @@ pub struct CocoonFs<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     /// allocations potentially subject to pre-commit writes.
     pending_transactions_sync_state: CocoonFsPendingTransactionsSyncStateMemberType<ST, B>,
     /// Transaction commit sequence number used for validating
-    /// [`CocoonFsConsistentReadSequence`]s.
+    /// [`ConsistentReadSequence`]s.
     ///
     /// Incremented
     /// * while holding a [`CocoonFsSyncStateMemberWriteGuard`] on
@@ -93,7 +93,7 @@ pub struct CocoonFs<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     /// Whether or not any not yet committed transaction is pending.
     ///
     /// Reset to zero upon transaction commit, transitioned to non-zero
-    /// upon a subsequent [`CocoonFsStartTransactionFuture`] completion.
+    /// upon a subsequent [`StartTransactionFuture`] completion.
     ///
     /// Used for selecting the first among a number of pending transactions as
     /// the "primary" one, enabling more freedom regarding in-place
@@ -101,10 +101,9 @@ pub struct CocoonFs<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     any_transaction_pending: atomic::AtomicUsize,
     /// The currently committing transaction, if any.
     ///
-    /// The initiating [`CocoonFsCommitTransactionFuture`] and any subsequently
-    /// started [`CocoonFsStartReadSequenceFuture`] or
-    /// [`CocoonFsStartTransactionFuture`] cooperate to drive progress
-    /// forward.
+    /// The initiating [`CommitTransactionFuture`] and any subsequently
+    /// started [`StartReadSequenceFuture`] or [`StartTransactionFuture`]
+    /// cooperate to drive progress forward.
     committing_transaction: ST::Lock<CommittingTransactionState<ST, B>>,
 }
 
@@ -855,28 +854,25 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFs for CocoonFs<ST, B
     type SyncRcPtr = CocoonFsSyncRcPtrType<ST, B>;
     type SyncRcPtrRef<'a> = <Self::SyncRcPtr as sync_types::SyncRcPtr<Self>>::SyncRcPtrRef<'a>;
 
-    type ConsistentReadSequence = CocoonFsConsistentReadSequence;
-    type Transaction = CocoonFsTransaction;
+    type ConsistentReadSequence = ConsistentReadSequence;
+    type Transaction = Transaction;
 
-    type StartReadSequenceFut = CocoonFsStartReadSequenceFuture<ST, B>;
+    type StartReadSequenceFut = StartReadSequenceFuture<ST, B>;
 
     fn start_read_sequence(_this: &Self::SyncRcPtrRef<'_>) -> Self::StartReadSequenceFut {
-        let start_read_sequence_fut = StartReadSequenceFuture::new();
-        CocoonFsStartReadSequenceFuture {
-            start_read_sequence_fut,
-        }
+        StartReadSequenceFuture::new()
     }
 
-    type StartTransactionFut = CocoonFsStartTransactionFuture<ST, B>;
+    type StartTransactionFut = StartTransactionFuture<ST, B>;
 
     fn start_transaction(
         _this: &Self::SyncRcPtrRef<'_>,
         continued_read_sequence: Option<&Self::ConsistentReadSequence>,
     ) -> Self::StartTransactionFut {
-        CocoonFsStartTransactionFuture::new(continued_read_sequence)
+        StartTransactionFuture::new(continued_read_sequence)
     }
 
-    type CommitTransactionFut = CocoonFsCommitTransactionFuture<ST, B>;
+    type CommitTransactionFut = CommitTransactionFuture<ST, B>;
 
     fn commit_transaction(
         _this: &Self::SyncRcPtrRef<'_>,
@@ -885,28 +881,28 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFs for CocoonFs<ST, B
         post_commit_cb: Option<fs::PostCommitCallbackType>,
         issue_sync: bool,
     ) -> Self::CommitTransactionFut {
-        CocoonFsCommitTransactionFuture::new(transaction, pre_commit_validate_cb, post_commit_cb, issue_sync)
+        CommitTransactionFuture::new(transaction, pre_commit_validate_cb, post_commit_cb, issue_sync)
     }
 
-    type TryCleanupIndeterminateCommitLogFut = CocoonFsTryCleanupIntermediateCommitLogFuture<ST, B>;
+    type TryCleanupIndeterminateCommitLogFut = TryCleanupIntermediateCommitLogFuture<ST, B>;
 
     fn try_cleanup_indeterminate_commit_log(
         _this: &Self::SyncRcPtrRef<'_>,
     ) -> Self::TryCleanupIndeterminateCommitLogFut {
-        CocoonFsTryCleanupIntermediateCommitLogFuture::new()
+        TryCleanupIntermediateCommitLogFuture::new()
     }
 
-    type ReadInodeFut = CocoonFsReadInodeFuture<ST, B>;
+    type ReadInodeFut = ReadInodeFuture<ST, B>;
 
     fn read_inode(
         _this: &Self::SyncRcPtrRef<'_>,
         context: Option<fs::NvFsReadContext<Self>>,
         inode: u32,
     ) -> Self::ReadInodeFut {
-        CocoonFsReadInodeFuture::new(context, inode)
+        ReadInodeFuture::new(context, inode)
     }
 
-    type WriteInodeFut = CocoonFsWriteInodeFuture<ST, B>;
+    type WriteInodeFut = WriteInodeFuture<ST, B>;
 
     fn write_inode(
         _this: &Self::SyncRcPtrRef<'_>,
@@ -914,40 +910,40 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFs for CocoonFs<ST, B
         inode: u32,
         data: zeroize::Zeroizing<Vec<u8>>,
     ) -> Self::WriteInodeFut {
-        CocoonFsWriteInodeFuture::new(transaction, inode, data)
+        WriteInodeFuture::new(transaction, inode, data)
     }
 
-    type EnumerateCursor = CocoonFsEnumerateCursor<ST, B>;
+    type EnumerateCursor = EnumerateCursor<ST, B>;
 
     fn enumerate_cursor(
         _this: &Self::SyncRcPtrRef<'_>,
         context: fs::NvFsReadContext<Self>,
         inodes_enumerate_range: ops::RangeInclusive<u32>,
     ) -> Result<Result<Self::EnumerateCursor, (fs::NvFsReadContext<Self>, NvFsError)>, NvFsError> {
-        Ok(CocoonFsEnumerateCursor::new(context, inodes_enumerate_range))
+        Ok(EnumerateCursor::new(context, inodes_enumerate_range))
     }
 
-    type UnlinkCursor = CocoonFsUnlinkCursor<ST, B>;
+    type UnlinkCursor = UnlinkCursor<ST, B>;
 
     fn unlink_cursor(
         _this: &Self::SyncRcPtrRef<'_>,
         transaction: Self::Transaction,
         inodes_unlink_range: ops::RangeInclusive<u32>,
     ) -> Result<Result<Self::UnlinkCursor, (Self::Transaction, NvFsError)>, NvFsError> {
-        Ok(CocoonFsUnlinkCursor::new(transaction, inodes_unlink_range))
+        Ok(UnlinkCursor::new(transaction, inodes_unlink_range))
     }
 }
 
 /// [`NvFs::ConsistentReadSequence`](fs::NvFs::ConsistentReadSequence)
 /// implementation for [`CocoonFs`].
 #[derive(Clone, Copy)]
-pub struct CocoonFsConsistentReadSequence {
+pub struct ConsistentReadSequence {
     /// Snapshot of the [`CocoonFs::transaction_commit_gen`] sequence number.
     base_transaction_commit_gen: u64,
 }
 
-impl CocoonFsConsistentReadSequence {
-    /// Try to continue a previously started [`CocoonFsConsistentReadSequence`].
+impl ConsistentReadSequence {
+    /// Try to continue a previously started [`ConsistentReadSequence`].
     ///
     /// If the read sequence, as previously started via
     /// [`StartReadSequenceFuture`] has not been rendered stale
@@ -990,58 +986,36 @@ impl CocoonFsConsistentReadSequence {
     }
 }
 
-impl<'a> convert::From<&'a CocoonFsTransaction> for CocoonFsConsistentReadSequence {
-    fn from(value: &'a CocoonFsTransaction) -> Self {
+impl<'a> convert::From<&'a Transaction> for ConsistentReadSequence {
+    fn from(value: &'a Transaction) -> Self {
         value.read_sequence
     }
 }
 
 /// [`NvFs::Transaction`](fs::NvFs::Transaction) implementation for
 /// [`CocoonFs`].
-pub struct CocoonFsTransaction {
-    read_sequence: CocoonFsConsistentReadSequence,
+pub struct Transaction {
+    read_sequence: ConsistentReadSequence,
     transaction: Box<transaction::Transaction>,
 }
 
 #[cfg(test)]
-impl CocoonFsTransaction {
+impl Transaction {
     pub fn test_set_fail_apply_journal(&mut self) {
         self.transaction.test_fail_apply_journal = true;
     }
 }
 
-/// [`NvFs::StartReadSequenceFut`](fs::NvFs::StartReadSequenceFut)
-/// implementation for [`CocoonFs`].
-pub struct CocoonFsStartReadSequenceFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
-    start_read_sequence_fut: StartReadSequenceFuture<ST, B>,
-}
-
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsStartReadSequenceFuture<ST, B>
-{
-    type Output = Result<CocoonFsConsistentReadSequence, NvFsError>;
-
-    fn poll(
-        self: pin::Pin<&mut Self>,
-        fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
-        rng: &mut dyn rng::RngCoreDispatchable,
-        cx: &mut task::Context<'_>,
-    ) -> task::Poll<Self::Output> {
-        let this = pin::Pin::into_inner(self);
-        fs::NvFsFuture::poll(pin::Pin::new(&mut this.start_read_sequence_fut), fs_instance, rng, cx)
-    }
-}
-
 /// [`NvFs::StartTransactionFut`](fs::NvFs::StartTransactionFut) implementation
 /// for [`CocoonFs`].
-pub struct CocoonFsStartTransactionFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
-    fut_state: CocoonFsStartTransactionFutureState<ST, B>,
+pub struct StartTransactionFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: StartTransactionFutureState<ST, B>,
 }
 
-/// Internal [`CocoonFsStartTransactionFuture`] state-machine state.
-enum CocoonFsStartTransactionFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// Internal [`StartTransactionFuture`] state-machine state.
+enum StartTransactionFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     ContinueReadSequence {
-        read_sequence: CocoonFsConsistentReadSequence,
+        read_sequence: ConsistentReadSequence,
     },
     StartReadSequence {
         start_read_sequence_fut: StartReadSequenceFuture<ST, B>,
@@ -1049,26 +1023,24 @@ enum CocoonFsStartTransactionFutureState<ST: sync_types::SyncTypes, B: blkdev::N
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsStartTransactionFuture<ST, B> {
-    fn new(mut continued_read_sequence: Option<&CocoonFsConsistentReadSequence>) -> Self {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> StartTransactionFuture<ST, B> {
+    fn new(mut continued_read_sequence: Option<&ConsistentReadSequence>) -> Self {
         if let Some(read_sequence) = continued_read_sequence.take().copied() {
             return Self {
-                fut_state: CocoonFsStartTransactionFutureState::ContinueReadSequence { read_sequence },
+                fut_state: StartTransactionFutureState::ContinueReadSequence { read_sequence },
             };
         }
 
         Self {
-            fut_state: CocoonFsStartTransactionFutureState::StartReadSequence {
+            fut_state: StartTransactionFutureState::StartReadSequence {
                 start_read_sequence_fut: StartReadSequenceFuture::new(),
             },
         }
     }
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsStartTransactionFuture<ST, B>
-{
-    type Output = Result<CocoonFsTransaction, NvFsError>;
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>> for StartTransactionFuture<ST, B> {
+    type Output = Result<Transaction, NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1078,31 +1050,31 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
         let read_sequence = match &mut this.fut_state {
-            CocoonFsStartTransactionFutureState::ContinueReadSequence { read_sequence } => {
+            StartTransactionFutureState::ContinueReadSequence { read_sequence } => {
                 let read_sequence = *read_sequence;
-                this.fut_state = CocoonFsStartTransactionFutureState::Done;
+                this.fut_state = StartTransactionFutureState::Done;
                 read_sequence
             }
-            CocoonFsStartTransactionFutureState::StartReadSequence {
+            StartTransactionFutureState::StartReadSequence {
                 start_read_sequence_fut,
             } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, rng, cx) {
                 task::Poll::Ready(Ok(read_sequence)) => {
-                    this.fut_state = CocoonFsStartTransactionFutureState::Done;
+                    this.fut_state = StartTransactionFutureState::Done;
                     read_sequence
                 }
                 task::Poll::Ready(Err(e)) => {
-                    this.fut_state = CocoonFsStartTransactionFutureState::Done;
+                    this.fut_state = StartTransactionFutureState::Done;
                     return task::Poll::Ready(Err(e));
                 }
                 task::Poll::Pending => return task::Poll::Pending,
             },
-            CocoonFsStartTransactionFutureState::Done => unreachable!(),
+            StartTransactionFutureState::Done => unreachable!(),
         };
 
         let sync_state_read_guard = match read_sequence.continue_sequence(fs_instance) {
             Ok(sync_state_read_guard) => sync_state_read_guard,
             Err(e) => {
-                this.fut_state = CocoonFsStartTransactionFutureState::Done;
+                this.fut_state = StartTransactionFutureState::Done;
                 return task::Poll::Ready(Err(e));
             }
         };
@@ -1122,7 +1094,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                 return task::Poll::Ready(Err(NvFsError::from(e)));
             }
         };
-        task::Poll::Ready(Ok(CocoonFsTransaction {
+        task::Poll::Ready(Ok(Transaction {
             read_sequence,
             transaction,
         }))
@@ -1131,16 +1103,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
 /// [`NvFs::CommitTransactionFut`](fs::NvFs::CommitTransactionFut)
 /// implementation for [`CocoonFs`].
-pub struct CocoonFsCommitTransactionFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
-    fut_state: CocoonFsCommitTransactionFutureState<ST, B>,
+pub struct CommitTransactionFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: CommitTransactionFutureState<ST, B>,
 }
 
-/// Internal [`CocoonFsCommitTransactionFuture`] state-machine state.
-enum CocoonFsCommitTransactionFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// Internal [`CommitTransactionFuture`] state-machine state.
+enum CommitTransactionFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        transaction: Option<CocoonFsTransaction>,
+        transaction: Option<Transaction>,
         pre_commit_validate_cb: Option<fs::PreCommitValidateCallbackType>,
         post_commit_cb: Option<fs::PostCommitCallbackType>,
         issue_sync: bool,
@@ -1152,15 +1124,15 @@ enum CocoonFsCommitTransactionFutureState<ST: sync_types::SyncTypes, B: blkdev::
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsCommitTransactionFuture<ST, B> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CommitTransactionFuture<ST, B> {
     fn new(
-        transaction: CocoonFsTransaction,
+        transaction: Transaction,
         pre_commit_validate_cb: Option<fs::PreCommitValidateCallbackType>,
         post_commit_cb: Option<fs::PostCommitCallbackType>,
         issue_sync: bool,
     ) -> Self {
         Self {
-            fut_state: CocoonFsCommitTransactionFutureState::Init {
+            fut_state: CommitTransactionFutureState::Init {
                 transaction: Some(transaction),
                 pre_commit_validate_cb,
                 post_commit_cb,
@@ -1171,7 +1143,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsCommitTransactionFu
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsCommitTransactionFuture<ST, B>
+    for CommitTransactionFuture<ST, B>
 {
     type Output = Result<(), fs::TransactionCommitError>;
 
@@ -1185,7 +1157,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
         loop {
             match &mut this.fut_state {
-                CocoonFsCommitTransactionFutureState::Init {
+                CommitTransactionFutureState::Init {
                     transaction,
                     pre_commit_validate_cb,
                     post_commit_cb,
@@ -1194,14 +1166,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     let transaction = match transaction.take() {
                         Some(transaction) => transaction,
                         None => {
-                            this.fut_state = CocoonFsCommitTransactionFutureState::Done;
+                            this.fut_state = CommitTransactionFutureState::Done;
                             return task::Poll::Ready(Err(fs::TransactionCommitError::LogStateClean {
                                 reason: nvfs_err_internal!(),
                             }));
                         }
                     };
 
-                    let CocoonFsTransaction {
+                    let Transaction {
                         read_sequence: transaction_read_sequence,
                         transaction,
                     } = transaction;
@@ -1217,7 +1189,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     }) {
                         Ok(sync_state_write_fut) => sync_state_write_fut,
                         Err(e) => {
-                            this.fut_state = CocoonFsCommitTransactionFutureState::Done;
+                            this.fut_state = CommitTransactionFutureState::Done;
                             return task::Poll::Ready(Err(fs::TransactionCommitError::LogStateClean { reason: e }));
                         }
                     };
@@ -1237,7 +1209,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     }) {
                         Ok(progress_broadcast_fut) => progress_broadcast_fut,
                         Err(e) => {
-                            this.fut_state = CocoonFsCommitTransactionFutureState::Done;
+                            this.fut_state = CommitTransactionFutureState::Done;
                             return task::Poll::Ready(Err(fs::TransactionCommitError::LogStateClean { reason: e }));
                         }
                     };
@@ -1263,7 +1235,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                 progress_committing_transaction_subscription_fut
                             }
                             Err(e) => {
-                                this.fut_state = CocoonFsCommitTransactionFutureState::Done;
+                                this.fut_state = CommitTransactionFutureState::Done;
                                 return task::Poll::Ready(Err(fs::TransactionCommitError::LogStateClean { reason: e }));
                             }
                         };
@@ -1280,18 +1252,18 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                         || (fs_instance.transaction_commit_gen.load(atomic::Ordering::Relaxed)
                             != transaction_read_sequence.base_transaction_commit_gen)
                     {
-                        this.fut_state = CocoonFsCommitTransactionFutureState::Done;
+                        this.fut_state = CommitTransactionFutureState::Done;
                         return task::Poll::Ready(Err(fs::TransactionCommitError::LogStateClean {
                             reason: NvFsError::Retry,
                         }));
                     }
 
                     *committing_transaction = CommittingTransactionState::Progressing { progress_broadcast_fut };
-                    this.fut_state = CocoonFsCommitTransactionFutureState::ProgressCommitting {
+                    this.fut_state = CommitTransactionFutureState::ProgressCommitting {
                         progress_committing_transaction_subscription_fut,
                     };
                 }
-                CocoonFsCommitTransactionFutureState::ProgressCommitting {
+                CommitTransactionFutureState::ProgressCommitting {
                     progress_committing_transaction_subscription_fut,
                 } => {
                     match ProgressCommittingTransactionBroadcastFutureSubscriptionType::poll(
@@ -1334,13 +1306,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                     })
                                 }
                             };
-                            this.fut_state = CocoonFsCommitTransactionFutureState::Done;
+                            this.fut_state = CommitTransactionFutureState::Done;
                             return task::Poll::Ready(r);
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     }
                 }
-                CocoonFsCommitTransactionFutureState::Done => unreachable!(),
+                CommitTransactionFutureState::Done => unreachable!(),
             }
         }
     }
@@ -1348,11 +1320,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
 /// [`NvFs::TryCleanupIndeterminateCommitLogFut`](fs::NvFs::TryCleanupIndeterminateCommitLogFut)
 /// implementation for [`CocoonFs`].
-pub struct CocoonFsTryCleanupIntermediateCommitLogFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+pub struct TryCleanupIntermediateCommitLogFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     start_read_sequence_fut: StartReadSequenceFuture<ST, B>,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsTryCleanupIntermediateCommitLogFuture<ST, B> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TryCleanupIntermediateCommitLogFuture<ST, B> {
     fn new() -> Self {
         Self {
             start_read_sequence_fut: StartReadSequenceFuture::new(),
@@ -1361,7 +1333,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsTryCleanupIntermedi
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsTryCleanupIntermediateCommitLogFuture<ST, B>
+    for TryCleanupIntermediateCommitLogFuture<ST, B>
 {
     type Output = Result<(), NvFsError>;
 
@@ -1382,13 +1354,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
 /// [`NvFs::ReadInodeFut`](fs::NvFs::ReadInodeFut) implementation for
 /// [`CocoonFs`].
-pub struct CocoonFsReadInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
-    fut_state: CocoonFsReadInodeFutureState<ST, B>,
+pub struct ReadInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: ReadInodeFutureState<ST, B>,
 }
 
-/// Internal [`CocoonFsReadInodeFuture`] state-machine state.
+/// Internal [`ReadInodeFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum CocoonFsReadInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+enum ReadInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     StartReadSequence {
         start_read_sequence_fut: StartReadSequenceFuture<ST, B>,
         inode: u32,
@@ -1400,22 +1372,22 @@ enum CocoonFsReadInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev
         inode: u32,
     },
     ReadInodeData {
-        read_sequence: CocoonFsConsistentReadSequence,
+        read_sequence: ConsistentReadSequence,
         with_transaction: bool,
         read_inode_data_fut: ReadInodeDataFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsReadInodeFuture<ST, B> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadInodeFuture<ST, B> {
     fn new(context: Option<fs::NvFsReadContext<CocoonFs<ST, B>>>, inode: u32) -> Self {
         Self {
             fut_state: match context {
-                Some(context) => CocoonFsReadInodeFutureState::ReadInodeDataPrepare {
+                Some(context) => ReadInodeFutureState::ReadInodeDataPrepare {
                     context: Some(context),
                     inode,
                 },
-                None => CocoonFsReadInodeFutureState::StartReadSequence {
+                None => ReadInodeFutureState::StartReadSequence {
                     start_read_sequence_fut: StartReadSequenceFuture::new(),
                     inode,
                 },
@@ -1424,9 +1396,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsReadInodeFuture<ST,
     }
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsReadInodeFuture<ST, B>
-{
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>> for ReadInodeFuture<ST, B> {
     type Output = Result<
         (
             fs::NvFsReadContext<CocoonFs<ST, B>>,
@@ -1445,33 +1415,33 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
         loop {
             match &mut this.fut_state {
-                CocoonFsReadInodeFutureState::StartReadSequence {
+                ReadInodeFutureState::StartReadSequence {
                     start_read_sequence_fut,
                     inode,
                 } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, rng, cx) {
                     task::Poll::Ready(Ok(read_sequence)) => {
-                        this.fut_state = CocoonFsReadInodeFutureState::ReadInodeDataPrepare {
+                        this.fut_state = ReadInodeFutureState::ReadInodeDataPrepare {
                             context: Some(fs::NvFsReadContext::Committed { seq: read_sequence }),
                             inode: *inode,
                         };
                     }
                     task::Poll::Ready(Err(e)) => {
-                        this.fut_state = CocoonFsReadInodeFutureState::Done;
+                        this.fut_state = ReadInodeFutureState::Done;
                         return task::Poll::Ready(Err(e));
                     }
                     task::Poll::Pending => return task::Poll::Pending,
                 },
-                CocoonFsReadInodeFutureState::ReadInodeDataPrepare { context, inode } => {
+                ReadInodeFutureState::ReadInodeDataPrepare { context, inode } => {
                     let context = match context.take() {
                         Some(context) => context,
                         None => {
-                            this.fut_state = CocoonFsReadInodeFutureState::Done;
+                            this.fut_state = ReadInodeFutureState::Done;
                             return task::Poll::Ready(Err(nvfs_err_internal!()));
                         }
                     };
 
                     if *inode <= inode_index::SPECIAL_INODE_MAX {
-                        this.fut_state = CocoonFsReadInodeFutureState::Done;
+                        this.fut_state = ReadInodeFutureState::Done;
                         return task::Poll::Ready(Ok((context, Err(NvFsError::InodeReserved))));
                     }
 
@@ -1484,13 +1454,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
                     let with_transaction = transaction.is_some();
                     let read_inode_data_fut = ReadInodeDataFuture::new(transaction, *inode);
-                    this.fut_state = CocoonFsReadInodeFutureState::ReadInodeData {
+                    this.fut_state = ReadInodeFutureState::ReadInodeData {
                         read_sequence,
                         with_transaction,
                         read_inode_data_fut,
                     };
                 }
-                CocoonFsReadInodeFutureState::ReadInodeData {
+                ReadInodeFutureState::ReadInodeData {
                     read_sequence,
                     with_transaction,
                     read_inode_data_fut,
@@ -1498,7 +1468,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     let sync_state_read_guard = match read_sequence.continue_sequence::<ST, B>(fs_instance) {
                         Ok(sync_state) => sync_state,
                         Err(e) => {
-                            this.fut_state = CocoonFsReadInodeFutureState::Done;
+                            this.fut_state = ReadInodeFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }
                     };
@@ -1516,7 +1486,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
                     let context = match transaction {
                         Some(transaction) => fs::NvFsReadContext::Transaction {
-                            transaction: CocoonFsTransaction {
+                            transaction: Transaction {
                                 read_sequence: *read_sequence,
                                 transaction,
                             },
@@ -1525,7 +1495,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                             // We started out with some transaction, but it got lost somewhere on
                             // the way.
                             if *with_transaction {
-                                this.fut_state = CocoonFsReadInodeFutureState::Done;
+                                this.fut_state = ReadInodeFutureState::Done;
                                 return task::Poll::Ready(Err(nvfs_err_internal!()));
                             }
 
@@ -1533,10 +1503,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                         }
                     };
 
-                    this.fut_state = CocoonFsReadInodeFutureState::Done;
+                    this.fut_state = ReadInodeFutureState::Done;
                     return task::Poll::Ready(Ok((context, result)));
                 }
-                CocoonFsReadInodeFutureState::Done => unreachable!(),
+                ReadInodeFutureState::Done => unreachable!(),
             };
         }
     }
@@ -1544,31 +1514,31 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
 /// [`NvFs::WriteInodeFut`](fs::NvFs::WriteInodeFut) implementation for
 /// [`CocoonFs`].
-pub struct CocoonFsWriteInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
-    fut_state: CocoonFsWriteInodeFutureState<ST, B>,
+pub struct WriteInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: WriteInodeFutureState<ST, B>,
 }
 
-/// Internal [`CocoonFsWriteInodeFuture`] state-machine state.
+/// Internal [`WriteInodeFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum CocoonFsWriteInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+enum WriteInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        transaction: Option<CocoonFsTransaction>,
+        transaction: Option<Transaction>,
         inode: u32,
         data: zeroize::Zeroizing<Vec<u8>>,
     },
     WriteInodeData {
-        read_sequence: CocoonFsConsistentReadSequence,
+        read_sequence: ConsistentReadSequence,
         write_inode_data_fut: WriteInodeDataFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsWriteInodeFuture<ST, B> {
-    fn new(transaction: CocoonFsTransaction, inode: u32, data: zeroize::Zeroizing<Vec<u8>>) -> Self {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeFuture<ST, B> {
+    fn new(transaction: Transaction, inode: u32, data: zeroize::Zeroizing<Vec<u8>>) -> Self {
         Self {
-            fut_state: CocoonFsWriteInodeFutureState::Init {
+            fut_state: WriteInodeFutureState::Init {
                 transaction: Some(transaction),
                 inode,
                 data,
@@ -1577,10 +1547,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsWriteInodeFuture<ST
     }
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsWriteInodeFuture<ST, B>
-{
-    type Output = Result<(CocoonFsTransaction, zeroize::Zeroizing<Vec<u8>>, Result<(), NvFsError>), NvFsError>;
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>> for WriteInodeFuture<ST, B> {
+    type Output = Result<(Transaction, zeroize::Zeroizing<Vec<u8>>, Result<(), NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1592,7 +1560,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
         loop {
             match &mut this.fut_state {
-                CocoonFsWriteInodeFutureState::Init {
+                WriteInodeFutureState::Init {
                     transaction,
                     inode,
                     data,
@@ -1600,35 +1568,35 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     let transaction = match transaction.take() {
                         Some(transaction) => transaction,
                         None => {
-                            this.fut_state = CocoonFsWriteInodeFutureState::Done;
+                            this.fut_state = WriteInodeFutureState::Done;
                             return task::Poll::Ready(Err(nvfs_err_internal!()));
                         }
                     };
 
                     if *inode <= inode_index::SPECIAL_INODE_MAX {
                         let data = mem::take(data);
-                        this.fut_state = CocoonFsWriteInodeFutureState::Done;
+                        this.fut_state = WriteInodeFutureState::Done;
                         return task::Poll::Ready(Ok((transaction, data, Err(NvFsError::InodeReserved))));
                     }
 
-                    let CocoonFsTransaction {
+                    let Transaction {
                         read_sequence,
                         transaction,
                     } = transaction;
                     let write_inode_data_fut = WriteInodeDataFuture::new(transaction, *inode, mem::take(data));
-                    this.fut_state = CocoonFsWriteInodeFutureState::WriteInodeData {
+                    this.fut_state = WriteInodeFutureState::WriteInodeData {
                         read_sequence,
                         write_inode_data_fut,
                     };
                 }
-                CocoonFsWriteInodeFutureState::WriteInodeData {
+                WriteInodeFutureState::WriteInodeData {
                     read_sequence,
                     write_inode_data_fut,
                 } => {
                     let sync_state_read_guard = match read_sequence.continue_sequence::<ST, B>(fs_instance) {
                         Ok(sync_state) => sync_state,
                         Err(e) => {
-                            this.fut_state = CocoonFsWriteInodeFutureState::Done;
+                            this.fut_state = WriteInodeFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }
                     };
@@ -1642,20 +1610,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     ) {
                         task::Poll::Ready(Ok((transaction, data, result))) => (transaction, data, result),
                         task::Poll::Ready(Err(e)) => {
-                            this.fut_state = CocoonFsWriteInodeFutureState::Done;
+                            this.fut_state = WriteInodeFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let transaction = CocoonFsTransaction {
+                    let transaction = Transaction {
                         read_sequence: *read_sequence,
                         transaction,
                     };
-                    this.fut_state = CocoonFsWriteInodeFutureState::Done;
+                    this.fut_state = WriteInodeFutureState::Done;
                     return task::Poll::Ready(Ok((transaction, data, result)));
                 }
-                CocoonFsWriteInodeFutureState::Done => unreachable!(),
+                WriteInodeFutureState::Done => unreachable!(),
             }
         }
     }
@@ -1663,13 +1631,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
 /// [`NvFs::EnumerateCursor`](fs::NvFs::EnumerateCursor) implementation for
 /// [`CocoonFs`].
-pub struct CocoonFsEnumerateCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+pub struct EnumerateCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     cursor: Box<inode_index::InodeIndexEnumerateCursor<ST, B>>,
-    read_sequence: CocoonFsConsistentReadSequence,
+    read_sequence: ConsistentReadSequence,
     with_transaction: bool,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsEnumerateCursor<ST, B> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> EnumerateCursor<ST, B> {
     fn new(
         context: fs::NvFsReadContext<CocoonFs<ST, B>>,
         inodes_enumerate_range: ops::RangeInclusive<u32>,
@@ -1677,7 +1645,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsEnumerateCursor<ST,
         let (read_sequence, transaction) = match context {
             fs::NvFsReadContext::Committed { seq } => (seq, None),
             fs::NvFsReadContext::Transaction { transaction } => {
-                let CocoonFsTransaction {
+                let Transaction {
                     read_sequence,
                     transaction,
                 } = transaction;
@@ -1695,7 +1663,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsEnumerateCursor<ST,
             .map_err(|(transaction, e)| {
                 let context = match transaction {
                     Some(transaction) => fs::NvFsReadContext::Transaction {
-                        transaction: CocoonFsTransaction {
+                        transaction: Transaction {
                             read_sequence,
                             transaction,
                         },
@@ -1711,7 +1679,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsEnumerateCursor<ST,
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsEnumerateCursor<CocoonFs<ST, B>>
-    for CocoonFsEnumerateCursor<ST, B>
+    for EnumerateCursor<ST, B>
 {
     fn into_context(self) -> Result<fs::NvFsReadContext<CocoonFs<ST, B>>, NvFsError> {
         let Self {
@@ -1722,7 +1690,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsEnumerateCursor<Coc
 
         match cursor.into_transaction() {
             Some(transaction) => Ok(fs::NvFsReadContext::Transaction {
-                transaction: CocoonFsTransaction {
+                transaction: Transaction {
                     read_sequence,
                     transaction,
                 },
@@ -1738,7 +1706,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsEnumerateCursor<Coc
         }
     }
 
-    type NextFut = CocoonFsEnumerateCursorNextFuture<ST, B>;
+    type NextFut = EnumerateCursorNextFuture<ST, B>;
 
     fn next(self) -> Self::NextFut {
         let Self {
@@ -1746,14 +1714,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsEnumerateCursor<Coc
             read_sequence,
             with_transaction,
         } = self;
-        CocoonFsEnumerateCursorNextFuture {
+        EnumerateCursorNextFuture {
             next_fut: cursor.next(),
             read_sequence,
             with_transaction,
         }
     }
 
-    type ReadInodeDataFut = CocoonFsEnumerateCursorReadInodeDataFuture<ST, B>;
+    type ReadInodeDataFut = EnumerateCursorReadInodeDataFuture<ST, B>;
 
     fn read_current_inode_data(self) -> Self::ReadInodeDataFut {
         let Self {
@@ -1762,7 +1730,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsEnumerateCursor<Coc
             with_transaction,
         } = self;
 
-        CocoonFsEnumerateCursorReadInodeDataFuture {
+        EnumerateCursorReadInodeDataFuture {
             read_inode_data_fut: cursor.read_inode_data(),
             read_sequence,
             with_transaction,
@@ -1770,17 +1738,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsEnumerateCursor<Coc
     }
 }
 /// [`NvFsEnumerateCursor::NextFut`](fs::NvFsEnumerateCursor::NextFut)
-/// implementation for [`CocoonFsEnumerateCursor`].
-pub struct CocoonFsEnumerateCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// implementation for [`EnumerateCursor`].
+pub struct EnumerateCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     next_fut: inode_index::InodeIndexEnumerateCursorNextFuture<ST, B>,
-    read_sequence: CocoonFsConsistentReadSequence,
+    read_sequence: ConsistentReadSequence,
     with_transaction: bool,
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsEnumerateCursorNextFuture<ST, B>
+    for EnumerateCursorNextFuture<ST, B>
 {
-    type Output = Result<(CocoonFsEnumerateCursor<ST, B>, Result<Option<u32>, NvFsError>), NvFsError>;
+    type Output = Result<(EnumerateCursor<ST, B>, Result<Option<u32>, NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1799,7 +1767,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
         match CocoonFsSyncStateReadFuture::poll(pin::Pin::new(&mut this.next_fut), &mut sync_state, &mut (), cx) {
             task::Poll::Ready(Ok((cursor, result))) => task::Poll::Ready(Ok((
-                CocoonFsEnumerateCursor {
+                EnumerateCursor {
                     cursor,
                     read_sequence: this.read_sequence,
                     with_transaction: this.with_transaction,
@@ -1813,23 +1781,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 }
 
 /// [`NvFsEnumerateCursor::ReadInodeDataFut`](fs::NvFsEnumerateCursor::ReadInodeDataFut)
-/// implementation for [`CocoonFsEnumerateCursor`].
-pub struct CocoonFsEnumerateCursorReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// implementation for [`EnumerateCursor`].
+pub struct EnumerateCursorReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     read_inode_data_fut: inode_index::InodeIndexEnumerateCursorReadInodeDataFuture<ST, B>,
-    read_sequence: CocoonFsConsistentReadSequence,
+    read_sequence: ConsistentReadSequence,
     with_transaction: bool,
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsEnumerateCursorReadInodeDataFuture<ST, B>
+    for EnumerateCursorReadInodeDataFuture<ST, B>
 {
-    type Output = Result<
-        (
-            CocoonFsEnumerateCursor<ST, B>,
-            Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>,
-        ),
-        NvFsError,
-    >;
+    type Output = Result<(EnumerateCursor<ST, B>, Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1853,7 +1815,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
             cx,
         ) {
             task::Poll::Ready(Ok((cursor, result))) => task::Poll::Ready(Ok((
-                CocoonFsEnumerateCursor {
+                EnumerateCursor {
                     cursor,
                     read_sequence: this.read_sequence,
                     with_transaction: this.with_transaction,
@@ -1868,17 +1830,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
 /// [`NvFs::UnlinkCursor`](fs::NvFs::UnlinkCursor) implementation for
 /// [`CocoonFs`].
-pub struct CocoonFsUnlinkCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+pub struct UnlinkCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     cursor: Box<inode_index::InodeIndexUnlinkCursor<ST, B>>,
-    read_sequence: CocoonFsConsistentReadSequence,
+    read_sequence: ConsistentReadSequence,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsUnlinkCursor<ST, B> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> UnlinkCursor<ST, B> {
     fn new(
-        transaction: CocoonFsTransaction,
+        transaction: Transaction,
         inodes_unlink_range: ops::RangeInclusive<u32>,
-    ) -> Result<Self, (CocoonFsTransaction, NvFsError)> {
-        let CocoonFsTransaction {
+    ) -> Result<Self, (Transaction, NvFsError)> {
+        let Transaction {
             read_sequence,
             transaction,
         } = transaction;
@@ -1886,7 +1848,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsUnlinkCursor<ST, B>
             .map(|cursor| Self { cursor, read_sequence })
             .map_err(|(transaction, e)| {
                 (
-                    CocoonFsTransaction {
+                    Transaction {
                         read_sequence,
                         transaction,
                     },
@@ -1896,43 +1858,41 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsUnlinkCursor<ST, B>
     }
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsUnlinkCursor<CocoonFs<ST, B>>
-    for CocoonFsUnlinkCursor<ST, B>
-{
-    fn into_transaction(self) -> Result<CocoonFsTransaction, NvFsError> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsUnlinkCursor<CocoonFs<ST, B>> for UnlinkCursor<ST, B> {
+    fn into_transaction(self) -> Result<Transaction, NvFsError> {
         let Self { cursor, read_sequence } = self;
         let transaction = cursor.into_transaction()?;
-        Ok(CocoonFsTransaction {
+        Ok(Transaction {
             read_sequence,
             transaction,
         })
     }
 
-    type NextFut = CocoonFsUnlinkCursorNextFuture<ST, B>;
+    type NextFut = UnlinkCursorNextFuture<ST, B>;
 
     fn next(self) -> Self::NextFut {
         let Self { cursor, read_sequence } = self;
-        CocoonFsUnlinkCursorNextFuture {
+        UnlinkCursorNextFuture {
             next_fut: cursor.next(),
             read_sequence,
         }
     }
 
-    type UnlinkInodeFut = CocoonFsUnlinkCursorUnlinkInodeFuture<ST, B>;
+    type UnlinkInodeFut = UnlinkCursorUnlinkInodeFuture<ST, B>;
 
     fn unlink_current_inode(self) -> Self::UnlinkInodeFut {
         let Self { cursor, read_sequence } = self;
-        CocoonFsUnlinkCursorUnlinkInodeFuture {
+        UnlinkCursorUnlinkInodeFuture {
             unlink_inode_fut: cursor.unlink_inode(),
             read_sequence,
         }
     }
 
-    type ReadInodeDataFut = CocoonFsUnlinkCursorReadInodeDataFuture<ST, B>;
+    type ReadInodeDataFut = UnlinkCursorReadInodeDataFuture<ST, B>;
 
     fn read_current_inode_data(self) -> Self::ReadInodeDataFut {
         let Self { cursor, read_sequence } = self;
-        CocoonFsUnlinkCursorReadInodeDataFuture {
+        UnlinkCursorReadInodeDataFuture {
             read_inode_data_fut: cursor.read_inode_data(),
             read_sequence,
         }
@@ -1940,16 +1900,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsUnlinkCursor<Cocoon
 }
 
 /// [`NvFsUnlinkCursor::NextFut`](fs::NvFsUnlinkCursor::NextFut) implementation
-/// for [`CocoonFsUnlinkCursor`].
-pub struct CocoonFsUnlinkCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// for [`UnlinkCursor`].
+pub struct UnlinkCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     next_fut: inode_index::InodeIndexUnlinkCursorNextFuture<ST, B>,
-    read_sequence: CocoonFsConsistentReadSequence,
+    read_sequence: ConsistentReadSequence,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsUnlinkCursorNextFuture<ST, B>
-{
-    type Output = Result<(CocoonFsUnlinkCursor<ST, B>, Result<Option<u32>, NvFsError>), NvFsError>;
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>> for UnlinkCursorNextFuture<ST, B> {
+    type Output = Result<(UnlinkCursor<ST, B>, Result<Option<u32>, NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1968,7 +1926,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
         match CocoonFsSyncStateReadFuture::poll(pin::Pin::new(&mut this.next_fut), &mut sync_state, &mut (), cx) {
             task::Poll::Ready(Ok((cursor, result))) => task::Poll::Ready(Ok((
-                CocoonFsUnlinkCursor {
+                UnlinkCursor {
                     cursor,
                     read_sequence: this.read_sequence,
                 },
@@ -1981,16 +1939,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 }
 
 /// [`NvFsUnlinkCursor::UnlinkInodeFut`](fs::NvFsUnlinkCursor::UnlinkInodeFut)
-/// implementation for [`CocoonFsUnlinkCursor`].
-pub struct CocoonFsUnlinkCursorUnlinkInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// implementation for [`UnlinkCursor`].
+pub struct UnlinkCursorUnlinkInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     unlink_inode_fut: inode_index::InodeIndexUnlinkCursorUnlinkInodeFuture<ST, B>,
-    read_sequence: CocoonFsConsistentReadSequence,
+    read_sequence: ConsistentReadSequence,
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsUnlinkCursorUnlinkInodeFuture<ST, B>
+    for UnlinkCursorUnlinkInodeFuture<ST, B>
 {
-    type Output = Result<(CocoonFsUnlinkCursor<ST, B>, Result<(), NvFsError>), NvFsError>;
+    type Output = Result<(UnlinkCursor<ST, B>, Result<(), NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -2014,7 +1972,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
             cx,
         ) {
             task::Poll::Ready(Ok((cursor, result))) => task::Poll::Ready(Ok((
-                CocoonFsUnlinkCursor {
+                UnlinkCursor {
                     cursor,
                     read_sequence: this.read_sequence,
                 },
@@ -2027,22 +1985,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 }
 
 /// [`NvFsUnlinkCursor::ReadInodeDataFut`](fs::NvFsUnlinkCursor::ReadInodeDataFut) implementation
-/// for [`CocoonFsUnlinkCursor`].
-pub struct CocoonFsUnlinkCursorReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// for [`UnlinkCursor`].
+pub struct UnlinkCursorReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     read_inode_data_fut: inode_index::InodeIndexUnlinkCursorReadInodeDataFuture<ST, B>,
-    read_sequence: CocoonFsConsistentReadSequence,
+    read_sequence: ConsistentReadSequence,
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
-    for CocoonFsUnlinkCursorReadInodeDataFuture<ST, B>
+    for UnlinkCursorReadInodeDataFuture<ST, B>
 {
-    type Output = Result<
-        (
-            CocoonFsUnlinkCursor<ST, B>,
-            Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>,
-        ),
-        NvFsError,
-    >;
+    type Output = Result<(UnlinkCursor<ST, B>, Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -2066,7 +2018,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
             cx,
         ) {
             task::Poll::Ready(Ok((cursor, result))) => task::Poll::Ready(Ok((
-                CocoonFsUnlinkCursor {
+                UnlinkCursor {
                     cursor,
                     read_sequence: this.read_sequence,
                 },
@@ -2094,9 +2046,9 @@ enum CommittingTransactionState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> 
     /// successfully up to (and including) the journal write-out, but the
     /// subsequent journal application failed.
     ///
-    /// Success has been reported to the initiating
-    /// [`CocoonFsCommitTransactionFuture`], and the journal application
-    /// needs to get retried until it succeeds eventually.
+    /// Success has been reported to the initiating [`CommitTransactionFuture`],
+    /// and the journal application needs to get retried until it succeeds
+    /// eventually.
     RetryApplyJournal {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -2149,7 +2101,7 @@ enum ProgressCommittingTransactionFutureResult {
     /// application failed.
     ///
     /// The changes are considered effective, and the initiating
-    /// [`CocoonFsCommitTransactionFuture`] will complete with success.
+    /// [`CommitTransactionFuture`] will complete with success.
     ///
     /// Subscribed [`StartReadSequenceFuture`]s will also complete for now with
     /// a failure of `apply_journal_error`.
@@ -2162,18 +2114,16 @@ enum ProgressCommittingTransactionFutureResult {
     /// The transaction commit failed, but the journal is in a determinate
     /// state.
     ///
-    /// The initiating
-    /// [`CocoonFsCommitTransactionFuture`], will complete with a failure of
-    /// `commit_error`.
+    /// The initiating [`CommitTransactionFuture`], will complete with a failure
+    /// of `commit_error`.
     ///
     /// Subscribed [`StartReadSequenceFuture`]s will complete with success.
     CommitErrAbortJournalOk { commit_error: NvFsError },
     /// The transaction commit failed and the journal has been left in an
     /// indeterminate state.
     ///
-    /// The initiating
-    /// [`CocoonFsCommitTransactionFuture`], will complete with a failure of
-    /// `commit_error`.
+    /// The initiating [`CommitTransactionFuture`], will complete with a failure
+    /// of `commit_error`.
     ///
     /// Subscribed [`StartReadSequenceFuture`]s will also complete for now with
     /// a failure of `abort_journal_error`.
@@ -3022,13 +2972,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
     }
 }
 
-/// Start a [`CocoonFsConsistentReadSequence`].
+/// [`NvFs::StartReadSequenceFut`](fs::NvFs::StartReadSequenceFut)
+/// implementation for [`CocoonFs`].
+///
+/// Start a [`ConsistentReadSequence`].
 ///
 /// If there's a committing transaction at [`CocoonFs::committing_transaction`],
 /// help out driving its progress forward and eventually return a snapshot of
 /// [`CocoonFs::transaction_commit_gen`] wrapped in a
-/// [`CocoonFsConsistentReadSequence`].
-struct StartReadSequenceFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+/// [`ConsistentReadSequence`].
+pub struct StartReadSequenceFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     state: StartReadSequenceFutureState<ST, B>,
 }
 
@@ -3053,7 +3006,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> StartReadSequenceFuture<ST,
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
     for StartReadSequenceFuture<ST, B>
 {
-    type Output = Result<CocoonFsConsistentReadSequence, NvFsError>;
+    type Output = Result<ConsistentReadSequence, NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -3075,7 +3028,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                     fs_instance.transaction_commit_gen.load(atomic::Ordering::Relaxed);
 
                                 this.state = StartReadSequenceFutureState::Done;
-                                return task::Poll::Ready(Ok(CocoonFsConsistentReadSequence {
+                                return task::Poll::Ready(Ok(ConsistentReadSequence {
                                     base_transaction_commit_gen,
                                 }));
                             }
@@ -3387,7 +3340,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     let base_transaction_commit_gen =
                         fs_instance.transaction_commit_gen.load(atomic::Ordering::Relaxed);
                     this.state = StartReadSequenceFutureState::Done;
-                    return task::Poll::Ready(Ok(CocoonFsConsistentReadSequence {
+                    return task::Poll::Ready(Ok(ConsistentReadSequence {
                         base_transaction_commit_gen,
                     }));
                 }
@@ -3437,14 +3390,13 @@ type QueuedPendingTransactionsSyncFuture<ST, B> = asynchronous::EnqueuedFutureSu
 /// to be enqueued the [`CocoonFs::pending_transactions_sync_state`]
 /// [`FutureQueue`](asynchronous::FutureQueue).
 ///
-/// Implementation backend for [`CocoonFsAllocateBlockFuture`],
-/// [`CocoonFsAllocateBlocksFuture`] and [`CocoonFsAllocateExtentsFuture`],
-/// which all require exlusive access to
+/// Implementation backend for [`AllocateBlockFuture`], [`AllocateBlocksFuture`]
+/// and [`AllocateExtentsFuture`], which all require exlusive access to
 /// [`CocoonFs::pending_transactions_sync_state`], as is provided by the
 /// [`FutureQueue`](asynchronous::FutureQueue)'s serialization.
 enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     GrabTransactionsSyncStateForCommit,
-    /// Serve a [`CocoonFsAllocateExtentsFuture`].
+    /// Serve a [`AllocateExtentsFuture`].
     AllocateExtents {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -3452,7 +3404,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         request: alloc_bitmap::ExtentsAllocationRequest,
         for_journal: bool,
     },
-    /// Serve a [`CocoonFsAllocateBlockFuture`].
+    /// Serve a [`AllocateBlockFuture`].
     AllocateBlock {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -3460,7 +3412,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         block_allocation_blocks_log2: u32,
         for_journal: bool,
     },
-    /// Serve a [`CocoonFsAllocateBlocksFuture`].
+    /// Serve a [`AllocateBlocksFuture`].
     AllocateBlocks {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -3480,7 +3432,7 @@ enum PendingTransactionsSyncFutureResult {
         pending_transactions_sync_state: CocoonFsPendingTransactionsSyncState,
     },
     /// The result in case the [`PendingTransactionsSyncFuture`] operated on
-    /// behalf of a [`CocoonFsAllocateExtentsFuture`].
+    /// behalf of a [`AllocateExtentsFuture`].
     AllocateExtents {
         #[allow(clippy::type_complexity)]
         result: Result<
@@ -3492,7 +3444,7 @@ enum PendingTransactionsSyncFutureResult {
         >,
     },
     /// The result in case the [`PendingTransactionsSyncFuture`] operated on
-    /// behalf of a [`CocoonFsAllocateBlockFuture`].
+    /// behalf of a [`AllocateBlockFuture`].
     AllocateBlock {
         #[allow(clippy::type_complexity)]
         result: Result<
@@ -3504,7 +3456,7 @@ enum PendingTransactionsSyncFutureResult {
         >,
     },
     /// The result in case the [`PendingTransactionsSyncFuture`] operated on
-    /// behalf of a [`CocoonFsAllocateBlocksFuture`].
+    /// behalf of a [`AllocateBlocksFuture`].
     AllocateBlocks {
         #[allow(clippy::type_complexity)]
         result: Result<
@@ -3811,10 +3763,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
 
 /// Allocate extents on behalf of a transaction at pre-commit time.
 ///
-/// [`CocoonFsAllocateExtentsFuture`] assumes ownership of the
+/// [`AllocateExtentsFuture`] assumes ownership of the
 /// [`Transaction`](transaction::Transaction) for the duration of the operation
-/// and eventually returns it back from [`poll()`](Self::poll) upon future
-/// completion.
+/// and eventually returns it back from [`poll()`](Self::poll) upon
+/// future completion.
 ///
 /// On success, the allocation may get rolled back again by invoking
 /// [`Transaction::rollback_extents_allocation()`](transaction::Transaction::rollback_extents_allocation),
@@ -3824,14 +3776,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
 /// though, so
 /// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback)
 /// should get invoked once its no longer needed.
-pub(super) struct CocoonFsAllocateExtentsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+pub(super) struct AllocateExtentsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     pending_transactions_sync_state_fut: QueuedPendingTransactionsSyncFuture<ST, B>,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsAllocateExtentsFuture<ST, B> {
-    /// Instantiate a [`CocoonFsAllocateExtentsFuture`].
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateExtentsFuture<ST, B> {
+    /// Instantiate a [`AllocateExtentsFuture`].
     ///
-    /// On success, the new [`CocoonFsAllocateExtentsFuture`] instance will get
+    /// On success, the new [`AllocateExtentsFuture`] instance will get
     /// returned.
     ///
     /// On failure, a pair of the input `transaction` (if not lost due to an
@@ -3875,7 +3827,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsAllocateExtentsFutu
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
-    for CocoonFsAllocateExtentsFuture<ST, B>
+    for AllocateExtentsFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -3928,9 +3880,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
 /// Allocate a block on behalf of a transaction at pre-commit time.
 ///
-/// [`CocoonFsAllocateBlockFuture`] assumes ownership of the
+/// [`AllocateBlockFuture`] assumes ownership of the
 /// [`Transaction`](transaction::Transaction) for the duration of the operation
-/// and returns it back  from [`poll()`](Self::poll) upon future completion.
+/// and returns it back from [`poll()`](Self::poll) upon future completion.
 ///
 /// On success, the allocation may get rolled back again by invoking
 /// [`Transaction::rollback_block_allocation()`](transaction::Transaction::rollback_block_allocation),
@@ -3940,15 +3892,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 /// though, so
 /// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback)
 /// should get invoked once its no longer needed.
-pub(super) struct CocoonFsAllocateBlockFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+pub(super) struct AllocateBlockFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     pending_transactions_sync_state_fut: QueuedPendingTransactionsSyncFuture<ST, B>,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsAllocateBlockFuture<ST, B> {
-    /// Instantiate a [`CocoonFsAllocateBlockFuture`].
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlockFuture<ST, B> {
+    /// Instantiate a [`AllocateBlockFuture`].
     ///
-    /// On success, the new [`CocoonFsAllocateBlockFuture`] instance will get
-    /// returned.
+    /// On success, the new [`AllocateBlockFuture`] instance will get returned.
     ///
     /// On failure, a pair of the input `transaction` (if not lost due to an
     /// internal error) and the error reason will get returned.
@@ -3992,9 +3943,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsAllocateBlockFuture
     }
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
-    for CocoonFsAllocateBlockFuture<ST, B>
-{
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B> for AllocateBlockFuture<ST, B> {
     /// Output type of [`poll()`](Self::poll).
     ///
     /// A two-level result is returned upon
@@ -4047,7 +3996,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 /// Allocate a specified number of blocks on behalf of a transaction at
 /// pre-commit time.
 ///
-/// [`CocoonFsAllocateBlocksFuture`] assumes ownership of the
+/// [`AllocateBlocksFuture`] assumes ownership of the
 /// [`Transaction`](transaction::Transaction) for the duration of the operation
 /// and returns it back from [`poll()`](Self::poll) upon future completion.
 ///
@@ -4059,15 +4008,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 /// though, so
 /// [`reset_rollback()`](transaction::TransactionAllocations::reset_rollback)
 /// should get invoked once its no longer needed.
-pub(super) struct CocoonFsAllocateBlocksFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+pub(super) struct AllocateBlocksFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     pending_transactions_sync_state_fut: QueuedPendingTransactionsSyncFuture<ST, B>,
 }
 
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsAllocateBlocksFuture<ST, B> {
-    /// Instantiate a [`CocoonFsAllocateBlocksFuture`].
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlocksFuture<ST, B> {
+    /// Instantiate a [`AllocateBlocksFuture`].
     ///
-    /// On success, the new [`CocoonFsAllocateBlockFuture`] instance will get
-    /// returned.
+    /// On success, the new [`AllocateBlockFuture`] instance will get returned.
     ///
     /// On failure, a pair of the input `transaction` (if not lost due to an
     /// internal error) and the error reason will get returned.
@@ -4121,7 +4069,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsAllocateBlocksFutur
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
-    for CocoonFsAllocateBlocksFuture<ST, B>
+    for AllocateBlocksFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///

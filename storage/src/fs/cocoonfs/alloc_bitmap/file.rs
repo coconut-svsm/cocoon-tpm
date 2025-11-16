@@ -17,7 +17,7 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            CocoonFsFormatError, auth_tree, encryption_entities, extents, inode_index,
+            FormatError, auth_tree, encryption_entities, extents, inode_index,
             journal::{self, extents_covering_auth_digests::ExtentsCoveringAuthDigests},
             keys,
             layout::{self, BlockIndex as _},
@@ -81,7 +81,7 @@ impl AllocBitmapFile {
         let file_block_size_log2 =
             file_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7;
         if file_block_size_log2 >= u64::BITS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileConfig));
+            return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileConfig));
         } else if file_block_size_log2 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
         }
@@ -110,16 +110,14 @@ impl AllocBitmapFile {
                 || !(u64::from(extent.begin()) | u64::from(extent.end()))
                     .is_aligned_pow2(auth_tree_data_block_allocation_blocks_log2 as u32)
             {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::UnalignedAllocationBitmapFileExtents,
-                ));
+                return Err(NvFsError::from(FormatError::UnalignedAllocationBitmapFileExtents));
             }
 
             total_file_blocks = match total_file_blocks
                 .checked_add(u64::from(extent.block_count()) >> file_block_allocation_blocks_log2)
             {
                 Some(total_file_blocks) => total_file_blocks,
-                None => return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileSize)),
+                None => return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileSize)),
             };
         }
 
@@ -135,7 +133,7 @@ impl AllocBitmapFile {
             max_total_file_blocks
         );
         if total_file_blocks > max_total_file_blocks {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileSize));
+            return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileSize));
         }
 
         // Verify that each of the Allocation Bitmap File extents is covered by the
@@ -149,7 +147,7 @@ impl AllocBitmapFile {
                     bitmap_words_per_file_block_inv_shift,
                 )? >= total_file_blocks
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InconsistentAllocBitmapFileExtents));
+                return Err(NvFsError::from(FormatError::InconsistentAllocBitmapFileExtents));
             }
         }
 
@@ -203,7 +201,7 @@ impl AllocBitmapFile {
         let file_block_size_log2 =
             file_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7;
         if file_block_size_log2 >= u64::BITS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileConfig));
+            return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileConfig));
         }
 
         let file_block_encryption_layout = encryption_entities::EncryptedBlockLayout::new(
@@ -1510,7 +1508,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
             if ordered_file_extents_index == ordered_file_extents.len() {
                 // No overlap with any Allocation Bitmap file extent.
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
             let cur_extent = file
@@ -1524,7 +1522,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                 // No overlap with any Allocation Bitmap file extent or the fragment does not
                 // align with a Allocation Bitmap File Block's beginning.
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
             if (fragments_auth_digests.len() - fragments_auth_digests_index) >> file_block_auth_tree_data_blocks_log2
@@ -1539,7 +1537,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
             {
                 // The current Allocation Bitmap File Block is not fully covered.
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
 

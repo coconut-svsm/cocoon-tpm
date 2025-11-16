@@ -14,9 +14,7 @@ use crypto::{
 };
 use storage::fs::{
     NvFs, NvFsEnumerateCursor as _, NvFsFutureAsCoreFuture, NvFsReadContext, NvFsUnlinkCursor as _,
-    cocoonfs::{
-        CocoonFs, CocoonFsImageLayout, CocoonFsMkFsFuture, CocoonFsOpenFsFuture, CocoonFsWriteMkfsInfoHeaderFuture,
-    },
+    cocoonfs::{CocoonFs, ImageLayout, MkFsFuture, OpenFsFuture, WriteMkFsInfoHeaderFuture},
 };
 use tpm2_interface::TpmiAlgHash;
 use utils_async::sync_types;
@@ -439,7 +437,7 @@ struct CliSaltSource {
     salt: Option<FixedVec<u8, 4>>,
 }
 
-fn cli_mkfs_to_cocoonfs_image_layout(cli: &CliMkfsInfo) -> CocoonFsImageLayout {
+fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
     let allocation_block_size_128b_log2 = cli
         .allocation_block_size_log2
         .map(|allocation_block_size_log2| allocation_block_size_log2 - 7)
@@ -585,7 +583,7 @@ fn cli_mkfs_to_cocoonfs_image_layout(cli: &CliMkfsInfo) -> CocoonFsImageLayout {
         }),
     };
 
-    match CocoonFsImageLayout::new(
+    match ImageLayout::new(
         allocation_block_size_128b_log2 as u8,
         io_block_allocation_blocks_log2 as u8,
         auth_tree_node_io_blocks_log2 as u8,
@@ -751,8 +749,7 @@ fn open_filesystem(
     };
     let rng = instantiate_rng();
     let key = zeroize::Zeroizing::new(key.to_vec());
-    let openfs_fut = match CocoonFsOpenFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(blkdev, key, enable_trimming, rng)
-    {
+    let openfs_fut = match OpenFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(blkdev, key, enable_trimming, rng) {
         Ok(openfs_fut) => openfs_fut,
         Err((_blkdev, _key, _rng, e)) => {
             eprintln!(
@@ -776,7 +773,7 @@ fn main() {
 
     match cli.command {
         CliCommand::Mkfs(cli_mkfs_args) => {
-            let image_layout = cli_mkfs_to_cocoonfs_image_layout(&cli_mkfs_args.mkfsinfo);
+            let image_layout = cli_mkfs_to_image_layout(&cli_mkfs_args.mkfsinfo);
             let key = load_key(&cli_mkfs_args.key);
             let salt = load_salt(&cli_mkfs_args.mkfsinfo.salt);
 
@@ -789,7 +786,7 @@ fn main() {
                         + image_layout.allocation_block_size_128b_log2 as u32,
                 ),
             );
-            let mkfs_fut = match CocoonFsMkFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(
+            let mkfs_fut = match MkFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(
                 blkdev,
                 &image_layout,
                 salt,
@@ -813,7 +810,7 @@ fn main() {
             }
         }
         CliCommand::WriteMkfsInfoHeader(cli_write_mkfsinfo_header_args) => {
-            let image_layout = cli_mkfs_to_cocoonfs_image_layout(&cli_write_mkfsinfo_header_args.mkfsinfo);
+            let image_layout = cli_mkfs_to_image_layout(&cli_write_mkfsinfo_header_args.mkfsinfo);
             let salt = load_salt(&cli_write_mkfsinfo_header_args.mkfsinfo.salt);
 
             let blkdev = open_volume_file_for_mkfs(
@@ -824,7 +821,7 @@ fn main() {
                         + image_layout.allocation_block_size_128b_log2 as u32,
                 ),
             );
-            let write_mkfsinfo_header_fut = match CocoonFsWriteMkfsInfoHeaderFuture::new(
+            let write_mkfsinfo_header_fut = match WriteMkFsInfoHeaderFuture::new(
                 blkdev,
                 &image_layout,
                 salt,

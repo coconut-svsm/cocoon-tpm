@@ -13,7 +13,7 @@ use crate::{
     crypto::{hash, symcipher},
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{CocoonFsFormatError, encryption_entities, keys, layout},
+        cocoonfs::{FormatError, encryption_entities, keys, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
@@ -163,7 +163,7 @@ impl ReadExtentUnauthenticatedNvBlkDevReadRequest {
             allocation_block_size_128b_log2 as u32,
         )
         .map_err(|e| match e {
-            ChunkedIoRegionError::ChunkSizeOverflow => NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig),
+            ChunkedIoRegionError::ChunkSizeOverflow => NvFsError::from(FormatError::InvalidImageLayoutConfig),
             ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
             ChunkedIoRegionError::InvalidBounds | ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
         })?;

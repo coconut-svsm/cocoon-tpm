@@ -11,7 +11,7 @@ use crate::{
     crypto::{CryptoError, rng, symcipher},
     fs::{
         NvFsError,
-        cocoonfs::{CocoonFsFormatError, layout},
+        cocoonfs::{FormatError, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_common::{
@@ -370,7 +370,7 @@ impl JournalStagingCopyUndisguise {
         let (_, block_cipher_alg_id) = tpm2_interface::TpmiAlgSymObject::unmarshal(&encoded_block_cipher_alg_id)
             .map_err(|e| match e {
                 tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::SYMMETRIC) => {
-                    NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm)
+                    NvFsError::from(FormatError::UnsupportedCryptoAlgorithm)
                 }
                 _ => nvfs_err_internal!(),
             })?;
@@ -387,7 +387,7 @@ impl JournalStagingCopyUndisguise {
 
         let block_cipher_alg = symcipher::SymBlockCipherAlg::try_from((block_cipher_alg_id, block_cipher_key_size))
             .map_err(|e| match e {
-                CryptoError::InvalidParams => NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm),
+                CryptoError::InvalidParams => NvFsError::from(FormatError::UnsupportedCryptoAlgorithm),
                 _ => nvfs_err_internal!(),
             })?;
         let block_cipher_key_len = block_cipher_alg.key_len();

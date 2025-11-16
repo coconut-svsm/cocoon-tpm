@@ -13,7 +13,7 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            CocoonFsFormatError, extents,
+            FormatError, extents,
             extents_layout::ExtentsLayout,
             layout::{self, BlockCount as _},
         },
@@ -128,7 +128,7 @@ impl ExtentsAllocationRequest {
                     // The current extent is even larger than the maximum allowed limit. In
                     // principle we could split the extent logically and
                     // continue, but don't even bother.
-                    return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                    return Err(NvFsError::from(FormatError::InvalidExtents));
                 }
                 // When here, the current extent provides enough space to accomodate
                 // the remaining_effective_payload_len.
@@ -1887,7 +1887,7 @@ impl AllocBitmap {
                 // because that would drop to below the minimum extent length.
                 // At this point in time, nothing would issue such requests, so
                 // don't even bother supporting it.
-                Err(NvFsError::from(CocoonFsFormatError::UnsupportedImageLayoutConfig))
+                Err(NvFsError::from(FormatError::UnsupportedImageLayoutConfig))
             }
         }
     }

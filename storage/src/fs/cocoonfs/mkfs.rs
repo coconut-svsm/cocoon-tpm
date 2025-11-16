@@ -2,7 +2,7 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
-//! Implementation of [`CocoonFsMkFsFuture`].
+//! Implementation of [`MkFsFuture`].
 
 extern crate alloc;
 use alloc::boxed::Box;
@@ -13,8 +13,7 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            CocoonFsFormatError, CocoonFsImageLayout, alloc_bitmap, auth_tree, encryption_entities, extent_ptr,
-            extents,
+            FormatError, ImageLayout, alloc_bitmap, auth_tree, encryption_entities, extent_ptr, extents,
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
             image_header, inode_extents_list, inode_index, journal, keys,
             layout::{self, BlockCount as _, BlockIndex as _},
@@ -30,115 +29,6 @@ use crate::{
     },
 };
 use core::{future, iter, marker, mem, pin, task};
-
-/// Format a CocoonFs filesystem instance.
-///
-/// Directly format a filesystem instance, without considering any
-/// filesystem creation info header existing on storage, if any.
-///
-/// # See also:
-///
-/// * [`CocoonFsWriteMkfsInfoHeaderFuture`] for a way to provision a storage
-///   volume for CocoonFs usage without access to the root key.
-pub struct CocoonFsMkFsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
-    mkfs_fut: MkFsFuture<ST, B>,
-}
-
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsMkFsFuture<ST, B> {
-    /// Instantiate a [`CocoonFsMkFsFuture`].
-    ///
-    /// On error, the input `blkdev` and `rng` are returned directly as part of
-    /// the `Err`. On success, the [`CocoonFsMkFsFuture`] assumes ownership
-    /// of the `blkdev` and `rng` for the duration of the operation. They will
-    /// get either returned back from [`poll()`](Self::poll) at completion,
-    /// or will be passed onwards to the resulting [`CocoonFs`] instance as
-    /// appropriate.
-    ///
-    /// # Arguments:
-    ///
-    /// * `blkdev` - The storage to create a filesystem on.
-    /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
-    /// * `salt` - The filsystem salt to be stored in the static image header.
-    ///   Its length must not exceed [`u8::MAX`].
-    /// * `image_size` - Optional desired filesystem image size in units of
-    ///   Bytes to get recorded in the mutable image header. If not specified,
-    ///   the maximum possible value within the backing storage's
-    ///   [dimensions](blkdev::NvBlkDev::io_blocks) will be used.
-    /// * `raw_root_key` - The filesystem's raw root key material supplied from
-    ///   extern.
-    /// * `enable_trimming` - Whether to enable the submission of [trim
-    ///   commands](blkdev::NvBlkDev::trim) to the underlying storage for the
-    ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
-    ///   upon successful completion. The setting of this value also controls
-    ///   whether whether unallocated storage will get initialized with random
-    ///   data in the course of the filesystem formatting -- unallocated storage
-    ///   will get randomized if and only if `enable_trimming` is off.
-    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
-    ///   for generating IVs, as well as randomizing padding in data structures
-    ///   and for initializing unallocated storage if `enable_trimming` is off.
-    pub fn new(
-        blkdev: B,
-        image_layout: &CocoonFsImageLayout,
-        salt: FixedVec<u8, 4>,
-        image_size: Option<u64>,
-        raw_root_key: &[u8],
-        enable_trimming: bool,
-        rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
-    ) -> Result<Self, (B, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
-        // Convert from units of Bytes to Allocation Blocks.
-        let image_size = image_size.map(|image_size| {
-            layout::AllocBlockCount::from(image_size >> (image_layout.allocation_block_size_128b_log2 as u32 + 7))
-        });
-        Ok(Self {
-            mkfs_fut: MkFsFuture::new(
-                blkdev,
-                image_layout,
-                salt,
-                image_size,
-                raw_root_key,
-                None,
-                enable_trimming,
-                rng,
-            )?,
-        })
-    }
-}
-
-impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> future::Future for CocoonFsMkFsFuture<ST, B>
-where
-    <ST as sync_types::SyncTypes>::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
-{
-    /// Output type of [`poll()`](Self::poll).
-    ///
-    /// A two-level [`Result`] is returned from the
-    /// [`Future::poll()`](future::Future::poll):
-    ///
-    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
-    ///   encountering an internal error and the input
-    ///   [`NvBlkDev`](blkdev::NvBlkDev) as and  [random number
-    ///   generator](rng::RngCoreDispatchable) lost.
-    /// * `Ok((rng, ...))` - Otherwise the outer level [`Result`] is set to
-    ///   [`Ok`] and a pair of the input [random number
-    ///   generator](rng::RngCoreDispatchable), `rng`, and the operation result
-    ///   will get returned within:
-    ///   * `Ok((rng, Err((blkdev, e))))` - In case of an error, a pair of the
-    ///     [`NvBlkDev`](blkdev::NvBlkDev) instance `blkdev` and the error
-    ///     reason `e` is returned in an [`Err`].
-    ///   * `Ok((rng, Ok(fs_instance)))` - Otherwise an opened [`CocoonFs`]
-    ///     instance `fs_instance` associated with the filesystem just created
-    ///     is returned in an [`Ok`].
-    type Output = Result<
-        (
-            Box<dyn rng::RngCoreDispatchable + marker::Send>,
-            Result<CocoonFsSyncRcPtrType<ST, B>, (B, NvFsError)>,
-        ),
-        NvFsError,
-    >;
-
-    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        future::Future::poll(pin::Pin::new(&mut pin::Pin::into_inner(self).mkfs_fut), cx)
-    }
-}
 
 /// Filesystem layout description internal to [`MkFsFuture`].
 struct MkFsLayout {
@@ -160,8 +50,7 @@ impl MkFsLayout {
     ///
     /// # Arguments:
     ///
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the
     ///   [`StaticImageHeader::salt`](image_header::StaticImageHeader::salt).
     /// * `image_size` - The filesystem image size to get recorded in the
@@ -178,7 +67,7 @@ impl MkFsLayout {
         let journal_block_allocation_blocks_log2 =
             io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2);
 
-        let salt_len = u8::try_from(salt.len()).map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?;
+        let salt_len = u8::try_from(salt.len()).map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?;
         let image_header_end = image_header::MutableImageHeader::physical_location(image_layout, salt_len).end();
 
         let image_size = image_size.min(layout::AllocBlockCount::from(
@@ -240,7 +129,7 @@ impl MkFsLayout {
             >> (image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32)
             != alloc_bitmap_file_blocks
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
+            return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
         // The Allocation Bitmap File's extents must be aligned to the Authentication
         // Tree Data Block size. The beginning, i.e. auth_tree_extent.end(), is
@@ -383,19 +272,24 @@ impl MkFsLayout {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum MkFsFutureBackupMkfsInfoHeaderWriteControl {
+pub enum MkFsFutureBackupMkFsInfoHeaderWriteControl {
     Write,
     RetainExisting,
 }
 
-/// Internal filesystem creation ("mkfs") primitive.
+/// Format a CocoonFs filesystem instance.
+///
+/// # See also:
+///
+/// * [`WriteMkFsInfoHeaderFuture`] for a workflow to provision a storage volume
+///   for CocoonFs usage without access to the root key.
 pub struct MkFsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     fs_init_data: Option<MkFsFutureFsInitData<ST, B>>,
 
     // Always valid, initialized from Self::new().
-    backup_mkfsinfo_header_write_control: Option<MkFsFutureBackupMkfsInfoHeaderWriteControl>,
+    backup_mkfsinfo_header_write_control: Option<MkFsFutureBackupMkFsInfoHeaderWriteControl>,
 
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
@@ -517,23 +411,29 @@ enum MkFsFutureState<B: blkdev::NvBlkDev> {
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
     /// Instantiate a [`MkFsFuture`].
     ///
+    /// Instantiate a [`MkFsFuture`] for a "direct" filesystem creation
+    /// operation without any filesystem creation info header involved. Note
+    /// that this requires access to the root
+    /// key. See [`WriteMkFsInfoHeaderFuture`] for a workflow to provision a
+    /// storage volume for CocoonFs usage without access to the root key.
+    ///
     /// On error, the input `blkdev` and `rng` are returned directly as part of
     /// the `Err`. On success, the [`MkFsFuture`] assumes ownership of the
-    /// `blkdev` and `rng` for the duration of the operation. It will get either
-    /// returned back from [`poll()`](Self::poll) at completion, or will be
-    /// passed onwards to the resulting [`CocoonFs`] instance as
+    /// `blkdev` and `rng` for the duration of the operation. They will get
+    /// either returned back from [`poll()`](Self::poll) at completion,
+    /// or will be passed onwards to the resulting [`CocoonFs`] instance as
     /// appropriate.
     ///
     /// # Arguments:
     ///
     /// * `blkdev` - The storage to create a filesystem on.
-    /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the static image header.
-    /// * `image_size` - Optional filesystem image size to get recorded in the
-    ///   mutable image header. If specified, it must not exceed the undelying
-    ///   storage's size, as reported by
-    ///   [`NvBlkDev::io_blocks()`](blkdev::NvBlkDev::io_blocks) on `blkdev`. If
-    ///   not specified, the maximum possible value will be used.
+    ///   Its length must not exceed [`u8::MAX`].
+    /// * `image_size` - Optional desired filesystem image size in units of
+    ///   Bytes to get recorded in the mutable image header. If not specified,
+    ///   the maximum possible value within the backing storage's
+    ///   [dimensions](blkdev::NvBlkDev::io_blocks) will be used.
     /// * `raw_root_key` - The filesystem's raw root key material supplied from
     ///   extern.
     /// * `enable_trimming` - Whether to enable the submission of [trim
@@ -546,14 +446,79 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
     /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
     ///   for generating IVs, as well as randomizing padding in data structures
     ///   and for initializing unallocated storage if `enable_trimming` is off.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// # See also:
+    ///
+    /// * [`WriteMkFsInfoHeaderFuture`].
     pub fn new(
         blkdev: B,
-        image_layout: &CocoonFsImageLayout,
+        image_layout: &ImageLayout,
+        salt: FixedVec<u8, 4>,
+        image_size: Option<u64>,
+        raw_root_key: &[u8],
+        enable_trimming: bool,
+        rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
+    ) -> Result<Self, (B, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
+        // Convert from units of Bytes to Allocation Blocks.
+        let image_size = image_size.map(|image_size| {
+            layout::AllocBlockCount::from(image_size >> (image_layout.allocation_block_size_128b_log2 as u32 + 7))
+        });
+        Self::_new(
+            blkdev,
+            image_layout,
+            salt,
+            image_size,
+            raw_root_key,
+            None,
+            enable_trimming,
+            rng,
+        )
+    }
+
+    /// Internal [`MkFsFuture`] instantiation primitive.
+    ///
+    /// On error, the input `blkdev` and `rng` are returned directly as part of
+    /// the `Err`. On success, the [`MkFsFuture`] assumes ownership of the
+    /// `blkdev` and `rng` for the duration of the operation. It will get either
+    /// returned back from [`poll()`](Self::poll) at completion, or will be
+    /// passed onwards to the resulting [`CocoonFs`] instance as
+    /// appropriate.
+    ///
+    /// # Arguments:
+    ///
+    /// * `blkdev` - The storage to create a filesystem on.
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    /// * `salt` - The filsystem salt to be stored in the static image header.
+    /// * `image_size` - Optional filesystem image size to get recorded in the
+    ///   mutable image header. If specified, it must not exceed the undelying
+    ///   storage's size, as reported by
+    ///   [`NvBlkDev::io_blocks()`](blkdev::NvBlkDev::io_blocks) on `blkdev`. If
+    ///   not specified, the maximum possible value will be used.
+    /// * `raw_root_key` - The filesystem's raw root key material supplied from
+    ///   extern.
+    /// * `backup_mkfsinfo_header_write_control` - If specified, controls
+    ///   whether the backup filesystem creation info header is to be written or
+    ///   an already existing one must be left unmodified. If `None`, it is
+    ///   assumed that this is a "direct" filesystem creation operation and no
+    ///   filesystem creation info header had been setup beforehand.
+    /// * `enable_trimming` - Whether to enable the submission of [trim
+    ///   commands](blkdev::NvBlkDev::trim) to the underlying storage for the
+    ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
+    ///   upon successful completion. The setting of this value also controls
+    ///   whether whether unallocated storage will get initialized with random
+    ///   data in the course of the filesystem formatting -- unallocated storage
+    ///   will get randomized if and only if `enable_trimming` is off.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating IVs, as well as randomizing padding in data structures
+    ///   and for initializing unallocated storage if `enable_trimming` is off.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn _new(
+        blkdev: B,
+        image_layout: &ImageLayout,
         salt: FixedVec<u8, 4>,
         image_size: Option<layout::AllocBlockCount>,
         raw_root_key: &[u8],
-        backup_mkfsinfo_header_write_control: Option<MkFsFutureBackupMkfsInfoHeaderWriteControl>,
+        backup_mkfsinfo_header_write_control: Option<MkFsFutureBackupMkFsInfoHeaderWriteControl>,
         enable_trimming: bool,
         mut rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
     ) -> Result<Self, (B, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
@@ -579,7 +544,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
             return Err((
                 blkdev,
                 rng,
-                NvFsError::from(CocoonFsFormatError::IoBlockSizeNotSupportedByDevice),
+                NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice),
             ));
         }
         let allocation_block_blkdev_io_blocks_log2 =
@@ -596,7 +561,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
         };
 
         if let Some(backup_mkfsinfo_header_write_control) = backup_mkfsinfo_header_write_control {
-            if backup_mkfsinfo_header_write_control == MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting
+            if backup_mkfsinfo_header_write_control == MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting
                 && mkfs_layout.image_size > blkdev_allocation_blocks
             {
                 // If the backup MkFsInfoHeader is to be retained, the storage resizing
@@ -613,11 +578,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
             let backup_mkfsinfo_header_location = match image_header::MkFsInfoHeader::physical_backup_location(
                 salt_len,
                 match backup_mkfsinfo_header_write_control {
-                    MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting => {
+                    MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting => {
                         // No attempt to resize will be made, see above.
                         blkdev_io_blocks
                     }
-                    MkFsFutureBackupMkfsInfoHeaderWriteControl::Write => {
+                    MkFsFutureBackupMkFsInfoHeaderWriteControl::Write => {
                         // An attempt to resize will be made. In either case the storage will be >=
                         // the image_size in the end.
                         u64::from(mkfs_layout.image_size) << allocation_block_blkdev_io_blocks_log2
@@ -851,7 +816,7 @@ where
                     );
 
                     if this.backup_mkfsinfo_header_write_control
-                        == Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting)
+                        == Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting)
                     {
                         // It's been checked from Self::new() that the storage size is >= the desired
                         // image size.
@@ -882,12 +847,12 @@ where
                     }
 
                     match this.backup_mkfsinfo_header_write_control {
-                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting) => {
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting) => {
                             // Handled above, so is unreachable, but for the sake of
                             // completeness, handle it here as well
                             this.fut_state = MkFsFutureState::PrepareAdvanceAuthTreeCursorToInitPos;
                         }
-                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::Write) => {
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write) => {
                             this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
                                 write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(true),
                             };
@@ -928,12 +893,12 @@ where
                     }
 
                     match this.backup_mkfsinfo_header_write_control {
-                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting) => {
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting) => {
                             // If there's already a backup MkFsInfoHeader to retain, a storage resizing
                             // operation wouldn't have been attempted in the first place.
                             break nvfs_err_internal!();
                         }
-                        Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::Write) => {
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write) => {
                             this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
                                 write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(true),
                             };
@@ -1495,7 +1460,7 @@ where
                     let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
                     let salt_len = match u8::try_from(mkfs_layout.salt.len()) {
                         Ok(salt_len) => salt_len,
-                        Err(_) => break NvFsError::from(CocoonFsFormatError::InvalidSaltLength),
+                        Err(_) => break NvFsError::from(FormatError::InvalidSaltLength),
                     };
                     let mutable_image_header_allocation_blocks_range =
                         image_header::MutableImageHeader::physical_location(image_layout, salt_len);
@@ -2256,8 +2221,7 @@ impl<B: blkdev::NvBlkDev> WriteRandomDataFuture<B> {
     /// * `extent` - The storage extent to initialize with random data. Must be
     ///   aligned to the [IO
     ///   Block](layout::ImageLayout::io_block_allocation_blocks_log2) size.
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `blkdev` - The storage the filesystem is being created on.
     fn new(
         extent: &layout::PhysicalAllocBlockRange,
@@ -2441,8 +2405,7 @@ impl<B: blkdev::NvBlkDev> InvalidateBackupMkFsInfoHeaderFuture<B> {
     /// # Arguments:
     ///
     /// * `blkdev` - The storage the filsystem is being created on.
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt_len`- The filesystem salt's length.
     /// * `image_size` - The created filesystem image's size.
     /// * `enable_trimming` - Whether to enable the submission of [trim
@@ -2483,8 +2446,7 @@ impl<B: blkdev::NvBlkDev> InvalidateBackupMkFsInfoHeaderFuture<B> {
     /// # Arguments:
     ///
     /// * `blkdev` - The storage the filesystem is being created on.
-    /// * `image_layout` - The filesystem's
-    ///   [`ImageLayout`](layout::ImageLayout).
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
     ///   for the randomizing the backup
     ///   [`MkFsInfoHeader`](image_header::MkFsInfoHeader)'s backing storage
@@ -2724,8 +2686,8 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
     /// # Arguments:
     ///
     /// * `blkdev` - The storage the filesystem is to be created on.
-    /// * `image_layout` - The filesystem's [`ImageLayout`](layout::ImageLayout)
-    ///   to record in the [`MkFsInfoHeader`](image_header::MkFsInfoHeader).
+    /// * `image_layout` - The filesystem's [`ImageLayout`] to record in the
+    ///   [`MkFsInfoHeader`](image_header::MkFsInfoHeader).
     /// * `salt` - The to be created filesystem's salt. Its lenght must not
     ///   exceed [`u8::MAX`].
     /// * `image_size` - The filesystem's desired image size.
@@ -2750,9 +2712,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                             + image_layout.allocation_block_size_128b_log2 as u32
                     {
                         this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(
-                            CocoonFsFormatError::IoBlockSizeNotSupportedByDevice,
-                        )));
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
                     }
                     // As the ImageLayout's IO Block size fits an usize, this applies to the Device
                     // IO Block size as well.
@@ -2762,7 +2722,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         Ok(salt_len) => salt_len,
                         Err(_) => {
                             this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidSaltLength)));
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidSaltLength)));
                         }
                     };
 
@@ -2877,20 +2837,20 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
 ///
 /// # See also:
 ///
-/// * [`CocoonFsMkFsFuture`] for direct filesystem creation without a filesystem
+/// * [`MkFsFuture`] for direct filesystem creation without a filesystem
 ///   creation info header.
-pub struct CocoonFsWriteMkfsInfoHeaderFuture<B: blkdev::NvBlkDev> {
+pub struct WriteMkFsInfoHeaderFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     blkdev: Option<B>,
     image_layout: layout::ImageLayout,
     salt: FixedVec<u8, 4>,
     image_size: layout::AllocBlockCount,
-    fut_state: CocoonFsWriteMkfsInfoHeaderFutureState<B>,
+    fut_state: WriteMkFsInfoHeaderFutureState<B>,
 }
 
-/// [`CocoonFsWriteMkfsInfoHeaderFuture`] state-machine state.
-enum CocoonFsWriteMkfsInfoHeaderFutureState<B: blkdev::NvBlkDev> {
+/// [`WriteMkFsInfoHeaderFuture`] state-machine state.
+enum WriteMkFsInfoHeaderFutureState<B: blkdev::NvBlkDev> {
     ResizeBlkDev {
         resize_fut: B::ResizeFuture,
     },
@@ -2903,19 +2863,18 @@ enum CocoonFsWriteMkfsInfoHeaderFutureState<B: blkdev::NvBlkDev> {
     Done,
 }
 
-impl<B: blkdev::NvBlkDev> CocoonFsWriteMkfsInfoHeaderFuture<B> {
-    /// Instantiate a [`CocoonFsWriteMkfsInfoHeaderFuture`].
+impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
+    /// Instantiate a [`WriteMkFsInfoHeaderFuture`].
     ///
-    /// On error, the input `blkdev` is returned directly as part of
-    /// the `Err`. On success, the [`CocoonFsWriteMkfsInfoHeaderFuture`] assumes
-    /// ownership of the `blkdev` for the duration of the operation. It will
-    /// eventually get returned back from [`poll()`](Self::poll) at
-    /// completion.
+    /// On error, the input `blkdev` is returned directly as part of the `Err`.
+    /// On success, the [`WriteMkFsInfoHeaderFuture`] assumes ownership of
+    /// the `blkdev` for the duration of the operation. It will eventually
+    /// get returned back from [`poll()`](Self::poll) at completion.
     ///
     /// # Arguments:
     ///
     /// * `blkdev` - The storage the filesystem is to be created on.
-    /// * `image_layout` - The filesystem's [`CocoonFsImageLayout`].
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the static image header.
     ///   Its length must not exceed [`u8::MAX`].
     /// * `image_size` - Optional desired filesystem image size in units of
@@ -2930,7 +2889,7 @@ impl<B: blkdev::NvBlkDev> CocoonFsWriteMkfsInfoHeaderFuture<B> {
     ///   if neeeded.
     pub fn new(
         blkdev: B,
-        image_layout: &CocoonFsImageLayout,
+        image_layout: &ImageLayout,
         salt: FixedVec<u8, 4>,
         image_size: Option<u64>,
         resize_image_to_final_size: bool,
@@ -2941,10 +2900,7 @@ impl<B: blkdev::NvBlkDev> CocoonFsWriteMkfsInfoHeaderFuture<B> {
         let blkdev_io_block_allocation_blocks_log2 =
             blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
         if blkdev_io_block_allocation_blocks_log2 > io_block_allocation_blocks_log2 {
-            return Err((
-                blkdev,
-                NvFsError::from(CocoonFsFormatError::IoBlockSizeNotSupportedByDevice),
-            ));
+            return Err((blkdev, NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
         }
         let allocation_block_blkdev_io_blocks_log2 =
             allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
@@ -3027,9 +2983,9 @@ impl<B: blkdev::NvBlkDev> CocoonFsWriteMkfsInfoHeaderFuture<B> {
                     ));
                 }
             };
-            CocoonFsWriteMkfsInfoHeaderFutureState::ResizeBlkDev { resize_fut }
+            WriteMkFsInfoHeaderFutureState::ResizeBlkDev { resize_fut }
         } else {
-            CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
+            WriteMkFsInfoHeaderFutureState::WriteMkFsInfoHeader {
                 write_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(false),
             }
         };
@@ -3044,7 +3000,7 @@ impl<B: blkdev::NvBlkDev> CocoonFsWriteMkfsInfoHeaderFuture<B> {
     }
 }
 
-impl<B: blkdev::NvBlkDev> future::Future for CocoonFsWriteMkfsInfoHeaderFuture<B> {
+impl<B: blkdev::NvBlkDev> future::Future for WriteMkFsInfoHeaderFuture<B> {
     /// Output type of [`poll()`](Self::poll).
     ///
     /// A two-level [`Result`] is returned from the
@@ -3068,14 +3024,14 @@ impl<B: blkdev::NvBlkDev> future::Future for CocoonFsWriteMkfsInfoHeaderFuture<B
         let blkdev = match this.blkdev.as_mut() {
             Some(blkdev) => blkdev,
             None => {
-                this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::Done;
+                this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
                 return task::Poll::Ready(Err(nvfs_err_internal!()));
             }
         };
 
         let result = loop {
             match &mut this.fut_state {
-                CocoonFsWriteMkfsInfoHeaderFutureState::ResizeBlkDev { resize_fut } => {
+                WriteMkFsInfoHeaderFutureState::ResizeBlkDev { resize_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(resize_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => {
@@ -3086,11 +3042,11 @@ impl<B: blkdev::NvBlkDev> future::Future for CocoonFsWriteMkfsInfoHeaderFuture<B
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
+                    this.fut_state = WriteMkFsInfoHeaderFutureState::WriteMkFsInfoHeader {
                         write_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(false),
                     };
                 }
-                CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
+                WriteMkFsInfoHeaderFutureState::WriteMkFsInfoHeader {
                     write_mkfsinfo_header_fut,
                 } => {
                     match WriteMkFsInfoHeaderDataFuture::poll(
@@ -3110,11 +3066,10 @@ impl<B: blkdev::NvBlkDev> future::Future for CocoonFsWriteMkfsInfoHeaderFuture<B
                         Ok(write_sync_fut) => write_sync_fut,
                         Err(e) => break Err(NvFsError::from(e)),
                     };
-                    this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::WriteSyncAfterBackupMkFsInfoHeaderWrite {
-                        write_sync_fut,
-                    };
+                    this.fut_state =
+                        WriteMkFsInfoHeaderFutureState::WriteSyncAfterBackupMkFsInfoHeaderWrite { write_sync_fut };
                 }
-                CocoonFsWriteMkfsInfoHeaderFutureState::WriteSyncAfterBackupMkFsInfoHeaderWrite { write_sync_fut } => {
+                WriteMkFsInfoHeaderFutureState::WriteSyncAfterBackupMkFsInfoHeaderWrite { write_sync_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_sync_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break Err(NvFsError::from(e)),
@@ -3123,11 +3078,11 @@ impl<B: blkdev::NvBlkDev> future::Future for CocoonFsWriteMkfsInfoHeaderFuture<B
 
                     break Ok(());
                 }
-                CocoonFsWriteMkfsInfoHeaderFutureState::Done => unreachable!(),
+                WriteMkFsInfoHeaderFutureState::Done => unreachable!(),
             }
         };
 
-        this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::Done;
+        this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
         let blkdev = match this.blkdev.take() {
             Some(blkdev) => blkdev,
             None => {

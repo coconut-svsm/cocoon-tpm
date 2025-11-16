@@ -18,7 +18,7 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap, auth_tree, extents, image_header, keys,
+            FormatError, alloc_bitmap, auth_tree, extents, image_header, keys,
             layout::{self, BlockIndex as _},
         },
     },
@@ -968,7 +968,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                         {
                             this.fut_state = JournalReplayWritesFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(
-                                CocoonFsFormatError::InvalidJournalApplyWritesScriptEntry,
+                                FormatError::InvalidJournalApplyWritesScriptEntry,
                             )));
                         }
                         this.next_target_allocation_block_index =

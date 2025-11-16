@@ -17,8 +17,7 @@ use crate::{
             alloc_bitmap::{self, ExtentsAllocationRequest},
             extents,
             fs::{
-                CocoonFsAllocateBlocksFuture, CocoonFsAllocateExtentsFuture, CocoonFsSyncStateMemberRef,
-                CocoonFsSyncStateReadFuture,
+                AllocateBlocksFuture, AllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture,
             },
             layout,
         },
@@ -51,7 +50,7 @@ enum TransactionAllocateJournalStagingCopiesFutureState<ST: sync_types::SyncType
     /// CocoonFsSyncState, i.e. coordindate with other pending transactions,
     /// if any.
     AllocateBlocksSync {
-        allocate_journal_staging_copy_blocks_fut: CocoonFsAllocateBlocksFuture<ST, B>,
+        allocate_journal_staging_copy_blocks_fut: AllocateBlocksFuture<ST, B>,
         states_index_range: AuthTreeDataBlocksUpdateStatesIndexRange,
         total_needed_blocks: usize,
     },
@@ -345,7 +344,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 total_needed_blocks,
                             };
                     } else {
-                        let allocate_journal_staging_copy_blocks_fut = match CocoonFsAllocateBlocksFuture::new(
+                        let allocate_journal_staging_copy_blocks_fut = match AllocateBlocksFuture::new(
                             &fs_instance_sync_state.get_fs_ref(),
                             transaction,
                             journal_block_allocation_blocks_log2,
@@ -511,7 +510,7 @@ enum TransactionAllocateJournalExtentsFutureState<ST: sync_types::SyncTypes, B: 
     /// CocoonFsSyncState, i.e. coordindate with other pending transactions,
     /// if any.
     AllocateExtentsSync {
-        allocate_fut: CocoonFsAllocateExtentsFuture<ST, B>,
+        allocate_fut: AllocateExtentsFuture<ST, B>,
         result_extents: extents::PhysicalExtents,
         transaction_abandoned_journal_staging_copy_blocks_truncated_len: usize,
     },
@@ -749,7 +748,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         return task::Poll::Ready(Ok((transaction, Ok(result_extents))));
                     } else {
                         let fs_instance = fs_instance_sync_state.get_fs_ref();
-                        let allocate_fut = match CocoonFsAllocateExtentsFuture::new(
+                        let allocate_fut = match AllocateExtentsFuture::new(
                             &fs_instance,
                             transaction,
                             allocation_request.clone(),

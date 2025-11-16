@@ -9,7 +9,7 @@ use crate::{
     crypto::hash,
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{CocoonFsFormatError, crc32, extent_ptr, layout},
+        cocoonfs::{FormatError, crc32, extent_ptr, layout},
     },
     nvfs_err_internal,
     utils_common::{
@@ -69,7 +69,7 @@ impl MinStaticImageHeader {
         let expected_magic = b"COCOONFS";
         let (magic, buf) = buf.split_at(expected_magic.len());
         if magic != expected_magic {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageHeaderMagic));
+            return Err(NvFsError::from(FormatError::InvalidImageHeaderMagic));
         }
 
         let (version, buf) = buf.split_at(mem::size_of::<u8>());
@@ -77,7 +77,7 @@ impl MinStaticImageHeader {
         let version =
             u8::from_le_bytes(*<&[u8; mem::size_of::<u8>()]>::try_from(version).map_err(|_| nvfs_err_internal!())?);
         if version != 0 {
-            return Err(NvFsError::from(CocoonFsFormatError::UnsupportedFormatVersion));
+            return Err(NvFsError::from(FormatError::UnsupportedFormatVersion));
         }
 
         let (encoded_image_layout, buf) = buf.split_at(layout::ImageLayout::encoded_len() as usize);
@@ -218,7 +218,7 @@ impl StaticImageHeader {
         }
 
         let salt_len = u8::try_from(salt.len())
-            .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?
+            .map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?
             .to_le_bytes();
         crc = crc32::crc32le_update_data(crc, &salt_len);
         crc_snb = crc32::crc32le_update_data_snb(crc_snb, &salt_len);
@@ -421,7 +421,7 @@ impl MutableImageHeader {
             extent_ptr::EncodedBlockPtr::from(inode_index_entry_leaf_node_block_ptr);
         match inode_index_entry_leaf_node_block_ptr.decode(image_layout.allocation_block_size_128b_log2 as u32) {
             Ok(Some(_)) => (),
-            Ok(None) => return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+            Ok(None) => return Err(NvFsError::from(FormatError::InvalidExtents)),
             Err(e) => return Err(e),
         }
 
@@ -438,7 +438,7 @@ impl MutableImageHeader {
             != image_size
             || !image_size.is_aligned_pow2(image_layout.io_block_allocation_blocks_log2 as u32)
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
+            return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
         let image_size = layout::AllocBlockCount::from(image_size);
 
@@ -800,11 +800,11 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                                     this.fut_state =
                                         ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
                                             first_error: if static_image_header_read_error
-                                                != NvFsError::from(CocoonFsFormatError::InvalidImageHeaderMagic)
+                                                != NvFsError::from(FormatError::InvalidImageHeaderMagic)
                                             {
                                                 debug_assert_eq!(
                                                     e,
-                                                    NvFsError::from(CocoonFsFormatError::InvalidImageHeaderMagic,)
+                                                    NvFsError::from(FormatError::InvalidImageHeaderMagic,)
                                                 );
                                                 static_image_header_read_error
                                             } else {
@@ -937,7 +937,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         // Checksum mismatch. Proceed with attempting to read the backup MkFsInfoHeader,
                         // if any.
                         this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                            first_error: NvFsError::from(CocoonFsFormatError::InvalidImageHeaderChecksum),
+                            first_error: NvFsError::from(FormatError::InvalidImageHeaderChecksum),
                         };
                         continue;
                     }
@@ -979,9 +979,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         < blkdev_io_block_size_128b_log2
                     {
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(
-                            CocoonFsFormatError::IoBlockSizeNotSupportedByDevice,
-                        )));
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
                     }
 
                     // Decode the remainder of the image header.
@@ -1152,7 +1150,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         match *first_error {
                             None => {
                                 this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                    first_error: NvFsError::from(CocoonFsFormatError::InvalidImageHeaderChecksum),
+                                    first_error: NvFsError::from(FormatError::InvalidImageHeaderChecksum),
                                 };
                                 continue;
                             }
@@ -1201,9 +1199,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         < blkdev_io_block_size_128b_log2
                     {
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(
-                            CocoonFsFormatError::IoBlockSizeNotSupportedByDevice,
-                        )));
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
                     }
 
                     // Decode the remainder of the MkFsInfoHeader.
@@ -1431,7 +1427,7 @@ enum ReadMutableImageHeaderFutureState<B: blkdev::NvBlkDev> {
 impl<B: blkdev::NvBlkDev> ReadMutableImageHeaderFuture<B> {
     pub fn new(static_image_header: &StaticImageHeader) -> Result<Self, NvFsError> {
         let salt_len = u8::try_from(static_image_header.salt.len())
-            .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?;
+            .map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?;
 
         Ok(Self {
             image_layout: static_image_header.image_layout.clone(),
@@ -1581,7 +1577,7 @@ impl MinMkFsInfoHeader {
         let expected_magic = b"CCFSMKFS";
         let (magic, buf) = buf.split_at(expected_magic.len());
         if magic != expected_magic {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageHeaderMagic));
+            return Err(NvFsError::from(FormatError::InvalidImageHeaderMagic));
         }
 
         let (version, buf) = buf.split_at(mem::size_of::<u8>());
@@ -1589,7 +1585,7 @@ impl MinMkFsInfoHeader {
         let version =
             u8::from_le_bytes(*<&[u8; mem::size_of::<u8>()]>::try_from(version).map_err(|_| nvfs_err_internal!())?);
         if version != 0 {
-            return Err(NvFsError::from(CocoonFsFormatError::UnsupportedFormatVersion));
+            return Err(NvFsError::from(FormatError::UnsupportedFormatVersion));
         }
 
         let (encoded_image_layout, buf) = buf.split_at(layout::ImageLayout::encoded_len() as usize);
@@ -1698,7 +1694,7 @@ impl MkFsInfoHeader {
 
         let blkdev_size_128b = blkdev_io_blocks << blkdev_io_block_size_128b_log2;
         if blkdev_size_128b == 0 || blkdev_size_128b >> blkdev_io_block_size_128b_log2 != blkdev_io_blocks {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
+            return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
 
         // Partition the image into blocks of largest possible alignment, such that
@@ -1707,7 +1703,7 @@ impl MkFsInfoHeader {
         // The aligned blocks should be able to contain the MkfsInfoHeader in full,
         // which may need 3 * 128b < 2^2 * 128b.
         if blkdev_size_128b_log2 < 4 + 2 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
+            return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
 
         let backup_location_begin_alignment_128b_log2 = blkdev_size_128b_log2 - 4;
@@ -1744,7 +1740,7 @@ impl MkFsInfoHeader {
         let (backup_location_begin_128b, backup_location_begin_alignment_128b_log2) =
             Self::physical_backup_location_begin_128b(blkdev_io_blocks, blkdev_io_block_size_128b_log2)?;
         if backup_location_begin_alignment_128b_log2 < blkdev_io_block_size_128b_log2 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
+            return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
         debug_assert!(backup_location_begin_128b.is_aligned_pow2(blkdev_io_block_size_128b_log2));
         Ok(backup_location_begin_128b >> blkdev_io_block_size_128b_log2)
@@ -1788,7 +1784,7 @@ impl MkFsInfoHeader {
         // to arrive at the same location and discover the backup.
         if backup_location_begin_alignment_128b_log2 < io_block_allocation_blocks_log2 + allocation_block_size_128b_log2
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageSize));
+            return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
         debug_assert!(
             backup_location_begin_128b
@@ -1876,7 +1872,7 @@ impl MkFsInfoHeader {
         }
 
         let salt_len = u8::try_from(salt.len())
-            .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?
+            .map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?
             .to_le_bytes();
         crc = crc32::crc32le_update_data(crc, &salt_len);
         crc_snb = crc32::crc32le_update_data_snb(crc_snb, &salt_len);

@@ -13,11 +13,11 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError,
+            FormatError,
             alloc_bitmap::{self, ExtentsAllocationRequest, ExtentsReallocationRequest},
             encryption_entities::{EncryptedExtentsEncryptionInstance, EncryptedExtentsLayout},
             extents,
-            fs::{CocoonFsAllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
+            fs::{AllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             inode_extents_list::{InodeExtentsListReadFuture, InodeExtentsListWriteFuture},
             inode_index::{
                 InodeIndexInsertEntryFuture, InodeIndexKeyType, InodeIndexLookupForInsertFuture,
@@ -77,7 +77,7 @@ enum WriteInodeDataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
         inode_index_lookup_result: Option<InodeIndexLookupForInsertResult>,
         preexisting_inode_extents: Option<PreexistingInodeExtents>,
         inode_extents_encryption_layout: EncryptedExtentsLayout,
-        allocate_fut: CocoonFsAllocateExtentsFuture<ST, B>,
+        allocate_fut: AllocateExtentsFuture<ST, B>,
     },
     WriteInodeDataUpdates {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -237,7 +237,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             }
                             Ok(None) => {
                                 // The inode exists, but the extents reference is nil.
-                                break (Some(transaction), NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                                break (Some(transaction), NvFsError::from(FormatError::InvalidExtents));
                             }
                             Err(e) => break (Some(transaction), e),
                         };
@@ -318,7 +318,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     {
                         Some(data_len) => data_len,
                         None => {
-                            break (Some(transaction), NvFsError::from(CocoonFsFormatError::InvalidFileSize));
+                            break (Some(transaction), NvFsError::from(FormatError::InvalidFileSize));
                         }
                     };
 
@@ -398,7 +398,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         None => ExtentsAllocationRequest::new(data_len, &inode_extents_allocation_layout),
                     };
 
-                    let allocate_fut = match CocoonFsAllocateExtentsFuture::new(
+                    let allocate_fut = match AllocateExtentsFuture::new(
                         &fs_instance_sync_state.get_fs_ref(),
                         transaction,
                         inode_extents_allocation_request,

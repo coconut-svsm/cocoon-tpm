@@ -13,11 +13,11 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap, auth_subject_ids, auth_tree, encryption_entities,
+            FormatError, alloc_bitmap, auth_subject_ids, auth_tree, encryption_entities,
             extent_ptr::{self, EncodedBlockPtr, EncodedExtentPtr},
             extents,
             fs::{
-                CocoonFsAllocateBlockFuture, CocoonFsAllocateBlocksFuture, CocoonFsConfig, CocoonFsSyncStateMemberRef,
+                AllocateBlockFuture, AllocateBlocksFuture, CocoonFsConfig, CocoonFsSyncStateMemberRef,
                 CocoonFsSyncStateReadFuture,
             },
             inode_extents_list::{InodeExtentsListPendingUpdate, InodeExtentsListReadFuture},
@@ -206,7 +206,7 @@ impl InodeIndexTreeLayout {
         if 1u64 << node_encrypted_block_layout.get_block_allocation_blocks_log2()
             > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexConfig));
+            return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
 
         let block_len = node_encrypted_block_layout.effective_payload_len()?;
@@ -223,7 +223,7 @@ impl InodeIndexTreeLayout {
         // entry would remain at the two child nodes each, 1, gets moved into
         // the parent.
         if max_internal_node_entries < 3 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexConfig));
+            return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
 
         let min_internal_node_entries = max_internal_node_entries / 2;
@@ -263,7 +263,7 @@ impl InodeIndexTreeLayout {
         let min_leaf_node_entries = max_leaf_node_entries.div_ceil(2);
         // Cannot happen, but make it explicit.
         if min_leaf_node_entries < 4 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexConfig));
+            return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
 
         let encoded_leaf_node_len = 4
@@ -363,7 +363,7 @@ impl InodeIndexTreeLeafNode {
 
         // Encoded node levels are 1-based.
         if *n.encoded_node_level(layout)? != 1u32.to_le_bytes() {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
 
         let mut last_key: Option<InodeIndexKeyType> = None;
@@ -377,7 +377,7 @@ impl InodeIndexTreeLeafNode {
             }
 
             if last_key.as_ref().map(|last_key| *last_key >= key).unwrap_or(false) {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
             entries += 1;
             last_key = Some(key);
@@ -386,7 +386,7 @@ impl InodeIndexTreeLeafNode {
             .iter()
             .any(|b| *b != 0)
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
         n.entries = entries;
 
@@ -402,7 +402,7 @@ impl InodeIndexTreeLeafNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_none()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
         for encoded_extent_ptr in
@@ -415,7 +415,7 @@ impl InodeIndexTreeLeafNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_some()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
 
@@ -1337,7 +1337,7 @@ impl InodeIndexTreeInternalNode {
 
         // Encoded node levels are 1-based, counted from leaf nodes upwards.
         if u32::from_le_bytes(*n.encoded_node_level(layout)?) <= 1 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
 
         let mut last_key: Option<InodeIndexKeyType> = None;
@@ -1351,7 +1351,7 @@ impl InodeIndexTreeInternalNode {
             }
 
             if last_key.as_ref().map(|last_key| *last_key >= key).unwrap_or(false) {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
             entries += 1;
             last_key = Some(key);
@@ -1360,7 +1360,7 @@ impl InodeIndexTreeInternalNode {
             .iter()
             .any(|b| *b != 0)
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
         n.entries = entries;
 
@@ -1376,7 +1376,7 @@ impl InodeIndexTreeInternalNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_none()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
         for encoded_child_ptr in
@@ -1389,7 +1389,7 @@ impl InodeIndexTreeInternalNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_some()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
 
@@ -2099,7 +2099,7 @@ impl InodeIndexTreeNode {
             *<&[u8; mem::size_of::<u32>()]>::try_from(&encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..])
                 .map_err(|_| nvfs_err_internal!())?,
         ) {
-            0u32 => Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+            0u32 => Err(NvFsError::from(FormatError::InvalidIndexNode)),
             1u32 => Ok(Self::Leaf(InodeIndexTreeLeafNode::decode(
                 node_allocation_blocks_begin,
                 encoded_node,
@@ -3527,7 +3527,7 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                                         this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                                         return task::Poll::Ready((
                                             Some(transaction),
-                                            Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+                                            Err(NvFsError::from(FormatError::InvalidIndexNode)),
                                         ));
                                     }
                                     return task::Poll::Ready((
@@ -3562,7 +3562,7 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                                 this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                                 return task::Poll::Ready((
                                     Some(transaction),
-                                    Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+                                    Err(NvFsError::from(FormatError::InvalidIndexNode)),
                                 ));
                             }
                             if this.read_for_update {
@@ -3686,7 +3686,7 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                             this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                             return task::Poll::Ready((
                                 transaction,
-                                Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+                                Err(NvFsError::from(FormatError::InvalidIndexNode)),
                             ));
                         }
                         if this.read_for_update {
@@ -3880,10 +3880,7 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                         .map(|expected_node_level| node_level != expected_node_level)
                         .unwrap_or(false)
                     {
-                        return task::Poll::Ready((
-                            transaction,
-                            Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                        ));
+                        return task::Poll::Ready((transaction, Err(NvFsError::from(FormatError::InvalidIndexNode))));
                     }
 
                     return task::Poll::Ready(if !this.read_for_update {
@@ -4117,10 +4114,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             next_child_node_allocation_blocks_begin
                                         }
                                         None => {
-                                            break (
-                                                transaction,
-                                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                                            );
+                                            break (transaction, NvFsError::from(FormatError::InvalidIndexNode));
                                         }
                                     }
                                 }
@@ -4598,7 +4592,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (
                                         Some(cursor),
                                         returned_transaction.or(node_ref.into_transaction()),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -4773,21 +4767,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let leaf_node = match tree_position.get_leaf_node(cursor.transaction.as_deref()) {
                         Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                         Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (
-                                Some(cursor),
-                                None,
-                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                            );
+                            break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
                         }
                         Err(e) => break (Some(cursor), None, e),
                     };
 
                     if leaf_node.entries == 0 {
-                        break (
-                            Some(cursor),
-                            None,
-                            NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                        );
+                        break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
                     }
                     let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
                         Ok(inode) => inode,
@@ -4935,11 +4921,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let leaf_node = match tree_position.get_leaf_node(cursor.transaction.as_deref()) {
                         Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                         Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (
-                                Some(cursor),
-                                None,
-                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                            );
+                            break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
                         }
                         Err(e) => break (Some(cursor), None, e),
                     };
@@ -5009,7 +4991,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 read_inode_extents_list_fut,
                             };
                         }
-                        Ok(None) => break (Some(cursor), None, NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+                        Ok(None) => break (Some(cursor), None, NvFsError::from(FormatError::InvalidExtents)),
                         Err(e) => break (Some(cursor), None, e),
                     }
                 }
@@ -5392,7 +5374,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         None => {
                                             break (
                                                 returned_transaction.or(node_ref.into_transaction()),
-                                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                                NvFsError::from(FormatError::InvalidIndexNode),
                                             );
                                         }
                                     }
@@ -5567,13 +5549,13 @@ enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBl
     },
     SplitRootNode {
         nodes_staged_updates_old_root_slot_index: usize,
-        allocate_fut: CocoonFsAllocateBlocksFuture<ST, B>,
+        allocate_fut: AllocateBlocksFuture<ST, B>,
     },
     SplitNode {
         nodes_staged_updates_parent_slot_index: usize,
         nodes_staged_updates_child_slot_index: usize,
         child_index_in_parent: usize,
-        allocate_fut: CocoonFsAllocateBlockFuture<ST, B>,
+        allocate_fut: AllocateBlockFuture<ST, B>,
     },
     PreemptiveRotateSplitWalkLoadRoot {
         read_root_fut: InodeIndexReadTreeNodeFuture<B>,
@@ -5995,7 +5977,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         debug_assert_eq!(transaction.inode_index_updates.index_tree_levels, 1);
                         let fs_instance = fs_instance_sync_state.get_fs_ref();
                         let image_layout = &fs_instance.fs_config.image_layout;
-                        let allocate_fut = match CocoonFsAllocateBlocksFuture::<ST, B>::new(
+                        let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -6039,10 +6021,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     // Any internal node, including the root, should have at least two childs,
                     // i.e. at least one separator key.
                     if parent_node.entries == 0 {
-                        break (
-                            Some(transaction),
-                            Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                        );
+                        break (Some(transaction), Err(NvFsError::from(FormatError::InvalidIndexNode)));
                     }
 
                     let tree_layout = &fs_instance_sync_state.inode_index.layout;
@@ -6068,7 +6047,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         })
                         .and_then(|sibling_child_node_allocation_blocks_begin| {
                             sibling_child_node_allocation_blocks_begin
-                                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                         }) {
                         Ok(sibling_child_node_allocation_blocks_begin) => sibling_child_node_allocation_blocks_begin,
                         Err(e) => break (Some(transaction), Err(e)),
@@ -6229,7 +6208,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             );
                             if parent_node_level != 1 || parent_node.entries != tree_layout.max_internal_node_entries {
                                 let image_layout = &fs_instance.fs_config.image_layout;
-                                let allocate_fut = match CocoonFsAllocateBlockFuture::new(
+                                let allocate_fut = match AllocateBlockFuture::new(
                                     &fs_instance,
                                     transaction,
                                     image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -6273,7 +6252,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 })
                                 .and_then(|sibling_child_node_allocation_blocks_begin| {
                                     sibling_child_node_allocation_blocks_begin
-                                        .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                        .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                                 }) {
                                 Ok(sibling_child_node_allocation_blocks_begin) => {
                                     sibling_child_node_allocation_blocks_begin
@@ -6394,10 +6373,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let sibling_child_node = match &mut nodes_staged_updates_sibling_child_slot.node {
                                 InodeIndexTreeNode::Internal(sibling_child_node) => sibling_child_node,
                                 InodeIndexTreeNode::Leaf(_) => {
-                                    break (
-                                        Some(transaction),
-                                        Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                                    );
+                                    break (Some(transaction), Err(NvFsError::from(FormatError::InvalidIndexNode)));
                                 }
                             };
 
@@ -6493,10 +6469,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let sibling_child_node = match &mut nodes_staged_updates_sibling_child_slot.node {
                                 InodeIndexTreeNode::Leaf(sibling_child_node) => sibling_child_node,
                                 InodeIndexTreeNode::Internal(_) => {
-                                    break (
-                                        Some(transaction),
-                                        Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                                    );
+                                    break (Some(transaction), Err(NvFsError::from(FormatError::InvalidIndexNode)));
                                 }
                             };
 
@@ -7358,7 +7331,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             } => nodes_staged_updates_slot_index,
                         };
 
-                        let allocate_fut = match CocoonFsAllocateBlocksFuture::<ST, B>::new(
+                        let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -7477,7 +7450,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             _ => break (Some(transaction), Err(nvfs_err_internal!())),
                         };
 
-                        let allocate_fut = match CocoonFsAllocateBlockFuture::new(
+                        let allocate_fut = match AllocateBlockFuture::new(
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -7505,8 +7478,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 )
                             })
                             .and_then(|child_node_allocation_blocks_begin| {
-                                child_node_allocation_blocks_begin
-                                    .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                child_node_allocation_blocks_begin.ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                             }) {
                             Ok(child_node_allocation_blocks_begin) => child_node_allocation_blocks_begin,
                             Err(e) => break (Some(transaction), Err(e)),
@@ -8197,7 +8169,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (
                                         Some(cursor),
                                         Some(transaction),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                                 let tree_layout = &fs_instance_sync_state.inode_index.layout;
@@ -8257,7 +8229,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                                 break (
                                                     Some(cursor),
                                                     Some(transaction),
-                                                    NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                                    NvFsError::from(FormatError::InvalidIndexNode),
                                                 );
                                             }
                                         }
@@ -8265,7 +8237,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             break (
                                                 Some(cursor),
                                                 Some(transaction),
-                                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                                NvFsError::from(FormatError::InvalidIndexNode),
                                             );
                                         }
                                     };
@@ -8384,7 +8356,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (
                                         Some(cursor),
                                         returned_transaction.or(node_ref.into_transaction()),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -8616,7 +8588,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             break (
                                 Some(cursor),
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                NvFsError::from(FormatError::InvalidIndexNode),
                             );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -8626,7 +8598,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         break (
                             Some(cursor),
                             Some(transaction),
-                            NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                            NvFsError::from(FormatError::InvalidIndexNode),
                         );
                     }
                     let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
@@ -8946,7 +8918,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             break (
                                 Some(cursor),
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidExtents),
+                                NvFsError::from(FormatError::InvalidExtents),
                             );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -9459,7 +9431,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         break (
                             Some(cursor),
                             Some(transaction),
-                            NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                            NvFsError::from(FormatError::InvalidIndexNode),
                         );
                     }
 
@@ -9487,7 +9459,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         })
                         .and_then(|sibling_child_node_allocation_blocks_begin| {
                             sibling_child_node_allocation_blocks_begin
-                                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                         }) {
                         Ok(sibling_child_node_allocation_blocks_begin) => sibling_child_node_allocation_blocks_begin,
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -9665,7 +9637,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             })
                             .and_then(|sibling_child_node_allocation_blocks_begin| {
                                 sibling_child_node_allocation_blocks_begin
-                                    .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                    .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                             }) {
                             Ok(sibling_child_node_allocation_blocks_begin) => {
                                 sibling_child_node_allocation_blocks_begin
@@ -9790,7 +9762,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (
                                         Some(cursor),
                                         Some(transaction),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -10029,7 +10001,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (
                                         Some(cursor),
                                         Some(transaction),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -10429,8 +10401,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             )
                         })
                         .and_then(|child_node_allocation_blocks_begin| {
-                            child_node_allocation_blocks_begin
-                                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                            child_node_allocation_blocks_begin.ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                         }) {
                         Ok(child_node_allocation_blocks_begin) => child_node_allocation_blocks_begin,
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -10868,7 +10839,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             break (
                                 Some(cursor),
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidExtents),
+                                NvFsError::from(FormatError::InvalidExtents),
                             );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -11084,7 +11055,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             this.fut_state = InodeIndexUpdateRootNodeInodeFutureState::Done;
                             return task::Poll::Ready(Ok((
                                 transaction,
-                                Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+                                Err(NvFsError::from(FormatError::InvalidExtents)),
                             )));
                         }
                         Err(e) => {
@@ -11650,19 +11621,18 @@ where
                         }
                     };
 
-                    let index_root_inode_entry_index = match entry_leaf_node
-                        .lookup(SpecialInode::IndexRoot as u32, &this.tree_layout)
-                    {
-                        Ok(Ok(index_root_inode_entry_index)) => index_root_inode_entry_index,
-                        Ok(Err(_)) => {
-                            this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::SpecialInodeMissing)));
-                        }
-                        Err(e) => {
-                            this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
+                    let index_root_inode_entry_index =
+                        match entry_leaf_node.lookup(SpecialInode::IndexRoot as u32, &this.tree_layout) {
+                            Ok(Ok(index_root_inode_entry_index)) => index_root_inode_entry_index,
+                            Ok(Err(_)) => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(FormatError::SpecialInodeMissing)));
+                            }
+                            Err(e) => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
                     let root_node_extent_ptr = match entry_leaf_node
                         .encoded_entry_extent_ptr(index_root_inode_entry_index, &this.tree_layout)
                     {
@@ -11681,14 +11651,12 @@ where
                         Ok(Some((_, true))) => {
                             // Indirect extent. Not allowed for the index root node.
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(
-                                CocoonFsFormatError::InvalidIndexRootExtents,
-                            )));
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidIndexRootExtents)));
                         }
                         Ok(None) => {
                             // The inode exists, but the extents reference is nil, which is invalid.
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)));
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
                         }
                         Err(e) => {
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
@@ -11705,7 +11673,7 @@ where
                     {
                         // The encoded root node extent's length must match the tree node size.
                         this.fut_state = InodeIndexBootstrapFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidIndexRootExtents)));
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidIndexRootExtents)));
                     }
 
                     if root_node_extent.begin() == *entry_leaf_node_allocation_blocks_begin {
@@ -11768,7 +11736,7 @@ where
                             // It's already know that the entry leaf node is not the root, hence the
                             // root cannot be a leaf.
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)));
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidIndexNode)));
                         }
                     };
                     let root_node_level = match root_node.node_level(&this.tree_layout) {

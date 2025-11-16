@@ -18,7 +18,7 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap,
+            FormatError, alloc_bitmap,
             auth_subject_ids::AuthSubjectDataSuffix,
             encryption_entities::{
                 EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix, EncryptedChainedExtentsDecryptionInstance,
@@ -130,7 +130,7 @@ fn decode_field_tag<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = c
         .copy_from_iter(&mut src)?;
     let tag = tag[0];
     if tag & 0x80 != 0 {
-        return Err(NvFsError::from(CocoonFsFormatError::InvalidJournalLogFieldTagEncoding));
+        return Err(NvFsError::from(FormatError::InvalidJournalLogFieldTagEncoding));
     }
     let tag = match tag {
         JOURNAL_LOG_FIELD_TAG_AUTH_TREE_EXTENTS_VALUE => JournalLogFieldTag::AuthTreeExtents,
@@ -142,7 +142,7 @@ fn decode_field_tag<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = c
         JOURNAL_LOG_FIELD_TAG_UPDATE_AUTH_DIGESTS_SCRIPT_VALUE => JournalLogFieldTag::UpdateAuthDigestsScript,
         JOURNAL_LOG_FIELD_TAG_TRIM_SCRIPT_VALUE => JournalLogFieldTag::TrimScript,
         JOURNAL_LOG_FIELD_TAG_JOURNAL_STAGING_COPY_DISGUISE_VALUE => JournalLogFieldTag::JournalStagingCopyDisguise,
-        _ => return Err(NvFsError::from(CocoonFsFormatError::InvalidJournalLogFieldTag)),
+        _ => return Err(NvFsError::from(FormatError::InvalidJournalLogFieldTag)),
     };
 
     Ok(Some(tag))
@@ -158,7 +158,7 @@ fn decode_field_tag<'a, SI: io_slices::IoSlicesIter<'a, BackendIteratorError = c
 fn encoded_field_tag_and_len_len(tag: JournalLogFieldTag, value_len: usize) -> Result<usize, NvFsError> {
     let encoded_tag_len = encoded_field_tag_len(tag);
     let encoded_len_len = leb128::leb128u_u64_encoded_len(
-        u64::try_from(value_len).map_err(|_| NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOverflow))?,
+        u64::try_from(value_len).map_err(|_| NvFsError::from(FormatError::JournalLogFieldLengthOverflow))?,
     );
     Ok(encoded_tag_len + encoded_len_len)
 }
@@ -180,7 +180,7 @@ fn encode_field_tag_and_len(
     value_len: usize,
 ) -> Result<&mut [u8], NvFsError> {
     let value_len =
-        u64::try_from(value_len).map_err(|_| NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOverflow))?;
+        u64::try_from(value_len).map_err(|_| NvFsError::from(FormatError::JournalLogFieldLengthOverflow))?;
     dst = encode_field_tag(dst, tag);
     dst = leb128::leb128u_u64_encode(dst, value_len);
     Ok(dst)
@@ -219,7 +219,7 @@ fn decode_field_tag_and_len<'a, SI: io_slices::PeekableIoSlicesIter<'a, BackendI
     let decode_buf = &decode_buf[..decode_buf_len];
 
     let (value_len, decode_buf_remainder) = leb128::leb128u_u64_decode(decode_buf)
-        .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalLogFieldLengthEncoding))?;
+        .map_err(|_| NvFsError::from(FormatError::InvalidJournalLogFieldLengthEncoding))?;
     // Advance the peeked src iterator past the encoded length value.
     src.skip(decode_buf.len() - decode_buf_remainder.len())
         .map_err(|e| match e {
@@ -312,7 +312,7 @@ impl JournalLogEncodeBufferLayout {
         )?;
 
         let salt_len =
-            u8::try_from(fs_config.salt.len()).map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?;
+            u8::try_from(fs_config.salt.len()).map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?;
         let encoded_apply_writes_script_value_len = apply_script::JournalApplyWritesScript::encoded_len(
             TransactionJournalApplyWritesScriptIterator::new(
                 &transaction.auth_tree_data_blocks_update_states,
@@ -635,7 +635,7 @@ impl JournalLog {
             >> (u64::BITS - 7 - image_layout.allocation_block_size_128b_log2 as u32)
             > 1
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
 
         Ok((
@@ -789,7 +789,7 @@ impl JournalLog {
             encode_buf_layout.encoded_apply_writes_script_value_len,
         )?;
         let salt_len =
-            u8::try_from(fs_config.salt.len()).map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidSaltLength))?;
+            u8::try_from(fs_config.salt.len()).map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?;
         dst = apply_script::JournalApplyWritesScript::encode(
             dst,
             TransactionJournalApplyWritesScriptIterator::new(
@@ -884,10 +884,10 @@ impl JournalLog {
             io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2);
 
         // Journal log field: Authentication Tree File extents.
-        let (tag, encoded_auth_tree_extents_len) = decode_field_tag_and_len(src.as_ref())?
-            .ok_or(NvFsError::from(CocoonFsFormatError::IncompleteJournalLog))?;
+        let (tag, encoded_auth_tree_extents_len) =
+            decode_field_tag_and_len(src.as_ref())?.ok_or(NvFsError::from(FormatError::IncompleteJournalLog))?;
         if tag != JournalLogFieldTag::AuthTreeExtents {
-            return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+            return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
         }
         let mut encoded_auth_tree_extents =
             src.as_ref()
@@ -896,13 +896,13 @@ impl JournalLog {
                     io_slices::IoSlicesIterError::BackendIteratorError(e) => NvFsError::from(e),
                     io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
                         io_slices::IoSlicesError::BuffersExhausted => {
-                            NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOutOfBounds)
+                            NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds)
                         }
                     },
                 });
         let auth_tree_extents = inode_extents_list::indirect_extents_list_decode(&mut encoded_auth_tree_extents)?;
         if !encoded_auth_tree_extents.is_empty()? {
-            return Err(NvFsError::from(CocoonFsFormatError::ExcessJournalLogFieldLength));
+            return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
         // This is considered unauthenticated data, because the encoded extents might
         // span multiple, independently authenticated Journal log extents. While the
@@ -913,7 +913,7 @@ impl JournalLog {
             if !(u64::from(cur_extent.begin()) | u64::from(cur_extent.end()))
                 .is_aligned_pow2(journal_block_allocation_blocks_log2)
             {
-                return Err(NvFsError::from(CocoonFsFormatError::UnalignedAuthTreeExtents));
+                return Err(NvFsError::from(FormatError::UnalignedAuthTreeExtents));
             }
 
             if cur_extent.begin() >= extents_end_high_watermark {
@@ -923,7 +923,7 @@ impl JournalLog {
 
             for j in 0..i {
                 if auth_tree_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                    return Err(NvFsError::from(FormatError::InvalidExtents));
                 }
             }
         }
@@ -951,14 +951,14 @@ impl JournalLog {
             .update(io_slices::SingletonIoSlice::new(&encoded_image_layout).map_infallible_err())?;
 
         // Journal log field: Allocation Bitmap File extents.
-        let (tag, encoded_alloc_bitmap_file_extents_len) = decode_field_tag_and_len(src.as_ref())?
-            .ok_or(NvFsError::from(CocoonFsFormatError::IncompleteJournalLog))?;
+        let (tag, encoded_alloc_bitmap_file_extents_len) =
+            decode_field_tag_and_len(src.as_ref())?.ok_or(NvFsError::from(FormatError::IncompleteJournalLog))?;
         if tag != JournalLogFieldTag::AllocBitmapFileExtents {
-            return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+            return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
         }
 
         if src.total_len()? < encoded_alloc_bitmap_file_extents_len {
-            return Err(NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOutOfBounds));
+            return Err(NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds));
         }
         alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_hmac_instance.update(
             src.decoupled_borrow()
@@ -985,7 +985,7 @@ impl JournalLog {
         let alloc_bitmap_file_extents =
             inode_extents_list::indirect_extents_list_decode(&mut encoded_alloc_bitmap_file_extents)?;
         if !encoded_alloc_bitmap_file_extents.is_empty()? {
-            return Err(NvFsError::from(CocoonFsFormatError::ExcessJournalLogFieldLength));
+            return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
         // This is considered unauthenticated data, because the encoded extents might
         // span multiple, independently authenticated Journal log extents. While the
@@ -1000,28 +1000,28 @@ impl JournalLog {
 
             for j in 0..i {
                 if alloc_bitmap_file_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                    return Err(NvFsError::from(FormatError::InvalidExtents));
                 }
             }
         }
 
         // Journal log field: Allocation Bitmap File digests.
-        let (tag, encoded_alloc_bitmap_file_fragments_auth_digests_len) = decode_field_tag_and_len(src.as_ref())?
-            .ok_or(NvFsError::from(CocoonFsFormatError::IncompleteJournalLog))?;
+        let (tag, encoded_alloc_bitmap_file_fragments_auth_digests_len) =
+            decode_field_tag_and_len(src.as_ref())?.ok_or(NvFsError::from(FormatError::IncompleteJournalLog))?;
         if tag != JournalLogFieldTag::AllocBitmapFileFragmentsAuthDigests {
-            return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+            return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
         }
 
         let preauth_cca_protection_digest_len =
             hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as usize;
         if encoded_alloc_bitmap_file_fragments_auth_digests_len < preauth_cca_protection_digest_len {
             return Err(NvFsError::from(
-                CocoonFsFormatError::InvalidJournalExtentsCoveringAuthDigestsFormat,
+                FormatError::InvalidJournalExtentsCoveringAuthDigestsFormat,
             ));
         }
 
         if src.total_len()? < encoded_alloc_bitmap_file_extents_len {
-            return Err(NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOutOfBounds));
+            return Err(NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds));
         }
         alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_hmac_instance.update(
             src.decoupled_borrow()
@@ -1052,7 +1052,7 @@ impl JournalLog {
             hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as usize,
         )?;
         if !encoded_alloc_bitmap_file_fragments_auth_digests.is_empty()? {
-            return Err(NvFsError::from(CocoonFsFormatError::ExcessJournalLogFieldLength));
+            return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
 
         // Verify the digest over all.
@@ -1091,10 +1091,10 @@ impl JournalLog {
         drop(alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_digest);
 
         // Journal log field: apply script.
-        let (tag, encoded_apply_writes_script_len) = decode_field_tag_and_len(src.as_ref())?
-            .ok_or(NvFsError::from(CocoonFsFormatError::IncompleteJournalLog))?;
+        let (tag, encoded_apply_writes_script_len) =
+            decode_field_tag_and_len(src.as_ref())?.ok_or(NvFsError::from(FormatError::IncompleteJournalLog))?;
         if tag != JournalLogFieldTag::ApplyWritesScript {
-            return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+            return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
         }
         let mut encoded_apply_writes_script =
             src.as_ref()
@@ -1103,7 +1103,7 @@ impl JournalLog {
                     io_slices::IoSlicesIterError::BackendIteratorError(e) => NvFsError::from(e),
                     io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
                         io_slices::IoSlicesError::BuffersExhausted => {
-                            NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOutOfBounds)
+                            NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds)
                         }
                     },
                 });
@@ -1113,14 +1113,14 @@ impl JournalLog {
             image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
         )?;
         if !encoded_apply_writes_script.is_empty()? {
-            return Err(NvFsError::from(CocoonFsFormatError::ExcessJournalLogFieldLength));
+            return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
 
         // Journal log field: data authentication digests update script.
-        let (tag, encoded_update_auth_digests_script_len) = decode_field_tag_and_len(src.as_ref())?
-            .ok_or(NvFsError::from(CocoonFsFormatError::IncompleteJournalLog))?;
+        let (tag, encoded_update_auth_digests_script_len) =
+            decode_field_tag_and_len(src.as_ref())?.ok_or(NvFsError::from(FormatError::IncompleteJournalLog))?;
         if tag != JournalLogFieldTag::UpdateAuthDigestsScript {
-            return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+            return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
         }
         let mut encoded_update_auth_digests_script = src
             .as_ref()
@@ -1129,7 +1129,7 @@ impl JournalLog {
                 io_slices::IoSlicesIterError::BackendIteratorError(e) => NvFsError::from(e),
                 io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
                     io_slices::IoSlicesError::BuffersExhausted => {
-                        NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOutOfBounds)
+                        NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds)
                     }
                 },
             });
@@ -1139,7 +1139,7 @@ impl JournalLog {
             image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
         )?;
         if !encoded_update_auth_digests_script.is_empty()? {
-            return Err(NvFsError::from(CocoonFsFormatError::ExcessJournalLogFieldLength));
+            return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
 
         // Optional journal log fields.
@@ -1148,14 +1148,14 @@ impl JournalLog {
         while let Some((tag, encoded_field_len)) = decode_field_tag_and_len(src.as_ref())? {
             if tag == JournalLogFieldTag::TrimScript {
                 if trim_script.is_some() {
-                    return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+                    return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
                 }
 
                 let mut encoded_trim_script = src.as_ref().take_exact(encoded_field_len).map_err(|e| match e {
                     io_slices::IoSlicesIterError::BackendIteratorError(e) => NvFsError::from(e),
                     io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
                         io_slices::IoSlicesError::BuffersExhausted => {
-                            NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOutOfBounds)
+                            NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds)
                         }
                     },
                 });
@@ -1165,11 +1165,11 @@ impl JournalLog {
                     image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
                 )?);
                 if !encoded_trim_script.is_empty()? {
-                    return Err(NvFsError::from(CocoonFsFormatError::ExcessJournalLogFieldLength));
+                    return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
                 }
             } else if tag == JournalLogFieldTag::JournalStagingCopyDisguise {
                 if journal_staging_copy_undisguise.is_some() {
-                    return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+                    return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
                 }
 
                 let mut encoded_journal_staging_copy_disguise =
@@ -1177,7 +1177,7 @@ impl JournalLog {
                         io_slices::IoSlicesIterError::BackendIteratorError(e) => NvFsError::from(e),
                         io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
                             io_slices::IoSlicesError::BuffersExhausted => {
-                                NvFsError::from(CocoonFsFormatError::JournalLogFieldLengthOutOfBounds)
+                                NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds)
                             }
                         },
                     });
@@ -1185,10 +1185,10 @@ impl JournalLog {
                     encoded_journal_staging_copy_disguise.as_ref(),
                 )?);
                 if !encoded_journal_staging_copy_disguise.is_empty()? {
-                    return Err(NvFsError::from(CocoonFsFormatError::ExcessJournalLogFieldLength));
+                    return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
                 }
             } else {
-                return Err(NvFsError::from(CocoonFsFormatError::UnexpectedJournalLogField));
+                return Err(NvFsError::from(FormatError::UnexpectedJournalLogField));
             }
         }
 
@@ -1946,7 +1946,7 @@ impl JournalLogReadExtentNvBlkDevReadRequest {
                 ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
                 ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
                 ChunkedIoRegionError::RegionUnaligned => {
-                    NvFsError::FsFormatError(CocoonFsFormatError::UnalignedJournalExtents as isize)
+                    NvFsError::FsFormatError(FormatError::UnalignedJournalExtents as isize)
                 }
             })?;
         Ok(Self { region, dst })

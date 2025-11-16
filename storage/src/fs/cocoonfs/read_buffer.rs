@@ -11,7 +11,7 @@ use crate::{
     blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     fs::{
         NvFsError,
-        cocoonfs::{CocoonFsFormatError, alloc_bitmap, auth_tree, layout},
+        cocoonfs::{FormatError, alloc_bitmap, auth_tree, layout},
     },
     nvblkdev_err_internal, nvfs_err_internal,
     utils_async::sync_types::{self, ConstructibleLock as _, Lock as _},
@@ -1052,7 +1052,7 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
             match request_range.align(auth_tree_data_block_allocation_blocks_log2 as u32) {
                 Some(auth_tree_data_block_aligned_request_range) => auth_tree_data_block_aligned_request_range,
                 None => {
-                    return Err(NvFsError::from(CocoonFsFormatError::BlockOutOfRange));
+                    return Err(NvFsError::from(FormatError::BlockOutOfRange));
                 }
             };
 
@@ -1069,7 +1069,7 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
             match auth_tree_data_block_aligned_request_range.align(min_io_block_allocation_blocks_log2 as u32) {
                 Some(min_io_block_aligned_request_range) => min_io_block_aligned_request_range,
                 None => {
-                    return Err(NvFsError::from(CocoonFsFormatError::BlockOutOfRange));
+                    return Err(NvFsError::from(FormatError::BlockOutOfRange));
                 }
             };
 

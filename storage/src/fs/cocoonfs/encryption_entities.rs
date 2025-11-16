@@ -14,7 +14,7 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError, auth_subject_ids::AuthSubjectDataSuffix, extent_ptr::EncodedExtentPtr,
+            FormatError, auth_subject_ids::AuthSubjectDataSuffix, extent_ptr::EncodedExtentPtr,
             extents_layout::ExtentsLayout, layout,
         },
     },
@@ -132,18 +132,18 @@ pub fn check_cbc_padding<'a, DI: CryptoDoubleEndedIoSlicesIter<'a>>(
 
         let cbc_padding_len = tail_slice[last_nonzero_pos];
         if (cbc_padding_len - 1) as usize > last_nonzero_pos {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidPadding));
+            return Err(NvFsError::from(FormatError::InvalidPadding));
         }
         if tail_slice[last_nonzero_pos - (cbc_padding_len - 1) as usize..last_nonzero_pos]
             .iter()
             .any(|b| *b != cbc_padding_len)
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidPadding));
+            return Err(NvFsError::from(FormatError::InvalidPadding));
         }
 
         return Ok(trailing_zeroes_len + cbc_padding_len as usize);
     }
-    Err(NvFsError::from(CocoonFsFormatError::InvalidPadding))
+    Err(NvFsError::from(FormatError::InvalidPadding))
 }
 
 /// Information about a given [block cipher
@@ -1873,7 +1873,7 @@ impl EncryptedChainedExtentsDecryptionInstance {
             Some((next_chained_extent, is_indirect)) => {
                 // Chained continuation extents are always direct.
                 if is_indirect {
-                    return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                    return Err(NvFsError::from(FormatError::InvalidExtents));
                 }
                 Some(next_chained_extent)
             }

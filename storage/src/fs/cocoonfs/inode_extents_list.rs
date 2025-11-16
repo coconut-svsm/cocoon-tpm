@@ -13,7 +13,7 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError,
+            FormatError,
             alloc_bitmap::{self, ExtentsAllocationRequest, ExtentsReallocationRequest},
             encryption_entities::{
                 EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix, EncryptedChainedExtentsDecryptionInstance,
@@ -21,7 +21,7 @@ use crate::{
             },
             extent_ptr::{self, EncodedExtentPtr},
             extents,
-            fs::{CocoonFsAllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
+            fs::{AllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             inode_index::{InodeIndexKeyType, InodeKeySubdomain, SpecialInode},
             keys, layout, leb128,
             read_authenticate_extent::ReadAuthenticateExtentFuture,
@@ -214,12 +214,12 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
         match decode_buf_len.cmp(&2) {
             cmp::Ordering::Less => {
                 // No terminating (0, 0).
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                return Err(NvFsError::from(FormatError::InvalidExtents));
             }
             cmp::Ordering::Equal => {
                 if decode_buf[0] != 0 || decode_buf[1] != 0 {
                     // No terminating (0, 0).
-                    return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                    return Err(NvFsError::from(FormatError::InvalidExtents));
                 }
                 return Ok(inode_extents);
             }
@@ -231,13 +231,13 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
         let delta;
         (delta, remaining_decode_buf) = match leb128::leb128s_i64_decode(remaining_decode_buf) {
             Ok((delta, remaining_decode_buf)) => (delta, remaining_decode_buf),
-            Err(_) => return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+            Err(_) => return Err(NvFsError::from(FormatError::InvalidExtents)),
         };
         let inode_extent_allocation_blocks;
         (inode_extent_allocation_blocks, remaining_decode_buf) = match leb128::leb128u_u64_decode(remaining_decode_buf)
         {
             Ok((extent_allocation_blocks, remaining_decode_buf)) => (extent_allocation_blocks, remaining_decode_buf),
-            Err(_) => return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+            Err(_) => return Err(NvFsError::from(FormatError::InvalidExtents)),
         };
 
         // Move the remaining bytes in decode_buf to the front.
@@ -251,13 +251,13 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
         let delta = delta as u64;
         if inode_extent_allocation_blocks == 0 {
             // Invalid (delta, length) pair, possibly a premature termination marker.
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
         let inode_extent_allocation_blocks_begin = last_inode_extent_end.wrapping_add(delta);
         if (inode_extent_allocation_blocks_begin | inode_extent_allocation_blocks) >> MAX_IMAGE_ALLOCATION_BLOCKS_LOG2
             != 0
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
         // Neither of the two following sums can overflow, as per all summands being <
         // 2^63 (< 2^(64 - 7 actually)).
@@ -268,7 +268,7 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
             >> MAX_IMAGE_ALLOCATION_BLOCKS_LOG2
             != 0
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
         last_inode_extent_end = inode_extent_allocation_blocks_end;
 
@@ -694,7 +694,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for InodeExtentsListReadPreA
 
             for j in 0..i {
                 if inode_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)));
+                    return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
                 }
             }
         }
@@ -758,7 +758,7 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBl
         preexisting_inode_extents_list_extents: Option<extents::PhysicalExtents>,
         encoded_inode_extents_list_len: usize,
         inode_extents_list_encryption_layout: EncryptedChainedExtentsLayout,
-        allocate_fut: CocoonFsAllocateExtentsFuture<ST, B>,
+        allocate_fut: AllocateExtentsFuture<ST, B>,
     },
     StageInodeExtentsListUpdates {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -1155,7 +1155,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         ),
                     };
 
-                    let allocate_fut = match CocoonFsAllocateExtentsFuture::new(
+                    let allocate_fut = match AllocateExtentsFuture::new(
                         &fs_instance_sync_state.get_fs_ref(),
                         transaction,
                         inode_extents_list_extents_allocation_request,

@@ -13,7 +13,7 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError,
+            FormatError,
             encryption_entities::{self, EncryptedExtentsDecryptionInstance, EncryptedExtentsLayout},
             extents,
             fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
@@ -212,7 +212,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         }
                         Ok(None) => {
                             // The inode exists, but the extents reference is nil, which is invalid.
-                            break (transaction, NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                            break (transaction, NvFsError::from(FormatError::InvalidExtents));
                         }
                         Err(e) => break (transaction, e),
                     }
@@ -234,7 +234,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     };
 
                     if inode_extents.is_empty() {
-                        break (transaction, NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                        break (transaction, NvFsError::from(FormatError::InvalidExtents));
                     }
 
                     this.fut_state = ReadInodeDataFutureState::ReadInodeDataExtentsPrepare {

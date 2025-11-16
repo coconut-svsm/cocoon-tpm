@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::{
-    fs::cocoonfs::{CocoonFsFormatError, NvFsError, extents, layout, leb128},
+    fs::cocoonfs::{FormatError, NvFsError, extents, layout, leb128},
     nvfs_err_internal,
     utils_common::{
         fixed_vec::FixedVec,
@@ -141,7 +141,7 @@ impl ExtentsCoveringAuthDigests {
             let decode_buf = &decode_buf[..decode_buf_len];
 
             let (delta_auth_tree_data_blocks, decode_buf_remainder) = leb128::leb128u_u64_decode(decode_buf)
-                .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalExtentsCoveringAuthDigestsFormat))?;
+                .map_err(|_| NvFsError::from(FormatError::InvalidJournalExtentsCoveringAuthDigestsFormat))?;
             // Advance the peeked src iterator past the encoded length value.
             src.skip(decode_buf.len() - decode_buf_remainder.len())
                 .map_err(|e| match e {
@@ -156,7 +156,7 @@ impl ExtentsCoveringAuthDigests {
                 != delta_auth_tree_data_blocks
             {
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::InvalidJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
 
@@ -164,7 +164,7 @@ impl ExtentsCoveringAuthDigests {
                 u64::from(last_auth_tree_data_block_allocation_blocks_end)
                     .checked_add(delta_allocation_blocks)
                     .ok_or(NvFsError::from(
-                        CocoonFsFormatError::InvalidJournalExtentsCoveringAuthDigestsEntry,
+                        FormatError::InvalidJournalExtentsCoveringAuthDigestsEntry,
                     ))?,
             );
             if u64::from(cur_auth_tree_data_block_allocation_blocks_begin)
@@ -173,7 +173,7 @@ impl ExtentsCoveringAuthDigests {
                     >> (auth_tree_data_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7)
             {
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::InvalidJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
             last_auth_tree_data_block_allocation_blocks_end =
@@ -187,7 +187,7 @@ impl ExtentsCoveringAuthDigests {
                     io_slices::IoSlicesIterError::BackendIteratorError(e) => e,
                     io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
                         io_slices::IoSlicesError::BuffersExhausted => {
-                            NvFsError::from(CocoonFsFormatError::InvalidJournalExtentsCoveringAuthDigestsFormat)
+                            NvFsError::from(FormatError::InvalidJournalExtentsCoveringAuthDigestsFormat)
                         }
                     },
                 })?;
