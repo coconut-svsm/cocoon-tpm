@@ -449,7 +449,7 @@ enum MkFsFutureState<B: blkdev::NvBlkDev> {
         resize_fut: B::ResizeFuture,
     },
     WriteBackupMkFsInfoHeader {
-        write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture<B>,
+        write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
     },
     WriteBarrierAfterBackupMkFsInfoHeaderWrite {
         write_barrier_fut: B::WriteBarrierFuture,
@@ -889,7 +889,7 @@ where
                         }
                         Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::Write) => {
                             this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
-                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(true),
+                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(true),
                             };
                         }
                         None => {
@@ -935,7 +935,7 @@ where
                         }
                         Some(MkFsFutureBackupMkfsInfoHeaderWriteControl::Write) => {
                             this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
-                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(true),
+                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(true),
                             };
                         }
                         None => {
@@ -947,7 +947,7 @@ where
                     write_backup_mkfsinfo_header_fut,
                 } => {
                     let blkdev = &fs_init_data.blkdev;
-                    match WriteMkFsInfoHeaderFuture::poll(
+                    match WriteMkFsInfoHeaderDataFuture::poll(
                         pin::Pin::new(write_backup_mkfsinfo_header_fut),
                         blkdev,
                         &fs_init_data.mkfs_layout.image_layout,
@@ -2690,12 +2690,12 @@ impl<B: blkdev::NvBlkDev> InvalidateBackupMkFsInfoHeaderFuture<B> {
 }
 
 /// Internal [`MkFsInfoHeader`](image_header::MkFsInfoHeader) writing primitive.
-struct WriteMkFsInfoHeaderFuture<B: blkdev::NvBlkDev> {
-    fut_state: WriteMkFsInfoHeaderFutureState<B>,
+struct WriteMkFsInfoHeaderDataFuture<B: blkdev::NvBlkDev> {
+    fut_state: WriteMkFsInfoHeaderDataFutureState<B>,
 }
 
-/// [`WriteMkFsInfoHeaderFuture`] state-machine state.
-enum WriteMkFsInfoHeaderFutureState<B: blkdev::NvBlkDev> {
+/// [`WriteMkFsInfoHeaderDataFuture`] state-machine state.
+enum WriteMkFsInfoHeaderDataFutureState<B: blkdev::NvBlkDev> {
     Init {
         to_backup_location: bool,
     },
@@ -2705,8 +2705,8 @@ enum WriteMkFsInfoHeaderFutureState<B: blkdev::NvBlkDev> {
     Done,
 }
 
-impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
-    /// Instantiate a [`WriteMkFsInfoHeaderFuture`].
+impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
+    /// Instantiate a [`WriteMkFsInfoHeaderDataFuture`].
     ///
     /// # Arguments:
     ///
@@ -2715,11 +2715,11 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
     ///   the backup location, to the storage's beginning otherwise.
     fn new(to_backup_location: bool) -> Self {
         Self {
-            fut_state: WriteMkFsInfoHeaderFutureState::Init { to_backup_location },
+            fut_state: WriteMkFsInfoHeaderDataFutureState::Init { to_backup_location },
         }
     }
 
-    /// Poll the [`WriteMkFsInfoHeaderFuture`] to completion.
+    /// Poll the [`WriteMkFsInfoHeaderDataFuture`] to completion.
     ///
     /// # Arguments:
     ///
@@ -2743,13 +2743,13 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
 
         loop {
             match &mut this.fut_state {
-                WriteMkFsInfoHeaderFutureState::Init { to_backup_location } => {
+                WriteMkFsInfoHeaderDataFutureState::Init { to_backup_location } => {
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     if blkdev_io_block_size_128b_log2
                         > image_layout.io_block_allocation_blocks_log2 as u32
                             + image_layout.allocation_block_size_128b_log2 as u32
                     {
-                        this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                        this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                         return task::Poll::Ready(Err(NvFsError::from(
                             CocoonFsFormatError::IoBlockSizeNotSupportedByDevice,
                         )));
@@ -2761,7 +2761,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
                     let salt_len = match u8::try_from(salt.len()) {
                         Ok(salt_len) => salt_len,
                         Err(_) => {
-                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidSaltLength)));
                         }
                     };
@@ -2781,7 +2781,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
                         ) {
                             Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
                             Err(e) => {
-                                this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                                this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                                 return task::Poll::Ready(Err(e));
                             }
                         }
@@ -2813,7 +2813,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
                     {
                         Ok(buffers) => buffers,
                         Err(e) => {
-                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                     };
@@ -2823,7 +2823,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
                         ) {
                             Ok(blkdev_io_block_buffer) => blkdev_io_block_buffer,
                             Err(e) => {
-                                this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                                this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                                 return task::Poll::Ready(Err(NvFsError::from(e)));
                             }
                         };
@@ -2835,7 +2835,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
                         image_size,
                         salt,
                     ) {
-                        this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                        this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                         return task::Poll::Ready(Err(e));
                     }
 
@@ -2846,22 +2846,22 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
                         blkdev_io_block_allocation_blocks_log2 as u8,
                         image_layout.allocation_block_size_128b_log2,
                     );
-                    this.fut_state = WriteMkFsInfoHeaderFutureState::Write { write_fut };
+                    this.fut_state = WriteMkFsInfoHeaderDataFutureState::Write { write_fut };
                 }
-                WriteMkFsInfoHeaderFutureState::Write { write_fut } => {
+                WriteMkFsInfoHeaderDataFutureState::Write { write_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => {
-                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                             return task::Poll::Ready(Ok(()));
                         }
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
-                            this.fut_state = WriteMkFsInfoHeaderFutureState::Done;
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
                 }
-                WriteMkFsInfoHeaderFutureState::Done => unreachable!(),
+                WriteMkFsInfoHeaderDataFutureState::Done => unreachable!(),
             }
         }
     }
@@ -2895,7 +2895,7 @@ enum CocoonFsWriteMkfsInfoHeaderFutureState<B: blkdev::NvBlkDev> {
         resize_fut: B::ResizeFuture,
     },
     WriteMkFsInfoHeader {
-        write_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture<B>,
+        write_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
     },
     WriteSyncAfterBackupMkFsInfoHeaderWrite {
         write_sync_fut: B::WriteSyncFuture,
@@ -3030,7 +3030,7 @@ impl<B: blkdev::NvBlkDev> CocoonFsWriteMkfsInfoHeaderFuture<B> {
             CocoonFsWriteMkfsInfoHeaderFutureState::ResizeBlkDev { resize_fut }
         } else {
             CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
-                write_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(false),
+                write_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(false),
             }
         };
 
@@ -3087,13 +3087,13 @@ impl<B: blkdev::NvBlkDev> future::Future for CocoonFsWriteMkfsInfoHeaderFuture<B
                         task::Poll::Pending => return task::Poll::Pending,
                     };
                     this.fut_state = CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
-                        write_mkfsinfo_header_fut: WriteMkFsInfoHeaderFuture::new(false),
+                        write_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(false),
                     };
                 }
                 CocoonFsWriteMkfsInfoHeaderFutureState::WriteMkFsInfoHeader {
                     write_mkfsinfo_header_fut,
                 } => {
-                    match WriteMkFsInfoHeaderFuture::poll(
+                    match WriteMkFsInfoHeaderDataFuture::poll(
                         pin::Pin::new(write_mkfsinfo_header_fut),
                         blkdev,
                         &this.image_layout,
