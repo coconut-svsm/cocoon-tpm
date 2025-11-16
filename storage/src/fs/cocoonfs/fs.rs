@@ -1011,7 +1011,7 @@ impl CocoonFsTransaction {
 }
 
 /// [`NvFs::StartReadSequenceFut`](fs::NvFs::StartReadSequenceFut)
-/// implementation  for [`CocoonFs`].
+/// implementation for [`CocoonFs`].
 pub struct CocoonFsStartReadSequenceFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     start_read_sequence_fut: StartReadSequenceFuture<ST, B>,
 }
@@ -1416,7 +1416,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsReadInodeFuture<ST,
                     inode,
                 },
                 None => CocoonFsReadInodeFutureState::StartReadSequence {
-                    start_read_sequence_fut: StartReadSequenceFuture::Init,
+                    start_read_sequence_fut: StartReadSequenceFuture::new(),
                     inode,
                 },
             },
@@ -3028,7 +3028,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
 /// help out driving its progress forward and eventually return a snapshot of
 /// [`CocoonFs::transaction_commit_gen`] wrapped in a
 /// [`CocoonFsConsistentReadSequence`].
-enum StartReadSequenceFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+struct StartReadSequenceFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    state: StartReadSequenceFutureState<ST, B>,
+}
+
+/// Internal [`StartReadSequenceFuture`] state-machine state.
+enum StartReadSequenceFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init,
     ProgressCommittingTransaction {
         progress_committing_transaction_subscription_fut:
@@ -3039,7 +3044,9 @@ enum StartReadSequenceFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> StartReadSequenceFuture<ST, B> {
     fn new() -> Self {
-        Self::Init
+        Self {
+            state: StartReadSequenceFutureState::Init,
+        }
     }
 }
 
@@ -3056,8 +3063,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
         loop {
-            match this {
-                Self::Init => {
+            match &mut this.state {
+                StartReadSequenceFutureState::Init => {
                     let mut committing_transaction = fs_instance.committing_transaction.lock();
                     'recheck: loop {
                         match committing_transaction.deref_mut() {
@@ -3067,7 +3074,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                 let base_transaction_commit_gen =
                                     fs_instance.transaction_commit_gen.load(atomic::Ordering::Relaxed);
 
-                                *this = Self::Done;
+                                this.state = StartReadSequenceFutureState::Done;
                                 return task::Poll::Ready(Ok(CocoonFsConsistentReadSequence {
                                     base_transaction_commit_gen,
                                 }));
@@ -3095,11 +3102,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                             progress_committing_transaction_subscription_fut
                                         }
                                         Err(e) => {
-                                            *this = Self::Done;
+                                            this.state = StartReadSequenceFutureState::Done;
                                             return task::Poll::Ready(Err(e));
                                         }
                                     };
-                                *this = Self::ProgressCommittingTransaction {
+                                this.state = StartReadSequenceFutureState::ProgressCommittingTransaction {
                                     progress_committing_transaction_subscription_fut,
                                 };
                                 break;
@@ -3151,7 +3158,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                                         {
                                                             *low_memory = true;
                                                         }
-                                                        *this = Self::Done;
+                                                        this.state = StartReadSequenceFutureState::Done;
                                                         return task::Poll::Ready(Err(
                                                             NvFsError::MemoryAllocationFailure,
                                                         ));
@@ -3172,7 +3179,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                                         committing_transaction = reacquired_committing_transaction;
                                                         continue 'recheck;
                                                     }
-                                                    *this = Self::Done;
+                                                    this.state = StartReadSequenceFutureState::Done;
                                                     return task::Poll::Ready(Err(e));
                                                 }
                                             };
@@ -3208,11 +3215,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                             progress_committing_transaction_subscription_fut
                                         }
                                         Err(e) => {
-                                            *this = Self::Done;
+                                            this.state = StartReadSequenceFutureState::Done;
                                             return task::Poll::Ready(Err(e));
                                         }
                                     };
-                                *this = Self::ProgressCommittingTransaction {
+                                this.state = StartReadSequenceFutureState::ProgressCommittingTransaction {
                                     progress_committing_transaction_subscription_fut,
                                 };
                                 break;
@@ -3266,7 +3273,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                                         {
                                                             *low_memory = true;
                                                         }
-                                                        *this = Self::Done;
+                                                        this.state = StartReadSequenceFutureState::Done;
                                                         return task::Poll::Ready(Err(
                                                             NvFsError::MemoryAllocationFailure,
                                                         ));
@@ -3287,7 +3294,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                                         committing_transaction = reacquired_committing_transaction;
                                                         continue 'recheck;
                                                     }
-                                                    *this = Self::Done;
+                                                    this.state = StartReadSequenceFutureState::Done;
                                                     return task::Poll::Ready(Err(e));
                                                 }
                                             };
@@ -3323,11 +3330,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                                             progress_committing_transaction_subscription_fut
                                         }
                                         Err(e) => {
-                                            *this = Self::Done;
+                                            this.state = StartReadSequenceFutureState::Done;
                                             return task::Poll::Ready(Err(e));
                                         }
                                     };
-                                *this = Self::ProgressCommittingTransaction {
+                                this.state = StartReadSequenceFutureState::ProgressCommittingTransaction {
                                     progress_committing_transaction_subscription_fut,
                                 };
                                 break;
@@ -3335,13 +3342,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                             CommittingTransactionState::PermanentInternalFailure {
                                 _sync_state_write_guard: _,
                             } => {
-                                *this = Self::Done;
+                                this.state = StartReadSequenceFutureState::Done;
                                 return task::Poll::Ready(Err(NvFsError::PermanentInternalFailure));
                             }
                         };
                     }
                 }
-                Self::ProgressCommittingTransaction {
+                StartReadSequenceFutureState::ProgressCommittingTransaction {
                     progress_committing_transaction_subscription_fut,
                 } => {
                     // In case that progressing the committing transaction failed, complete the
@@ -3359,7 +3366,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                             ProgressCommittingTransactionFutureResult::CommitOkApplyJournalErr {
                                 apply_journal_error,
                             } => {
-                                *this = Self::Done;
+                                this.state = StartReadSequenceFutureState::Done;
                                 return task::Poll::Ready(Err(apply_journal_error));
                             }
                             ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk { .. }
@@ -3370,7 +3377,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                             }
                             | ProgressCommittingTransactionFutureResult::RetryJournalAbortErr { abort_journal_error } =>
                             {
-                                *this = Self::Done;
+                                this.state = StartReadSequenceFutureState::Done;
                                 return task::Poll::Ready(Err(abort_journal_error));
                             }
                         },
@@ -3379,12 +3386,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
 
                     let base_transaction_commit_gen =
                         fs_instance.transaction_commit_gen.load(atomic::Ordering::Relaxed);
-                    *this = Self::Done;
+                    this.state = StartReadSequenceFutureState::Done;
                     return task::Poll::Ready(Ok(CocoonFsConsistentReadSequence {
                         base_transaction_commit_gen,
                     }));
                 }
-                Self::Done => unreachable!(),
+                StartReadSequenceFutureState::Done => unreachable!(),
             }
         }
     }
