@@ -1,6 +1,6 @@
 [package]
 name = "cocoon-tpm-utils-async"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 license = "Apache-2.0"
@@ -13,4 +13,4 @@ readme = "README.md"
 doctest = false
 
 [dependencies]
-cocoon-tpm-utils-common = { version = "0.1.1" }
+cocoon-tpm-utils-common = { version = "0.1.2" }
