@@ -8,12 +8,12 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::symcipher,
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError,
+            FormatError,
             encryption_entities::{self, EncryptedExtentsDecryptionInstance, EncryptedExtentsLayout},
             extents,
             fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
@@ -39,19 +39,19 @@ use core::{mem, pin, task};
 ///
 /// Used for the implementation of
 /// [`NvFs::read_inode()`](crate::fs::NvFs::read_inode).
-pub struct ReadInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct ReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
-    fut_state: ReadInodeDataFutureState<ST, C>,
+    fut_state: ReadInodeDataFutureState<ST, B>,
 }
 
 /// [`ReadInodeDataFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum ReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum ReadInodeDataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     LookupInode {
-        inode_index_lookup_fut: InodeIndexLookupFuture<ST, C>,
+        inode_index_lookup_fut: InodeIndexLookupFuture<ST, B>,
     },
     ReadInodeExtentsList {
-        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, C>,
+        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, B>,
     },
     ReadInodeDataExtentsPrepare {
         transaction: Option<Box<transaction::Transaction>>,
@@ -63,12 +63,12 @@ enum ReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
         inode_extents_decryption_instance: EncryptedExtentsDecryptionInstance,
         result_buf: zeroize::Zeroizing<Vec<u8>>,
         cur_result_pos: usize,
-        read_fut: ReadAuthenticateExtentFuture<ST, C>,
+        read_fut: ReadAuthenticateExtentFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadInodeDataFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadInodeDataFuture<ST, B> {
     /// Instantiate a [`ReadInodeDataFuture`].
     ///
     /// If `transaction` is specified, then the inode's data will be read at the
@@ -122,7 +122,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadInodeDataFuture<ST, C> {
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C> for ReadInodeDataFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B> for ReadInodeDataFuture<ST, B> {
     /// Output type of [`poll()`](Self::poll).
     ///
     /// The [`Transaction`](transaction::Transaction) initially passed to
@@ -139,7 +139,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -212,7 +212,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         }
                         Ok(None) => {
                             // The inode exists, but the extents reference is nil, which is invalid.
-                            break (transaction, NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                            break (transaction, NvFsError::from(FormatError::InvalidExtents));
                         }
                         Err(e) => break (transaction, e),
                     }
@@ -234,7 +234,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     };
 
                     if inode_extents.is_empty() {
-                        break (transaction, NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                        break (transaction, NvFsError::from(FormatError::InvalidExtents));
                     }
 
                     this.fut_state = ReadInodeDataFutureState::ReadInodeDataExtentsPrepare {

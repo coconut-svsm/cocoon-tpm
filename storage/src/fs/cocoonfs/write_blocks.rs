@@ -7,7 +7,7 @@
 extern crate alloc;
 
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     fs::{NvFsError, NvFsIoError, cocoonfs::layout},
     nvfs_err_internal,
     utils_common::{bitmanip::BitManip as _, fixed_vec::FixedVec},
@@ -15,32 +15,32 @@ use crate::{
 use core::{mem, pin, task};
 
 #[cfg(doc)]
-use crate::chip::NvChipFuture as _;
+use crate::blkdev::NvBlkDevFuture as _;
 
 /// Directly write an extent to storage.
 ///
 /// Intended for use at filesystem creation ("mkfs") time. In particular the
 /// writes don't go through a [`Transaction`](super::transaction::Transaction).
-pub struct WriteBlocksFuture<C: chip::NvChip> {
-    fut_state: WriteBlocksFutureState<C>,
+pub struct WriteBlocksFuture<B: blkdev::NvBlkDev> {
+    fut_state: WriteBlocksFutureState<B>,
 }
 
 /// [`WriteBlocksFuture`] state-machine state.
-enum WriteBlocksFutureState<C: chip::NvChip> {
+enum WriteBlocksFutureState<B: blkdev::NvBlkDev> {
     Init {
         extent: layout::PhysicalAllocBlockRange,
         src_io_blocks: FixedVec<FixedVec<u8, 7>, 0>,
         src_block_allocation_blocks_log2: u8,
-        chip_io_block_allocation_blocks_log2: u8,
+        blkdev_io_block_allocation_blocks_log2: u8,
         allocation_block_size_128b_log2: u8,
     },
     Write {
-        write_fut: C::WriteFuture<WriteBlocksNvChipRequest>,
+        write_fut: B::WriteFuture<WriteBlocksNvBlkDevRequest>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> WriteBlocksFuture<C> {
+impl<B: blkdev::NvBlkDev> WriteBlocksFuture<B> {
     /// Instantiate a [`WriteBlocksFuture`].
     ///
     /// The input data, `src_io_blocks`, is assumed to be partitioned into
@@ -58,8 +58,8 @@ impl<C: chip::NvChip> WriteBlocksFuture<C> {
     /// * `src_block_allocation_blocks_log2` - Base-2 logarithm of the
     ///   `src_io_blocks` buffers' length each, in units of [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
-    /// * `chip_io_block_allocation_blocks_log2` - Size of one [Chip IO
-    ///   Block](chip::NvChip::chip_io_block_size_128b_log2) in units of
+    /// * `blkdev_io_block_allocation_blocks_log2` - Size of one [Device IO
+    ///   Block](blkdev::NvBlkDev::io_block_size_128b_log2) in units of
     ///   [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
     /// * `allocation_block_size_128b_log2` - Verbatim value of
@@ -68,7 +68,7 @@ impl<C: chip::NvChip> WriteBlocksFuture<C> {
         extent: &layout::PhysicalAllocBlockRange,
         src_io_blocks: FixedVec<FixedVec<u8, 7>, 0>,
         src_block_allocation_blocks_log2: u8,
-        chip_io_block_allocation_blocks_log2: u8,
+        blkdev_io_block_allocation_blocks_log2: u8,
         allocation_block_size_128b_log2: u8,
     ) -> Self {
         Self {
@@ -76,18 +76,18 @@ impl<C: chip::NvChip> WriteBlocksFuture<C> {
                 extent: *extent,
                 src_io_blocks,
                 src_block_allocation_blocks_log2,
-                chip_io_block_allocation_blocks_log2,
+                blkdev_io_block_allocation_blocks_log2,
                 allocation_block_size_128b_log2,
             },
         }
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for WriteBlocksFuture<B> {
     /// Output type of [`poll()`](Self::poll).
     ///
     /// A two-level [`Result`] is returned upon
-    /// [future](chip::NvChipFuture) completion.
+    /// [future](blkdev::NvBlkDevFuture) completion.
     /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
     ///   encountering an internal error and the input data buffers are lost.
     /// * `Ok((src_io_blocks, ...))` - Otherwise the outer level [`Result`] is
@@ -99,7 +99,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
     ///       returned for the operation result on success.
     type Output = Result<(FixedVec<FixedVec<u8, 7>, 0>, Result<(), NvFsError>), NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
 
         loop {
@@ -108,14 +108,14 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
                     extent,
                     src_io_blocks,
                     src_block_allocation_blocks_log2,
-                    chip_io_block_allocation_blocks_log2,
+                    blkdev_io_block_allocation_blocks_log2,
                     allocation_block_size_128b_log2,
                 } => {
-                    let write_request = match WriteBlocksNvChipRequest::new(
+                    let write_request = match WriteBlocksNvBlkDevRequest::new(
                         extent,
                         mem::take(src_io_blocks),
                         *src_block_allocation_blocks_log2 as u32,
-                        *chip_io_block_allocation_blocks_log2 as u32,
+                        *blkdev_io_block_allocation_blocks_log2 as u32,
                         *allocation_block_size_128b_log2 as u32,
                     ) {
                         Ok(write_request) => write_request,
@@ -124,11 +124,11 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
                             return task::Poll::Ready(Ok((src_io_blocks, Err(e))));
                         }
                     };
-                    let write_fut = match chip.write(write_request) {
+                    let write_fut = match blkdev.write(write_request) {
                         Ok(Ok(write_fut)) => write_fut,
                         Ok(Err((write_request, e))) => {
                             this.fut_state = WriteBlocksFutureState::Done;
-                            let WriteBlocksNvChipRequest {
+                            let WriteBlocksNvBlkDevRequest {
                                 region: _,
                                 src_blocks: src_io_blocks,
                             } = write_request;
@@ -142,10 +142,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
                     this.fut_state = WriteBlocksFutureState::Write { write_fut }
                 }
                 WriteBlocksFutureState::Write { write_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((write_request, result))) => {
                             this.fut_state = WriteBlocksFutureState::Done;
-                            let WriteBlocksNvChipRequest {
+                            let WriteBlocksNvBlkDevRequest {
                                 region: _,
                                 src_blocks: src_io_blocks,
                             } = write_request;
@@ -164,24 +164,25 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for WriteBlocksFuture<C> {
     }
 }
 
-/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
 /// internally by [`WriteBlocksFuture`].
-struct WriteBlocksNvChipRequest {
+struct WriteBlocksNvBlkDevRequest {
     region: ChunkedIoRegion,
     src_blocks: FixedVec<FixedVec<u8, 7>, 0>,
 }
 
-impl WriteBlocksNvChipRequest {
+impl WriteBlocksNvBlkDevRequest {
     fn new(
         extent: &layout::PhysicalAllocBlockRange,
         src_blocks: FixedVec<FixedVec<u8, 7>, 0>,
         src_block_allocation_blocks_log2: u32,
-        chip_io_block_allocation_blocks_log2: u32,
+        blkdev_io_block_allocation_blocks_log2: u32,
         allocation_block_size_128b_log2: u32,
     ) -> Result<Self, (FixedVec<FixedVec<u8, 7>, 0>, NvFsError)> {
-        // The target range must be aligned to the Chip IO block size and its length
+        // The target range must be aligned to the Device IO block size and its length
         // must be a multiple of the source block size.
-        if !(u64::from(extent.begin()) | u64::from(extent.end())).is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+        if !(u64::from(extent.begin()) | u64::from(extent.end()))
+            .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
             || src_block_allocation_blocks_log2 >= u64::BITS
             || !u64::from(extent.block_count()).is_aligned_pow2(src_block_allocation_blocks_log2)
         {
@@ -220,7 +221,7 @@ impl WriteBlocksNvChipRequest {
             Err(ChunkedIoRegionError::ChunkIndexOverflow) => {
                 // It's been checked above the the number of chunks, i.e. of source blocks,
                 // fits an usize.
-                debug_assert!(chip_io_block_allocation_blocks_log2 < src_block_allocation_blocks_log2);
+                debug_assert!(blkdev_io_block_allocation_blocks_log2 < src_block_allocation_blocks_log2);
                 return Err((src_blocks, NvFsError::DimensionsNotSupported));
             }
             Err(ChunkedIoRegionError::RegionUnaligned) => {
@@ -234,12 +235,12 @@ impl WriteBlocksNvChipRequest {
     }
 }
 
-impl chip::NvChipWriteRequest for WriteBlocksNvChipRequest {
+impl blkdev::NvBlkDevWriteRequest for WriteBlocksNvBlkDevRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
 
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], chip::NvChipIoError> {
+    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
         let src_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
         Ok(&self.src_blocks[src_block_index][range.range_in_chunk().clone()])
     }

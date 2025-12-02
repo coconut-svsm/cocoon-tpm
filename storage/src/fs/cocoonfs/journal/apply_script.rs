@@ -26,7 +26,7 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap, image_header, layout, leb128,
+            FormatError, alloc_bitmap, image_header, layout, leb128,
             transaction::auth_tree_data_blocks_update_states::{
                 AuthTreeDataBlocksUpdateStates, AuthTreeDataBlocksUpdateStatesAllocationBlockIndex,
                 AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange, AuthTreeDataBlocksUpdateStatesIndex,
@@ -42,9 +42,9 @@ use crate::{
 use core::{cmp, ops};
 
 #[cfg(doc)]
-use layout::ImageLayout;
-#[cfg(doc)]
 use crate::fs::cocoonfs::transaction::Transaction;
+#[cfg(doc)]
+use layout::ImageLayout;
 
 /// Entry in a [`JournalApplyWritesScript`].
 pub struct JournalApplyWritesScriptEntry {
@@ -511,24 +511,22 @@ impl JournalApplyWritesScript {
             // There must be enough space for the three zero bytes of the termination
             // record.
             if decode_buf_len < 3 {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat));
             }
 
             // Decode the triplet of (target delta, journal copy area begin, length).
             let mut remaining_decode_buf = &decode_buf[..decode_buf_len];
             let target_delta_io_blocks;
             (target_delta_io_blocks, remaining_decode_buf) = leb128::leb128u_u64_decode(remaining_decode_buf)
-                .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat))?;
+                .map_err(|_| NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat))?;
 
             let journal_staging_copy_delta_io_blocks;
             (journal_staging_copy_delta_io_blocks, remaining_decode_buf) =
                 leb128::leb128s_i64_decode(remaining_decode_buf)
-                    .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat))?;
+                    .map_err(|_| NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat))?;
             let io_blocks_count;
             (io_blocks_count, remaining_decode_buf) = leb128::leb128u_u64_decode(remaining_decode_buf)
-                .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat))?;
+                .map_err(|_| NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat))?;
 
             // Move the remaining bytes in decode_buf to the front.
             let consumed = decode_buf_len - remaining_decode_buf.len();
@@ -541,31 +539,23 @@ impl JournalApplyWritesScript {
                 break;
             } else if io_blocks_count == 0 {
                 // Invalid value.
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptEntry,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptEntry));
             }
 
             let target_delta_allocation_blocks = target_delta_io_blocks << io_block_allocation_blocks_log2;
             if target_delta_allocation_blocks >> io_block_allocation_blocks_log2 != target_delta_io_blocks {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat));
             }
             let entry_target_allocation_blocks_begin = last_entry_target_allocation_blocks_end
                 .checked_add(target_delta_allocation_blocks)
-                .ok_or(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptEntry,
-                ))?;
+                .ok_or(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptEntry))?;
 
             let journal_staging_copy_delta_allocation_blocks =
                 journal_staging_copy_delta_io_blocks << io_block_allocation_blocks_log2;
             if journal_staging_copy_delta_allocation_blocks >> io_block_allocation_blocks_log2
                 != journal_staging_copy_delta_io_blocks
             {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat));
             }
             // Convert the delta encoded as signed leb128 to u64 in
             // two's complement and add with wraparound  -- this way the full
@@ -576,30 +566,20 @@ impl JournalApplyWritesScript {
 
             let allocation_blocks_count = io_blocks_count << io_block_allocation_blocks_log2;
             if allocation_blocks_count >> io_block_allocation_blocks_log2 != io_blocks_count {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat));
             }
 
             let entry_target_allocation_blocks_end = entry_target_allocation_blocks_begin
                 .checked_add(allocation_blocks_count)
-                .ok_or(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptEntry,
-                ))?;
+                .ok_or(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptEntry))?;
             if entry_target_allocation_blocks_end > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat));
             }
             let entry_journal_staging_copy_allocation_blocks_end = entry_journal_staging_copy_allocation_blocks_begin
                 .checked_add(allocation_blocks_count)
-                .ok_or(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptEntry,
-                ))?;
+                .ok_or(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptEntry))?;
             if entry_journal_staging_copy_allocation_blocks_end > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalApplyWritesScriptFormat,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalApplyWritesScriptFormat));
             }
 
             last_entry_target_allocation_blocks_end = entry_target_allocation_blocks_end;
@@ -809,7 +789,7 @@ impl JournalUpdateAuthDigestsScript {
             // record.
             if decode_buf_len < 2 {
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptFormat,
+                    FormatError::InvalidJournalUpdateAuthDigestsScriptFormat,
                 ));
             }
 
@@ -818,10 +798,10 @@ impl JournalUpdateAuthDigestsScript {
             let target_delta_auth_tree_data_blocks;
             (target_delta_auth_tree_data_blocks, remaining_decode_buf) =
                 leb128::leb128u_u64_decode(remaining_decode_buf)
-                    .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptFormat))?;
+                    .map_err(|_| NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptFormat))?;
             let auth_tree_data_blocks_count;
             (auth_tree_data_blocks_count, remaining_decode_buf) = leb128::leb128u_u64_decode(remaining_decode_buf)
-                .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptFormat))?;
+                .map_err(|_| NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptFormat))?;
 
             // Move the remaining bytes in decode_buf to the front.
             let consumed = decode_buf_len - remaining_decode_buf.len();
@@ -834,9 +814,7 @@ impl JournalUpdateAuthDigestsScript {
                 break;
             } else if auth_tree_data_blocks_count == 0 {
                 // Invalid value.
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptEntry));
             }
 
             let target_delta_allocation_blocks =
@@ -844,32 +822,22 @@ impl JournalUpdateAuthDigestsScript {
             if target_delta_allocation_blocks >> auth_tree_data_blocks_allocation_blocks_log2
                 != target_delta_auth_tree_data_blocks
             {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptEntry));
             }
             let entry_target_allocation_blocks_begin = last_entry_target_allocation_blocks_end
                 .checked_add(target_delta_allocation_blocks)
-                .ok_or(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
-                ))?;
+                .ok_or(NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptEntry))?;
 
             let allocation_blocks_count = auth_tree_data_blocks_count << auth_tree_data_blocks_allocation_blocks_log2;
             if allocation_blocks_count >> auth_tree_data_blocks_allocation_blocks_log2 != auth_tree_data_blocks_count {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptEntry));
             }
 
             let entry_target_allocation_blocks_end = entry_target_allocation_blocks_begin
                 .checked_add(allocation_blocks_count)
-                .ok_or(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
-                ))?;
+                .ok_or(NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptEntry))?;
             if entry_target_allocation_blocks_end > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::InvalidJournalUpdateAuthDigestsScriptEntry,
-                ));
+                return Err(NvFsError::from(FormatError::InvalidJournalUpdateAuthDigestsScriptEntry));
             }
 
             last_entry_target_allocation_blocks_end = entry_target_allocation_blocks_end;
@@ -1136,17 +1104,17 @@ impl JournalTrimsScript {
             // There must be enough space for the two zero bytes of the termination
             // record.
             if decode_buf_len < 2 {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptFormat));
+                return Err(NvFsError::from(FormatError::InvalidJournalTrimsScriptFormat));
             }
 
             // Decode the pair of (target delta, length).
             let mut remaining_decode_buf = &decode_buf[..decode_buf_len];
             let target_delta_io_blocks;
             (target_delta_io_blocks, remaining_decode_buf) = leb128::leb128u_u64_decode(remaining_decode_buf)
-                .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptFormat))?;
+                .map_err(|_| NvFsError::from(FormatError::InvalidJournalTrimsScriptFormat))?;
             let io_blocks_count;
             (io_blocks_count, remaining_decode_buf) = leb128::leb128u_u64_decode(remaining_decode_buf)
-                .map_err(|_| NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptFormat))?;
+                .map_err(|_| NvFsError::from(FormatError::InvalidJournalTrimsScriptFormat))?;
 
             // Move the remaining bytes in decode_buf to the front.
             let consumed = decode_buf_len - remaining_decode_buf.len();
@@ -1159,26 +1127,26 @@ impl JournalTrimsScript {
                 break;
             } else if io_blocks_count == 0 {
                 // Invalid value.
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptEntry));
+                return Err(NvFsError::from(FormatError::InvalidJournalTrimsScriptEntry));
             }
 
             let target_delta_allocation_blocks = target_delta_io_blocks << io_block_allocation_blocks_log2;
             if target_delta_allocation_blocks >> io_block_allocation_blocks_log2 != target_delta_io_blocks {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptEntry));
+                return Err(NvFsError::from(FormatError::InvalidJournalTrimsScriptEntry));
             }
             let entry_target_allocation_blocks_begin = last_entry_target_allocation_blocks_end
                 .checked_add(target_delta_allocation_blocks)
-                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptEntry))?;
+                .ok_or(NvFsError::from(FormatError::InvalidJournalTrimsScriptEntry))?;
 
             let allocation_blocks_count = io_blocks_count << io_block_allocation_blocks_log2;
             if allocation_blocks_count >> io_block_allocation_blocks_log2 != io_blocks_count {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptEntry));
+                return Err(NvFsError::from(FormatError::InvalidJournalTrimsScriptEntry));
             }
             let entry_target_allocation_blocks_end = entry_target_allocation_blocks_begin
                 .checked_add(allocation_blocks_count)
-                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptEntry))?;
+                .ok_or(NvFsError::from(FormatError::InvalidJournalTrimsScriptEntry))?;
             if entry_target_allocation_blocks_end > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidJournalTrimsScriptEntry));
+                return Err(NvFsError::from(FormatError::InvalidJournalTrimsScriptEntry));
             }
 
             last_entry_target_allocation_blocks_end = entry_target_allocation_blocks_end;

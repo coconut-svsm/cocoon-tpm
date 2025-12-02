@@ -10,7 +10,7 @@ use crate::{
     crypto::{CryptoError, symcipher},
     fs::{
         NvFsError,
-        cocoonfs::{CocoonFsFormatError, alloc_bitmap, extent_ptr},
+        cocoonfs::{FormatError, alloc_bitmap, extent_ptr},
     },
     nvfs_err_internal, tpm2_interface,
     utils_common::bitmanip::UBitManip as _,
@@ -443,14 +443,14 @@ impl ImageLayout {
         block_cipher_alg: symcipher::SymBlockCipherAlg,
     ) -> Result<Self, NvFsError> {
         if allocation_block_size_128b_log2 as u32 + 7 >= u64::BITS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
         if allocation_block_size_128b_log2 as u32 + 7 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
         }
 
         if io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= u64::BITS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
         if io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
@@ -462,7 +462,7 @@ impl ImageLayout {
             + 7
             >= u64::BITS
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
         if auth_tree_node_io_blocks_log2 as u32
             + io_block_allocation_blocks_log2 as u32
@@ -475,7 +475,7 @@ impl ImageLayout {
 
         if auth_tree_data_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= u64::BITS
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
         if auth_tree_data_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7
             >= usize::BITS
@@ -489,13 +489,13 @@ impl ImageLayout {
         if 1u64 << io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2)
             > alloc_bitmap::BitmapWord::BITS as u64
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
 
         if allocation_bitmap_file_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7
             >= u64::BITS
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
         if allocation_bitmap_file_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7
             >= usize::BITS
@@ -504,7 +504,7 @@ impl ImageLayout {
         }
 
         if index_tree_node_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= u64::BITS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
         if index_tree_node_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
@@ -513,12 +513,12 @@ impl ImageLayout {
         // An index tree node block must fit into the region covered by a single
         // allocation bitmap word.
         if 1u64 << index_tree_node_allocation_blocks_log2 > alloc_bitmap::BitmapWord::BITS as u64 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
         // Also, an index tree node must be encodable as a direct extent pointer,
         // because the special index root node inode is encoded that way.
         if 1u64 << index_tree_node_allocation_blocks_log2 > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
 
         Ok(Self {
@@ -586,7 +586,7 @@ impl ImageLayout {
 
     pub fn decode(buf: &[u8]) -> Result<Self, NvFsError> {
         if buf.len() != Self::encoded_len() as usize {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidImageHeaderFormat));
+            return Err(NvFsError::from(FormatError::InvalidImageHeaderFormat));
         }
         let allocation_block_size_128b_log2 = buf[0];
         let io_block_allocation_blocks_log2 = buf[1];
@@ -599,7 +599,7 @@ impl ImageLayout {
         let auth_tree_node_hash_alg;
         (buf, auth_tree_node_hash_alg) = tpm2_interface::TpmiAlgHash::unmarshal(buf).map_err(|e| match e {
             tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::HASH) => {
-                NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm)
+                NvFsError::from(FormatError::UnsupportedCryptoAlgorithm)
             }
             _ => nvfs_err_internal!(),
         })?;
@@ -607,7 +607,7 @@ impl ImageLayout {
         let auth_tree_data_hmac_hash_alg;
         (buf, auth_tree_data_hmac_hash_alg) = tpm2_interface::TpmiAlgHash::unmarshal(buf).map_err(|e| match e {
             tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::HASH) => {
-                NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm)
+                NvFsError::from(FormatError::UnsupportedCryptoAlgorithm)
             }
             _ => nvfs_err_internal!(),
         })?;
@@ -615,7 +615,7 @@ impl ImageLayout {
         let auth_tree_root_hmac_hash_alg;
         (buf, auth_tree_root_hmac_hash_alg) = tpm2_interface::TpmiAlgHash::unmarshal(buf).map_err(|e| match e {
             tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::HASH) => {
-                NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm)
+                NvFsError::from(FormatError::UnsupportedCryptoAlgorithm)
             }
             _ => nvfs_err_internal!(),
         })?;
@@ -624,7 +624,7 @@ impl ImageLayout {
         (buf, preauth_cca_protection_hmac_hash_alg) =
             tpm2_interface::TpmiAlgHash::unmarshal(buf).map_err(|e| match e {
                 tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::HASH) => {
-                    NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm)
+                    NvFsError::from(FormatError::UnsupportedCryptoAlgorithm)
                 }
                 _ => nvfs_err_internal!(),
             })?;
@@ -632,7 +632,7 @@ impl ImageLayout {
         let kdf_hash_alg;
         (buf, kdf_hash_alg) = tpm2_interface::TpmiAlgHash::unmarshal(buf).map_err(|e| match e {
             tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::HASH) => {
-                NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm)
+                NvFsError::from(FormatError::UnsupportedCryptoAlgorithm)
             }
             _ => nvfs_err_internal!(),
         })?;
@@ -640,7 +640,7 @@ impl ImageLayout {
         let block_cipher_alg_id;
         (buf, block_cipher_alg_id) = tpm2_interface::TpmiAlgSymObject::unmarshal(buf).map_err(|e| match e {
             tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::SYMMETRIC) => {
-                NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm)
+                NvFsError::from(FormatError::UnsupportedCryptoAlgorithm)
             }
             _ => nvfs_err_internal!(),
         })?;
@@ -649,7 +649,7 @@ impl ImageLayout {
         debug_assert!(buf.is_empty());
         let block_cipher_alg = symcipher::SymBlockCipherAlg::try_from((block_cipher_alg_id, block_cipher_key_size))
             .map_err(|e| match e {
-                CryptoError::InvalidParams => NvFsError::from(CocoonFsFormatError::UnsupportedCryptoAlgorithm),
+                CryptoError::InvalidParams => NvFsError::from(FormatError::UnsupportedCryptoAlgorithm),
                 _ => nvfs_err_internal!(),
             })?;
 

@@ -13,5 +13,5 @@ use cocoon_tpm_tpm2_interface as tpm2_interface;
 use cocoon_tpm_utils_async as utils_async;
 use cocoon_tpm_utils_common as utils_common;
 
-pub mod chip;
+pub mod blkdev;
 pub mod fs;

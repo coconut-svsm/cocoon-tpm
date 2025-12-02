@@ -8,9 +8,8 @@
 //! storage of sensitive data in e.g. a TEE setting. In addition to its primary
 //! design focus on strong security properties, the format implements support
 //! for some features of particular relevance to the intended use-case, such as
-//! support for [keyless storage volume
-//! provisiong](CocoonFsWriteMkfsInfoHeaderFuture) and robustness against service
-//! interruptions by means of a journal.
+//! support for [keyless storage volume provisiong](WriteMkFsInfoHeaderFuture)
+//! and robustness against service interruptions by means of a journal.
 //!
 //! For the format specification, refer to file `cocoonfs-format.md` distributed
 //! with the code, see
@@ -52,7 +51,7 @@ use core::convert;
 
 /// [`CocoonFs`] specific [filesystem format
 /// errors](crate::fs::NvFsError::FsFormatError).
-pub enum CocoonFsFormatError {
+pub enum FormatError {
     InvalidDeviceParameter = 1,
     InvalidImageHeaderFormat = 2,
     InvalidImageHeaderMagic = 3,
@@ -105,13 +104,13 @@ pub enum CocoonFsFormatError {
     InvalidJournalTrimsScriptEntry = 46,
 }
 
-impl convert::From<CocoonFsFormatError> for NvFsError {
-    fn from(value: CocoonFsFormatError) -> Self {
+impl convert::From<FormatError> for NvFsError {
+    fn from(value: FormatError) -> Self {
         Self::FsFormatError(value as isize)
     }
 }
 
 pub use fs::CocoonFs;
-pub use layout::ImageLayout as CocoonFsImageLayout;
-pub use mkfs::{CocoonFsMkFsFuture, CocoonFsWriteMkfsInfoHeaderFuture};
-pub use openfs::CocoonFsOpenFsFuture;
+pub use layout::ImageLayout;
+pub use mkfs::{MkFsFuture, WriteMkFsInfoHeaderFuture};
+pub use openfs::OpenFsFuture;

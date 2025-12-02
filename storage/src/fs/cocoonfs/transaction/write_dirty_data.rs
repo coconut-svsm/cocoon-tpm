@@ -20,7 +20,7 @@ use super::{
     read_missing_data::TransactionReadMissingDataFuture,
 };
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
     crypto::rng,
     fs::{
         NvFsError,
@@ -29,7 +29,7 @@ use crate::{
             layout,
         },
     },
-    nvchip_err_internal, nvfs_err_internal,
+    nvblkdev_err_internal, nvfs_err_internal,
     utils_async::sync_types,
     utils_common::{
         fixed_vec::FixedVec,
@@ -64,16 +64,16 @@ use super::auth_tree_data_blocks_update_states::{AuthTreeDataBlockUpdateState, A
 /// Additional ones may get inserted, populated and written out as a byproduct
 /// for [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2)
 /// alignment purposes in the course though.
-pub(super) struct TransactionWriteDirtyDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub(super) struct TransactionWriteDirtyDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
     min_clean_block_allocation_blocks_log2: u8,
     remaining_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-    fut_state: TransactionWriteDirtyDataFutureState<ST, C>,
+    fut_state: TransactionWriteDirtyDataFutureState<ST, B>,
 }
 
 /// [`TransactionWriteDirtyDataFuture`] state-machine state.
-enum TransactionWriteDirtyDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum TransactionWriteDirtyDataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -82,7 +82,7 @@ enum TransactionWriteDirtyDataFutureState<ST: sync_types::SyncTypes, C: chip::Nv
     RegionReadMissing {
         cur_aligned_write_region_states_allocation_blocks_index_range:
             AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-        cur_aligned_write_region_read_missing_fut: TransactionReadMissingDataFuture<C>,
+        cur_aligned_write_region_read_missing_fut: TransactionReadMissingDataFuture<B>,
     },
     RegionAllocateJournalStagingCopyBlocks {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -90,17 +90,17 @@ enum TransactionWriteDirtyDataFutureState<ST: sync_types::SyncTypes, C: chip::Nv
         cur_aligned_write_region_states_allocation_blocks_index_range:
             AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
         cur_aligned_write_region_allocate_journal_staging_copy_blocks_fut:
-            TransactionAllocateJournalStagingCopiesFuture<ST, C>,
+            TransactionAllocateJournalStagingCopiesFuture<ST, B>,
     },
     RegionWrite {
         cur_aligned_write_region_states_allocation_blocks_index_range:
             AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-        cur_aligned_write_region_write_fut: C::WriteFuture<TransactionWriteDirtyDataNvChipWriteRequest>,
+        cur_aligned_write_region_write_fut: B::WriteFuture<TransactionWriteDirtyDataNvBlkDevWriteRequest>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteDirtyDataFuture<ST, B> {
     /// Instantiate a [`TransactionWriteDirtyDataFuture`].
     ///
     /// The [`TransactionWriteDirtyDataFuture`] assumes
@@ -134,7 +134,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         min_clean_block_allocation_blocks_log2: u8,
     ) -> Result<Self, (Box<Transaction>, NvFsError)> {
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
 
         // If only_regions_with_modified_dirty is true, then write out regions aligned
         // to a block size as small as the minimum supported by the storage
@@ -142,8 +142,10 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         // IO Blocks (containing any modification, dirty or not) shall get moved
         // to the clean state as a whole.
         let io_block_allocation_blocks_log2 = transaction.io_block_allocation_blocks_log2 as u32;
-        let min_write_block_allocation_blocks_log2 =
-            Self::min_write_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2);
+        let min_write_block_allocation_blocks_log2 = Self::min_write_block_allocation_blocks_log2(
+            blkdev_io_block_size_128b_log2,
+            allocation_block_size_128b_log2,
+        );
         if min_write_block_allocation_blocks_log2 > io_block_allocation_blocks_log2 {
             return Err((transaction, nvfs_err_internal!()));
         }
@@ -176,15 +178,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
     ///
     /// # Arguments:
     ///
-    /// * `chip_io_block_size_128b_log2` - Value of
-    ///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+    /// * `blkdev_io_block_size_128b_log2` - Value of
+    ///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
     /// * `allocation_block_size_128b_log2` - Verbatim value of
     ///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
     pub fn min_write_block_allocation_blocks_log2(
-        chip_io_block_size_128b_log2: u32,
+        blkdev_io_block_size_128b_log2: u32,
         allocation_block_size_128b_log2: u32,
     ) -> u32 {
-        min_write_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2)
+        min_write_block_allocation_blocks_log2(blkdev_io_block_size_128b_log2, allocation_block_size_128b_log2)
     }
 
     /// Determine the next subrange to write.
@@ -216,20 +218,22 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
         let io_block_allocation_blocks_log2 = transaction.io_block_allocation_blocks_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
-        let preferred_chip_io_blocks_bulk_log2 = transaction.preferred_chip_io_blocks_bulk_log2;
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
+        let preferred_blkdev_io_blocks_bulk_log2 = transaction.preferred_blkdev_io_blocks_bulk_log2;
 
         let mut remaining_states_allocation_blocks_index_range = remaining_states_allocation_blocks_index_range.clone();
         let states = &transaction.auth_tree_data_blocks_update_states;
-        let min_write_block_allocation_blocks_log2 =
-            Self::min_write_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2);
+        let min_write_block_allocation_blocks_log2 = Self::min_write_block_allocation_blocks_log2(
+            blkdev_io_block_size_128b_log2,
+            allocation_block_size_128b_log2,
+        );
         let min_clean_block_allocation_blocks_log2 =
             min_write_block_allocation_blocks_log2.max(self.min_clean_block_allocation_blocks_log2 as u32);
         // Determine the preferred Bulk IO size: consider the value announced by the
-        // NvChip, but ramp it up to some larger reasonable value in order to
+        // NvBlkDev, but ramp it up to some larger reasonable value in order to
         // reduce the overall number of IO requests.
-        let preferred_write_block_allocation_blocks_log2 = (preferred_chip_io_blocks_bulk_log2
-            + chip_io_block_size_128b_log2)
+        let preferred_write_block_allocation_blocks_log2 = (preferred_blkdev_io_blocks_bulk_log2
+            + blkdev_io_block_size_128b_log2)
             .saturating_sub(allocation_block_size_128b_log2)
             .min(usize::BITS - 1)
             .max(auth_tree_data_block_allocation_blocks_log2);
@@ -403,7 +407,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
                             {
                                 // So, we're not in same IO block as the last position found to
                                 // possibly need a write-out anymore. On the other hand, we do know
-                                // at this point that we're at most one Chip IO block ahead, as per
+                                // at this point that we're at most one Device IO block ahead, as per
                                 // the above logic stopping the dirty candidate range extension at
                                 // Minimum Write Block sized gaps. As the Minimum Write Block is
                                 // less or equal than an IO block in size, it follows that the
@@ -604,7 +608,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
     ///   fill alignment gaps within.
     fn fill_write_region_states_min_write_block_alignment_gaps(
         &mut self,
-        fs_instance_sync_state: &CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &CocoonFsSyncStateMemberRef<'_, ST, B>,
         transaction: &mut Transaction,
         write_region_states_allocation_blocks_index_range:
          &mut AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -612,16 +616,18 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
-        let min_write_block_allocation_blocks_log2 =
-            Self::min_write_block_allocation_blocks_log2(chip_io_block_size_128b_log2, allocation_block_size_128b_log2);
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
+        let min_write_block_allocation_blocks_log2 = Self::min_write_block_allocation_blocks_log2(
+            blkdev_io_block_size_128b_log2,
+            allocation_block_size_128b_log2,
+        );
         // The code here assumes that all states alignment gaps will get filled up here
         // and that the subsequent TransactionReadMissingDataFuture would not have to
         // insert anything more in this regard.
         debug_assert!(
             min_write_block_allocation_blocks_log2
-                >= TransactionReadMissingDataFuture::<C>::min_read_block_allocation_blocks_log2(
-                    chip_io_block_size_128b_log2,
+                >= TransactionReadMissingDataFuture::<B>::min_read_block_allocation_blocks_log2(
+                    blkdev_io_block_size_128b_log2,
                     allocation_block_size_128b_log2
                 )
         );
@@ -843,7 +849,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
         aligned_write_region_states_allocation_blocks_index_range:
         AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
         rng: &mut dyn rng::RngCoreDispatchable,
-    ) -> Result<TransactionWriteDirtyDataNvChipWriteRequest, (Box<Transaction>, NvFsError)> {
+    ) -> Result<TransactionWriteDirtyDataNvBlkDevWriteRequest, (Box<Transaction>, NvFsError)> {
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
         let allocation_block_size = 1usize << (allocation_block_size_128b_log2 + 7);
         let auth_tree_data_block_allocation_blocks_log2 =
@@ -993,7 +999,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
             Err(e) => return Err((transaction, e)),
         };
 
-        Ok(TransactionWriteDirtyDataNvChipWriteRequest {
+        Ok(TransactionWriteDirtyDataNvBlkDevWriteRequest {
             transaction,
             aligned_write_region_states_allocation_blocks_index_range,
             request_io_region,
@@ -1002,8 +1008,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionWriteDirtyDataFuture
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for TransactionWriteDirtyDataFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for TransactionWriteDirtyDataFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -1035,7 +1041,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         mut self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -1113,7 +1119,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         fs_instance_sync_state.fs_instance_and_destructure_borrow();
                     match TransactionReadMissingDataFuture::poll(
                         pin::Pin::new(cur_aligned_write_region_read_missing_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         fs_sync_state_alloc_bitmap,
                         cx,
                     ) {
@@ -1197,7 +1203,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             };
 
                             let fs_instance = fs_instance_sync_state.get_fs_ref();
-                            let cur_aligned_write_region_write_fut = match fs_instance.chip.write(write_request) {
+                            let cur_aligned_write_region_write_fut = match fs_instance.blkdev.write(write_request) {
                                 Ok(Ok(cur_aligned_write_region_write_fut)) => cur_aligned_write_region_write_fut,
                                 Ok(Err((write_request, e))) => {
                                     self.fut_state = TransactionWriteDirtyDataFutureState::Done;
@@ -1225,9 +1231,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     cur_aligned_write_region_write_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match chip::NvChipFuture::poll(
+                    match blkdev::NvBlkDevFuture::poll(
                         pin::Pin::new(cur_aligned_write_region_write_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         cx,
                     ) {
                         task::Poll::Ready(Ok((write_request, Ok(())))) => {
@@ -1268,36 +1274,36 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 ///
 /// # Arguments:
 ///
-/// * `chip_io_block_size_128b_log2` - Value of
-///   [`NvChip::chip_io_block_size_128b_log2()`](chip::NvChip::chip_io_block_size_128b_log2).
+/// * `blkdev_io_block_size_128b_log2` - Value of
+///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
 /// * `allocation_block_size_128b_log2` - Verbatim value of
 ///   [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
 pub(super) fn min_write_block_allocation_blocks_log2(
-    chip_io_block_size_128b_log2: u32,
+    blkdev_io_block_size_128b_log2: u32,
     allocation_block_size_128b_log2: u32,
 ) -> u32 {
-    // The minimum IO unit is the maximum of the Chip IO block and the Allocation
+    // The minimum IO unit is the maximum of the Device IO block and the Allocation
     // Block sizes.
-    chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2)
+    blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2)
 }
 
-/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
 /// internally by [`TransactionWriteDirtyDataFuture`].
-struct TransactionWriteDirtyDataNvChipWriteRequest {
+struct TransactionWriteDirtyDataNvBlkDevWriteRequest {
     transaction: Box<Transaction>,
     aligned_write_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_io_region: ChunkedIoRegion,
     disguised_src_allocation_block_buffers: Option<FixedVec<Option<FixedVec<u8, 7>>, 0>>,
 }
 
-impl chip::NvChipWriteRequest for TransactionWriteDirtyDataNvChipWriteRequest {
+impl blkdev::NvBlkDevWriteRequest for TransactionWriteDirtyDataNvBlkDevWriteRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.request_io_region
     }
 
     /// Get access to the destination buffer slice associated with a
     /// [`ChunkedIoRegionChunkRange`].
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], chip::NvChipIoError> {
+    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
         let (allocation_block_index_in_request, _) = range.chunk().decompose_to_hierarchic_indices([]);
 
         // If the Allocation Block has been disguised for the Journal Staging Copy,
@@ -1328,13 +1334,13 @@ impl chip::NvChipWriteRequest for TransactionWriteDirtyDataNvChipWriteRequest {
             AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => unallocated_state
                 .random_fillup
                 .as_deref()
-                .ok_or_else(|| nvchip_err_internal!())?,
+                .ok_or_else(|| nvblkdev_err_internal!())?,
             AllocationBlockUpdateNvSyncState::Allocated(allocated_state) => match allocated_state {
                 AllocationBlockUpdateNvSyncStateAllocated::Unmodified(unmodified_state) => unmodified_state
                     .cached_encrypted_data
                     .as_ref()
                     .map(|cached_encrypted_data| cached_encrypted_data.get_encrypted_data())
-                    .ok_or_else(|| nvchip_err_internal!())?,
+                    .ok_or_else(|| nvblkdev_err_internal!())?,
                 AllocationBlockUpdateNvSyncStateAllocated::Modified(modified_state) => match modified_state {
                     AllocationBlockUpdateNvSyncStateAllocatedModified::JournalDirty {
                         authenticated_encrypted_data,
@@ -1343,7 +1349,7 @@ impl chip::NvChipWriteRequest for TransactionWriteDirtyDataNvChipWriteRequest {
                         cached_encrypted_data
                             .as_ref()
                             .map(|cached_encrypted_data| cached_encrypted_data.get_encrypted_data())
-                            .ok_or_else(|| nvchip_err_internal!())?
+                            .ok_or_else(|| nvblkdev_err_internal!())?
                     }
                 },
             },

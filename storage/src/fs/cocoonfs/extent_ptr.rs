@@ -7,7 +7,7 @@
 use crate::{
     fs::{
         NvFsError,
-        cocoonfs::{CocoonFsFormatError, layout},
+        cocoonfs::{FormatError, layout},
     },
     nvfs_err_internal,
 };
@@ -98,7 +98,7 @@ impl EncodedExtentPtr {
 
         let extent_allocation_blocks_end = extent_allocation_blocks_begin + extent_allocation_blocks;
         if extent_allocation_blocks_end >> (u64::BITS - (allocation_block_size_128b_log2 + 7)) != 0 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
 
         Ok(Some((
@@ -186,11 +186,11 @@ impl EncodedBlockPtr {
 
         let block_allocation_blocks_begin = encoded_block_allocation_blocks_begin >> Self::RESERVED_ENCODING_BITS;
         if block_allocation_blocks_begin << Self::RESERVED_ENCODING_BITS != encoded_block_allocation_blocks_begin {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
 
         if block_allocation_blocks_begin >> (u64::BITS - (allocation_block_size_128b_log2 + 7)) != 0 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
 
         Ok(Some(layout::PhysicalAllocBlockIndex::from(

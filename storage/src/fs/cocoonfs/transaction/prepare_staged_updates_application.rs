@@ -22,7 +22,7 @@ use super::{
     read_missing_data::TransactionReadMissingDataFuture,
 };
 use crate::{
-    chip,
+    blkdev,
     fs::cocoonfs::{
         NvFsError,
         fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
@@ -51,15 +51,15 @@ use super::auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStates;
 /// # See also:
 ///
 /// * [`AuthTreeDataBlocksUpdateStates::apply_allocation_blocks_staged_updates()`].
-pub struct TransactionPrepareStagedUpdatesApplicationFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct TransactionPrepareStagedUpdatesApplicationFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
     remaining_states_index_range: AuthTreeDataBlocksUpdateStatesIndexRange,
-    fut_state: TransactionPrepareStagedUpdatesApplicationFutureState<C>,
+    fut_state: TransactionPrepareStagedUpdatesApplicationFutureState<B>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionPrepareStagedUpdatesApplicationFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionPrepareStagedUpdatesApplicationFuture<ST, B> {
     /// Instantiate a [`TransactionPrepareStagedUpdatesApplicationFuture`].
     ///
     /// The [`TransactionPrepareStagedUpdatesApplicationFuture`] assumes
@@ -128,12 +128,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionPrepareStagedUpdates
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
-        let preferred_chip_io_blocks_bulk_log2 = transaction.preferred_chip_io_blocks_bulk_log2;
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
+        let preferred_blkdev_io_blocks_bulk_log2 = transaction.preferred_blkdev_io_blocks_bulk_log2;
         let preferred_read_block_allocation_blocks_log2 =
-            TransactionReadMissingDataFuture::<C>::preferred_read_block_allocation_blocks_log2(
-                chip_io_block_size_128b_log2,
-                preferred_chip_io_blocks_bulk_log2,
+            TransactionReadMissingDataFuture::<B>::preferred_read_block_allocation_blocks_log2(
+                blkdev_io_block_size_128b_log2,
+                preferred_blkdev_io_blocks_bulk_log2,
                 allocation_block_size_128b_log2,
                 auth_tree_data_block_allocation_blocks_log2,
             );
@@ -293,8 +293,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionPrepareStagedUpdates
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for TransactionPrepareStagedUpdatesApplicationFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for TransactionPrepareStagedUpdatesApplicationFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -326,7 +326,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_poll_data: &mut Self::AuxPollData<'a>,
         cx: &mut core::task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -389,7 +389,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let (transaction, subrange_states_index_range_offsets, result) =
                         match TransactionReadAuthenticateDataFuture::poll(
                             pin::Pin::new(read_authenticate_data_fut),
-                            &fs_instance.chip,
+                            &fs_instance.blkdev,
                             &fs_instance.fs_config,
                             fs_sync_state_alloc_bitmap,
                             &mut fs_sync_state_auth_tree,
@@ -452,7 +452,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
 /// [`TransactionPrepareStagedUpdatesApplicationFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum TransactionPrepareStagedUpdatesApplicationFutureState<C: chip::NvChip> {
+enum TransactionPrepareStagedUpdatesApplicationFutureState<B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -463,7 +463,7 @@ enum TransactionPrepareStagedUpdatesApplicationFutureState<C: chip::NvChip> {
             AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsetsTransformToContaining,
         remaining_states_index_range_offsets_transform:
             AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsetsTransformToAfter,
-        read_authenticate_data_fut: TransactionReadAuthenticateDataFuture<C>,
+        read_authenticate_data_fut: TransactionReadAuthenticateDataFuture<B>,
     },
     Done,
 }

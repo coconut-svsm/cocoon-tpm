@@ -2,18 +2,18 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
-//! Implementation of [`CocoonFsOpenFsFuture`].
+//! Implementation of [`OpenFsFuture`].
 
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::rng,
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap, auth_tree, extent_ptr, extents,
+            FormatError, alloc_bitmap, auth_tree, extent_ptr, extents,
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
             image_header, inode_extents_list, inode_index, journal, keys, layout, mkfs, read_buffer,
         },
@@ -33,8 +33,8 @@ use super::mkfs::MkFsFuture;
 ///
 /// # See also:
 ///
-/// * [`CocoonFsWriteMkfsInfoHeaderFuture`](super::CocoonFsWriteMkfsInfoHeaderFuture).
-pub struct CocoonFsOpenFsFuture<ST: sync_types::SyncTypes, C: chip::NvChip + marker::Unpin>
+/// * [`WriteMkFsInfoHeaderFuture`](super::WriteMkFsInfoHeaderFuture).
+pub struct OpenFsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev + marker::Unpin>
 where
     auth_tree::AuthTree<ST>: marker::Unpin,
     read_buffer::ReadBuffer<ST>: marker::Unpin,
@@ -42,7 +42,7 @@ where
 {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self. Transferred to the inner MkFsFuture in case a [`MkFsInfoHeader`] is found.
-    chip: Option<C>,
+    blkdev: Option<B>,
 
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self. Transferred to the inner MkFsFuture in case a [`MkFsInfoHeader`] is found.
@@ -86,12 +86,12 @@ where
     #[cfg(test)]
     pub(super) test_fail_apply_mkfsinfo_header: bool,
 
-    fut_state: CocoonFsOpenFsFutureState<ST, C>,
+    fut_state: OpenFsFutureState<ST, B>,
 }
 
-/// [`CocoonFsOpenFsFuture`] state-machine state.
+/// [`OpenFsFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum CocoonFsOpenFsFutureState<ST: sync_types::SyncTypes, C: chip::NvChip>
+enum OpenFsFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev>
 where
     ST::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
 {
@@ -100,10 +100,10 @@ where
     },
     ReadCoreImageHeader {
         enable_trimming: bool,
-        read_core_image_header_fut: image_header::ReadCoreImageHeaderFuture<C>,
+        read_core_image_header_fut: image_header::ReadCoreImageHeaderFuture<B>,
     },
     MkFs {
-        mkfs_fut: mkfs::MkFsFuture<ST, C>,
+        mkfs_fut: mkfs::MkFsFuture<ST, B>,
     },
     ReplayJournal {
         enable_trimming: bool,
@@ -113,7 +113,7 @@ where
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
         // Self.
         root_key: Option<keys::RootKey>,
-        replay_journal_fut: journal::replay::JournalReplayFuture<C>,
+        replay_journal_fut: journal::replay::JournalReplayFuture<B>,
     },
     ReadMutableImageHeader {
         enable_trimming: bool,
@@ -123,13 +123,13 @@ where
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
         // Self.
         root_key: Option<keys::RootKey>,
-        read_mutable_image_header_fut: image_header::ReadMutableImageHeaderFuture<C>,
+        read_mutable_image_header_fut: image_header::ReadMutableImageHeaderFuture<B>,
     },
     ReadInodeIndexEntryLeafNode {
-        read_inode_index_entry_leaf_node_fut: inode_index::InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C>,
+        read_inode_index_entry_leaf_node_fut: inode_index::InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<B>,
     },
     ReadAuthTreeInodeExtentsList {
-        read_auth_tree_inode_extents_list_fut: inode_extents_list::InodeExtentsListReadPreAuthFuture<C>,
+        read_auth_tree_inode_extents_list_fut: inode_extents_list::InodeExtentsListReadPreAuthFuture<B>,
         alloc_bitmap_inode_entry_extent_ptr: extent_ptr::EncodedExtentPtr,
     },
     ReadAllocBitmapInodeExtentsListPrepare {
@@ -137,7 +137,7 @@ where
         auth_tree_extents: extents::LogicalExtents,
     },
     ReadAllocBitmapInodeExtentsList {
-        read_alloc_bitmap_inode_extents_list_fut: inode_extents_list::InodeExtentsListReadPreAuthFuture<C>,
+        read_alloc_bitmap_inode_extents_list_fut: inode_extents_list::InodeExtentsListReadPreAuthFuture<B>,
         auth_tree_extents: extents::LogicalExtents,
     },
     ReadAllocBitmapFilePrepare {
@@ -145,53 +145,51 @@ where
         alloc_bitmap_extents: extents::PhysicalExtents,
     },
     ReadAllocBitmapFile {
-        read_alloc_bitmap_file_fut: alloc_bitmap::AllocBitmapFileReadFuture<C>,
+        read_alloc_bitmap_file_fut: alloc_bitmap::AllocBitmapFileReadFuture<B>,
     },
     BootstrapInodeIndex {
-        bootstrap_inode_index_fut: inode_index::InodeIndexBootstrapFuture<ST, C>,
+        bootstrap_inode_index_fut: inode_index::InodeIndexBootstrapFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsOpenFsFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> OpenFsFuture<ST, B>
 where
     auth_tree::AuthTree<ST>: marker::Unpin,
     read_buffer::ReadBuffer<ST>: marker::Unpin,
     ST::RwLock<inode_index::InodeIndexTreeNodeCache>: marker::Unpin,
 {
-    /// Instantiate a [`CocoonFsOpenFsFuture`].
+    /// Instantiate a [`OpenFsFuture`].
     ///
-    /// On error, the input `chip`, `raw_root_key` and `rng` are returned
-    /// directly as part of the `Err`. On success, the
-    /// [`CocoonFsOpenFsFuture`] assumes their ownership. They will get
-    /// either get returned back from [`poll()`](Self::poll) on completion or
-    /// will be passed onwards to the resulting [`CocoonFs`] instance as
-    /// appropriate.
+    /// On error, the input `blkdev`, `raw_root_key` and `rng` are returned
+    /// directly as part of the `Err`. On success, the [`OpenFsFuture`]
+    /// assumes their ownership. They will get either get returned back from
+    /// [`poll()`](Self::poll) on completion or will be passed onwards to the
+    /// resulting [`CocoonFs`] instance as appropriate.
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `raw_root_key` - The filesystem's raw root key material supplied from
     ///   extern.
     /// * `enable_trimming` - Whether to enable the submission of [trim
-    ///   commands](chip::NvChip::trim) to the underlying storage for the
+    ///   commands](blkdev::NvBlkDev::trim) to the underlying storage for the
     ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
     ///   upon successful completion.
     /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
     ///   for the fileystem initialization ("mkfs") in case a filesystem
     ///   creation info header header is found. See
-    ///   [`CocoonFsMkFsFuture::new()`](mkfs::CocoonFsMkFsFuture::new) for
-    ///   details.
+    ///   [`MkFsFuture::new()`](mkfs::MkFsFuture::new) for details.
     #[allow(clippy::type_complexity)]
     pub fn new(
-        chip: C,
+        blkdev: B,
         raw_root_key: zeroize::Zeroizing<Vec<u8>>,
         enable_trimming: bool,
         rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
     ) -> Result<
         Self,
         (
-            C,
+            B,
             zeroize::Zeroizing<Vec<u8>>,
             Box<dyn rng::RngCoreDispatchable + marker::Send>,
             NvFsError,
@@ -200,12 +198,12 @@ where
         let keys_cache = match keys::KeyCache::new() {
             Ok(keys_cache) => keys_cache,
             Err(e) => {
-                return Err((chip, raw_root_key, rng, e));
+                return Err((blkdev, raw_root_key, rng, e));
             }
         };
 
         Ok(Self {
-            chip: Some(chip),
+            blkdev: Some(blkdev),
             rng: Some(rng),
             raw_root_key: Some(raw_root_key),
             fs_config: None,
@@ -219,12 +217,12 @@ where
             keys_cache: Some(keys_cache),
             #[cfg(test)]
             test_fail_apply_mkfsinfo_header: false,
-            fut_state: CocoonFsOpenFsFutureState::Init { enable_trimming },
+            fut_state: OpenFsFutureState::Init { enable_trimming },
         })
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> future::Future for CocoonFsOpenFsFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> future::Future for OpenFsFuture<ST, B>
 where
     auth_tree::AuthTree<ST>: marker::Unpin,
     read_buffer::ReadBuffer<ST>: marker::Unpin,
@@ -235,16 +233,16 @@ where
     /// A two-level [`Result`] is returned from the
     /// [`Future::poll()`](future::Future::poll):
     /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
-    ///   encountering an internal error and the input [`NvChip`](chip::NvChip),
-    ///   raw root key and input [random number
+    ///   encountering an internal error and the input
+    ///   [`NvBlkDev`](blkdev::NvBlkDev), raw root key and input [random number
     ///   generator](rng::RngCoreDispatchable) are lost.
     /// * `Ok((rng, ...))` - Otherwise the outer level [`Result`] is set to
     ///   [`Ok`] and a pair of the input [random number
     ///   generator](rng::RngCoreDispatchable), `rng`, and the operation result
     ///   will get returned within:
-    ///   * `Ok((rng, Err((chip, raw_root_key, e))))` - In case of an error, a
-    ///     tuple of the [`NvChip`](chip::NvChip) instance, `chip`, the input
-    ///     root key material `raw_root_key` and the error reason `e` is
+    ///   * `Ok((rng, Err((blkdev, raw_root_key, e))))` - In case of an error, a
+    ///     tuple of the [`NvBlkDev`](blkdev::NvBlkDev) instance, `blkdev`, the
+    ///     input root key material `raw_root_key` and the error reason `e` is
     ///     returned in an [`Err`].
     ///   * `Ok((rng, Ok(fs_instance)))` - Otherwise an opened [`CocoonFs`]
     ///     instance `fs_instance` associated with the filesystem just opened is
@@ -252,7 +250,7 @@ where
     type Output = Result<
         (
             Box<dyn rng::RngCoreDispatchable + marker::Send>,
-            Result<CocoonFsSyncRcPtrType<ST, C>, (C, zeroize::Zeroizing<Vec<u8>>, NvFsError)>,
+            Result<CocoonFsSyncRcPtrType<ST, B>, (B, zeroize::Zeroizing<Vec<u8>>, NvFsError)>,
         ),
         NvFsError,
     >;
@@ -262,23 +260,23 @@ where
 
         let e = loop {
             match &mut this.fut_state {
-                CocoonFsOpenFsFutureState::Init { enable_trimming } => {
+                OpenFsFutureState::Init { enable_trimming } => {
                     let read_core_image_header_fut = image_header::ReadCoreImageHeaderFuture::new();
-                    this.fut_state = CocoonFsOpenFsFutureState::ReadCoreImageHeader {
+                    this.fut_state = OpenFsFutureState::ReadCoreImageHeader {
                         enable_trimming: *enable_trimming,
                         read_core_image_header_fut,
                     };
                 }
-                CocoonFsOpenFsFutureState::ReadCoreImageHeader {
+                OpenFsFutureState::ReadCoreImageHeader {
                     enable_trimming,
                     read_core_image_header_fut,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
                     let image_header =
-                        match chip::NvChipFuture::poll(pin::Pin::new(read_core_image_header_fut), chip, cx) {
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_core_image_header_fut), blkdev, cx) {
                             task::Poll::Ready(Ok(static_image_header)) => static_image_header,
                             task::Poll::Ready(Err(e)) => break e,
                             task::Poll::Pending => return task::Poll::Pending,
@@ -309,7 +307,7 @@ where
                             };
 
                             let replay_journal_fut = journal::replay::JournalReplayFuture::new(*enable_trimming);
-                            this.fut_state = CocoonFsOpenFsFutureState::ReplayJournal {
+                            this.fut_state = OpenFsFutureState::ReplayJournal {
                                 enable_trimming: *enable_trimming,
                                 static_image_header: Some(static_image_header),
                                 root_key: Some(root_key),
@@ -322,8 +320,8 @@ where
                         } => {
                             // The filesystem has not been formatted yet, but there's a MkFsInfoHeader. Do
                             // it now.
-                            let chip = match this.chip.take() {
-                                Some(chip) => chip,
+                            let blkdev = match this.blkdev.take() {
+                                Some(blkdev) => blkdev,
                                 None => break nvfs_err_internal!(),
                             };
                             let rng = match this.rng.take() {
@@ -331,12 +329,12 @@ where
                                 None => break nvfs_err_internal!(),
                             };
                             let backup_mkfsinfo_header_write_control = if from_backup {
-                                mkfs::MkFsFutureBackupMkfsInfoHeaderWriteControl::RetainExisting
+                                mkfs::MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting
                             } else {
-                                mkfs::MkFsFutureBackupMkfsInfoHeaderWriteControl::Write
+                                mkfs::MkFsFutureBackupMkFsInfoHeaderWriteControl::Write
                             };
-                            let mkfs_fut = match mkfs::MkFsFuture::new(
-                                chip,
+                            let mkfs_fut = match mkfs::MkFsFuture::_new(
+                                blkdev,
                                 &header.image_layout,
                                 mem::take(&mut header.salt),
                                 Some(header.image_size),
@@ -346,8 +344,8 @@ where
                                 rng,
                             ) {
                                 Ok(mkfs_fut) => mkfs_fut,
-                                Err((chip, rng, e)) => {
-                                    this.chip = Some(chip);
+                                Err((blkdev, rng, e)) => {
+                                    this.blkdev = Some(blkdev);
                                     this.rng = Some(rng);
                                     break e;
                                 }
@@ -360,18 +358,18 @@ where
                             } else {
                                 mkfs_fut
                             };
-                            this.fut_state = CocoonFsOpenFsFutureState::MkFs { mkfs_fut }
+                            this.fut_state = OpenFsFutureState::MkFs { mkfs_fut }
                         }
                     }
                 }
-                CocoonFsOpenFsFutureState::MkFs { mkfs_fut } => {
+                OpenFsFutureState::MkFs { mkfs_fut } => {
                     match MkFsFuture::poll(pin::Pin::new(mkfs_fut), cx) {
                         task::Poll::Ready(Ok((rng, Ok(fs_instance)))) => {
-                            this.fut_state = CocoonFsOpenFsFutureState::Done;
+                            this.fut_state = OpenFsFutureState::Done;
                             return task::Poll::Ready(Ok((rng, Ok(fs_instance))));
                         }
-                        task::Poll::Ready(Ok((rng, Err((chip, e))))) => {
-                            this.chip = Some(chip);
+                        task::Poll::Ready(Ok((rng, Err((blkdev, e))))) => {
+                            this.blkdev = Some(blkdev);
                             this.rng = Some(rng);
                             break e;
                         }
@@ -379,14 +377,14 @@ where
                         task::Poll::Pending => return task::Poll::Pending,
                     };
                 }
-                CocoonFsOpenFsFutureState::ReplayJournal {
+                OpenFsFutureState::ReplayJournal {
                     enable_trimming,
                     static_image_header: fut_static_image_header,
                     root_key: fut_root_key,
                     replay_journal_fut,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
@@ -397,7 +395,7 @@ where
                     let image_layout = &static_image_header.image_layout;
                     let salt_len = match u8::try_from(static_image_header.salt.len()) {
                         Ok(salt_len) => salt_len,
-                        Err(_) => break NvFsError::from(CocoonFsFormatError::InvalidSaltLength),
+                        Err(_) => break NvFsError::from(FormatError::InvalidSaltLength),
                     };
 
                     let root_key = match fut_root_key.as_ref() {
@@ -413,7 +411,7 @@ where
 
                     match journal::replay::JournalReplayFuture::poll(
                         pin::Pin::new(replay_journal_fut),
-                        chip,
+                        blkdev,
                         image_layout,
                         salt_len,
                         root_key,
@@ -431,26 +429,26 @@ where
                             Err(e) => break e,
                         };
 
-                    this.fut_state = CocoonFsOpenFsFutureState::ReadMutableImageHeader {
+                    this.fut_state = OpenFsFutureState::ReadMutableImageHeader {
                         enable_trimming: *enable_trimming,
                         static_image_header: fut_static_image_header.take(),
                         root_key: fut_root_key.take(),
                         read_mutable_image_header_fut,
                     };
                 }
-                CocoonFsOpenFsFutureState::ReadMutableImageHeader {
+                OpenFsFutureState::ReadMutableImageHeader {
                     enable_trimming,
                     static_image_header,
                     root_key,
                     read_mutable_image_header_fut,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
                     let mutable_image_header =
-                        match chip::NvChipFuture::poll(pin::Pin::new(read_mutable_image_header_fut), chip, cx) {
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_mutable_image_header_fut), blkdev, cx) {
                             task::Poll::Ready(Ok(mutable_image_header)) => mutable_image_header,
                             task::Poll::Ready(Err(e)) => break e,
                             task::Poll::Pending => return task::Poll::Pending,
@@ -475,7 +473,7 @@ where
 
                     let salt_len = match u8::try_from(salt.len()) {
                         Ok(salt_len) => salt_len,
-                        Err(_) => break NvFsError::from(CocoonFsFormatError::InvalidSaltLength),
+                        Err(_) => break NvFsError::from(FormatError::InvalidSaltLength),
                     };
                     let image_header_end =
                         image_header::MutableImageHeader::physical_location(&image_layout, salt_len).end();
@@ -513,15 +511,15 @@ where
                         inode_index::InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture::new(
                             inode_index_entry_leaf_node_allocation_blocks_begin,
                         );
-                    this.fut_state = CocoonFsOpenFsFutureState::ReadInodeIndexEntryLeafNode {
+                    this.fut_state = OpenFsFutureState::ReadInodeIndexEntryLeafNode {
                         read_inode_index_entry_leaf_node_fut,
                     };
                 }
-                CocoonFsOpenFsFutureState::ReadInodeIndexEntryLeafNode {
+                OpenFsFutureState::ReadInodeIndexEntryLeafNode {
                     read_inode_index_entry_leaf_node_fut,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
@@ -539,7 +537,7 @@ where
                     let (inode_index_entry_leaf_node, inode_index_tree_layout) =
                         match inode_index::InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture::poll(
                             pin::Pin::new(read_inode_index_entry_leaf_node_fut),
-                            chip,
+                            blkdev,
                             &this.inode_index_entry_leaf_node_preauth_cca_protection_digest,
                             image_layout,
                             &fs_config.root_key,
@@ -558,7 +556,7 @@ where
                         .lookup(inode_index::SpecialInode::AuthTree as u32, &inode_index_tree_layout)
                     {
                         Ok(Ok(auth_tree_entry_index)) => auth_tree_entry_index,
-                        Ok(Err(_)) => break NvFsError::from(CocoonFsFormatError::SpecialInodeMissing),
+                        Ok(Err(_)) => break NvFsError::from(FormatError::SpecialInodeMissing),
                         Err(e) => break e,
                     };
                     let auth_tree_extent_ptr = match inode_index_entry_leaf_node
@@ -572,7 +570,7 @@ where
                         .lookup(inode_index::SpecialInode::AllocBitmap as u32, &inode_index_tree_layout)
                     {
                         Ok(Ok(alloc_bitmap_entry_index)) => alloc_bitmap_entry_index,
-                        Ok(Err(_)) => break NvFsError::from(CocoonFsFormatError::SpecialInodeMissing),
+                        Ok(Err(_)) => break NvFsError::from(FormatError::SpecialInodeMissing),
                         Err(e) => break e,
                     };
                     let alloc_bitmap_inode_entry_extent_ptr = match inode_index_entry_leaf_node
@@ -598,7 +596,7 @@ where
                                     Ok(read_auth_tree_inode_extents_list_fut) => read_auth_tree_inode_extents_list_fut,
                                     Err(e) => break e,
                                 };
-                            this.fut_state = CocoonFsOpenFsFutureState::ReadAuthTreeInodeExtentsList {
+                            this.fut_state = OpenFsFutureState::ReadAuthTreeInodeExtentsList {
                                 read_auth_tree_inode_extents_list_fut,
                                 alloc_bitmap_inode_entry_extent_ptr,
                             };
@@ -609,30 +607,30 @@ where
                             if let Err(e) = auth_tree_extents.push_extent(&auth_tree_extent, true) {
                                 break e;
                             }
-                            this.fut_state = CocoonFsOpenFsFutureState::ReadAllocBitmapInodeExtentsListPrepare {
+                            this.fut_state = OpenFsFutureState::ReadAllocBitmapInodeExtentsListPrepare {
                                 alloc_bitmap_inode_entry_extent_ptr,
                                 auth_tree_extents: extents::LogicalExtents::from(auth_tree_extents),
                             };
                         }
                         Ok(None) => {
                             // The inode exists, but the extents reference is nil, which is invalid.
-                            break NvFsError::from(CocoonFsFormatError::InvalidExtents);
+                            break NvFsError::from(FormatError::InvalidExtents);
                         }
                         Err(e) => break e,
                     }
                 }
-                CocoonFsOpenFsFutureState::ReadAuthTreeInodeExtentsList {
+                OpenFsFutureState::ReadAuthTreeInodeExtentsList {
                     read_auth_tree_inode_extents_list_fut,
                     alloc_bitmap_inode_entry_extent_ptr,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
-                    let auth_tree_extents = match chip::NvChipFuture::poll(
+                    let auth_tree_extents = match blkdev::NvBlkDevFuture::poll(
                         pin::Pin::new(read_auth_tree_inode_extents_list_fut),
-                        chip,
+                        blkdev,
                         cx,
                     ) {
                         task::Poll::Ready(Ok(auth_tree_extents)) => auth_tree_extents,
@@ -640,12 +638,12 @@ where
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    this.fut_state = CocoonFsOpenFsFutureState::ReadAllocBitmapInodeExtentsListPrepare {
+                    this.fut_state = OpenFsFutureState::ReadAllocBitmapInodeExtentsListPrepare {
                         alloc_bitmap_inode_entry_extent_ptr: *alloc_bitmap_inode_entry_extent_ptr,
                         auth_tree_extents: extents::LogicalExtents::from(auth_tree_extents),
                     };
                 }
-                CocoonFsOpenFsFutureState::ReadAllocBitmapInodeExtentsListPrepare {
+                OpenFsFutureState::ReadAllocBitmapInodeExtentsListPrepare {
                     alloc_bitmap_inode_entry_extent_ptr,
                     auth_tree_extents,
                 } => {
@@ -679,7 +677,7 @@ where
                                     }
                                     Err(e) => break e,
                                 };
-                            this.fut_state = CocoonFsOpenFsFutureState::ReadAllocBitmapInodeExtentsList {
+                            this.fut_state = OpenFsFutureState::ReadAllocBitmapInodeExtentsList {
                                 read_alloc_bitmap_inode_extents_list_fut,
                                 auth_tree_extents: mem::replace(auth_tree_extents, extents::LogicalExtents::new()),
                             };
@@ -690,30 +688,30 @@ where
                             if let Err(e) = alloc_bitmap_extents.push_extent(&alloc_bitmap_extent, true) {
                                 break e;
                             }
-                            this.fut_state = CocoonFsOpenFsFutureState::ReadAllocBitmapFilePrepare {
+                            this.fut_state = OpenFsFutureState::ReadAllocBitmapFilePrepare {
                                 auth_tree_extents: mem::replace(auth_tree_extents, extents::LogicalExtents::new()),
                                 alloc_bitmap_extents,
                             };
                         }
                         Ok(None) => {
                             // The inode exists, but the extents reference is nil, which is invalid.
-                            break NvFsError::from(CocoonFsFormatError::InvalidExtents);
+                            break NvFsError::from(FormatError::InvalidExtents);
                         }
                         Err(e) => break e,
                     }
                 }
-                CocoonFsOpenFsFutureState::ReadAllocBitmapInodeExtentsList {
+                OpenFsFutureState::ReadAllocBitmapInodeExtentsList {
                     read_alloc_bitmap_inode_extents_list_fut,
                     auth_tree_extents,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
-                    let alloc_bitmap_extents = match chip::NvChipFuture::poll(
+                    let alloc_bitmap_extents = match blkdev::NvBlkDevFuture::poll(
                         pin::Pin::new(read_alloc_bitmap_inode_extents_list_fut),
-                        chip,
+                        blkdev,
                         cx,
                     ) {
                         task::Poll::Ready(Ok(auth_tree_extents)) => auth_tree_extents,
@@ -721,17 +719,17 @@ where
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    this.fut_state = CocoonFsOpenFsFutureState::ReadAllocBitmapFilePrepare {
+                    this.fut_state = OpenFsFutureState::ReadAllocBitmapFilePrepare {
                         auth_tree_extents: mem::replace(auth_tree_extents, extents::LogicalExtents::new()),
                         alloc_bitmap_extents,
                     };
                 }
-                CocoonFsOpenFsFutureState::ReadAllocBitmapFilePrepare {
+                OpenFsFutureState::ReadAllocBitmapFilePrepare {
                     auth_tree_extents,
                     alloc_bitmap_extents,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
@@ -777,7 +775,7 @@ where
                     this.auth_tree = Some(auth_tree);
 
                     // The ReadBuffer is used for reading in the Allocation Bitmap File, create it.
-                    let read_buffer = match read_buffer::ReadBuffer::new(image_layout, chip) {
+                    let read_buffer = match read_buffer::ReadBuffer::new(image_layout, blkdev) {
                         Ok(read_buffer) => read_buffer,
                         Err(e) => break e,
                     };
@@ -799,15 +797,15 @@ where
                         Ok(read_alloc_bitmap_file_fut) => read_alloc_bitmap_file_fut,
                         Err(e) => break e,
                     };
-                    this.fut_state = CocoonFsOpenFsFutureState::ReadAllocBitmapFile {
+                    this.fut_state = OpenFsFutureState::ReadAllocBitmapFile {
                         read_alloc_bitmap_file_fut,
                     };
                 }
-                CocoonFsOpenFsFutureState::ReadAllocBitmapFile {
+                OpenFsFutureState::ReadAllocBitmapFile {
                     read_alloc_bitmap_file_fut,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
@@ -835,7 +833,7 @@ where
 
                     let alloc_bitmap = match alloc_bitmap::AllocBitmapFileReadFuture::poll(
                         pin::Pin::new(read_alloc_bitmap_file_fut),
-                        chip,
+                        blkdev,
                         alloc_bitmap_file,
                         image_layout,
                         fs_config.image_header_end,
@@ -877,15 +875,15 @@ where
                         Ok(bootstrap_inode_index_fut) => bootstrap_inode_index_fut,
                         Err(e) => break e,
                     };
-                    this.fut_state = CocoonFsOpenFsFutureState::BootstrapInodeIndex {
+                    this.fut_state = OpenFsFutureState::BootstrapInodeIndex {
                         bootstrap_inode_index_fut,
                     };
                 }
-                CocoonFsOpenFsFutureState::BootstrapInodeIndex {
+                OpenFsFutureState::BootstrapInodeIndex {
                     bootstrap_inode_index_fut,
                 } => {
-                    let chip = match this.chip.as_mut() {
-                        Some(chip) => chip,
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
                         None => break nvfs_err_internal!(),
                     };
 
@@ -912,7 +910,7 @@ where
 
                     let inode_index = match inode_index::InodeIndexBootstrapFuture::poll(
                         pin::Pin::new(bootstrap_inode_index_fut),
-                        chip,
+                        blkdev,
                         fs_config,
                         alloc_bitmap,
                         &mut auth_tree,
@@ -971,11 +969,11 @@ where
                     };
 
                     let fs = match <ST::SyncRcPtrFactory as sync_types::SyncRcPtrFactory>::try_new_with(|| {
-                        let chip = match this.chip.take() {
-                            Some(chip) => chip,
+                        let blkdev = match this.blkdev.take() {
+                            Some(blkdev) => blkdev,
                             None => return Err(nvfs_err_internal!()),
                         };
-                        Ok((CocoonFs::new(chip, fs_config, fs_sync_state), ()))
+                        Ok((CocoonFs::new(blkdev, fs_config, fs_sync_state), ()))
                     }) {
                         Ok((fs, _)) => fs,
                         Err(sync_types::SyncRcPtrTryNewWithError::TryNewError(e)) => {
@@ -996,13 +994,13 @@ where
                     let fs = unsafe { pin::Pin::new_unchecked(fs) };
                     return task::Poll::Ready(Ok((rng, Ok(fs))));
                 }
-                CocoonFsOpenFsFutureState::Done => unreachable!(),
+                OpenFsFutureState::Done => unreachable!(),
             }
         };
 
-        this.fut_state = CocoonFsOpenFsFutureState::Done;
-        let chip = match this.chip.take() {
-            Some(chip) => chip,
+        this.fut_state = OpenFsFutureState::Done;
+        let blkdev = match this.blkdev.take() {
+            Some(blkdev) => blkdev,
             None => return task::Poll::Ready(Err(e)),
         };
         let rng = match this.rng.take() {
@@ -1013,6 +1011,6 @@ where
             Some(raw_root_key) => raw_root_key,
             None => return task::Poll::Ready(Err(e)),
         };
-        task::Poll::Ready(Ok((rng, Err((chip, raw_root_key, e)))))
+        task::Poll::Ready(Ok((rng, Err((blkdev, raw_root_key, e)))))
     }
 }

@@ -12,12 +12,12 @@ use super::{
     bitmap_word::{BITMAP_WORD_BITS_LOG2, BitmapWord},
 };
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     crypto::{rng, symcipher},
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            CocoonFsFormatError, auth_tree, encryption_entities, extents, inode_index,
+            FormatError, auth_tree, encryption_entities, extents, inode_index,
             journal::{self, extents_covering_auth_digests::ExtentsCoveringAuthDigests},
             keys,
             layout::{self, BlockIndex as _},
@@ -81,7 +81,7 @@ impl AllocBitmapFile {
         let file_block_size_log2 =
             file_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7;
         if file_block_size_log2 >= u64::BITS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileConfig));
+            return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileConfig));
         } else if file_block_size_log2 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
         }
@@ -110,16 +110,14 @@ impl AllocBitmapFile {
                 || !(u64::from(extent.begin()) | u64::from(extent.end()))
                     .is_aligned_pow2(auth_tree_data_block_allocation_blocks_log2 as u32)
             {
-                return Err(NvFsError::from(
-                    CocoonFsFormatError::UnalignedAllocationBitmapFileExtents,
-                ));
+                return Err(NvFsError::from(FormatError::UnalignedAllocationBitmapFileExtents));
             }
 
             total_file_blocks = match total_file_blocks
                 .checked_add(u64::from(extent.block_count()) >> file_block_allocation_blocks_log2)
             {
                 Some(total_file_blocks) => total_file_blocks,
-                None => return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileSize)),
+                None => return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileSize)),
             };
         }
 
@@ -135,7 +133,7 @@ impl AllocBitmapFile {
             max_total_file_blocks
         );
         if total_file_blocks > max_total_file_blocks {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileSize));
+            return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileSize));
         }
 
         // Verify that each of the Allocation Bitmap File extents is covered by the
@@ -149,7 +147,7 @@ impl AllocBitmapFile {
                     bitmap_words_per_file_block_inv_shift,
                 )? >= total_file_blocks
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InconsistentAllocBitmapFileExtents));
+                return Err(NvFsError::from(FormatError::InconsistentAllocBitmapFileExtents));
             }
         }
 
@@ -203,7 +201,7 @@ impl AllocBitmapFile {
         let file_block_size_log2 =
             file_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7;
         if file_block_size_log2 >= u64::BITS {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidAllocationBitmapFileConfig));
+            return Err(NvFsError::from(FormatError::InvalidAllocationBitmapFileConfig));
         }
 
         let file_block_encryption_layout = encryption_entities::EncryptedBlockLayout::new(
@@ -534,7 +532,7 @@ impl AllocBitmapFile {
 ///
 /// Read an allocation bitmap from storage into memory at filesystem opening
 /// time.
-pub struct AllocBitmapFileReadFuture<C: chip::NvChip> {
+pub struct AllocBitmapFileReadFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     bitmap: Option<AllocBitmap>,
@@ -546,20 +544,20 @@ pub struct AllocBitmapFileReadFuture<C: chip::NvChip> {
     file_block_decryption_instance: encryption_entities::EncryptedBlockDecryptionInstance,
     file_block_decryption_buf: FixedVec<u8, 0>,
 
-    fut_state: AllocBitmapFileReadFutureState<C>,
+    fut_state: AllocBitmapFileReadFutureState<B>,
 }
 
 /// Internal [`AllocBitmapFileReadFuture::poll()`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum AllocBitmapFileReadFutureState<C: chip::NvChip> {
+enum AllocBitmapFileReadFutureState<B: blkdev::NvBlkDev> {
     Init,
     ReadAuthenticateFileBlock {
-        read_fut: read_buffer::BufferedReadAuthenticateDataFuture<C>,
+        read_fut: read_buffer::BufferedReadAuthenticateDataFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
+impl<B: blkdev::NvBlkDev> AllocBitmapFileReadFuture<B> {
     /// Instantiate a [`AllocBitmapFileReadFuture`].
     ///
     /// # Arguments:
@@ -637,7 +635,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `file` - The [`AllocBitmapFile`] to read in.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
@@ -651,7 +649,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
     #[allow(clippy::too_many_arguments)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         file: &AllocBitmapFile,
         image_layout: &layout::ImageLayout,
         image_header_end: layout::PhysicalAllocBlockIndex,
@@ -712,7 +710,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
                         ),
                         image_layout,
                         auth_tree.get_config(),
-                        chip,
+                        blkdev,
                     ) {
                         Ok(read_fut) => read_fut,
                         Err(e) => {
@@ -732,7 +730,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
                     };
                     let encryted_file_block = match read_buffer::BufferedReadAuthenticateDataFuture::poll(
                         pin::Pin::new(read_fut),
-                        chip,
+                        blkdev,
                         image_layout,
                         image_header_end,
                         bitmap,
@@ -786,7 +784,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadFuture<C> {
 
 /// Initialize an allocation bitmap file on storage at filesystem creation
 /// ("mkfs") time.
-pub struct AllocBitmapFileInitializeFuture<C: chip::NvChip> {
+pub struct AllocBitmapFileInitializeFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     auth_tree_initialization_cursor: Option<Box<auth_tree::AuthTreeInitializationCursor>>,
@@ -799,31 +797,31 @@ pub struct AllocBitmapFileInitializeFuture<C: chip::NvChip> {
     encrypted_file_blocks: FixedVec<FixedVec<u8, 7>, 0>,
     next_file_extent_allocation_block_index: layout::PhysicalAllocBlockIndex,
     next_bitmap_word_index: usize,
-    chip_io_block_allocation_blocks_log2: u8,
+    blkdev_io_block_allocation_blocks_log2: u8,
     preferred_bulk_allocation_blocks_log2: u8,
-    fut_state: AllocBitmapFileInitializeFutureState<C>,
+    fut_state: AllocBitmapFileInitializeFutureState<B>,
 }
 
 /// Internal [`AllocBitmapFileInitializeFuture::poll()`] state-machine state.
-enum AllocBitmapFileInitializeFutureState<C: chip::NvChip> {
+enum AllocBitmapFileInitializeFutureState<B: blkdev::NvBlkDev> {
     PrepareFileBlocksBatch,
     AuthTreeUpdateFileBlocksBatchRange {
         cur_file_extent_range_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         cur_file_extent_range_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
         cur_file_extent_range_write_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
         cur_file_extent_range_next_allocation_block_index: layout::PhysicalAllocBlockIndex,
-        auth_tree_write_part_fut: Option<auth_tree::AuthTreeInitializationCursorWritePartFuture<C>>,
+        auth_tree_write_part_fut: Option<auth_tree::AuthTreeInitializationCursorWritePartFuture<B>>,
     },
     WriteFileBlocksBatch {
         cur_file_extent_range_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         cur_file_extent_range_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
         cur_file_extent_range_write_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
-        write_fut: write_blocks::WriteBlocksFuture<C>,
+        write_fut: write_blocks::WriteBlocksFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
+impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
     /// Instantiate a [`AllocBitmapFileReadFuture`].
     ///
     /// The [`AllocBitmapFileReadFuture`] assumes ownership of the
@@ -843,7 +841,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
     ///   and the [IO
     ///   Block](layout::ImageLayout::io_block_allocation_blocks_log2) size. No
     ///   alignment constraints apply to the `file_extent`'s end though.
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `auth_tree_initialization_cursor` - The
     ///   [`AuthTreeInitializationCursor`](auth_tree::AuthTreeInitializationCursor)
     ///   to push data updates in the course of writing for the purpose of
@@ -856,7 +854,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
     ///   the `root_key`.
     pub fn new<ST: sync_types::SyncTypes>(
         file_extent: &layout::PhysicalAllocBlockRange,
-        chip: &C,
+        blkdev: &B,
         auth_tree_initialization_cursor: Box<auth_tree::AuthTreeInitializationCursor>,
         image_layout: &layout::ImageLayout,
         root_key: &keys::RootKey,
@@ -932,21 +930,22 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
         };
         drop(file_block_encryption_key);
 
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
         let file_block_allocation_blocks_log2 = image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32;
-        let chip_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2) as u8;
-        let preferred_chip_io_blocks_bulk_log2 =
-            chip.preferred_chip_io_blocks_bulk_log2()
-                .min(u64::BITS - 1 - chip_io_block_size_128b_log2 - 7) as u8;
+        let blkdev_io_block_allocation_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2) as u8;
+        let preferred_blkdev_io_blocks_bulk_log2 = blkdev
+            .preferred_io_blocks_bulk_log2()
+            .min(u64::BITS - 1 - blkdev_io_block_size_128b_log2 - 7)
+            as u8;
         let preferred_bulk_allocation_blocks_log2 =
-            (preferred_chip_io_blocks_bulk_log2 as u32 + chip_io_block_size_128b_log2)
+            (preferred_blkdev_io_blocks_bulk_log2 as u32 + blkdev_io_block_size_128b_log2)
                 .saturating_sub(allocation_block_size_128b_log2)
                 .max(image_layout.io_block_allocation_blocks_log2 as u32)
                 .max(file_block_allocation_blocks_log2)
                 .min(usize::BITS - 1 + file_block_allocation_blocks_log2) as u8;
-        debug_assert!(preferred_bulk_allocation_blocks_log2 >= chip_io_block_allocation_blocks_log2);
+        debug_assert!(preferred_bulk_allocation_blocks_log2 >= blkdev_io_block_allocation_blocks_log2);
 
         let preferred_bulk_file_blocks_log2 =
             preferred_bulk_allocation_blocks_log2 as u32 - file_block_allocation_blocks_log2;
@@ -973,7 +972,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
             encrypted_file_blocks,
             next_file_extent_allocation_block_index: file_extent.begin(),
             next_bitmap_word_index: 0,
-            chip_io_block_allocation_blocks_log2,
+            blkdev_io_block_allocation_blocks_log2,
             preferred_bulk_allocation_blocks_log2,
             fut_state: AllocBitmapFileInitializeFutureState::PrepareFileBlocksBatch,
         })
@@ -994,8 +993,8 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
     /// * A possibly empty list of buffers corresponding to the file's tail not
     ///   written out yet. The list is non-empty if and only if the
     ///   `file_extent` as passed initially passed to [`Self::new()`] does not
-    ///   end at a location aligned to the [Chip IO Block
-    ///   size](chip::NvChip::chip_io_block_size_128b_log2). Each buffer in the
+    ///   end at a location aligned to the [Device IO Block
+    ///   size](blkdev::NvBlkDev::io_block_size_128b_log2). Each buffer in the
     ///   list corresponds to exactly one [Allocation Bitmap File
     ///   Block](layout::ImageLayout::allocation_bitmap_file_block_allocation_blocks_log2)
     ///   and is of that size.  It is the caller's responsibility to write the
@@ -1007,7 +1006,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `bitmap` - The [`AllocBitmap`] to write to the newly initialized
     ///   allocation bitmap file.
     /// * `image_layout` - The filesystem's
@@ -1021,7 +1020,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
     #[allow(clippy::type_complexity)]
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         bitmap: &AllocBitmap,
         image_layout: &layout::ImageLayout,
         auth_tree_config: &auth_tree::AuthTreeConfig,
@@ -1145,7 +1144,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                     }
 
                     let cur_file_extent_range_write_allocation_blocks_end = cur_file_extent_range_allocation_blocks_end
-                        .align_down(this.chip_io_block_allocation_blocks_log2 as u32);
+                        .align_down(this.blkdev_io_block_allocation_blocks_log2 as u32);
                     debug_assert!(
                         cur_file_extent_range_allocation_blocks_end == this.file_extent.end()
                             || cur_file_extent_range_write_allocation_blocks_end
@@ -1155,7 +1154,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                     if cur_file_extent_range_write_allocation_blocks_end
                         == cur_file_extent_range_allocation_blocks_begin
                     {
-                        // In the last Chip IO block and its only partially filled by Allocation
+                        // In the last Device IO block and its only partially filled by Allocation
                         // Bitmap File Blocks. Return the remainder for the caller to handle it
                         // alongside other data subsequent to the Allocation Bitmap File.
                         let file = match this.file.take() {
@@ -1219,7 +1218,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                             if let Some(auth_tree_write_part_fut) = auth_tree_write_part_fut.as_mut() {
                                 match auth_tree::AuthTreeInitializationCursorWritePartFuture::poll(
                                     pin::Pin::new(auth_tree_write_part_fut),
-                                    chip,
+                                    blkdev,
                                     auth_tree_config,
                                     cx,
                                 ) {
@@ -1289,7 +1288,7 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                         ),
                         mem::take(&mut this.encrypted_file_blocks),
                         image_layout.allocation_bitmap_file_block_allocation_blocks_log2,
-                        this.chip_io_block_allocation_blocks_log2,
+                        this.blkdev_io_block_allocation_blocks_log2,
                         image_layout.allocation_block_size_128b_log2,
                     );
                     this.fut_state = AllocBitmapFileInitializeFutureState::WriteFileBlocksBatch {
@@ -1306,20 +1305,21 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
                     cur_file_extent_range_write_allocation_blocks_end,
                     write_fut,
                 } => {
-                    this.encrypted_file_blocks = match chip::NvChipFuture::poll(pin::Pin::new(write_fut), chip, cx) {
-                        task::Poll::Ready(Ok((encrypted_file_blocks, Ok(())))) => encrypted_file_blocks,
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
-                            this.fut_state = AllocBitmapFileInitializeFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
+                    this.encrypted_file_blocks =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
+                            task::Poll::Ready(Ok((encrypted_file_blocks, Ok(())))) => encrypted_file_blocks,
+                            task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                                this.fut_state = AllocBitmapFileInitializeFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
 
                     this.next_file_extent_allocation_block_index = *cur_file_extent_range_allocation_blocks_end;
                     if *cur_file_extent_range_write_allocation_blocks_end
                         != *cur_file_extent_range_allocation_blocks_end
                     {
-                        // At the end and the last Chip IO block is only partially filled by
+                        // At the end and the last Device IO block is only partially filled by
                         // Allocation Bitmap File Blocks. Return the remainder for the caller to
                         // handle it alongside other data subsequent to the Allocation Bitmap File.
                         debug_assert_eq!(*cur_file_extent_range_allocation_blocks_end, this.file_extent.end());
@@ -1395,8 +1395,8 @@ impl<C: chip::NvChip> AllocBitmapFileInitializeFuture<C> {
 /// by some entry in the
 /// [`JournalApplyWritesScript`](journal::apply_script::JournalApplyWritesScript)
 /// are read from the respective journal staging copy.
-pub struct AllocBitmapFileReadJournalFragmentsFuture<C: chip::NvChip> {
-    fut_state: AllocBitmapFileReadJournalFragmentsFutureState<C>,
+pub struct AllocBitmapFileReadJournalFragmentsFuture<B: blkdev::NvBlkDev> {
+    fut_state: AllocBitmapFileReadJournalFragmentsFutureState<B>,
     fragments_auth_digests: ExtentsCoveringAuthDigests,
     /// Indices into file_extents, sorted by the extents' relative order.
     ordered_file_extents: Vec<usize>,
@@ -1409,19 +1409,19 @@ pub struct AllocBitmapFileReadJournalFragmentsFuture<C: chip::NvChip> {
     fragments_auth_digests_index: usize,
     ordered_file_extents_index: usize,
     apply_writes_script_index: usize,
-    preferred_chip_io_bulk_allocation_blocks_log2: u8,
+    preferred_blkdev_io_bulk_allocation_blocks_log2: u8,
     read_buffers_total_allocation_blocks_log2: u8,
 }
 
 /// Internal [`AllocBitmapFileReadJournalFragmentsFuture::poll()`] state-machine
 /// state.
-enum AllocBitmapFileReadJournalFragmentsFutureState<C: chip::NvChip> {
+enum AllocBitmapFileReadJournalFragmentsFutureState<B: blkdev::NvBlkDev> {
     PrepareReadRegion {
         fragments_auth_digests_index: usize,
         offset_allocation_blocks_in_fragment_auth_tree_data_block: layout::AllocBlockCount,
     },
     ReadRegion {
-        read_fut: C::ReadFuture<AllocBitmapFileReadJournalFragmentsNvChipReadRequest>,
+        read_fut: B::ReadFuture<AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest>,
         read_region_src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         read_region_first_fragments_auth_digests_index: usize,
         fragments_auth_digests_index: usize,
@@ -1434,12 +1434,12 @@ enum AllocBitmapFileReadJournalFragmentsFutureState<C: chip::NvChip> {
     Done,
 }
 
-impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
+impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
     /// Instantiate a [`AllocBitmapFileReadJournalFragmentsFuture`].
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `fragments_auth_digests` - The fragment's authentication digests, as
     ///   [decoded](ExtentsCoveringAuthDigests::decode) from the
     ///   [`AllocBitmapFileFragmentsAuthDigests`](journal::log::JournalLogFieldTag::AllocBitmapFileFragmentsAuthDigests`)
@@ -1455,7 +1455,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
     /// * `keys_cache` - A [KeyCache](keys::KeyCache) instance associated with
     ///   the `root_key`.
     pub fn new<ST: sync_types::SyncTypes>(
-        chip: &C,
+        blkdev: &B,
         fragments_auth_digests: ExtentsCoveringAuthDigests,
         file: &AllocBitmapFile,
         image_layout: &layout::ImageLayout,
@@ -1508,7 +1508,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
             if ordered_file_extents_index == ordered_file_extents.len() {
                 // No overlap with any Allocation Bitmap file extent.
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
             let cur_extent = file
@@ -1522,7 +1522,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                 // No overlap with any Allocation Bitmap file extent or the fragment does not
                 // align with a Allocation Bitmap File Block's beginning.
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
             if (fragments_auth_digests.len() - fragments_auth_digests_index) >> file_block_auth_tree_data_blocks_log2
@@ -1537,7 +1537,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
             {
                 // The current Allocation Bitmap File Block is not fully covered.
                 return Err(NvFsError::from(
-                    CocoonFsFormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
+                    FormatError::UnexpectedJournalExtentsCoveringAuthDigestsEntry,
                 ));
             }
 
@@ -1597,18 +1597,18 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
             file_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2)
         );
 
-        let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-        // Preferred Chip IO read size. Ramp it up to a reasonable value still
+        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+        // Preferred Device IO read size. Ramp it up to a reasonable value still
         // compatible with the Allocation Bitmap File's extents' guaranteed
         // alignment, i.e. to an Authentication Tree Data Block.
-        let preferred_chip_io_bulk_allocation_blocks_log2 =
-            (chip.preferred_chip_io_blocks_bulk_log2() + chip_io_block_size_128b_log2)
+        let preferred_blkdev_io_bulk_allocation_blocks_log2 =
+            (blkdev.preferred_io_blocks_bulk_log2() + blkdev_io_block_size_128b_log2)
                 .saturating_sub(allocation_block_size_128b_log2)
                 .min(usize::BITS - 1)
                 .max(auth_tree_data_block_allocation_blocks_log2) as u8;
-        // The read buffers should be able to hold the larger of the preferred Chip IO
+        // The read buffers should be able to hold the larger of the preferred Device IO
         // block size and the fragment size.
-        let read_buffers_total_allocation_blocks_log2 = (preferred_chip_io_bulk_allocation_blocks_log2 as u32)
+        let read_buffers_total_allocation_blocks_log2 = (preferred_blkdev_io_bulk_allocation_blocks_log2 as u32)
             .max(fragment_allocation_blocks_log2)
             .min(usize::BITS - 1) as u8;
 
@@ -1636,7 +1636,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
             fragments_auth_digests_index: 0,
             ordered_file_extents_index: 0,
             apply_writes_script_index: 0,
-            preferred_chip_io_bulk_allocation_blocks_log2,
+            preferred_blkdev_io_bulk_allocation_blocks_log2,
             read_buffers_total_allocation_blocks_log2,
         })
     }
@@ -1654,7 +1654,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `file` - The [`AllocBitmapFile`] to read fragments from.
     /// * `image_layout` - The filesystem's
     ///   [`ImageLayout`](layout::ImageLayout).
@@ -1675,7 +1675,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
     #[allow(clippy::too_many_arguments)]
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         file: &AllocBitmapFile,
         image_layout: &layout::ImageLayout,
         auth_tree_config: &auth_tree::AuthTreeConfig,
@@ -1719,11 +1719,11 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                         file_block_allocation_blocks_log2.saturating_sub(auth_tree_data_block_allocation_blocks_log2);
                     let fragment_allocation_blocks_log2 =
                         file_block_auth_tree_data_blocks_log2 + auth_tree_data_block_allocation_blocks_log2;
-                    let chip_io_block_allocation_blocks_log2 = chip
-                        .chip_io_block_size_128b_log2()
+                    let blkdev_io_block_allocation_blocks_log2 = blkdev
+                        .io_block_size_128b_log2()
                         .saturating_sub(allocation_block_size_128b_log2);
-                    let preferred_chip_io_bulk_allocation_blocks_log2 =
-                        this.preferred_chip_io_bulk_allocation_blocks_log2 as u32;
+                    let preferred_blkdev_io_bulk_allocation_blocks_log2 =
+                        this.preferred_blkdev_io_bulk_allocation_blocks_log2 as u32;
                     let read_buffers_total_allocation_blocks_log2 =
                         this.read_buffers_total_allocation_blocks_log2 as u32;
 
@@ -1822,12 +1822,12 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                     let mut max_cur_read_region_end_step_allocation_blocks = (1u64 << fragment_allocation_blocks_log2)
                         - (u64::from(cur_read_region_allocation_blocks_end - cur_file_extent.begin())
                             & u64::trailing_bits_mask(fragment_allocation_blocks_log2));
-                    // Distance to the next preferred Chip IO boundary or Journal Apply script
+                    // Distance to the next preferred Device IO boundary or Journal Apply script
                     // discontinuity, whichever comes first.
                     let mut cur_read_region_max_end_distance_allocation_blocks = (1u64
-                        << preferred_chip_io_bulk_allocation_blocks_log2)
+                        << preferred_blkdev_io_bulk_allocation_blocks_log2)
                         - (u64::from(cur_read_region_allocation_blocks_end)
-                            & u64::trailing_bits_mask(preferred_chip_io_bulk_allocation_blocks_log2));
+                            & u64::trailing_bits_mask(preferred_blkdev_io_bulk_allocation_blocks_log2));
                     if this.apply_writes_script_index < apply_writes_script.len() {
                         let next_apply_writes_script_entry = &apply_writes_script[this.apply_writes_script_index];
                         let next_apply_writes_script_discontinuity_allocation_block_index =
@@ -1839,10 +1839,10 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                                 next_apply_writes_script_entry.get_target_range().end()
                             };
                         // Journal apply script entries' associated boundaries are always
-                        // aligned to the IO Block size, hence also to the Chip IO Block size.
+                        // aligned to the IO Block size, hence also to the Device IO Block size.
                         debug_assert!(
                             u64::from(next_apply_writes_script_discontinuity_allocation_block_index)
-                                .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                                .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
                         );
                         cur_read_region_max_end_distance_allocation_blocks =
                             cur_read_region_max_end_distance_allocation_blocks.min(u64::from(
@@ -1851,22 +1851,22 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                             ));
                     }
                     loop {
-                        // Limit the read region to not exceed past the next preferred Chip IO boundary
-                        // or Journal Apply script discontinuity.
+                        // Limit the read region to not exceed past the next preferred Device IO
+                        // boundary or Journal Apply script discontinuity.
                         debug_assert!(
                             u64::from(*offset_allocation_blocks_in_fragment_auth_tree_data_block)
-                                .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                                .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
                         );
                         debug_assert!(
-                            chip_io_block_allocation_blocks_log2 < auth_tree_data_block_allocation_blocks_log2
+                            blkdev_io_block_allocation_blocks_log2 < auth_tree_data_block_allocation_blocks_log2
                                 || u64::from(*offset_allocation_blocks_in_fragment_auth_tree_data_block) == 0
                         );
-                        // The preferred Chip IO boundaries are aligned to the larger of
-                        // a Chip IO block and an Authentication Tree Data Block's size, c.f.
+                        // The preferred Device IO boundaries are aligned to the larger of
+                        // a Device IO block and an Authentication Tree Data Block's size, c.f.
                         // Self::new().
                         debug_assert!(
-                            preferred_chip_io_bulk_allocation_blocks_log2
-                                >= chip_io_block_allocation_blocks_log2
+                            preferred_blkdev_io_bulk_allocation_blocks_log2
+                                >= blkdev_io_block_allocation_blocks_log2
                                     .max(auth_tree_data_block_allocation_blocks_log2)
                         );
                         if cur_read_region_max_end_distance_allocation_blocks
@@ -1906,10 +1906,10 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                             // The invariants still hold.
                             debug_assert!(
                                 u64::from(*offset_allocation_blocks_in_fragment_auth_tree_data_block)
-                                    .is_aligned_pow2(chip_io_block_allocation_blocks_log2)
+                                    .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
                             );
                             debug_assert!(
-                                chip_io_block_allocation_blocks_log2 < auth_tree_data_block_allocation_blocks_log2
+                                blkdev_io_block_allocation_blocks_log2 < auth_tree_data_block_allocation_blocks_log2
                                     || u64::from(*offset_allocation_blocks_in_fragment_auth_tree_data_block) == 0
                             );
 
@@ -1951,11 +1951,11 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                                 .is_aligned_pow2(fragment_allocation_blocks_log2)
                         );
 
-                        // If crossing a preferred Chip IO boundary, stop and read what's been found
+                        // If crossing a preferred Device IO boundary, stop and read what's been found
                         // so far.
                         if (u64::from(cur_fragment_allocation_blocks_begin)
                             ^ u64::from(cur_read_region_allocation_blocks_begin))
-                            >> preferred_chip_io_bulk_allocation_blocks_log2
+                            >> preferred_blkdev_io_bulk_allocation_blocks_log2
                             != 0
                         {
                             break;
@@ -1979,12 +1979,12 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                             break;
                         }
 
-                        // If there's a Chip IO block sized gap, stop and read what's been found so
+                        // If there's a Device IO block sized gap, stop and read what's been found so
                         // far.
                         if (u64::from(cur_fragment_allocation_blocks_begin)
                             - (u64::from(cur_read_region_allocation_blocks_end) - 1)
-                                .round_down_pow2(chip_io_block_allocation_blocks_log2))
-                            >> chip_io_block_allocation_blocks_log2
+                                .round_down_pow2(blkdev_io_block_allocation_blocks_log2))
+                            >> blkdev_io_block_allocation_blocks_log2
                             > 1
                         {
                             break;
@@ -2003,7 +2003,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                     );
                     debug_assert!(
                         u64::from(cur_read_region_allocation_blocks_end - cur_read_region_allocation_blocks_begin)
-                            <= 1u64 << preferred_chip_io_bulk_allocation_blocks_log2
+                            <= 1u64 << preferred_blkdev_io_bulk_allocation_blocks_log2
                     );
 
                     // Read the found region.
@@ -2044,7 +2044,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                         cur_read_region_src_allocation_blocks_begin,
                         cur_read_region_src_allocation_blocks_end,
                     )
-                    .align(chip_io_block_allocation_blocks_log2)
+                    .align(blkdev_io_block_allocation_blocks_log2)
                     {
                         Some(aligned_cur_read_region_src) => aligned_cur_read_region_src,
                         None => {
@@ -2082,7 +2082,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                                     nvfs_err_internal!()
                                 }
                                 ChunkedIoRegionError::ChunkIndexOverflow => {
-                                    // No more that the preferred Chip IO block size is ever read at once and
+                                    // No more that the preferred Device IO block size is ever read at once and
                                     // that in units of Allocation Blocks has been capped to fit an usize.
                                     nvfs_err_internal!()
                                 }
@@ -2090,7 +2090,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                             }));
                         }
                     };
-                    let read_request = AllocBitmapFileReadJournalFragmentsNvChipReadRequest {
+                    let read_request = AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
                         region: read_request_region,
                         read_buffers_base_target_allocation_block_index: this.fragments_auth_digests
                             [this.fragments_auth_digests_index]
@@ -2099,9 +2099,9 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                         read_buffers: mem::take(&mut this.read_buffers),
                         read_buffer_allocation_blocks_log2: fragment_allocation_blocks_log2 as u8,
                         allocation_block_size_128b_log2: image_layout.allocation_block_size_128b_log2,
-                        chip_io_block_allocation_blocks_log2: chip_io_block_allocation_blocks_log2 as u8,
+                        blkdev_io_block_allocation_blocks_log2: blkdev_io_block_allocation_blocks_log2 as u8,
                     };
-                    let read_fut = match chip.read(read_request) {
+                    let read_fut = match blkdev.read(read_request) {
                         Ok(Ok(read_fut)) => read_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Done;
@@ -2126,7 +2126,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                     offset_allocation_blocks_in_fragment_auth_tree_data_block,
                     from_journal,
                 } => {
-                    let read_request = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Done;
@@ -2135,7 +2135,7 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let AllocBitmapFileReadJournalFragmentsNvChipReadRequest {
+                    let AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
                         read_region_target_allocation_blocks_begin,
                         read_buffers,
                         ..
@@ -2391,19 +2391,19 @@ impl<C: chip::NvChip> AllocBitmapFileReadJournalFragmentsFuture<C> {
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by  [`AllocBitmapFileReadJournalFragmentsFuture`].
-struct AllocBitmapFileReadJournalFragmentsNvChipReadRequest {
+struct AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
     region: ChunkedIoRegion,
     read_buffers_base_target_allocation_block_index: layout::PhysicalAllocBlockIndex,
     read_region_target_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
     read_buffer_allocation_blocks_log2: u8,
     allocation_block_size_128b_log2: u8,
-    chip_io_block_allocation_blocks_log2: u8,
+    blkdev_io_block_allocation_blocks_log2: u8,
 }
 
-impl chip::NvChipReadRequest for AllocBitmapFileReadJournalFragmentsNvChipReadRequest {
+impl blkdev::NvBlkDevReadRequest for AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.region
     }
@@ -2411,10 +2411,10 @@ impl chip::NvChipReadRequest for AllocBitmapFileReadJournalFragmentsNvChipReadRe
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
         let (allocation_block_index_in_aligned_region, _) = range.chunk().decompose_to_hierarchic_indices([]);
         let read_region_head_alignment_allocation_blocks = (u64::from(self.read_region_target_allocation_blocks_begin)
-            & u64::trailing_bits_mask(self.chip_io_block_allocation_blocks_log2 as u32))
+            & u64::trailing_bits_mask(self.blkdev_io_block_allocation_blocks_log2 as u32))
             as usize;
         if allocation_block_index_in_aligned_region < read_region_head_alignment_allocation_blocks {
             return Ok(None);
@@ -2433,9 +2433,9 @@ impl chip::NvChipReadRequest for AllocBitmapFileReadJournalFragmentsNvChipReadRe
             - region_allocation_blocks_offset_in_read_buffers
             <= allocation_block_index_in_region
         {
-            // Padding for Chip IO block alignment at the tail. Note that the condition does
-            // not catch all padding reads, only those beyond the read_buffers,
-            // but that's Ok.
+            // Padding for Device IO block alignment at the tail. Note that the condition
+            // does not catch all padding reads, only those beyond the
+            // read_buffers, but that's Ok.
             return Ok(None);
         }
 

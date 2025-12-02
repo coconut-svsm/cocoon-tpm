@@ -14,7 +14,7 @@ use super::{
     auth_tree_data_blocks_update_states::{AuthTreeDataBlocksUpdateStates, AuthTreeDataBlocksUpdateStatesIndex},
 };
 use crate::{
-    chip,
+    blkdev,
     fs::{
         NvFsError,
         cocoonfs::{
@@ -37,28 +37,28 @@ use layout::ImageLayout;
 /// Compute the updated digest of an [Authentication Tree Data
 /// Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) with some
 /// deallocations but no data modifications in it.
-struct RedigestAuthTreeDataBlockFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+struct RedigestAuthTreeDataBlockFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     auth_tree_data_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     updated_auth_tree_data_block_alloc_bitmap: alloc_bitmap::BitmapWord,
     auth_tree_data_block_allocation_blocks_bufs: FixedVec<Option<FixedVec<u8, 7>>, 0>,
-    fut_state: RedigestAuthTreeDataBlockFutureState<C>,
+    fut_state: RedigestAuthTreeDataBlockFutureState<B>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
 /// [`RedigestAuthTreeDataBlockFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum RedigestAuthTreeDataBlockFutureState<C: chip::NvChip> {
+enum RedigestAuthTreeDataBlockFutureState<B: blkdev::NvBlkDev> {
     DetermineNextReadAuthenticateSubrange {
         next_allocation_block_index: layout::PhysicalAllocBlockIndex,
     },
     ReadAuthenticateSubrange {
         subrange: layout::PhysicalAllocBlockRange,
-        read_auth_subrange_fut: read_buffer::BufferedReadAuthenticateDataFuture<C>,
+        read_auth_subrange_fut: read_buffer::BufferedReadAuthenticateDataFuture<B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> RedigestAuthTreeDataBlockFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> RedigestAuthTreeDataBlockFuture<ST, B> {
     /// Instantiate a [`RedigestAuthTreeDataBlockFuture`].
     ///
     /// # Arguments:
@@ -105,8 +105,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> RedigestAuthTreeDataBlockFuture
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for RedigestAuthTreeDataBlockFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for RedigestAuthTreeDataBlockFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -119,7 +119,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -182,7 +182,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         &next_subrange,
                         &fs_instance.fs_config.image_layout,
                         fs_instance_sync_state.auth_tree.get_config(),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                     ) {
                         Ok(read_auth_next_subrange_fut) => read_auth_next_subrange_fut,
                         Err(e) => {
@@ -213,7 +213,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let mut subrange_allocation_blocks_bufs =
                         match read_buffer::BufferedReadAuthenticateDataFuture::poll(
                             pin::Pin::new(read_auth_subrange_fut),
-                            &fs_instance.chip,
+                            &fs_instance.blkdev,
                             &fs_config.image_layout,
                             fs_config.image_header_end,
                             fs_sync_state_alloc_bitmap,
@@ -256,15 +256,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 ///
 /// Used for [preparing](auth_tree::AuthTreePrepareUpdatesFuture) updates to the
 /// authentication tree upon [`Transaction`] commit.
-pub struct TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     transaction: Option<Box<Transaction>>,
     next_auth_tree_data_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
     next_pending_free: Option<(layout::PhysicalAllocBlockIndex, alloc_bitmap::BitmapWord)>,
-    redigest_auth_tree_data_block_fut: Option<RedigestAuthTreeDataBlockFuture<ST, C>>,
+    redigest_auth_tree_data_block_fut: Option<RedigestAuthTreeDataBlockFuture<ST, B>>,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, B> {
     /// Instantiate a new
     /// [`TransactionAuthTreeDataBlocksDigestsUpdatesIterator`].
     ///
@@ -360,12 +360,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> TransactionAuthTreeDataBlocksDi
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> auth_tree::AuthTreeDataBlocksUpdatesIterator<ST, C>
-    for TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> auth_tree::AuthTreeDataBlocksUpdatesIterator<ST, B>
+    for TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, B>
 {
     fn poll_for_next(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Option<auth_tree::PhysicalAuthTreeDataBlockUpdate>, NvFsError>> {
         let this = pin::Pin::into_inner(self);

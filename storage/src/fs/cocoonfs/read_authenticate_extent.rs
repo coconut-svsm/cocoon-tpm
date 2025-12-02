@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use crate::{
-    chip,
+    blkdev,
     crypto::CryptoError,
     fs::{
         NvFsError,
@@ -146,29 +146,29 @@ impl<'a> Iterator for ReadAuthenticateExtentFutureResultAllocationBlocksBufsIter
 
 /// Read and authenticate a given data storage extent, optionally through a
 /// pending [`Transaction`].
-pub struct ReadAuthenticateExtentFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: ReadAuthenticateExtentFutureState<C>,
+pub struct ReadAuthenticateExtentFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: ReadAuthenticateExtentFutureState<B>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
 /// [`ReadAuthenticateExtentFuture`] state-machine state.
-enum ReadAuthenticateExtentFutureState<C: chip::NvChip> {
+enum ReadAuthenticateExtentFutureState<B: blkdev::NvBlkDev> {
     Init {
         transaction: Option<Box<Transaction>>,
         request_range: layout::PhysicalAllocBlockRange,
     },
     ReadCommitted {
         returned_transaction: Option<Box<Transaction>>,
-        read_fut: BufferedReadAuthenticateDataFuture<C>,
+        read_fut: BufferedReadAuthenticateDataFuture<B>,
     },
     ReadUncommited {
         update_states_allocation_blocks_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-        read_fut: TransactionReadAuthenticateDataFuture<C>,
+        read_fut: TransactionReadAuthenticateDataFuture<B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadAuthenticateExtentFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadAuthenticateExtentFuture<ST, B> {
     /// Instantiate a [`ReadAuthenticateExtentFuture`].
     ///
     /// The requested storage extent, as specified through `request_range`, may
@@ -200,8 +200,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> ReadAuthenticateExtentFuture<ST
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for ReadAuthenticateExtentFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for ReadAuthenticateExtentFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -214,7 +214,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: core::pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
@@ -291,7 +291,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         request_range,
                         &fs_instance.fs_config.image_layout,
                         fs_instance_sync_state.auth_tree.get_config(),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                     ) {
                         Ok(read_fut) => read_fut,
                         Err(e) => {
@@ -322,7 +322,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let fs_config = &fs_instance.fs_config;
                     match BufferedReadAuthenticateDataFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_config.image_layout,
                         fs_config.image_header_end,
                         fs_sync_state_alloc_bitmap,
@@ -354,7 +354,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         fs_instance_sync_state.fs_instance_and_destructure_borrow();
                     match TransactionReadAuthenticateDataFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,

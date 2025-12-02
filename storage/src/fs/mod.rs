@@ -11,7 +11,7 @@
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
-use crate::chip;
+use crate::blkdev;
 use crate::crypto::{self, rng};
 use crate::utils_async::sync_types::{self, SyncRcPtrRef as _};
 use crate::utils_common::{self, zeroize};
@@ -136,15 +136,15 @@ impl convert::From<alloc::collections::TryReserveError> for NvFsError {
     }
 }
 
-impl convert::From<chip::NvChipIoError> for NvFsError {
-    fn from(value: chip::NvChipIoError) -> Self {
+impl convert::From<blkdev::NvBlkDevIoError> for NvFsError {
+    fn from(value: blkdev::NvBlkDevIoError) -> Self {
         match value {
-            chip::NvChipIoError::Internal => Self::Internal,
-            chip::NvChipIoError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
-            chip::NvChipIoError::OperationNotSupported => Self::OperationNotSupported,
-            chip::NvChipIoError::IoBlockOutOfRange => Self::IoError(NvFsIoError::RegionOutOfRange),
-            chip::NvChipIoError::IoBlockNotMapped => Self::IoError(NvFsIoError::RegionNotMapped),
-            chip::NvChipIoError::IoFailure => Self::IoError(NvFsIoError::IoFailure),
+            blkdev::NvBlkDevIoError::Internal => Self::Internal,
+            blkdev::NvBlkDevIoError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
+            blkdev::NvBlkDevIoError::OperationNotSupported => Self::OperationNotSupported,
+            blkdev::NvBlkDevIoError::IoBlockOutOfRange => Self::IoError(NvFsIoError::RegionOutOfRange),
+            blkdev::NvBlkDevIoError::IoBlockNotMapped => Self::IoError(NvFsIoError::RegionNotMapped),
+            blkdev::NvBlkDevIoError::IoFailure => Self::IoError(NvFsIoError::IoFailure),
         }
     }
 }

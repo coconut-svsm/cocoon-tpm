@@ -2,7 +2,7 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
-//! Definition of the [`NvChip`] trait, a block device abstraction for
+//! Definition of the [`NvBlkDev`] trait, a block device abstraction for
 //! [`NvFs`](super::fs::NvFs) implementations to build on.
 
 extern crate alloc;
@@ -18,9 +18,9 @@ pub use chunked_io_region::{
 
 pub mod test;
 
-/// Error type returned by [`NvChip`] primitives.
+/// Error type returned by [`NvBlkDev`] primitives.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum NvChipIoError {
+pub enum NvBlkDevIoError {
     /// Logic error.
     Internal,
 
@@ -41,13 +41,13 @@ pub enum NvChipIoError {
     IoFailure,
 }
 
-impl convert::From<convert::Infallible> for NvChipIoError {
+impl convert::From<convert::Infallible> for NvBlkDevIoError {
     fn from(value: convert::Infallible) -> Self {
         match value {}
     }
 }
 
-impl convert::From<utils_common::alloc::TryNewError> for NvChipIoError {
+impl convert::From<utils_common::alloc::TryNewError> for NvBlkDevIoError {
     fn from(value: utils_common::alloc::TryNewError) -> Self {
         match value {
             utils_common::alloc::TryNewError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
@@ -55,14 +55,14 @@ impl convert::From<utils_common::alloc::TryNewError> for NvChipIoError {
     }
 }
 
-impl convert::From<utils_common::fixed_vec::FixedVecMemoryAllocationFailure> for NvChipIoError {
+impl convert::From<utils_common::fixed_vec::FixedVecMemoryAllocationFailure> for NvBlkDevIoError {
     fn from(_value: utils_common::fixed_vec::FixedVecMemoryAllocationFailure) -> Self {
         Self::MemoryAllocationFailure
     }
 }
 
-impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<NvChipIoError>> for NvChipIoError {
-    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<NvChipIoError>) -> Self {
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<NvBlkDevIoError>> for NvBlkDevIoError {
+    fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<NvBlkDevIoError>) -> Self {
         match value {
             utils_common::fixed_vec::FixedVecNewFromFnError::MemoryAllocationFailure => Self::MemoryAllocationFailure,
             utils_common::fixed_vec::FixedVecNewFromFnError::FnError(e) => e,
@@ -70,57 +70,57 @@ impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<NvChipIoError
     }
 }
 
-impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>> for NvChipIoError {
+impl convert::From<utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>> for NvBlkDevIoError {
     fn from(value: utils_common::fixed_vec::FixedVecNewFromFnError<convert::Infallible>) -> Self {
         Self::from(utils_common::fixed_vec::FixedVecMemoryAllocationFailure::from(value))
     }
 }
 
-impl convert::From<alloc::collections::TryReserveError> for NvChipIoError {
+impl convert::From<alloc::collections::TryReserveError> for NvBlkDevIoError {
     fn from(_value: alloc::collections::TryReserveError) -> Self {
         Self::MemoryAllocationFailure
     }
 }
 
-/// Debugging friendly helper for [`NvChip`] implementations to instantiate
-/// [`NvChipIoError::Internal`].
+/// Debugging friendly helper for [`NvBlkDev`] implementations to instantiate
+/// [`NvBlkDevIoError::Internal`].
 ///
 /// Panics if `cfg!(debug_assertions)` is on, to allow for debugger examination
 /// at the point the logic error has happened. Otherwise a
-/// [`NvChipIoError::Internal`] is returned.
+/// [`NvBlkDevIoError::Internal`] is returned.
 #[macro_export]
-macro_rules! nvchip_err_internal {
+macro_rules! nvblkdev_err_internal {
     () => {{
         if cfg!(debug_assertions) {
-            panic!("NvChipError::Internal");
+            panic!("NvBlkDevIoError::Internal");
         } else {
-            $crate::chip::NvChipIoError::Internal
+            $crate::blkdev::NvBlkDevIoError::Internal
         }
     }};
 }
 
-/// Future trait implemented by all [`NvChip`] related futures.
+/// Future trait implemented by all [`NvBlkDev`] related futures.
 ///
-/// `NvChipFuture` differs from the standard [Rust
-/// `Future`](core::future::Future) only in that it takes an additional `chip`
+/// `NvBlkDevFuture` differs from the standard [Rust
+/// `Future`](core::future::Future) only in that it takes an additional `dev`
 /// argument, thereby potentially avoiding the need of creating and
 /// storing additional [`SyncRcPtr`](crate::utils_async::sync_types::SyncRcPtr)
-/// clones for the [`NvChip`] instance.
-pub trait NvChipFuture<C: ?Sized + NvChip>: marker::Send {
+/// clones for the [`NvBlkDev`] instance.
+pub trait NvBlkDevFuture<B: ?Sized + NvBlkDev>: marker::Send {
     type Output;
 
-    /// Poll on a [`NvChipFuture`].
+    /// Poll on a [`NvBlkDevFuture`].
     ///
     /// Completely analogous to the standard [Rust
     /// `Future::poll()`](core::future::Future::poll), except for the
-    /// additional `chip` argument.
+    /// additional `dev` argument.
     ///
     /// # Arguments:
     ///
-    /// * `chip` -The [`NvChip`] instance the [`NvChipFuture`] had been obtained
-    ///   from.
+    /// * `dev` -The [`NvBlkDev`] instance the [`NvBlkDevFuture`] had been
+    ///   obtained from.
     /// * `cx` - The context of an asynchronous task.
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output>;
+    fn poll(self: pin::Pin<&mut Self>, dev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output>;
 }
 
 /// Trait defining an interface to block device like storage backends for
@@ -128,26 +128,26 @@ pub trait NvChipFuture<C: ?Sized + NvChip>: marker::Send {
 ///
 /// Define primitives for querying a physical storage backend about its
 /// dimensions and characteristics, as well as for reading, writing and trimming
-/// contiguous, [block](Self::chip_io_block_size_128b_log2) aligned regions.
+/// contiguous, [block](Self::io_block_size_128b_log2) aligned regions.
 ///
 /// Most of the API is specified in terms of Rust `async` [`Future`] concept in
 /// order to enable dependant [`NvFs`](super::fs::NvFs) implementations to
 /// target a wide range of possible execution environments with different
 /// characteristics.
 ///
-/// In general, a storage backend `NvChip` implementation is tightly coupled to
-/// the target `async` execution environment by nature though. `NvChip`
+/// In general, a storage backend `NvBlkDev` implementation is tightly coupled
+/// to the target `async` execution environment by nature though. `NvBlkDev`
 /// implementations may therefore assume a specific `async` executor
 /// implementation to be deployed with. For example, if targetting some minimal
 /// executor like [`Pollster`](https://docs.rs/pollster/latest/pollster/), it would be
 /// absolutely legitimate to block the current's thread's execution for IO.
 ///
-/// The `NvChip` methods don't in fact return [`Future`]s, but
-/// [`NvChipFuture`]s. The latter differ from the former only in that they take
-/// an additional `chip` argument, thereby potentially avoiding the need of
+/// The `NvBlkDev` methods don't in fact return [`Future`]s, but
+/// [`NvBlkDevFuture`]s. The latter differ from the former only in that they
+/// take an additional `dev` argument, thereby potentially avoiding the need of
 /// creating and storing additional
-/// [`SyncRcPtr`](crate::utils_async::sync_types::SyncRcPtr) clones
-/// for the `NvChip` instance.
+/// [`SyncRcPtr`](crate::utils_async::sync_types::SyncRcPtr) clones for the
+/// `NvBlkDev` instance.
 ///
 /// # Coherence considerations
 /// ## Intra-power-cycle coherence
@@ -155,7 +155,7 @@ pub trait NvChipFuture<C: ?Sized + NvChip>: marker::Send {
 /// By the very nature of the `async` execution model, there can be concurrent
 /// reads and writes to overlapping regions on storage. In what follows, it is
 /// assumed there's a total order on all points in time where some IO operation
-/// is initiated or [polled](NvChipFuture::poll) to completion.
+/// is initiated or [polled](NvBlkDevFuture::poll) to completion.
 /// The following coherence rules apply for any sequence of operations initiated
 /// from the same power cycle, in order of their priority:
 ///
@@ -204,33 +204,32 @@ pub trait NvChipFuture<C: ?Sized + NvChip>: marker::Send {
 /// effective on physical storage. More specifically how reads after a power
 /// cycling event relate to writes and trims somewhen before it.
 ///
-/// It is assumed that the minimum unit of IO,
-/// i.e. a ["Chip IO Block"](Self::chip_io_block_size_128b_log2), has the
-/// following semantics:
-/// * [Writes](Self::write) to or [trims](Self::trim) of one ["Chip IO
-///   Block"](Self::chip_io_block_size_128b_log2) do not affect any other [Chip
-///   IO Blocks](Self::chip_io_block_size_128b_log2).
-/// * [Writes](Self::write) to a single [Chip IO
-///   Block](Self::chip_io_block_size_128b_log2) are not necessarily atomic, but
+/// It is assumed that the minimum unit of IO, i.e. a ["Device IO
+/// Block"](Self::io_block_size_128b_log2), has the following semantics:
+/// * [Writes](Self::write) to or [trims](Self::trim) of one ["Device IO
+///   Block"](Self::io_block_size_128b_log2) do not affect any other [Device
+///   IO Blocks](Self::io_block_size_128b_log2).
+/// * [Writes](Self::write) to a single [Device IO
+///   Block](Self::io_block_size_128b_log2) are not necessarily atomic, but
 ///   -- assuming the absence of any power cycling events -- there is a point in
 ///   time when its physical state fully reflects the to be written state. It is
 ///   said that "a write becomes effective on physical storage" at that point in
 ///   time. Starting from when a write was initiatied up to when it possibly
-///   becomes effective on physical storage, the [Chip IO
-///   Block](Self::chip_io_block_size_128b_log2) "is under write". In
-///   particular, if a [Chip IO Block](Self::chip_io_block_size_128b_log2) is
+///   becomes effective on physical storage, the [Device IO
+///   Block](Self::io_block_size_128b_log2) "is under write". In
+///   particular, if a [Device IO Block](Self::io_block_size_128b_log2) is
 ///   under write at the time a power cycle event happens, it remains so until
 ///   eventually overwritten again (or trimmed) in a later power cycle.
 /// * [Trim](Self::trim) requests are at some point getting transmitted to the
 ///   physical storage backend, from when on they're said to have "commenced".
-/// * For a single given [Chip IO Block](Self::chip_io_block_size_128b_log2),
-///   there is a total order on the writes and trims. That is a given [Chip IO
-///   Block](Self::chip_io_block_size_128b_log2) can be either under write, a
+/// * For a single given [Device IO Block](Self::io_block_size_128b_log2),
+///   there is a total order on the writes and trims. That is a given [Device IO
+///   Block](Self::io_block_size_128b_log2) can be either under write, a
 ///   write to it may have become effective on physical storage or a trim may
 ///   have commenced.
-/// * Reading from a [Chip IO Block](Self::chip_io_block_size_128b_log2) under
+/// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) under
 ///   write results in arbitrary data to be returned.
-/// * Reading from a [Chip IO Block](Self::chip_io_block_size_128b_log2) for
+/// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) for
 ///   which a trim has commenced results in implementation defined behavior.
 ///   That is, it's an `unreachable()` condition.
 /// * Power cycle events behave as if a virtual [write
@@ -242,7 +241,7 @@ pub trait NvChipFuture<C: ?Sized + NvChip>: marker::Send {
 ///   completion, it is guaranteed that any writes initiated prior to it have
 ///   become effective on physical storage.
 /// * In the absence of any [write barrier](Self::write_barrier), writes to and
-///   trims of *different* [Chip IO Block](Self::chip_io_block_size_128b_log2)
+///   trims of *different* [Device IO Block](Self::io_block_size_128b_log2)
 ///   may become effective on physical storage or commence respectively in any
 ///   order.
 ///   - [Writes](Self::write) issued after a [write
@@ -255,66 +254,67 @@ pub trait NvChipFuture<C: ?Sized + NvChip>: marker::Send {
 ///     not commence before any [writes](Self::WriteFuture) polled to completion
 ///     before the [write barrier request](Self::write_barrier) became effective
 ///     on physical storage.
-pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
+pub trait NvBlkDev: marker::Unpin + marker::Send + marker::Sync + 'static {
     /// The minium IO unit guaranteed not to affect neighbouring blocks
     ///
-    /// Referred to in this documentation as "Chip IO Block" size. To be
-    /// returned as the base-2 logarithm of that minimum Chip IO Block size as
-    /// given in units of 128 Byte multiples.
+    /// Referred to in this documentation as "(Block) Device IO Block" size. To
+    /// be returned as the base-2 logarithm of that minimum Device IO Block
+    /// size as given in units of 128 Byte multiples.
     ///
     /// In order to avoid any TOCTOU issues, an implementation must always
-    /// consistently return the same value for a given [`NvChip`] instance.
-    fn chip_io_block_size_128b_log2(&self) -> u32;
+    /// consistently return the same value for a given [`NvBlkDev`] instance.
+    fn io_block_size_128b_log2(&self) -> u32;
 
-    /// The current size of the backing NV memory in units of [Chip IO
-    /// Blocks](Self::chip_io_block_size_128b_log2).
-    fn chip_io_blocks(&self) -> u64;
+    /// The current size of the backing NV memory in units of [Device IO
+    /// Blocks](Self::io_block_size_128b_log2).
+    fn io_blocks(&self) -> u64;
 
-    /// Optimum number of [Chip IO
-    /// Blocks](Self::chip_io_block_size_128b_log2) to process at
+    /// Optimum number of [Device IO
+    /// Blocks](Self::io_block_size_128b_log2) to process at
     /// once.
     ///
-    /// To be returned as a base-2 logarithm of the value in units of [Chip IO
-    /// blocks](Self::chip_io_block_size_128b_log2. For example, a memory-backed
+    /// To be returned as a base-2 logarithm of the value in units of [Device IO
+    /// blocks](Self::io_block_size_128b_log2. For example, a memory-backed
     /// implementation might guarantee that writes to individual 128 Byte
     /// allocation units won't affect neighbouring data, but prefer IO to
     /// processed in units of 4K pages for performance reasons.
     ///
     /// In order to avoid any TOCTOU issues, an implementation must always
-    /// consistently return the same value for a given [`NvChip`] instance.
-    fn preferred_chip_io_blocks_bulk_log2(&self) -> u32;
+    /// consistently return the same value for a given [`NvBlkDev`] instance.
+    fn preferred_io_blocks_bulk_log2(&self) -> u32;
 
-    /// `NvChip` implementation specific [future](NvChipFuture) type
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`resize()`](Self::resize).
-    type ResizeFuture: NvChipFuture<Self, Output = Result<(), NvChipIoError>> + marker::Unpin;
+    type ResizeFuture: NvBlkDevFuture<Self, Output = Result<(), NvBlkDevIoError>> + marker::Unpin;
 
     /// Attempt to resize, i.e. grow or shrink, the backing storage.
     ///
-    /// If unsupported, an error of [`NvChipIoError::OperationNotSupported`]
+    /// If unsupported, an error of [`NvBlkDevIoError::OperationNotSupported`]
     /// shall get returned.
     ///
     /// # Arguments:
     ///
-    /// * chip_io_blocks_count` - The new size, in units of [Chip IO
-    ///   Blocks](Self::chip_io_block_size_128b_log2).
-    fn resize(&self, chip_io_blocks_count: u64) -> Result<Self::ResizeFuture, NvChipIoError>;
+    /// * io_blocks` - The new size, in units of [Device IO
+    ///   Blocks](Self::io_block_size_128b_log2).
+    fn resize(&self, io_blocks: u64) -> Result<Self::ResizeFuture, NvBlkDevIoError>;
 
-    /// `NvChip` implementation specific [future](NvChipFuture) type
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`read()`](Self::read).
     ///
-    /// A two-level [`Result`] is returned upon [future](NvChipFuture)
+    /// A two-level [`Result`] is returned upon [future](NvBlkDevFuture)
     /// completion.
     /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
-    ///   encountering an internal error `e`. The [`request`](NvChipReadRequest)
-    ///   originally provided to [`read()`](Self::read) is lost.
+    ///   encountering an internal error `e`. The
+    ///   [`request`](NvBlkDevReadRequest) originally provided to
+    ///   [`read()`](Self::read) is lost.
     /// * `Ok((request, ...))` - Otherwise the outer level [`Result`] is set to
-    ///   [`Ok`] and a pair of the input [`request`](NvChipReadRequest) and the
-    ///   operation result will get returned within:
+    ///   [`Ok`] and a pair of the input [`request`](NvBlkDevReadRequest) and
+    ///   the operation result will get returned within:
     ///     * `Ok((request, Err(e)))` - In case of an error, the error reason
     ///       `e` is returned in an [`Err`].
     ///     * `Ok((request, Ok(())))` - Otherwise, `Ok(())` will get returned
     ///       for the operation result on success.
-    type ReadFuture<R: NvChipReadRequest>: NvChipFuture<Self, Output = Result<(R, Result<(), NvChipIoError>), NvChipIoError>>
+    type ReadFuture<R: NvBlkDevReadRequest>: NvBlkDevFuture<Self, Output = Result<(R, Result<(), NvBlkDevIoError>), NvBlkDevIoError>>
         + marker::Unpin;
 
     /// Read data from physical storage.
@@ -322,7 +322,7 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
     /// In order to avoid extensive allocations and data copies, the source
     /// buffer ownership is getting transferred to the
     /// [`ReadFuture`](Self::ReadFuture) in the form of a
-    /// [`NvChipReadRequest`] for the duration of the operation and eventually
+    /// [`NvBlkDevReadRequest`] for the duration of the operation and eventually
     /// returned back.
     ///
     /// The API interface does in principle allow for consuming the `request`,
@@ -333,34 +333,34 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
     ///
     /// # Arguments:
     ///
-    /// * `request` - The [`NvChipReadRequest`] describing where to read from as
-    ///   well as providing access to the destination buffers receiving the
+    /// * `request` - The [`NvBlkDevReadRequest`] describing where to read from
+    ///   as well as providing access to the destination buffers receiving the
     ///   result. The associated range is guaranteed to be
-    ///   [aligned](ChunkedIoRegion::is_aligned) to [Chip IO
-    ///   Blocks](Self::chip_io_block_size_128b_log2).
+    ///   [aligned](ChunkedIoRegion::is_aligned) to [Device IO
+    ///   Blocks](Self::io_block_size_128b_log2).
     #[allow(clippy::type_complexity)]
-    fn read<R: NvChipReadRequest>(
+    fn read<R: NvBlkDevReadRequest>(
         &self,
         request: R,
-    ) -> Result<Result<Self::ReadFuture<R>, (R, NvChipIoError)>, NvChipIoError>;
+    ) -> Result<Result<Self::ReadFuture<R>, (R, NvBlkDevIoError)>, NvBlkDevIoError>;
 
-    /// `NvChip` implementation specific [future](NvChipFuture) type
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`write()`](Self::write).
     ///
-    /// A two-level [`Result`] is returned upon [future](NvChipFuture)
+    /// A two-level [`Result`] is returned upon [future](NvBlkDevFuture)
     /// completion.
     /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
     ///   encountering an internal error `e`. The
-    ///   [`request`](NvChipWriteRequest) originally provided to
+    ///   [`request`](NvBlkDevWriteRequest) originally provided to
     ///   [`read()`](Self::read) is lost.
     /// * `Ok((request, ...))` - Otherwise the outer level [`Result`] is set to
-    ///   [`Ok`] and a pair of the input [`request`](NvChipWriteRequest) and the
-    ///   operation result will get returned within:
+    ///   [`Ok`] and a pair of the input [`request`](NvBlkDevWriteRequest) and
+    ///   the operation result will get returned within:
     ///     * `Ok((request, Err(e)))` - In case of an error, the error reason
     ///       `e` is returned in an [`Err`].
     ///     * `Ok((request, Ok(())))` - Otherwise, `Ok(())` will get returned
     ///       for the operation result on success.
-    type WriteFuture<R: NvChipWriteRequest>: NvChipFuture<Self, Output = Result<(R, Result<(), NvChipIoError>), NvChipIoError>>
+    type WriteFuture<R: NvBlkDevWriteRequest>: NvBlkDevFuture<Self, Output = Result<(R, Result<(), NvBlkDevIoError>), NvBlkDevIoError>>
         + marker::Unpin;
 
     /// Write data to physical storage.
@@ -368,8 +368,8 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
     /// In order to avoid extensive allocations and data copies, the source
     /// buffer ownership is getting transferred to the
     /// [`WriteFuture`](Self::WriteFuture) in the form of a
-    /// [`NvChipWriteRequest`] for the duration of the operation and eventually
-    /// returned back.
+    /// [`NvBlkDevWriteRequest`] for the duration of the operation and
+    /// eventually returned back.
     ///
     /// The API interface does in principle allow for consuming the `request`,
     /// but implementations should **only ever** do so on internal error
@@ -379,35 +379,35 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
     ///
     /// # Arguments:
     ///
-    /// * `request` - The [`NvChipWriteRequest`] describing where to write to as
-    ///   well as providing access to the source buffers to take the data from.
-    ///   The associated range is guaranteed to be
-    ///   [aligned](ChunkedIoRegion::is_aligned) to [Chip IO
-    ///   Blocks](Self::chip_io_block_size_128b_log2).
+    /// * `request` - The [`NvBlkDevWriteRequest`] describing where to write to
+    ///   as well as providing access to the source buffers to take the data
+    ///   from. The associated range is guaranteed to be
+    ///   [aligned](ChunkedIoRegion::is_aligned) to [Device IO
+    ///   Blocks](Self::io_block_size_128b_log2).
     #[allow(clippy::type_complexity)]
-    fn write<R: NvChipWriteRequest>(
+    fn write<R: NvBlkDevWriteRequest>(
         &self,
         request: R,
-    ) -> Result<Result<Self::WriteFuture<R>, (R, NvChipIoError)>, NvChipIoError>;
+    ) -> Result<Result<Self::WriteFuture<R>, (R, NvBlkDevIoError)>, NvBlkDevIoError>;
 
-    /// `NvChip` implementation specific [future](NvChipFuture) type
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`write_barrier()`](Self::write_barrier).
-    type WriteBarrierFuture: NvChipFuture<Self, Output = Result<(), NvChipIoError>> + marker::Unpin;
+    type WriteBarrierFuture: NvBlkDevFuture<Self, Output = Result<(), NvBlkDevIoError>> + marker::Unpin;
 
     /// Issue a reordering barrier for any pending writes and trims to
     /// subsequently issued ones.
-    fn write_barrier(&self) -> Result<Self::WriteBarrierFuture, NvChipIoError>;
+    fn write_barrier(&self) -> Result<Self::WriteBarrierFuture, NvBlkDevIoError>;
 
-    /// `NvChip` implementation specific [future](NvChipFuture) type
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`write_sync()`](Self::write_sync).
-    type WriteSyncFuture: NvChipFuture<Self, Output = Result<(), NvChipIoError>> + marker::Unpin;
+    type WriteSyncFuture: NvBlkDevFuture<Self, Output = Result<(), NvBlkDevIoError>> + marker::Unpin;
 
     /// Sync all pending writes to the backing storage.
-    fn write_sync(&self) -> Result<Self::WriteSyncFuture, NvChipIoError>;
+    fn write_sync(&self) -> Result<Self::WriteSyncFuture, NvBlkDevIoError>;
 
-    /// `NvChip` implementation specific [future](NvChipFuture) type
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`trim()`](Self::trim).
-    type TrimFuture: NvChipFuture<Self, Output = Result<(), NvChipIoError>> + marker::Unpin;
+    type TrimFuture: NvBlkDevFuture<Self, Output = Result<(), NvBlkDevIoError>> + marker::Unpin;
 
     /// Discard a given range on physical storage.
     ///
@@ -415,26 +415,26 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
     /// informing the storage device that the specified range is considered
     /// being unused from now and will never be read again without a prior
     /// write. Implementations may return
-    /// [`NvChipIoError::OperationNotSupported`].
+    /// [`NvBlkDevIoError::OperationNotSupported`].
     ///
     /// # Arguments:
     ///
-    /// * `chip_io_block_index` - Index of the first [Chip IO
-    ///   Block](Self::chip_io_block_size_128b_log2) to discard.
-    /// * `chip_io_blocks_count` - The number of [Chip IO
-    ///   Blocks](Self::chip_io_block_size_128b_log2) to discard.
-    fn trim(&self, chip_io_block_index: u64, chip_io_blocks_count: u64) -> Result<Self::TrimFuture, NvChipIoError>;
+    /// * `io_block_index` - Index of the first [Device IO
+    ///   Block](Self::io_block_size_128b_log2) to discard.
+    /// * `io_blocks` - The number of [Device IO
+    ///   Blocks](Self::io_block_size_128b_log2) to discard.
+    fn trim(&self, io_block_index: u64, io_blocks: u64) -> Result<Self::TrimFuture, NvBlkDevIoError>;
 }
 
-/// Trait defining the common interface to [`NvChip`] write requests to be
-/// submitted to [`write()`](NvChip::write).
+/// Trait defining the common interface to [`NvBlkDev`] write requests to be
+/// submitted to [`write()`](NvBlkDev::write).
 ///
-/// The `NvChipWriteRequest` interface is intended to provide a means to obtain
-/// all required information about the write destination location as well as
-/// access to the source data buffers in a generic way. Note that the
-/// [`NvChipWriteRequest`] instance is always getting returned again one way or
-/// the other out of [`write()`](NvChip::write) or the associated
-/// [`WriteFuture`](NvChip::WriteFuture) respectively, enabling temporary
+/// The `NvBlkDevWriteRequest` interface is intended to provide a means to
+/// obtain all required information about the write destination location as well
+/// as access to the source data buffers in a generic way. Note that the
+/// [`NvBlkDevWriteRequest`] instance is always getting returned again one way
+/// or the other out of [`write()`](NvBlkDev::write) or the associated
+/// [`WriteFuture`](NvBlkDev::WriteFuture) respectively, enabling temporary
 /// ownership transfers of any required ressources, like e.g. the source
 /// buffers, for the duration of the write request.
 ///
@@ -442,14 +442,14 @@ pub trait NvChip: marker::Unpin + marker::Send + marker::Sync + 'static {
 /// so-called "chunks", whose layout is described alongside the physical write
 /// destination location by means of the [`ChunkedIoRegion`] returned by
 /// [`region()`](Self::region). The region is required to be
-/// [aligned](ChunkedIoRegion::is_aligned) to the [Chip IO
-/// Block](NvChip::chip_io_block_size_128b_log2) size.
+/// [aligned](ChunkedIoRegion::is_aligned) to the [Device IO
+/// Block](NvBlkDev::io_block_size_128b_log2) size.
 ///
 /// Access to the chunked source buffers is provided by making the
-/// [`NvChipWriteRequest`] instance indexable with [`ChunkedIoRegionChunkRange`]
-/// "indices" emitted by the aforementioned
+/// [`NvBlkDevWriteRequest`] instance indexable with
+/// [`ChunkedIoRegionChunkRange`] "indices" emitted by the aforementioned
 /// [`ChunkedIoRegion`]'s iterators.
-pub trait NvChipWriteRequest: marker::Send + marker::Unpin {
+pub trait NvBlkDevWriteRequest: marker::Send + marker::Unpin {
     /// Return a [`ChunkedIoRegion`] describing the buffer layout as well as the
     /// physical destination of the write request.
     /// [`ChunkedIoRegionChunkRange`]s obtained from its iterators will be
@@ -459,18 +459,18 @@ pub trait NvChipWriteRequest: marker::Send + marker::Unpin {
 
     /// Get access to the destination buffer slice associated with a
     /// [`ChunkedIoRegionChunkRange`].
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], NvChipIoError>;
+    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], NvBlkDevIoError>;
 }
 
-/// Trait defining the common interface to [`NvChip`] read requests to be
-/// submitted to [`read()`](NvChip::read).
+/// Trait defining the common interface to [`NvBlkDev`] read requests to be
+/// submitted to [`read()`](NvBlkDev::read).
 ///
-/// The `NvChipReadRequest` interface is intended to provide a means to obtain
+/// The `NvBlkDevReadRequest` interface is intended to provide a means to obtain
 /// all required information about the read source location as well as access to
 /// the destination data buffers in a generic way. Note that the
-/// [`NvChipReadRequest`] instance is always getting returned again one way or
-/// the other out of [`read()`](NvChip::read) or the associated
-/// [`ReadFuture`](NvChip::ReadFuture) respectively, enabling temporary
+/// [`NvBlkDevReadRequest`] instance is always getting returned again one way or
+/// the other out of [`read()`](NvBlkDev::read) or the associated
+/// [`ReadFuture`](NvBlkDev::ReadFuture) respectively, enabling temporary
 /// ownership transfers of any required ressources, like e.g. the source
 /// buffers, for the duration of the read request.
 ///
@@ -478,14 +478,14 @@ pub trait NvChipWriteRequest: marker::Send + marker::Unpin {
 /// buffers, so-called "chunks", whose layout is described alongside the
 /// physical read source location by means of the [`ChunkedIoRegion`] returned
 /// by [`region()`](Self::region). The region is required to be
-/// [aligned](ChunkedIoRegion::is_aligned) to the [Chip IO
-/// Block](NvChip::chip_io_block_size_128b_log2) size.
+/// [aligned](ChunkedIoRegion::is_aligned) to the [Device IO
+/// Block](NvBlkDev::io_block_size_128b_log2) size.
 ///
 /// Access to the chunked destination buffers is provided by making the
-/// [`NvChipReadRequest`] instance indexable with [`ChunkedIoRegionChunkRange`]
-/// "indices" emitted by the aforementioned
+/// [`NvBlkDevReadRequest`] instance indexable with
+/// [`ChunkedIoRegionChunkRange`] "indices" emitted by the aforementioned
 /// [`ChunkedIoRegion`]'s iterators.
-pub trait NvChipReadRequest: marker::Send + marker::Unpin {
+pub trait NvBlkDevReadRequest: marker::Send + marker::Unpin {
     /// Return a [`ChunkedIoRegion`] describing the buffer layout as well as the
     /// physical source of the read request.
     /// [`ChunkedIoRegionChunkRange`]s obtained from its iterators will be
@@ -497,6 +497,8 @@ pub trait NvChipReadRequest: marker::Send + marker::Unpin {
     /// [`ChunkedIoRegionChunkRange`].
     ///
     /// Return `None` if the read result for the `range` is to be dismissed.
-    fn get_destination_buffer(&mut self, range: &ChunkedIoRegionChunkRange)
-    -> Result<Option<&mut [u8]>, NvChipIoError>;
+    fn get_destination_buffer(
+        &mut self,
+        range: &ChunkedIoRegionChunkRange,
+    ) -> Result<Option<&mut [u8]>, NvBlkDevIoError>;
 }

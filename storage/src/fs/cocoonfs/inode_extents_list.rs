@@ -8,12 +8,12 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::{self, hash, rng, symcipher},
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError,
+            FormatError,
             alloc_bitmap::{self, ExtentsAllocationRequest, ExtentsReallocationRequest},
             encryption_entities::{
                 EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix, EncryptedChainedExtentsDecryptionInstance,
@@ -21,7 +21,7 @@ use crate::{
             },
             extent_ptr::{self, EncodedExtentPtr},
             extents,
-            fs::{CocoonFsAllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
+            fs::{AllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             inode_index::{InodeIndexKeyType, InodeKeySubdomain, SpecialInode},
             keys, layout, leb128,
             read_authenticate_extent::ReadAuthenticateExtentFuture,
@@ -39,7 +39,7 @@ use crate::{
         io_slices::{self, IoSlicesIterCommon as _, PeekableIoSlicesIter as _},
     },
 };
-use core::{default, mem, pin, task, cmp};
+use core::{cmp, default, mem, pin, task};
 
 #[cfg(doc)]
 use transaction::Transaction;
@@ -214,12 +214,12 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
         match decode_buf_len.cmp(&2) {
             cmp::Ordering::Less => {
                 // No terminating (0, 0).
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                return Err(NvFsError::from(FormatError::InvalidExtents));
             }
             cmp::Ordering::Equal => {
                 if decode_buf[0] != 0 || decode_buf[1] != 0 {
                     // No terminating (0, 0).
-                    return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+                    return Err(NvFsError::from(FormatError::InvalidExtents));
                 }
                 return Ok(inode_extents);
             }
@@ -231,13 +231,13 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
         let delta;
         (delta, remaining_decode_buf) = match leb128::leb128s_i64_decode(remaining_decode_buf) {
             Ok((delta, remaining_decode_buf)) => (delta, remaining_decode_buf),
-            Err(_) => return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+            Err(_) => return Err(NvFsError::from(FormatError::InvalidExtents)),
         };
         let inode_extent_allocation_blocks;
         (inode_extent_allocation_blocks, remaining_decode_buf) = match leb128::leb128u_u64_decode(remaining_decode_buf)
         {
             Ok((extent_allocation_blocks, remaining_decode_buf)) => (extent_allocation_blocks, remaining_decode_buf),
-            Err(_) => return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+            Err(_) => return Err(NvFsError::from(FormatError::InvalidExtents)),
         };
 
         // Move the remaining bytes in decode_buf to the front.
@@ -251,13 +251,13 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
         let delta = delta as u64;
         if inode_extent_allocation_blocks == 0 {
             // Invalid (delta, length) pair, possibly a premature termination marker.
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
         let inode_extent_allocation_blocks_begin = last_inode_extent_end.wrapping_add(delta);
         if (inode_extent_allocation_blocks_begin | inode_extent_allocation_blocks) >> MAX_IMAGE_ALLOCATION_BLOCKS_LOG2
             != 0
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
         // Neither of the two following sums can overflow, as per all summands being <
         // 2^63 (< 2^(64 - 7 actually)).
@@ -268,7 +268,7 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
             >> MAX_IMAGE_ALLOCATION_BLOCKS_LOG2
             != 0
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidExtents));
+            return Err(NvFsError::from(FormatError::InvalidExtents));
         }
         last_inode_extent_end = inode_extent_allocation_blocks_end;
 
@@ -289,28 +289,28 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
 /// latter case, the `InodeExtentsListReadFuture` assumes ownership of the
 /// [`Transaction`] and eventually returns it back from [`poll()`](Self::poll)
 /// upon future completion.
-pub struct InodeExtentsListReadFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeExtentsListReadFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode_extents_list_decryption_instance: EncryptedChainedExtentsDecryptionInstance,
     inode_extents_list_extents: extents::PhysicalExtents,
     decrypted_inode_extents_list_extents: Vec<Vec<u8>>,
-    fut_state: InodeExtentsListReadFutureState<ST, C>,
+    fut_state: InodeExtentsListReadFutureState<ST, B>,
 }
 
 /// [`InodeExtentsListReadFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeExtentsListReadFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeExtentsListReadFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     ReadExtentsListExtentPrepare {
         transaction: Option<Box<transaction::Transaction>>,
         next_inode_extents_list_extent: layout::PhysicalAllocBlockRange,
     },
     ReadExtentsListExtent {
         cur_inode_extents_list_extent_allocation_blocks: layout::AllocBlockCount,
-        read_fut: ReadAuthenticateExtentFuture<ST, C>,
+        read_fut: ReadAuthenticateExtentFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListReadFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeExtentsListReadFuture<ST, B> {
     /// Instantiate a [`InodeExtentsListReadFuture`].
     ///
     /// # Arguments:
@@ -404,8 +404,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListReadFuture<ST, 
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeExtentsListReadFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeExtentsListReadFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -424,7 +424,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: core::pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -586,11 +586,11 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 ///
 /// Authentication is done via preauthentication CCA protection tags stored
 /// inline to the encrypted chained extents each.
-pub struct InodeExtentsListReadPreAuthFuture<C: chip::NvChip> {
-    read_extents_list_extents_fut: read_preauth::ReadChainedExtentsPreAuthCcaProtectedFuture<C>,
+pub struct InodeExtentsListReadPreAuthFuture<B: blkdev::NvBlkDev> {
+    read_extents_list_extents_fut: read_preauth::ReadChainedExtentsPreAuthCcaProtectedFuture<B>,
 }
 
-impl<C: chip::NvChip> InodeExtentsListReadPreAuthFuture<C> {
+impl<B: blkdev::NvBlkDev> InodeExtentsListReadPreAuthFuture<B> {
     /// Instantiate a [`InodeExtentsListReadPreAuthFuture`].
     ///
     /// # Arguments:
@@ -659,13 +659,13 @@ impl<C: chip::NvChip> InodeExtentsListReadPreAuthFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for InodeExtentsListReadPreAuthFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for InodeExtentsListReadPreAuthFuture<B> {
     type Output = Result<extents::PhysicalExtents, NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
         let decrypted_inode_extents_list_extents =
-            match chip::NvChipFuture::poll(pin::Pin::new(&mut this.read_extents_list_extents_fut), chip, cx) {
+            match blkdev::NvBlkDevFuture::poll(pin::Pin::new(&mut this.read_extents_list_extents_fut), blkdev, cx) {
                 task::Poll::Ready(Ok(decrypted_inode_extents_list_extents)) => decrypted_inode_extents_list_extents,
                 task::Poll::Ready(Err(e)) => return task::Poll::Ready(Err(e)),
                 task::Poll::Pending => return task::Poll::Pending,
@@ -694,7 +694,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for InodeExtentsListReadPreAuthFutur
 
             for j in 0..i {
                 if inode_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)));
+                    return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
                 }
             }
         }
@@ -720,15 +720,15 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for InodeExtentsListReadPreAuthFutur
 /// completion. Likewise for the inode's
 /// [`PhysicalExtents`](extents::PhysicalExtents) to encode in the extents
 /// lists.
-pub struct InodeExtentsListWriteFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeExtentsListWriteFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
     inode_extents: extents::PhysicalExtents,
-    fut_state: InodeExtentsListWriteFutureState<ST, C>,
+    fut_state: InodeExtentsListWriteFutureState<ST, B>,
 }
 
 /// [`InodeExtentsListWriteFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -743,7 +743,7 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
         next_preexisting_inode_extents_list_extent_index: usize,
     },
     PreparePreexistingInodeExtentsListExtents {
-        prepare_staged_updates_application_fut: transaction::TransactionPrepareStagedUpdatesApplicationFuture<ST, C>,
+        prepare_staged_updates_application_fut: transaction::TransactionPrepareStagedUpdatesApplicationFuture<ST, B>,
         preexisting_inode_extents_list_extents: extents::PhysicalExtents,
         cur_preexisting_inode_extents_list_extent_index: usize,
         cur_update_states_allocation_blocks_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
@@ -758,7 +758,7 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
         preexisting_inode_extents_list_extents: Option<extents::PhysicalExtents>,
         encoded_inode_extents_list_len: usize,
         inode_extents_list_encryption_layout: EncryptedChainedExtentsLayout,
-        allocate_fut: CocoonFsAllocateExtentsFuture<ST, C>,
+        allocate_fut: AllocateExtentsFuture<ST, B>,
     },
     StageInodeExtentsListUpdates {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -771,7 +771,7 @@ enum InodeExtentsListWriteFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListWriteFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeExtentsListWriteFuture<ST, B> {
     /// Instantiate a new [`InodeExtentsListWriteFuture`].
     ///
     /// # Arguments:
@@ -802,8 +802,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeExtentsListWriteFuture<ST,
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeExtentsListWriteFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeExtentsListWriteFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -836,7 +836,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -1155,7 +1155,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         ),
                     };
 
-                    let allocate_fut = match CocoonFsAllocateExtentsFuture::new(
+                    let allocate_fut = match AllocateExtentsFuture::new(
                         &fs_instance_sync_state.get_fs_ref(),
                         transaction,
                         inode_extents_list_extents_allocation_request,

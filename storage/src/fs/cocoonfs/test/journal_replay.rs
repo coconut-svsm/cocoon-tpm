@@ -6,10 +6,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{
-    cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_enumerate_inodes_op_collect,
-    cocoonfs_test_fs_instance_into_chip_helper, cocoonfs_test_mkfs_op_helper, cocoonfs_test_openfs_op_helper,
+    CocoonFsTestConfigs, cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_enumerate_inodes_op_collect,
+    cocoonfs_test_fs_instance_into_blkdev_helper, cocoonfs_test_mkfs_op_helper, cocoonfs_test_openfs_op_helper,
     cocoonfs_test_read_inode_op_helper, cocoonfs_test_start_transaction_op_helper,
-    cocoonfs_test_unlink_inodes_op_uncond, cocoonfs_test_write_inode_op_helper, CocoonFsTestConfigs,
+    cocoonfs_test_unlink_inodes_op_uncond, cocoonfs_test_write_inode_op_helper,
 };
 use crate::fs::cocoonfs::extent_ptr;
 
@@ -29,8 +29,8 @@ fn write_read_one_small() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
 
             // Close the FS, open and try to read the file.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -74,8 +74,8 @@ fn write_read_one_large() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -149,8 +149,8 @@ fn write_read_two_large_interleaved_growth() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode0_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -239,8 +239,8 @@ fn write_update_two_large_interleaved_growth() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode0_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -262,8 +262,8 @@ fn write_update_two_large_interleaved_growth() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
 
             // Close the FS, open and try to read again.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inode0_read_data) =
                 cocoonfs_test_read_inode_op_helper(&fs_instance, None, 0x10).unwrap();
@@ -349,8 +349,8 @@ fn write_unlink_two_large_interleaved_growth() {
 
             // Close the FS, open, verify that the unlinked inode is gone and read the
             // other's data.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             assert_eq!(
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x10..=0x11)
@@ -370,8 +370,8 @@ fn write_unlink_two_large_interleaved_growth() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
 
             // Close the FS, open and verify both inodes are gone now.
-            let chip = cocoonfs_test_fs_instance_into_chip_helper(fs_instance);
-            let fs_instance = cocoonfs_test_openfs_op_helper(chip).unwrap();
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             assert_eq!(
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x10..=0x11)

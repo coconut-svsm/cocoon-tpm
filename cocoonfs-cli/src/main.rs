@@ -14,9 +14,7 @@ use crypto::{
 };
 use storage::fs::{
     NvFs, NvFsEnumerateCursor as _, NvFsFutureAsCoreFuture, NvFsReadContext, NvFsUnlinkCursor as _,
-    cocoonfs::{
-        CocoonFs, CocoonFsImageLayout, CocoonFsMkFsFuture, CocoonFsOpenFsFuture, CocoonFsWriteMkfsInfoHeaderFuture,
-    },
+    cocoonfs::{CocoonFs, ImageLayout, MkFsFuture, OpenFsFuture, WriteMkFsInfoHeaderFuture},
 };
 use tpm2_interface::TpmiAlgHash;
 use utils_async::sync_types;
@@ -24,8 +22,8 @@ use utils_common::{fixed_vec::FixedVec, zeroize};
 
 mod std_sync_types;
 use std_sync_types::StdSyncTypes;
-mod std_file_nvchip;
-use std_file_nvchip::StdFileNvChip;
+mod std_file_nvblkdev;
+use std_file_nvblkdev::StdFileNvBlkDev;
 
 use clap::{self, CommandFactory as _, Parser as _};
 use pollster::FutureExt as _;
@@ -36,7 +34,7 @@ use std::{
     pin::Pin,
 };
 
-type CocoonFsType = CocoonFs<StdSyncTypes, StdFileNvChip>;
+type CocoonFsType = CocoonFs<StdSyncTypes, StdFileNvBlkDev>;
 
 fn cocoonfs_mk_fs_instance_ref(
     fs_instance: &<CocoonFsType as NvFs>::SyncRcPtr,
@@ -439,7 +437,7 @@ struct CliSaltSource {
     salt: Option<FixedVec<u8, 4>>,
 }
 
-fn cli_mkfs_to_cocoonfs_image_layout(cli: &CliMkfsInfo) -> CocoonFsImageLayout {
+fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
     let allocation_block_size_128b_log2 = cli
         .allocation_block_size_log2
         .map(|allocation_block_size_log2| allocation_block_size_log2 - 7)
@@ -585,7 +583,7 @@ fn cli_mkfs_to_cocoonfs_image_layout(cli: &CliMkfsInfo) -> CocoonFsImageLayout {
         }),
     };
 
-    match CocoonFsImageLayout::new(
+    match ImageLayout::new(
         allocation_block_size_128b_log2 as u8,
         io_block_allocation_blocks_log2 as u8,
         auth_tree_node_io_blocks_log2 as u8,
@@ -688,7 +686,7 @@ fn open_volume_file_for_mkfs(
     volume_file_path: &PathBuf,
     image_size: Option<u64>,
     max_io_block_size_128b_log2: Option<u32>,
-) -> StdFileNvChip {
+) -> StdFileNvBlkDev {
     let mut open_flags = fs::OpenOptions::new();
     // We also want O_DIRECT, but standard Rust doesn't make it available.
     open_flags.read(true).write(true);
@@ -714,8 +712,8 @@ fn open_volume_file_for_mkfs(
         Ok(()) | Err(_) => (),
     };
 
-    match StdFileNvChip::new(volume_file, max_io_block_size_128b_log2) {
-        Ok(chip) => chip,
+    match StdFileNvBlkDev::new(volume_file, max_io_block_size_128b_log2) {
+        Ok(blkdev) => blkdev,
         Err(_) => std::process::exit(5),
     }
 }
@@ -745,15 +743,15 @@ fn open_filesystem(
         }
     };
 
-    let chip = match StdFileNvChip::new(volume_file, max_io_block_size_128b_log2) {
-        Ok(chip) => chip,
+    let blkdev = match StdFileNvBlkDev::new(volume_file, max_io_block_size_128b_log2) {
+        Ok(blkdev) => blkdev,
         Err(_) => std::process::exit(5),
     };
     let rng = instantiate_rng();
     let key = zeroize::Zeroizing::new(key.to_vec());
-    let openfs_fut = match CocoonFsOpenFsFuture::<StdSyncTypes, StdFileNvChip>::new(chip, key, enable_trimming, rng) {
+    let openfs_fut = match OpenFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(blkdev, key, enable_trimming, rng) {
         Ok(openfs_fut) => openfs_fut,
-        Err((_chip, _key, _rng, e)) => {
+        Err((_blkdev, _key, _rng, e)) => {
             eprintln!(
                 "error: failed to initiate CocoonFS filesystem opening operation: error={:?}",
                 e
@@ -775,12 +773,12 @@ fn main() {
 
     match cli.command {
         CliCommand::Mkfs(cli_mkfs_args) => {
-            let image_layout = cli_mkfs_to_cocoonfs_image_layout(&cli_mkfs_args.mkfsinfo);
+            let image_layout = cli_mkfs_to_image_layout(&cli_mkfs_args.mkfsinfo);
             let key = load_key(&cli_mkfs_args.key);
             let salt = load_salt(&cli_mkfs_args.mkfsinfo.salt);
 
             let rng = instantiate_rng();
-            let chip = open_volume_file_for_mkfs(
+            let blkdev = open_volume_file_for_mkfs(
                 &cli.volume_file_path,
                 cli_mkfs_args.mkfsinfo.image_size,
                 (cli.ignore_volume_file_io_block_size).then_some(
@@ -788,8 +786,8 @@ fn main() {
                         + image_layout.allocation_block_size_128b_log2 as u32,
                 ),
             );
-            let mkfs_fut = match CocoonFsMkFsFuture::<StdSyncTypes, StdFileNvChip>::new(
-                chip,
+            let mkfs_fut = match MkFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(
+                blkdev,
                 &image_layout,
                 salt,
                 cli_mkfs_args.mkfsinfo.image_size,
@@ -798,7 +796,7 @@ fn main() {
                 rng,
             ) {
                 Ok(mkfs_fut) => mkfs_fut,
-                Err((_chip, _rng, e)) => {
+                Err((_blkdev, _rng, e)) => {
                     eprintln!("error: failed to initiate CocoonFS mkfs operation: error={:?}", e);
                     std::process::exit(6);
                 }
@@ -812,10 +810,10 @@ fn main() {
             }
         }
         CliCommand::WriteMkfsInfoHeader(cli_write_mkfsinfo_header_args) => {
-            let image_layout = cli_mkfs_to_cocoonfs_image_layout(&cli_write_mkfsinfo_header_args.mkfsinfo);
+            let image_layout = cli_mkfs_to_image_layout(&cli_write_mkfsinfo_header_args.mkfsinfo);
             let salt = load_salt(&cli_write_mkfsinfo_header_args.mkfsinfo.salt);
 
-            let chip = open_volume_file_for_mkfs(
+            let blkdev = open_volume_file_for_mkfs(
                 &cli.volume_file_path,
                 cli_write_mkfsinfo_header_args.mkfsinfo.image_size,
                 (cli.ignore_volume_file_io_block_size).then_some(
@@ -823,15 +821,15 @@ fn main() {
                         + image_layout.allocation_block_size_128b_log2 as u32,
                 ),
             );
-            let write_mkfsinfo_header_fut = match CocoonFsWriteMkfsInfoHeaderFuture::new(
-                chip,
+            let write_mkfsinfo_header_fut = match WriteMkFsInfoHeaderFuture::new(
+                blkdev,
                 &image_layout,
                 salt,
                 cli_write_mkfsinfo_header_args.mkfsinfo.image_size,
                 !cli_write_mkfsinfo_header_args.trim_volume_file_to_header,
             ) {
                 Ok(write_mkfsinfo_header_fut) => write_mkfsinfo_header_fut,
-                Err((_chip, e)) => {
+                Err((_blkdev, e)) => {
                     eprintln!(
                         "error: failed to initiate CocoonFS mkfsinfo header write operation: error={:?}",
                         e
@@ -840,7 +838,7 @@ fn main() {
                 }
             };
             match write_mkfsinfo_header_fut.block_on() {
-                Ok((_chip, Ok(()))) => (),
+                Ok((_blkdev, Ok(()))) => (),
                 Ok((_, Err(e))) | Err(e) => {
                     eprintln!("error: CocoonFS mkfsinfo header write operation failed: error={:?}", e);
                     std::process::exit(6);

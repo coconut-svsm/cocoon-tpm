@@ -19,7 +19,7 @@ use super::{
     read_missing_data::TransactionReadMissingDataFuture,
 };
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     fs::{
         NvFsError,
         cocoonfs::{
@@ -27,7 +27,7 @@ use crate::{
             read_buffer,
         },
     },
-    nvchip_err_internal, nvfs_err_internal,
+    nvblkdev_err_internal, nvfs_err_internal,
     utils_async::sync_types,
     utils_common::fixed_vec::FixedVec,
 };
@@ -44,14 +44,14 @@ use layout::ImageLayout;
 /// written](super::write_journal::TransactionWriteJournalFuture) beforehand,
 /// and thus, the changes staged at the [`Transaction`] are considered
 /// effective.
-pub struct TransactionApplyJournalFuture<C: chip::NvChip> {
-    fut_state: TransactionApplyJournalFutureState<C>,
+pub struct TransactionApplyJournalFuture<B: blkdev::NvBlkDev> {
+    fut_state: TransactionApplyJournalFutureState<B>,
     low_memory: u32,
     low_memory_at_init: bool,
 }
 
 #[repr(u32)]
-enum TransactionApplyJournalFutureState<C: chip::NvChip> {
+enum TransactionApplyJournalFutureState<B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -66,7 +66,7 @@ enum TransactionApplyJournalFutureState<C: chip::NvChip> {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        auth_tree_apply_updates_fut: auth_tree::AuthTreeApplyUpdatesFuture<C>,
+        auth_tree_apply_updates_fut: auth_tree::AuthTreeApplyUpdatesFuture<B>,
     },
     WriteDataUpdatesPrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -76,7 +76,7 @@ enum TransactionApplyJournalFutureState<C: chip::NvChip> {
     WriteDataUpdates {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        write_data_updates_fut: TransactionWriteDataUpdatesFuture<C>,
+        write_data_updates_fut: TransactionWriteDataUpdatesFuture<B>,
     },
     InvalidateJournalLogPrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -87,24 +87,24 @@ enum TransactionApplyJournalFutureState<C: chip::NvChip> {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        invalidate_journal_log_fut: journal::log::JournalLogInvalidateFuture<C>,
+        invalidate_journal_log_fut: journal::log::JournalLogInvalidateFuture<B>,
     },
     WriteBarrierBeforeTrim {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        write_barrier_fut: C::WriteBarrierFuture,
+        write_barrier_fut: B::WriteBarrierFuture,
     },
     TrimDeallocatedIoBlocks {
-        trim_deallocated_io_blocks_fut: TransactionTrimDeallocatedIoBlocksFuture<C>,
+        trim_deallocated_io_blocks_fut: TransactionTrimDeallocatedIoBlocksFuture<B>,
     },
     TrimJournal {
-        trim_journal_fut: TransactionTrimJournalFuture<C>,
+        trim_journal_fut: TransactionTrimJournalFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
     /// Instantiate a [`TransactionApplyJournalFuture`].
     ///
     /// The [`TransactionApplyJournalFuture`] assumes
@@ -120,7 +120,7 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
     /// * `low_memory` - Whether the system is in a low memory condition.
     pub fn new<ST: sync_types::SyncTypes>(
         transaction: Box<Transaction>,
-        _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         low_memory: bool,
     ) -> Result<Self, (Box<Transaction>, NvFsError)> {
         Ok(Self {
@@ -147,7 +147,7 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<(), (Option<Box<Transaction>>, NvFsError)>> {
         let this = pin::Pin::into_inner(self);
@@ -266,7 +266,7 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
                     ) = fs_instance_sync_state.fs_instance_and_destructure_borrow_mut();
                     match auth_tree::AuthTreeApplyUpdatesFuture::poll(
                         pin::Pin::new(auth_tree_apply_updates_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         fs_sync_state_auth_tree,
                         &transaction.pending_auth_tree_updates.updated_root_hmac_digest,
                         cx,
@@ -389,7 +389,7 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
                     let fs_config = &fs_instance.fs_config;
                     match journal::log::JournalLogInvalidateFuture::poll(
                         pin::Pin::new(invalidate_journal_log_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_config.image_layout,
                         fs_config.image_header_end,
                         cx,
@@ -420,7 +420,7 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
                     // If everything needed for trimming had been flushed due to a low memory
                     // condition, then don't even bother.
                     if fs_instance.fs_config.enable_trimming && this.low_memory < 2 {
-                        let write_barrier_fut = match fs_instance.chip.write_barrier() {
+                        let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
                             Ok(write_barrier_fut) => write_barrier_fut,
                             Err(_) => {
                                 // A write barrier is needed before trimming, but
@@ -443,7 +443,7 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
                     write_barrier_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match chip::NvChipFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(_)) => {
                             // A write barrier is needed before trimming, but
@@ -522,7 +522,7 @@ impl<C: chip::NvChip> TransactionApplyJournalFuture<C> {
     fn enter_low_memory<ST: sync_types::SyncTypes>(
         &mut self,
         transaction: &mut Transaction,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
     ) -> bool {
         let low_memory = self.low_memory;
 
@@ -903,14 +903,14 @@ fn transaction_drop_data_buffers(
 ///
 /// Data currently not cached in the [`Transaction`]'s buffers will get read in
 /// in the course.
-struct TransactionWriteDataUpdatesFuture<C: chip::NvChip> {
-    fut_state: TransactionWriteDataUpdatesFutureState<C>,
+struct TransactionWriteDataUpdatesFuture<B: blkdev::NvBlkDev> {
+    fut_state: TransactionWriteDataUpdatesFutureState<B>,
     remaining_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     low_memory: bool,
 }
 
 /// [`TransactionWriteDataUpdatesFuture`] state-machine state.
-enum TransactionWriteDataUpdatesFutureState<C: chip::NvChip> {
+enum TransactionWriteDataUpdatesFutureState<B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -918,16 +918,16 @@ enum TransactionWriteDataUpdatesFutureState<C: chip::NvChip> {
     },
     ReadMissingRegionData {
         cur_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-        read_missing_data_fut: TransactionReadMissingDataFuture<C>,
+        read_missing_data_fut: TransactionReadMissingDataFuture<B>,
     },
     WriteRegion {
         cur_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-        write_fut: C::WriteFuture<TransactionWriteDataUpdatesNvChipRequest>,
+        write_fut: B::WriteFuture<TransactionWriteDataUpdatesNvBlkDevRequest>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionWriteDataUpdatesFuture<B> {
     /// Instantiate [`TransactionWriteDataUpdatesFuture`].
     ///
     /// The [`TransactionWriteDataUpdatesFuture`] assumes
@@ -991,7 +991,7 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<(Box<Transaction>, Result<(), NvFsError>), NvFsError>> {
         let this = pin::Pin::into_inner(self);
@@ -1068,7 +1068,7 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
                     let transaction = match TransactionReadMissingDataFuture::poll(
                         pin::Pin::new(read_missing_data_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance_sync_state.alloc_bitmap,
                         cx,
                     ) {
@@ -1122,16 +1122,16 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
                             return task::Poll::Ready(Ok((transaction, Err(e))));
                         }
                     };
-                    let write_request = TransactionWriteDataUpdatesNvChipRequest {
+                    let write_request = TransactionWriteDataUpdatesNvBlkDevRequest {
                         transaction,
                         aligned_write_region_states_allocation_blocks_index_range:
                             cur_region_states_allocation_blocks_index_range.clone(),
                         request_io_region: write_request_io_region,
                     };
-                    let write_fut = match fs_instance.chip.write(write_request) {
+                    let write_fut = match fs_instance.blkdev.write(write_request) {
                         Ok(Ok(write_fut)) => write_fut,
                         Ok(Err((write_request, e))) => {
-                            let TransactionWriteDataUpdatesNvChipRequest { transaction, .. } = write_request;
+                            let TransactionWriteDataUpdatesNvBlkDevRequest { transaction, .. } = write_request;
                             this.fut_state = TransactionWriteDataUpdatesFutureState::Done;
                             return task::Poll::Ready(Ok((transaction, Err(NvFsError::from(e)))));
                         }
@@ -1152,13 +1152,13 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
                     let mut transaction =
-                        match chip::NvChipFuture::poll(pin::Pin::new(write_fut), &fs_instance.chip, cx) {
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), &fs_instance.blkdev, cx) {
                             task::Poll::Ready(Ok((write_request, Ok(())))) => {
-                                let TransactionWriteDataUpdatesNvChipRequest { transaction, .. } = write_request;
+                                let TransactionWriteDataUpdatesNvBlkDevRequest { transaction, .. } = write_request;
                                 transaction
                             }
                             task::Poll::Ready(Ok((write_request, Err(e)))) => {
-                                let TransactionWriteDataUpdatesNvChipRequest { transaction, .. } = write_request;
+                                let TransactionWriteDataUpdatesNvBlkDevRequest { transaction, .. } = write_request;
                                 this.fut_state = TransactionWriteDataUpdatesFutureState::Done;
                                 return task::Poll::Ready(Ok((transaction, Err(NvFsError::from(e)))));
                             }
@@ -1223,14 +1223,14 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
         }
 
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_size_128b_log2 = transaction.chip_io_block_size_128b_log2;
-        let preferred_chip_io_blocks_bulk_log2 = transaction.preferred_chip_io_blocks_bulk_log2;
+        let blkdev_io_block_size_128b_log2 = transaction.blkdev_io_block_size_128b_log2;
+        let preferred_blkdev_io_blocks_bulk_log2 = transaction.preferred_blkdev_io_blocks_bulk_log2;
         // Ramp it up to some reasonable value. Note that the subsequent code relies on
         // always writing multiples of an IO Block. In low memory conditions it would
-        // even be better to write the absolute minimum of a single Chip IO
+        // even be better to write the absolute minimum of a single Device IO
         // block at a time, but that would further complicate the logic.
         let preferred_write_allocation_blocks_log2 = if !low_memory {
-            (preferred_chip_io_blocks_bulk_log2 + chip_io_block_size_128b_log2)
+            (preferred_blkdev_io_blocks_bulk_log2 + blkdev_io_block_size_128b_log2)
                 .saturating_sub(allocation_block_size_128b_log2)
                 .min(usize::BITS - 1)
                 .max(auth_tree_data_block_allocation_blocks_log2)
@@ -1354,20 +1354,20 @@ impl<C: chip::NvChip> TransactionWriteDataUpdatesFuture<C> {
     }
 }
 
-/// [`NvChipWriteRequest`](chip::NvChipWriteRequest) implementation used
+/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
 /// internally by [`TransactionWriteDataUpdatesFuture`].
-struct TransactionWriteDataUpdatesNvChipRequest {
+struct TransactionWriteDataUpdatesNvBlkDevRequest {
     transaction: Box<Transaction>,
     aligned_write_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_io_region: ChunkedIoRegion,
 }
 
-impl chip::NvChipWriteRequest for TransactionWriteDataUpdatesNvChipRequest {
+impl blkdev::NvBlkDevWriteRequest for TransactionWriteDataUpdatesNvBlkDevRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.request_io_region
     }
 
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], chip::NvChipIoError> {
+    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
         let (allocation_block_index_in_request, _) = range.chunk().decompose_to_hierarchic_indices([]);
 
         let auth_tree_data_block_allocation_blocks_log2 =
@@ -1384,13 +1384,13 @@ impl chip::NvChipWriteRequest for TransactionWriteDataUpdatesNvChipRequest {
             AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => unallocated_state
                 .random_fillup
                 .as_deref()
-                .ok_or_else(|| nvchip_err_internal!())?,
+                .ok_or_else(|| nvblkdev_err_internal!())?,
             AllocationBlockUpdateNvSyncState::Allocated(allocated_state) => match allocated_state {
                 AllocationBlockUpdateNvSyncStateAllocated::Unmodified(unmodified_state) => unmodified_state
                     .cached_encrypted_data
                     .as_ref()
                     .map(|cached_encrypted_data| cached_encrypted_data.get_encrypted_data())
-                    .ok_or_else(|| nvchip_err_internal!())?,
+                    .ok_or_else(|| nvblkdev_err_internal!())?,
                 AllocationBlockUpdateNvSyncStateAllocated::Modified(modified_state) => match modified_state {
                     AllocationBlockUpdateNvSyncStateAllocatedModified::JournalDirty {
                         authenticated_encrypted_data,
@@ -1399,7 +1399,7 @@ impl chip::NvChipWriteRequest for TransactionWriteDataUpdatesNvChipRequest {
                         cached_encrypted_data
                             .as_ref()
                             .map(|cached_encrypted_data| cached_encrypted_data.get_encrypted_data())
-                            .ok_or_else(|| nvchip_err_internal!())?
+                            .ok_or_else(|| nvblkdev_err_internal!())?
                     }
                 },
             },
@@ -1409,24 +1409,24 @@ impl chip::NvChipWriteRequest for TransactionWriteDataUpdatesNvChipRequest {
     }
 }
 
-/// [Trim](chip::NvChip::trim) [IO
+/// [Trim](blkdev::NvBlkDev::trim) [IO
 /// Blocks](ImageLayout::io_block_allocation_blocks_log2) that became
 /// fully unallocated with a [`Transaction`].
-struct TransactionTrimDeallocatedIoBlocksFuture<C: chip::NvChip> {
+struct TransactionTrimDeallocatedIoBlocksFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
     transaction: Option<Box<Transaction>>,
     next_io_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-    fut_state: TransactionTrimDeallocatedIoBlocksFutureState<C>,
+    fut_state: TransactionTrimDeallocatedIoBlocksFutureState<B>,
 }
 
 /// [`TransactionTrimDeallocatedIoBlocksFuture`] state-machine state.
-enum TransactionTrimDeallocatedIoBlocksFutureState<C: chip::NvChip> {
+enum TransactionTrimDeallocatedIoBlocksFutureState<B: blkdev::NvBlkDev> {
     Init,
-    TrimRegion { trim_fut: C::TrimFuture },
+    TrimRegion { trim_fut: B::TrimFuture },
 }
 
-impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
+impl<B: blkdev::NvBlkDev> TransactionTrimDeallocatedIoBlocksFuture<B> {
     /// Instantiate a [`TransactionTrimDeallocatedIoBlocksFuture`].
     ///
     /// The [`TransactionTrimDeallocatedIoBlocksFuture`] assumes
@@ -1460,7 +1460,7 @@ impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, C>,
+        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<Box<Transaction>, NvFsError>> {
         let this = pin::Pin::into_inner(self);
@@ -1473,15 +1473,15 @@ impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
         let image_layout = &fs_instance.fs_config.image_layout;
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_size_128b_log2 = fs_instance.chip.chip_io_block_size_128b_log2();
-        if chip_io_block_size_128b_log2 > io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 {
+        let blkdev_io_block_size_128b_log2 = fs_instance.blkdev.io_block_size_128b_log2();
+        if blkdev_io_block_size_128b_log2 > io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 {
             // Failure to trim is considered non-fatal.
             return task::Poll::Ready(Ok(transaction));
         }
-        let chip_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-        let allocation_block_chip_io_blocks_log2 =
-            allocation_block_size_128b_log2.saturating_sub(chip_io_block_size_128b_log2);
+        let blkdev_io_block_allocation_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+        let allocation_block_blkdev_io_blocks_log2 =
+            allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
 
         loop {
             match &mut this.fut_state {
@@ -1500,15 +1500,15 @@ impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
                     this.next_io_block_allocation_blocks_begin =
                         next_trim_region.end() + layout::AllocBlockCount::from(1u64 << io_block_allocation_blocks_log2);
 
-                    let trim_region_chip_io_blocks_begin = u64::from(next_trim_region.begin())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
-                    let trim_region_chip_io_blocks_count = u64::from(next_trim_region.block_count())
-                        >> chip_io_block_allocation_blocks_log2
-                        << allocation_block_chip_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_begin = u64::from(next_trim_region.begin())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let trim_region_blkdev_io_blocks_count = u64::from(next_trim_region.block_count())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
                     let trim_fut = match fs_instance
-                        .chip
-                        .trim(trim_region_chip_io_blocks_begin, trim_region_chip_io_blocks_count)
+                        .blkdev
+                        .trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count)
                     {
                         Ok(trim_fut) => trim_fut,
                         Err(_) => {
@@ -1520,7 +1520,7 @@ impl<C: chip::NvChip> TransactionTrimDeallocatedIoBlocksFuture<C> {
                     this.fut_state = TransactionTrimDeallocatedIoBlocksFutureState::TrimRegion { trim_fut };
                 }
                 TransactionTrimDeallocatedIoBlocksFutureState::TrimRegion { trim_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(trim_fut), &fs_instance.chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(trim_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok(_)) | task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal. So
                             // proceed to the next

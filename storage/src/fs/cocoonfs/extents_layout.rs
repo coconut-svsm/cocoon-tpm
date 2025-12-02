@@ -8,7 +8,7 @@ use super::alloc_bitmap::BitmapWord;
 use crate::{
     fs::{
         NvFsError,
-        cocoonfs::{CocoonFsFormatError, layout},
+        cocoonfs::{FormatError, layout},
     },
     nvfs_err_internal,
     utils_common::bitmanip::{BitManip as _, UBitManip as _},
@@ -152,7 +152,7 @@ impl ExtentsLayout {
             let head_extent_min_allocation_blocks = extents_layout.extent_payload_len_to_allocation_blocks(0, true);
             if !head_extent_min_allocation_blocks.1 {
                 // Saturated.
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+                return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
             }
         }
         // If extents_hdr_len >= the payload alignment, then removing the extents
@@ -162,7 +162,7 @@ impl ExtentsLayout {
             let tail_extent_min_allocation_blocks = extents_layout.extent_payload_len_to_allocation_blocks(1, false);
             if !tail_extent_min_allocation_blocks.1 {
                 // Saturated.
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig));
+                return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
             }
         }
 

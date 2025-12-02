@@ -9,11 +9,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::{
-    chip::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
     crypto::{hash, symcipher},
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{CocoonFsFormatError, encryption_entities, keys, layout},
+        cocoonfs::{FormatError, encryption_entities, keys, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
@@ -27,26 +27,26 @@ use crate::{
 use core::{mem, pin, task};
 
 #[cfg(doc)]
-use crate::chip::NvChipFuture as _;
+use crate::blkdev::NvBlkDevFuture as _;
 
 /// Read an extent from storage without authentication.
-pub struct ReadExtentUnauthenticatedFuture<C: chip::NvChip> {
-    fut_state: ReadExtentUnauthenticatedFutureState<C>,
+pub struct ReadExtentUnauthenticatedFuture<B: blkdev::NvBlkDev> {
+    fut_state: ReadExtentUnauthenticatedFutureState<B>,
 }
 
 /// [`ReadExtentUnauthenticatedFuture`] state-machine state.
-enum ReadExtentUnauthenticatedFutureState<C: chip::NvChip> {
+enum ReadExtentUnauthenticatedFutureState<B: blkdev::NvBlkDev> {
     Init {
         extent_range: layout::PhysicalAllocBlockRange,
         allocation_block_size_128b_log2: u8,
     },
     Read {
-        read_fut: C::ReadFuture<ReadExtentUnauthenticatedNvChipReadRequest>,
+        read_fut: B::ReadFuture<ReadExtentUnauthenticatedNvBlkDevReadRequest>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> ReadExtentUnauthenticatedFuture<C> {
+impl<B: blkdev::NvBlkDev> ReadExtentUnauthenticatedFuture<B> {
     /// Instantiate a [`ReadExtentUnauthenticatedFuture`].
     ///
     /// # Arguments:
@@ -64,13 +64,13 @@ impl<C: chip::NvChip> ReadExtentUnauthenticatedFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadExtentUnauthenticatedFuture<B> {
     /// Output type of [`poll()`](Self::poll).
     ///
     /// On success, the extent's data read from storage is returned.
     type Output = Result<FixedVec<u8, 7>, NvFsError>;
 
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
 
         loop {
@@ -79,10 +79,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<
                     extent_range,
                     allocation_block_size_128b_log2,
                 } => {
-                    let chip_io_block_size_128b_log2 = chip.chip_io_block_size_128b_log2();
-                    let read_req = match ReadExtentUnauthenticatedNvChipReadRequest::new(
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let read_req = match ReadExtentUnauthenticatedNvBlkDevReadRequest::new(
                         extent_range,
-                        chip_io_block_size_128b_log2,
+                        blkdev_io_block_size_128b_log2,
                         *allocation_block_size_128b_log2,
                     ) {
                         Ok(read_req) => read_req,
@@ -91,7 +91,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<
                             return task::Poll::Ready(Err(e));
                         }
                     };
-                    let read_fut = match chip.read(read_req) {
+                    let read_fut = match blkdev.read(read_req) {
                         Ok(Ok(read_fut)) => read_fut,
                         Ok(Err((_, e))) | Err(e) => {
                             this.fut_state = ReadExtentUnauthenticatedFutureState::Done;
@@ -101,10 +101,10 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<
                     this.fut_state = ReadExtentUnauthenticatedFutureState::Read { read_fut };
                 }
                 ReadExtentUnauthenticatedFutureState::Read { read_fut } => {
-                    match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((read_req, Ok(())))) => {
                             this.fut_state = ReadExtentUnauthenticatedFutureState::Done;
-                            let ReadExtentUnauthenticatedNvChipReadRequest { dst_buf, .. } = read_req;
+                            let ReadExtentUnauthenticatedNvBlkDevReadRequest { dst_buf, .. } = read_req;
                             return task::Poll::Ready(Ok(dst_buf));
                         }
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
@@ -120,20 +120,20 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadExtentUnauthenticatedFuture<
     }
 }
 
-/// [`NvChipReadRequest`](chip::NvChipReadRequest) implementation used
+/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
 /// internally by [`ReadExtentUnauthenticatedFuture`].
-struct ReadExtentUnauthenticatedNvChipReadRequest {
+struct ReadExtentUnauthenticatedNvBlkDevReadRequest {
     dst_buf: FixedVec<u8, 7>,
     extent_range: layout::PhysicalAllocBlockRange,
     read_request_io_region: ChunkedIoRegion,
-    chip_io_block_size_128b_log2: u32,
+    blkdev_io_block_size_128b_log2: u32,
     allocation_block_size_128b_log2: u8,
 }
 
-impl ReadExtentUnauthenticatedNvChipReadRequest {
+impl ReadExtentUnauthenticatedNvBlkDevReadRequest {
     fn new(
         extent_range: &layout::PhysicalAllocBlockRange,
-        chip_io_block_size_128b_log2: u32,
+        blkdev_io_block_size_128b_log2: u32,
         allocation_block_size_128b_log2: u8,
     ) -> Result<Self, NvFsError> {
         // The extent's end in units of Bytes shall not exceed the maximum allowed image
@@ -151,10 +151,10 @@ impl ReadExtentUnauthenticatedNvChipReadRequest {
                 .map_err(|_| NvFsError::DimensionsNotSupported)?;
         let dst_buf = FixedVec::new_with_default(extent_size)?;
 
-        let chip_io_block_allocation_blocks_log2 =
-            chip_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2 as u32);
+        let blkdev_io_block_allocation_blocks_log2 =
+            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2 as u32);
         let aligned_extent_range = extent_range
-            .align(chip_io_block_allocation_blocks_log2)
+            .align(blkdev_io_block_allocation_blocks_log2)
             .ok_or(NvFsError::IoError(NvFsIoError::RegionOutOfRange))?;
 
         let read_request_io_region = ChunkedIoRegion::new(
@@ -163,7 +163,7 @@ impl ReadExtentUnauthenticatedNvChipReadRequest {
             allocation_block_size_128b_log2 as u32,
         )
         .map_err(|e| match e {
-            ChunkedIoRegionError::ChunkSizeOverflow => NvFsError::from(CocoonFsFormatError::InvalidImageLayoutConfig),
+            ChunkedIoRegionError::ChunkSizeOverflow => NvFsError::from(FormatError::InvalidImageLayoutConfig),
             ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
             ChunkedIoRegionError::InvalidBounds | ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
         })?;
@@ -172,13 +172,13 @@ impl ReadExtentUnauthenticatedNvChipReadRequest {
             dst_buf,
             extent_range: *extent_range,
             read_request_io_region,
-            chip_io_block_size_128b_log2,
+            blkdev_io_block_size_128b_log2,
             allocation_block_size_128b_log2,
         })
     }
 }
 
-impl chip::NvChipReadRequest for ReadExtentUnauthenticatedNvChipReadRequest {
+impl blkdev::NvBlkDevReadRequest for ReadExtentUnauthenticatedNvBlkDevReadRequest {
     fn region(&self) -> &ChunkedIoRegion {
         &self.read_request_io_region
     }
@@ -186,24 +186,24 @@ impl chip::NvChipReadRequest for ReadExtentUnauthenticatedNvChipReadRequest {
     fn get_destination_buffer(
         &mut self,
         range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, chip::NvChipIoError> {
+    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
         // The index is relative to the aligned region.
         let (allocation_block_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
 
         let allocation_block_size_128b_log2 = self.allocation_block_size_128b_log2 as u32;
-        let chip_io_block_allocation_blocks_log2 = self
-            .chip_io_block_size_128b_log2
+        let blkdev_io_block_allocation_blocks_log2 = self
+            .blkdev_io_block_size_128b_log2
             .saturating_sub(allocation_block_size_128b_log2);
 
         // It is known as per the successful instantiation of the read_request_io_region
-        // that the total number of Allocation Blocks in the Chip IO Block
+        // that the total number of Allocation Blocks in the Device IO Block
         // aligned range fits an usize.
         let head_padding_allocation_blocks = u64::from(
             self.extent_range.begin()
                 - self
                     .extent_range
                     .begin()
-                    .align_down(chip_io_block_allocation_blocks_log2),
+                    .align_down(blkdev_io_block_allocation_blocks_log2),
         ) as usize;
         if allocation_block_index < head_padding_allocation_blocks {
             return Ok(None);
@@ -229,27 +229,27 @@ impl chip::NvChipReadRequest for ReadExtentUnauthenticatedNvChipReadRequest {
 ///
 /// Used early at filesystem opening time when the authentication tree based
 /// authentication is not yet available.
-pub struct ReadChainedExtentsPreAuthCcaProtectedFuture<C: chip::NvChip> {
+pub struct ReadChainedExtentsPreAuthCcaProtectedFuture<B: blkdev::NvBlkDev> {
     decrypted_extents: Vec<zeroize::Zeroizing<Vec<u8>>>,
     authenticated_associated_data: Vec<u8>,
     chained_extents_decryption_instance: encryption_entities::EncryptedChainedExtentsDecryptionInstance,
     allocation_block_size_128b_log2: u8,
-    fut_state: ReadChainedExtentsPreauthCcaProtectedFutureState<C>,
+    fut_state: ReadChainedExtentsPreauthCcaProtectedFutureState<B>,
 }
 
 /// [`ReadChainedExtentsPreAuthCcaProtectedFuture`] state-machine state.
-enum ReadChainedExtentsPreauthCcaProtectedFutureState<C: chip::NvChip> {
+enum ReadChainedExtentsPreauthCcaProtectedFutureState<B: blkdev::NvBlkDev> {
     ReadNextExtentPrepare {
         next_extent: layout::PhysicalAllocBlockRange,
     },
     ReadNextExtent {
         extent_allocation_blocks: layout::AllocBlockCount,
-        read_fut: ReadExtentUnauthenticatedFuture<C>,
+        read_fut: ReadExtentUnauthenticatedFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> ReadChainedExtentsPreAuthCcaProtectedFuture<C> {
+impl<B: blkdev::NvBlkDev> ReadChainedExtentsPreAuthCcaProtectedFuture<B> {
     /// Instantiate a [`ReadChainedExtentsPreAuthCcaProtectedFuture`].
     ///
     /// # Arguments:
@@ -341,14 +341,14 @@ impl<C: chip::NvChip> ReadChainedExtentsPreAuthCcaProtectedFuture<C> {
     }
 }
 
-impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadChainedExtentsPreAuthCcaProtectedFuture<C> {
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadChainedExtentsPreAuthCcaProtectedFuture<B> {
     /// Output type of [`poll()`](Self::poll).
     ///
     /// On success, the entity's decrypted payload data, distributed over
     /// one or more buffers, possibly of different sizes each, is being
     /// returned.
     type Output = Result<Vec<zeroize::Zeroizing<Vec<u8>>>, NvFsError>;
-    fn poll(self: pin::Pin<&mut Self>, chip: &C, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
 
         loop {
@@ -365,7 +365,7 @@ impl<C: chip::NvChip> chip::NvChipFuture<C> for ReadChainedExtentsPreAuthCcaProt
                     extent_allocation_blocks,
                     read_fut,
                 } => {
-                    let encrypted_extent = match chip::NvChipFuture::poll(pin::Pin::new(read_fut), chip, cx) {
+                    let encrypted_extent = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(encrypted_extent)) => encrypted_extent,
                         task::Poll::Ready(Err(e)) => {
                             this.fut_state = ReadChainedExtentsPreauthCcaProtectedFutureState::Done;

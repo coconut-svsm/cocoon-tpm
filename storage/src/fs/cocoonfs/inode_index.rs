@@ -8,16 +8,16 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    chip,
+    blkdev,
     crypto::{self, hash, rng, symcipher},
     fs::{
         NvFsError,
         cocoonfs::{
-            CocoonFsFormatError, alloc_bitmap, auth_subject_ids, auth_tree, encryption_entities,
+            FormatError, alloc_bitmap, auth_subject_ids, auth_tree, encryption_entities,
             extent_ptr::{self, EncodedBlockPtr, EncodedExtentPtr},
             extents,
             fs::{
-                CocoonFsAllocateBlockFuture, CocoonFsAllocateBlocksFuture, CocoonFsConfig, CocoonFsSyncStateMemberRef,
+                AllocateBlockFuture, AllocateBlocksFuture, CocoonFsConfig, CocoonFsSyncStateMemberRef,
                 CocoonFsSyncStateReadFuture,
             },
             inode_extents_list::{InodeExtentsListPendingUpdate, InodeExtentsListReadFuture},
@@ -206,7 +206,7 @@ impl InodeIndexTreeLayout {
         if 1u64 << node_encrypted_block_layout.get_block_allocation_blocks_log2()
             > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexConfig));
+            return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
 
         let block_len = node_encrypted_block_layout.effective_payload_len()?;
@@ -223,7 +223,7 @@ impl InodeIndexTreeLayout {
         // entry would remain at the two child nodes each, 1, gets moved into
         // the parent.
         if max_internal_node_entries < 3 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexConfig));
+            return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
 
         let min_internal_node_entries = max_internal_node_entries / 2;
@@ -263,7 +263,7 @@ impl InodeIndexTreeLayout {
         let min_leaf_node_entries = max_leaf_node_entries.div_ceil(2);
         // Cannot happen, but make it explicit.
         if min_leaf_node_entries < 4 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexConfig));
+            return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
 
         let encoded_leaf_node_len = 4
@@ -363,7 +363,7 @@ impl InodeIndexTreeLeafNode {
 
         // Encoded node levels are 1-based.
         if *n.encoded_node_level(layout)? != 1u32.to_le_bytes() {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
 
         let mut last_key: Option<InodeIndexKeyType> = None;
@@ -377,7 +377,7 @@ impl InodeIndexTreeLeafNode {
             }
 
             if last_key.as_ref().map(|last_key| *last_key >= key).unwrap_or(false) {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
             entries += 1;
             last_key = Some(key);
@@ -386,7 +386,7 @@ impl InodeIndexTreeLeafNode {
             .iter()
             .any(|b| *b != 0)
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
         n.entries = entries;
 
@@ -402,7 +402,7 @@ impl InodeIndexTreeLeafNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_none()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
         for encoded_extent_ptr in
@@ -415,7 +415,7 @@ impl InodeIndexTreeLeafNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_some()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
 
@@ -1337,7 +1337,7 @@ impl InodeIndexTreeInternalNode {
 
         // Encoded node levels are 1-based, counted from leaf nodes upwards.
         if u32::from_le_bytes(*n.encoded_node_level(layout)?) <= 1 {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
 
         let mut last_key: Option<InodeIndexKeyType> = None;
@@ -1351,7 +1351,7 @@ impl InodeIndexTreeInternalNode {
             }
 
             if last_key.as_ref().map(|last_key| *last_key >= key).unwrap_or(false) {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
             entries += 1;
             last_key = Some(key);
@@ -1360,7 +1360,7 @@ impl InodeIndexTreeInternalNode {
             .iter()
             .any(|b| *b != 0)
         {
-            return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+            return Err(NvFsError::from(FormatError::InvalidIndexNode));
         }
         n.entries = entries;
 
@@ -1376,7 +1376,7 @@ impl InodeIndexTreeInternalNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_none()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
         for encoded_child_ptr in
@@ -1389,7 +1389,7 @@ impl InodeIndexTreeInternalNode {
             .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
             .is_some()
             {
-                return Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode));
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
             }
         }
 
@@ -2099,7 +2099,7 @@ impl InodeIndexTreeNode {
             *<&[u8; mem::size_of::<u32>()]>::try_from(&encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..])
                 .map_err(|_| nvfs_err_internal!())?,
         ) {
-            0u32 => Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+            0u32 => Err(NvFsError::from(FormatError::InvalidIndexNode)),
             1u32 => Ok(Self::Leaf(InodeIndexTreeLeafNode::decode(
                 node_allocation_blocks_begin,
                 encoded_node,
@@ -3376,8 +3376,8 @@ impl<'a, ST: sync_types::SyncTypes> InodeIndexTreeNodeRef<'a, ST> {
 
 /// Read, authenticate and decrypt an inode index B+-tree node, possibly at the
 /// state as last modified by some pending [`Transaction`].
-struct InodeIndexReadTreeNodeFuture<C: chip::NvChip> {
-    fut_state: InodeIndexReadTreeNodeFutureState<C>,
+struct InodeIndexReadTreeNodeFuture<B: blkdev::NvBlkDev> {
+    fut_state: InodeIndexReadTreeNodeFutureState<B>,
     node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     expected_node_level: Option<u32>,
     encoded_node_buf: FixedVec<u8, 7>,
@@ -3385,17 +3385,17 @@ struct InodeIndexReadTreeNodeFuture<C: chip::NvChip> {
 }
 
 /// [`InodeIndexReadTreeNodeFuture`] state-machine state.
-enum InodeIndexReadTreeNodeFutureState<C: chip::NvChip> {
+enum InodeIndexReadTreeNodeFutureState<B: blkdev::NvBlkDev> {
     Init {
         transaction: Option<Box<transaction::Transaction>>,
     },
     ReadNodeCommitted {
         returned_transaction: Option<Box<transaction::Transaction>>,
-        read_fut: BufferedReadAuthenticateDataFuture<C>,
+        read_fut: BufferedReadAuthenticateDataFuture<B>,
     },
     ReadNodeUncommitted {
         update_states_allocation_blocks_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-        read_fut: TransactionReadAuthenticateDataFuture<C>,
+        read_fut: TransactionReadAuthenticateDataFuture<B>,
     },
     DecryptNode {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -3406,7 +3406,7 @@ enum InodeIndexReadTreeNodeFutureState<C: chip::NvChip> {
     Done,
 }
 
-impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
+impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
     /// Instantiate a new [`InodeIndexReadTreeNodeFuture`].
     ///
     /// If the node is to be read at the state as if some [`Transaction`] had
@@ -3452,7 +3452,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `fs_config` - The filesystem instance's [`CocoonFsConfig`].
     /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
     ///   bitmap](crate::fs::cocoonfs::fs::CocoonFsSyncState::alloc_bitmap).
@@ -3478,7 +3478,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
     #[allow(clippy::type_complexity)]
     fn poll<'a, ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         fs_config: &CocoonFsConfig,
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
         fs_sync_state_auth_tree: &mut auth_tree::AuthTreeRef<'_, ST>,
@@ -3527,7 +3527,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                                         this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                                         return task::Poll::Ready((
                                             Some(transaction),
-                                            Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+                                            Err(NvFsError::from(FormatError::InvalidIndexNode)),
                                         ));
                                     }
                                     return task::Poll::Ready((
@@ -3562,7 +3562,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                                 this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                                 return task::Poll::Ready((
                                     Some(transaction),
-                                    Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+                                    Err(NvFsError::from(FormatError::InvalidIndexNode)),
                                 ));
                             }
                             if this.read_for_update {
@@ -3686,7 +3686,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                             this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                             return task::Poll::Ready((
                                 transaction,
-                                Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
+                                Err(NvFsError::from(FormatError::InvalidIndexNode)),
                             ));
                         }
                         if this.read_for_update {
@@ -3723,7 +3723,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                         &node_range,
                         &fs_config.image_layout,
                         fs_sync_state_auth_tree.get_config(),
-                        chip,
+                        blkdev,
                     ) {
                         Ok(read_fut) => read_fut,
                         Err(e) => {
@@ -3743,7 +3743,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                 } => {
                     match BufferedReadAuthenticateDataFuture::poll(
                         pin::Pin::new(read_fut),
-                        chip,
+                        blkdev,
                         &fs_config.image_layout,
                         fs_config.image_header_end,
                         fs_sync_state_alloc_bitmap,
@@ -3775,7 +3775,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                 } => {
                     match TransactionReadAuthenticateDataFuture::poll(
                         pin::Pin::new(read_fut),
-                        chip,
+                        blkdev,
                         fs_config,
                         fs_sync_state_alloc_bitmap,
                         fs_sync_state_auth_tree,
@@ -3880,10 +3880,7 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
                         .map(|expected_node_level| node_level != expected_node_level)
                         .unwrap_or(false)
                     {
-                        return task::Poll::Ready((
-                            transaction,
-                            Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                        ));
+                        return task::Poll::Ready((transaction, Err(NvFsError::from(FormatError::InvalidIndexNode))));
                     }
 
                     return task::Poll::Ready(if !this.read_for_update {
@@ -3953,25 +3950,25 @@ impl<C: chip::NvChip> InodeIndexReadTreeNodeFuture<C> {
 
 /// Lookup some inode in the inode index, possibly at the state as last modified
 /// by some [`Transaction`].
-pub struct InodeIndexLookupFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeIndexLookupFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
-    fut_state: InodeIndexLookupFutureState<C>,
+    fut_state: InodeIndexLookupFutureState<B>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
 /// [`InodeIndexLookupFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeIndexLookupFutureState<C: chip::NvChip> {
+enum InodeIndexLookupFutureState<B: blkdev::NvBlkDev> {
     Init {
         transaction: Option<Box<transaction::Transaction>>,
     },
     ReadTreeNode {
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexLookupFuture<ST, B> {
     /// Instantiate a new [`InodeIndexReadTreeNodeFuture`].
     ///
     /// If the index is to be read from at the state as if some [`Transaction`]
@@ -4003,7 +4000,9 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupFuture<ST, C> {
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C> for InodeIndexLookupFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexLookupFuture<ST, B>
+{
     /// Output type of [`poll()`](Self::poll).
     ///
     /// In case a [`Transaction`] had been passed to [`Self::new()`], and no
@@ -4022,7 +4021,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'_>,
         cx: &mut core::task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -4063,7 +4062,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                 InodeIndexLookupFutureState::ReadTreeNode { read_fut } => {
                     let (returned_transaction, node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -4115,10 +4114,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                             next_child_node_allocation_blocks_begin
                                         }
                                         None => {
-                                            break (
-                                                transaction,
-                                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                                            );
+                                            break (transaction, NvFsError::from(FormatError::InvalidIndexNode));
                                         }
                                     }
                                 }
@@ -4184,15 +4180,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 /// # See also:
 ///
 /// * [`NvFsEnumerateCursor`](crate::fs::NvFsEnumerateCursor).
-pub struct InodeIndexEnumerateCursor<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeIndexEnumerateCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inodes_enumerate_range: ops::RangeInclusive<InodeIndexKeyType>,
     transaction: Option<Box<transaction::Transaction>>,
     tree_position: Option<InodeIndexEnumerateCursorTreePosition>,
     at_end: bool,
-    _phantom: marker::PhantomData<fn() -> (ST, C)>,
+    _phantom: marker::PhantomData<fn() -> (ST, B)>,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexEnumerateCursor<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexEnumerateCursor<ST, B> {
     /// Instantiate a new [`InodeIndexEnumerateCursor`].
     ///
     /// If the index is to be read from at the state as if some [`Transaction`]
@@ -4251,7 +4247,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexEnumerateCursor<ST, C
     /// # See also:
     ///
     /// * [`NvFsEnumerateCursor::next()`](crate::fs::NvFsEnumerateCursor::next)
-    pub fn next(self: Box<Self>) -> InodeIndexEnumerateCursorNextFuture<ST, C> {
+    pub fn next(self: Box<Self>) -> InodeIndexEnumerateCursorNextFuture<ST, B> {
         InodeIndexEnumerateCursorNextFuture {
             fut_state: InodeIndexEnumerateCursorNextFutureState::Init { cursor: Some(self) },
         }
@@ -4271,7 +4267,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexEnumerateCursor<ST, C
     /// # See also:
     ///
     /// * [`NvFsEnumerateCursor::read_current_inode_data()`](crate::fs::NvFsEnumerateCursor::read_current_inode_data)
-    pub fn read_inode_data(self: Box<Self>) -> InodeIndexEnumerateCursorReadInodeDataFuture<ST, C> {
+    pub fn read_inode_data(self: Box<Self>) -> InodeIndexEnumerateCursorReadInodeDataFuture<ST, B> {
         debug_assert!(self.tree_position.is_some());
         InodeIndexEnumerateCursorReadInodeDataFuture {
             fut_state: InodeIndexEnumerateCursorReadInodeDataFutureState::Init { cursor: Some(self) },
@@ -4320,40 +4316,40 @@ impl InodeIndexEnumerateCursorTreePosition {
 
 /// [Future](CocoonFsSyncStateReadFuture) returned by
 /// [`InodeIndexEnumerateCursor::next()`].
-pub struct InodeIndexEnumerateCursorNextFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: InodeIndexEnumerateCursorNextFutureState<ST, C>,
+pub struct InodeIndexEnumerateCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: InodeIndexEnumerateCursorNextFutureState<ST, B>,
 }
 
 /// [`InodeIndexEnumerateCursorNextFuture`] state-machine state.
-enum InodeIndexEnumerateCursorNextFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeIndexEnumerateCursorNextFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexEnumerateCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
     },
     LookupNextInodeWalkReadTreeNode {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_fut.
-        cursor: Option<Box<InodeIndexEnumerateCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
         next_inode: InodeIndexKeyType,
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     ReadNextTreeLeafNode {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.  Has its transaction moved temporarily into read_fut.
-        cursor: Option<Box<InodeIndexEnumerateCursor<ST, C>>>,
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     InodesRangeExhausted {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexEnumerateCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexEnumerateCursorNextFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexEnumerateCursorNextFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -4375,7 +4371,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     ///           the specified enumeration range has number `inode`.
     type Output = Result<
         (
-            Box<InodeIndexEnumerateCursor<ST, C>>,
+            Box<InodeIndexEnumerateCursor<ST, B>>,
             Result<Option<InodeIndexKeyType>, NvFsError>,
         ),
         NvFsError,
@@ -4385,7 +4381,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -4533,7 +4529,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -4596,7 +4592,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     break (
                                         Some(cursor),
                                         returned_transaction.or(node_ref.into_transaction()),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -4701,7 +4697,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -4771,21 +4767,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let leaf_node = match tree_position.get_leaf_node(cursor.transaction.as_deref()) {
                         Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                         Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (
-                                Some(cursor),
-                                None,
-                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                            );
+                            break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
                         }
                         Err(e) => break (Some(cursor), None, e),
                     };
 
                     if leaf_node.entries == 0 {
-                        break (
-                            Some(cursor),
-                            None,
-                            NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                        );
+                        break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
                     }
                     let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
                         Ok(inode) => inode,
@@ -4858,35 +4846,35 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
 /// [Future](CocoonFsSyncStateReadFuture) returned by
 /// [`InodeIndexEnumerateCursor::read_inode_data()`].
-pub struct InodeIndexEnumerateCursorReadInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: InodeIndexEnumerateCursorReadInodeDataFutureState<ST, C>,
+pub struct InodeIndexEnumerateCursorReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: InodeIndexEnumerateCursorReadInodeDataFutureState<ST, B>,
 }
 
 /// [`InodeIndexEnumerateCursorReadInodeDataFutureState`] state-machine state.
-enum InodeIndexEnumerateCursorReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeIndexEnumerateCursorReadInodeDataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexEnumerateCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
     },
     ReadInodeExtentsList {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_inode_extents_list_fut.
-        cursor: Option<Box<InodeIndexEnumerateCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
         inode: InodeIndexKeyType,
-        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, C>,
+        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, B>,
     },
     ReadInodeData {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_inode_data_fut.
-        cursor: Option<Box<InodeIndexEnumerateCursor<ST, C>>>,
-        read_inode_data_fut: ReadInodeDataFuture<ST, C>,
+        cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
+        read_inode_data_fut: ReadInodeDataFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexEnumerateCursorReadInodeDataFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexEnumerateCursorReadInodeDataFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -4903,7 +4891,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     ///     * `Ok((cursor, Ok(data)))` - Otherwise the inode `data` is returned.
     type Output = Result<
         (
-            Box<InodeIndexEnumerateCursor<ST, C>>,
+            Box<InodeIndexEnumerateCursor<ST, B>>,
             Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>,
         ),
         NvFsError,
@@ -4913,7 +4901,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -4933,11 +4921,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     let leaf_node = match tree_position.get_leaf_node(cursor.transaction.as_deref()) {
                         Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
                         Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (
-                                Some(cursor),
-                                None,
-                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
-                            );
+                            break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
                         }
                         Err(e) => break (Some(cursor), None, e),
                     };
@@ -5007,7 +4991,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 read_inode_extents_list_fut,
                             };
                         }
-                        Ok(None) => break (Some(cursor), None, NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+                        Ok(None) => break (Some(cursor), None, NvFsError::from(FormatError::InvalidExtents)),
                         Err(e) => break (Some(cursor), None, e),
                     }
                 }
@@ -5222,28 +5206,28 @@ impl InodeIndexLookupForInsertResult {
 }
 
 /// Lookup an inode for insertion or update.
-pub struct InodeIndexLookupForInsertFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeIndexLookupForInsertFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
     found_leaf_parent_node: Option<InodeIndexTreeNodeRefForUpdate>,
-    fut_state: InodeIndexLookupForInsertFutureState<C>,
+    fut_state: InodeIndexLookupForInsertFutureState<B>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
 /// [`InodeIndexLookupForInsertFutureState`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeIndexLookupForInsertFutureState<C: chip::NvChip> {
+enum InodeIndexLookupForInsertFutureState<B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<transaction::Transaction>>,
     },
     ReadTreeNode {
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupForInsertFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexLookupForInsertFuture<ST, B> {
     /// Instantiate a [`InodeIndexLookupForInsertFuture`].
     ///
     /// [`InodeIndexLookupForInsertFuture`] assumes ownership of
@@ -5268,8 +5252,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexLookupForInsertFuture
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexLookupForInsertFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexLookupForInsertFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -5296,7 +5280,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'_>,
         cx: &mut core::task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -5336,7 +5320,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                 InodeIndexLookupForInsertFutureState::ReadTreeNode { read_fut } => {
                     let (returned_transaction, node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -5390,7 +5374,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                         None => {
                                             break (
                                                 returned_transaction.or(node_ref.into_transaction()),
-                                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                                NvFsError::from(FormatError::InvalidIndexNode),
                                             );
                                         }
                                     }
@@ -5535,15 +5519,15 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 }
 
 /// Insert or update an inode entry.
-pub struct InodeIndexInsertEntryFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeIndexInsertEntryFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     lookup_result: InodeIndexLookupForInsertResult,
     pending_inode_extents_reallocation: InodeExtentsPendingReallocation,
     pending_inode_extents_list_update: InodeExtentsListPendingUpdate,
-    fut_state: InodeIndexInsertEntryFutureState<ST, C>,
+    fut_state: InodeIndexInsertEntryFutureState<ST, B>,
 }
 
 /// [`InodeIndexInsertEntryFuture`] state-machine state.
-enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -5560,21 +5544,21 @@ enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
         nodes_staged_updates_parent_slot_index: usize,
         nodes_staged_updates_child_slot_index: usize,
         child_index_in_parent: usize,
-        read_sibling_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_sibling_fut: InodeIndexReadTreeNodeFuture<B>,
         at_left_sibling: bool,
     },
     SplitRootNode {
         nodes_staged_updates_old_root_slot_index: usize,
-        allocate_fut: CocoonFsAllocateBlocksFuture<ST, C>,
+        allocate_fut: AllocateBlocksFuture<ST, B>,
     },
     SplitNode {
         nodes_staged_updates_parent_slot_index: usize,
         nodes_staged_updates_child_slot_index: usize,
         child_index_in_parent: usize,
-        allocate_fut: CocoonFsAllocateBlockFuture<ST, C>,
+        allocate_fut: AllocateBlockFuture<ST, B>,
     },
     PreemptiveRotateSplitWalkLoadRoot {
-        read_root_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_root_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     PreemptiveRotateSplitWalkLoadChildPrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -5584,12 +5568,12 @@ enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, C: chip::NvChip
     },
     PreemptiveRotateSplitWalkLoadChild {
         parent_node_ref: InodeIndexTreeNodeRefForUpdate,
-        read_child_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_child_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexInsertEntryFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexInsertEntryFuture<ST, B> {
     /// Instantiate a [`InodeIndexInsertEntryFuture`].
     ///
     /// [`InodeIndexInsertEntryFuture`] assumes ownership of the `transaction`
@@ -5658,8 +5642,8 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexInsertEntryFuture<ST,
     }
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexInsertEntryFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexInsertEntryFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -5696,7 +5680,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -5993,7 +5977,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         debug_assert_eq!(transaction.inode_index_updates.index_tree_levels, 1);
                         let fs_instance = fs_instance_sync_state.get_fs_ref();
                         let image_layout = &fs_instance.fs_config.image_layout;
-                        let allocate_fut = match CocoonFsAllocateBlocksFuture::<ST, C>::new(
+                        let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -6037,10 +6021,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                     // Any internal node, including the root, should have at least two childs,
                     // i.e. at least one separator key.
                     if parent_node.entries == 0 {
-                        break (
-                            Some(transaction),
-                            Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                        );
+                        break (Some(transaction), Err(NvFsError::from(FormatError::InvalidIndexNode)));
                     }
 
                     let tree_layout = &fs_instance_sync_state.inode_index.layout;
@@ -6066,7 +6047,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         })
                         .and_then(|sibling_child_node_allocation_blocks_begin| {
                             sibling_child_node_allocation_blocks_begin
-                                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                         }) {
                         Ok(sibling_child_node_allocation_blocks_begin) => sibling_child_node_allocation_blocks_begin,
                         Err(e) => break (Some(transaction), Err(e)),
@@ -6111,7 +6092,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, sibling_child_node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_sibling_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -6227,7 +6208,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             );
                             if parent_node_level != 1 || parent_node.entries != tree_layout.max_internal_node_entries {
                                 let image_layout = &fs_instance.fs_config.image_layout;
-                                let allocate_fut = match CocoonFsAllocateBlockFuture::new(
+                                let allocate_fut = match AllocateBlockFuture::new(
                                     &fs_instance,
                                     transaction,
                                     image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -6271,7 +6252,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 })
                                 .and_then(|sibling_child_node_allocation_blocks_begin| {
                                     sibling_child_node_allocation_blocks_begin
-                                        .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                        .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                                 }) {
                                 Ok(sibling_child_node_allocation_blocks_begin) => {
                                     sibling_child_node_allocation_blocks_begin
@@ -6392,10 +6373,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             let sibling_child_node = match &mut nodes_staged_updates_sibling_child_slot.node {
                                 InodeIndexTreeNode::Internal(sibling_child_node) => sibling_child_node,
                                 InodeIndexTreeNode::Leaf(_) => {
-                                    break (
-                                        Some(transaction),
-                                        Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                                    );
+                                    break (Some(transaction), Err(NvFsError::from(FormatError::InvalidIndexNode)));
                                 }
                             };
 
@@ -6491,10 +6469,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             let sibling_child_node = match &mut nodes_staged_updates_sibling_child_slot.node {
                                 InodeIndexTreeNode::Leaf(sibling_child_node) => sibling_child_node,
                                 InodeIndexTreeNode::Internal(_) => {
-                                    break (
-                                        Some(transaction),
-                                        Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)),
-                                    );
+                                    break (Some(transaction), Err(NvFsError::from(FormatError::InvalidIndexNode)));
                                 }
                             };
 
@@ -7265,7 +7240,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, root_node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_root_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -7356,7 +7331,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             } => nodes_staged_updates_slot_index,
                         };
 
-                        let allocate_fut = match CocoonFsAllocateBlocksFuture::<ST, C>::new(
+                        let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -7475,7 +7450,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             _ => break (Some(transaction), Err(nvfs_err_internal!())),
                         };
 
-                        let allocate_fut = match CocoonFsAllocateBlockFuture::new(
+                        let allocate_fut = match AllocateBlockFuture::new(
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_node_allocation_blocks_log2 as u32,
@@ -7503,8 +7478,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                 )
                             })
                             .and_then(|child_node_allocation_blocks_begin| {
-                                child_node_allocation_blocks_begin
-                                    .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                child_node_allocation_blocks_begin.ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                             }) {
                             Ok(child_node_allocation_blocks_begin) => child_node_allocation_blocks_begin,
                             Err(e) => break (Some(transaction), Err(e)),
@@ -7544,7 +7518,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, child_node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_child_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -7799,17 +7773,17 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 /// # See also:
 ///
 /// * [`NvFsUnlinkCursor`](crate::fs::NvFsUnlinkCursor).
-pub struct InodeIndexUnlinkCursor<ST: sync_types::SyncTypes, C: chip::NvChip> {
+pub struct InodeIndexUnlinkCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inodes_unlink_range: ops::RangeInclusive<InodeIndexKeyType>,
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
     // reference on Self.
     transaction: Option<Box<transaction::Transaction>>,
     tree_position: Option<InodeIndexUnlinkCursorTreePosition>,
     at_end: bool,
-    _phantom: marker::PhantomData<fn() -> (ST, C)>,
+    _phantom: marker::PhantomData<fn() -> (ST, B)>,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUnlinkCursor<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexUnlinkCursor<ST, B> {
     /// Instantiate a new [`InodeIndexUnlinkCursor`].
     ///
     /// On instantiation success, the [`InodeIndexUnlinkCursor`] assumes
@@ -7872,7 +7846,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUnlinkCursor<ST, C> {
     /// # See also:
     ///
     /// * [`NvFsUnlinkCursor::next()`](crate::fs::NvFsUnlinkCursor::next)
-    pub fn next(self: Box<Self>) -> InodeIndexUnlinkCursorNextFuture<ST, C> {
+    pub fn next(self: Box<Self>) -> InodeIndexUnlinkCursorNextFuture<ST, B> {
         InodeIndexUnlinkCursorNextFuture {
             fut_state: InodeIndexUnlinkCursorNextFutureState::Init { cursor: Some(self) },
         }
@@ -7888,7 +7862,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUnlinkCursor<ST, C> {
     /// # See also:
     ///
     /// * [`NvFsUnlinkCursor::unlink_current_inode()`](crate::fs::NvFsUnlinkCursor::unlink_current_inode)
-    pub fn unlink_inode(self: Box<Self>) -> InodeIndexUnlinkCursorUnlinkInodeFuture<ST, C> {
+    pub fn unlink_inode(self: Box<Self>) -> InodeIndexUnlinkCursorUnlinkInodeFuture<ST, B> {
         debug_assert!(
             self.tree_position
                 .as_ref()
@@ -7910,7 +7884,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUnlinkCursor<ST, C> {
     /// # See also:
     ///
     /// * [`NvFsUnlinkCursor::read_current_inode_data()`](crate::fs::NvFsUnlinkCursor::read_current_inode_data)
-    pub fn read_inode_data(self: Box<Self>) -> InodeIndexUnlinkCursorReadInodeDataFuture<ST, C> {
+    pub fn read_inode_data(self: Box<Self>) -> InodeIndexUnlinkCursorReadInodeDataFuture<ST, B> {
         debug_assert!(
             self.tree_position
                 .as_ref()
@@ -7982,41 +7956,41 @@ struct InodeIndexUnlinkCursorTreePositionInodeEntryExtents {
 
 /// [Future](CocoonFsSyncStateReadFuture) returned by
 /// [`InodeIndexUnlinkCursor::next()`].
-pub struct InodeIndexUnlinkCursorNextFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: InodeIndexUnlinkCursorNextFutureState<ST, C>,
+pub struct InodeIndexUnlinkCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: InodeIndexUnlinkCursorNextFutureState<ST, B>,
 }
 
 /// [`InodeIndexUnlinkCursorNextFuture`] state-machine state.
-enum InodeIndexUnlinkCursorNextFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeIndexUnlinkCursorNextFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
     },
     LookupNextInodeWalkReadTreeNode {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         next_inode: InodeIndexKeyType,
         found_leaf_parent_node: Option<InodeIndexTreeNodeRefForUpdate>,
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     ReadNextTreeLeafNode {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.  Has its transaction moved temporarily into read_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     InodesRangeExhausted {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexUnlinkCursorNextFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexUnlinkCursorNextFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -8038,7 +8012,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     ///           the specified enumeration range has number `inode`.
     type Output = Result<
         (
-            Box<InodeIndexUnlinkCursor<ST, C>>,
+            Box<InodeIndexUnlinkCursor<ST, B>>,
             Result<Option<InodeIndexKeyType>, NvFsError>,
         ),
         NvFsError,
@@ -8048,7 +8022,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -8195,7 +8169,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     break (
                                         Some(cursor),
                                         Some(transaction),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                                 let tree_layout = &fs_instance_sync_state.inode_index.layout;
@@ -8255,7 +8229,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                                 break (
                                                     Some(cursor),
                                                     Some(transaction),
-                                                    NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                                    NvFsError::from(FormatError::InvalidIndexNode),
                                                 );
                                             }
                                         }
@@ -8263,7 +8237,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                             break (
                                                 Some(cursor),
                                                 Some(transaction),
-                                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                                NvFsError::from(FormatError::InvalidIndexNode),
                                             );
                                         }
                                     };
@@ -8319,7 +8293,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -8382,7 +8356,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     break (
                                         Some(cursor),
                                         returned_transaction.or(node_ref.into_transaction()),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -8535,7 +8509,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -8614,7 +8588,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             break (
                                 Some(cursor),
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                NvFsError::from(FormatError::InvalidIndexNode),
                             );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -8624,7 +8598,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         break (
                             Some(cursor),
                             Some(transaction),
-                            NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                            NvFsError::from(FormatError::InvalidIndexNode),
                         );
                     }
                     let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
@@ -8725,85 +8699,85 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
 /// [Future](CocoonFsSyncStateReadFuture) returned by
 /// [`InodeIndexUnlinkCursor::unlink_inode()`].
-pub struct InodeIndexUnlinkCursorUnlinkInodeFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: InodeIndexUnlinkCursorUnlinkInodeFutureState<ST, C>,
+pub struct InodeIndexUnlinkCursorUnlinkInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: InodeIndexUnlinkCursorUnlinkInodeFutureState<ST, B>,
 }
 
 /// [`InodeIndexUnlinkCursorUnlinkInodeFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeIndexUnlinkCursorUnlinkInodeFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeIndexUnlinkCursorUnlinkInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
     },
     ReadInodeExtentsList {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_inode_extents_list_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
-        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, C>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
+        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, B>,
     },
     ApplyInodeExtentsListStagedUpdatesPrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         next_inode_extents_list_extent_index: usize,
     },
     ApplyInodeExtentsListStagedUpdates {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into prepare_staged_updates_application_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         cur_inode_extents_list_extent_index: usize,
         cur_update_states_allocation_blocks_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-        prepare_staged_updates_application_fut: transaction::TransactionPrepareStagedUpdatesApplicationFuture<ST, C>,
+        prepare_staged_updates_application_fut: transaction::TransactionPrepareStagedUpdatesApplicationFuture<ST, B>,
     },
     UnlinkPrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
     },
     TryMergePrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         nodes_staged_updates_parent_slot_index: usize,
         nodes_staged_updates_child_slot_index: usize,
     },
     TryMerge {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_sibling_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         nodes_staged_updates_parent_slot_index: usize,
         nodes_staged_updates_child_slot_index: usize,
         child_index_in_parent: usize,
-        read_sibling_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_sibling_fut: InodeIndexReadTreeNodeFuture<B>,
         at_left_sibling: bool,
         has_right_sibling: bool,
     },
     PreemptiveMergeRotateWalkLoadRoot {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_root_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
-        read_root_fut: InodeIndexReadTreeNodeFuture<C>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
+        read_root_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     PreemptiveMergeRotateWalkLoadChildPrepare {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         parent_node_ref: InodeIndexTreeNodeRefForUpdate,
     },
     PreemptiveMergeRotateWalkLoadChild {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_child_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         parent_node_ref: InodeIndexTreeNodeRefForUpdate,
-        read_child_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_child_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexUnlinkCursorUnlinkInodeFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexUnlinkCursorUnlinkInodeFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -8819,13 +8793,13 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     ///       is returned in an [`Err`].
     ///     * `Ok((cursor, Ok(())))` - Otherwise an `Ok(())` is returned on
     ///       success.
-    type Output = Result<(Box<InodeIndexUnlinkCursor<ST, C>>, Result<(), NvFsError>), NvFsError>;
+    type Output = Result<(Box<InodeIndexUnlinkCursor<ST, B>>, Result<(), NvFsError>), NvFsError>;
 
     type AuxPollData<'a> = &'a mut dyn rng::RngCoreDispatchable;
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -8944,7 +8918,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             break (
                                 Some(cursor),
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidExtents),
+                                NvFsError::from(FormatError::InvalidExtents),
                             );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -9457,7 +9431,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         break (
                             Some(cursor),
                             Some(transaction),
-                            NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                            NvFsError::from(FormatError::InvalidIndexNode),
                         );
                     }
 
@@ -9485,7 +9459,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                         })
                         .and_then(|sibling_child_node_allocation_blocks_begin| {
                             sibling_child_node_allocation_blocks_begin
-                                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                         }) {
                         Ok(sibling_child_node_allocation_blocks_begin) => sibling_child_node_allocation_blocks_begin,
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -9534,7 +9508,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, sibling_child_node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_sibling_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -9663,7 +9637,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             })
                             .and_then(|sibling_child_node_allocation_blocks_begin| {
                                 sibling_child_node_allocation_blocks_begin
-                                    .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                                    .ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                             }) {
                             Ok(sibling_child_node_allocation_blocks_begin) => {
                                 sibling_child_node_allocation_blocks_begin
@@ -9788,7 +9762,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     break (
                                         Some(cursor),
                                         Some(transaction),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -10027,7 +10001,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                                     break (
                                         Some(cursor),
                                         Some(transaction),
-                                        NvFsError::from(CocoonFsFormatError::InvalidIndexNode),
+                                        NvFsError::from(FormatError::InvalidIndexNode),
                                     );
                                 }
                             };
@@ -10334,7 +10308,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, root_node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_root_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -10427,8 +10401,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             )
                         })
                         .and_then(|child_node_allocation_blocks_begin| {
-                            child_node_allocation_blocks_begin
-                                .ok_or(NvFsError::from(CocoonFsFormatError::InvalidIndexNode))
+                            child_node_allocation_blocks_begin.ok_or(NvFsError::from(FormatError::InvalidIndexNode))
                         }) {
                         Ok(child_node_allocation_blocks_begin) => child_node_allocation_blocks_begin,
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -10470,7 +10443,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, child_node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_child_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -10689,34 +10662,34 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
 /// [Future](CocoonFsSyncStateReadFuture) returned by
 /// [`InodeIndexUnlinkCursor::read_inode_data()`].
-pub struct InodeIndexUnlinkCursorReadInodeDataFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: InodeIndexUnlinkCursorReadInodeDataFutureState<ST, C>,
+pub struct InodeIndexUnlinkCursorReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: InodeIndexUnlinkCursorReadInodeDataFutureState<ST, B>,
 }
 
 /// [`InodeIndexUnlinkCursorReadInodeDataFutureState`] state-machine state.
-enum InodeIndexUnlinkCursorReadInodeDataFutureState<ST: sync_types::SyncTypes, C: chip::NvChip> {
+enum InodeIndexUnlinkCursorReadInodeDataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
     },
     ReadInodeExtentsList {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_inode_extents_list_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
-        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, C>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
+        read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, B>,
     },
     ReadInodeData {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self. Has its transaction moved temporarily into read_inode_data_fut.
-        cursor: Option<Box<InodeIndexUnlinkCursor<ST, C>>>,
-        read_inode_data_fut: ReadInodeDataFuture<ST, C>,
+        cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
+        read_inode_data_fut: ReadInodeDataFuture<ST, B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexUnlinkCursorReadInodeDataFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexUnlinkCursorReadInodeDataFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -10733,7 +10706,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
     ///     * `Ok((cursor, Ok(data)))` - Otherwise the inode `data` is returned.
     type Output = Result<
         (
-            Box<InodeIndexUnlinkCursor<ST, C>>,
+            Box<InodeIndexUnlinkCursor<ST, B>>,
             Result<zeroize::Zeroizing<Vec<u8>>, NvFsError>,
         ),
         NvFsError,
@@ -10743,7 +10716,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         _aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -10866,7 +10839,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             break (
                                 Some(cursor),
                                 Some(transaction),
-                                NvFsError::from(CocoonFsFormatError::InvalidExtents),
+                                NvFsError::from(FormatError::InvalidExtents),
                             );
                         }
                         Err(e) => break (Some(cursor), Some(transaction), e),
@@ -10989,12 +10962,12 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 /// that node over and over again upon every tree height change staged to a
 /// given [`Transaction`], that get's done once at the end via an
 /// `InodeIndexUpdateRootNodeInodeFuture` right before the transaction commit.
-pub struct InodeIndexUpdateRootNodeInodeFuture<ST: sync_types::SyncTypes, C: chip::NvChip> {
-    fut_state: InodeIndexUpdateRootNodeInodeFutureState<C>,
+pub struct InodeIndexUpdateRootNodeInodeFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: InodeIndexUpdateRootNodeInodeFutureState<B>,
     _phantom: marker::PhantomData<fn() -> *const ST>,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUpdateRootNodeInodeFuture<ST, C> {
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexUpdateRootNodeInodeFuture<ST, B> {
     /// Instantiate a [`InodeIndexUpdateRootNodeInodeFuture`].
     ///
     /// [`InodeIndexUpdateRootNodeInodeFuture`] assumes ownership of the
@@ -11017,20 +10990,20 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexUpdateRootNodeInodeFu
 
 /// [`InodeIndexUpdateRootNodeInodeFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
-enum InodeIndexUpdateRootNodeInodeFutureState<C: chip::NvChip> {
+enum InodeIndexUpdateRootNodeInodeFutureState<B: blkdev::NvBlkDev> {
     Init {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<transaction::Transaction>>,
     },
     ReadEntryLeafTreeNode {
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST, C>
-    for InodeIndexUpdateRootNodeInodeFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for InodeIndexUpdateRootNodeInodeFuture<ST, B>
 {
     /// Output type of [`poll()`](Self::poll).
     ///
@@ -11050,7 +11023,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, C>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
         aux_data: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
@@ -11082,7 +11055,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
                             this.fut_state = InodeIndexUpdateRootNodeInodeFutureState::Done;
                             return task::Poll::Ready(Ok((
                                 transaction,
-                                Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)),
+                                Err(NvFsError::from(FormatError::InvalidExtents)),
                             )));
                         }
                         Err(e) => {
@@ -11113,7 +11086,7 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 
                     let (returned_transaction, entry_leaf_node_ref) = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        &fs_instance.chip,
+                        &fs_instance.blkdev,
                         &fs_instance.fs_config,
                         fs_sync_state_alloc_bitmap,
                         &mut fs_sync_state_auth_tree,
@@ -11245,22 +11218,22 @@ impl<ST: sync_types::SyncTypes, C: chip::NvChip> CocoonFsSyncStateReadFuture<ST,
 /// Authentication is done by means of the preauthentication CCA protection
 /// digest over the inode index entry leaf node stored in the mutable image
 /// header.
-pub struct InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C: chip::NvChip> {
+pub struct InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<B: blkdev::NvBlkDev> {
     entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-    fut_state: InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState<C>,
+    fut_state: InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState<B>,
 }
 
 /// [`InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture`] state-machine
 /// state.
-enum InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState<C: chip::NvChip> {
+enum InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState<B: blkdev::NvBlkDev> {
     Init,
     ReadEntryLeafNode {
-        read_entry_leaf_node_fut: read_preauth::ReadExtentUnauthenticatedFuture<C>,
+        read_entry_leaf_node_fut: read_preauth::ReadExtentUnauthenticatedFuture<B>,
     },
     Done,
 }
 
-impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C> {
+impl<B: blkdev::NvBlkDev> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<B> {
     /// Instantiate a
     /// [`InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture`].
     ///
@@ -11284,7 +11257,7 @@ impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `expected_entry_leaf_node_preauth_cca_protection_digest` - The inode
     ///   index entry leaf node's expected preauthentication CCA protection
     ///   digest, as found in
@@ -11297,7 +11270,7 @@ impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         expected_entry_leaf_node_preauth_cca_protection_digest: &[u8],
         image_layout: &layout::ImageLayout,
         root_key: &keys::RootKey,
@@ -11330,7 +11303,7 @@ impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C
                     read_entry_leaf_node_fut,
                 } => {
                     let encrypted_entry_leaf_node =
-                        match chip::NvChipFuture::poll(pin::Pin::new(read_entry_leaf_node_fut), chip, cx) {
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_entry_leaf_node_fut), blkdev, cx) {
                             task::Poll::Ready(Ok(encrypted_entry_leaf_node)) => encrypted_entry_leaf_node,
                             task::Poll::Ready(Err(e)) => break Err(e),
                             task::Poll::Pending => return task::Poll::Pending,
@@ -11447,7 +11420,7 @@ impl<C: chip::NvChip> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFuture<C
 
 /// Bootstrap the [`InodeIndex`] at filesystem opening time, after the
 /// authentication tree based authentication has become available.
-pub struct InodeIndexBootstrapFuture<ST: sync_types::SyncTypes, C: chip::NvChip>
+pub struct InodeIndexBootstrapFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev>
 where
     ST::RwLock<InodeIndexTreeNodeCache>: marker::Unpin,
 {
@@ -11456,21 +11429,21 @@ where
     tree_node_encryption_instance: Option<encryption_entities::EncryptedBlockEncryptionInstance>,
     tree_node_decryption_instance: Option<encryption_entities::EncryptedBlockDecryptionInstance>,
     tree_nodes_cache: ST::RwLock<InodeIndexTreeNodeCache>,
-    fut_state: InodeIndexBootstrapFutureState<C>,
+    fut_state: InodeIndexBootstrapFutureState<B>,
 }
 
 /// [`InodeIndexBootstrapFuture`] state-machine state.
-enum InodeIndexBootstrapFutureState<C: chip::NvChip> {
+enum InodeIndexBootstrapFutureState<B: blkdev::NvBlkDev> {
     Init {
         entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     },
     ReadEntryLeafNode {
         entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     ReadRootNode {
         root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        read_fut: InodeIndexReadTreeNodeFuture<C>,
+        read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     Finalize {
         root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -11479,7 +11452,7 @@ enum InodeIndexBootstrapFutureState<C: chip::NvChip> {
     Done,
 }
 
-impl<ST: sync_types::SyncTypes, C: chip::NvChip> InodeIndexBootstrapFuture<ST, C>
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexBootstrapFuture<ST, B>
 where
     ST::RwLock<InodeIndexTreeNodeCache>: marker::Unpin,
 {
@@ -11560,7 +11533,7 @@ where
     ///
     /// # Arguments:
     ///
-    /// * `chip` - The filesystem image backing storage.
+    /// * `blkdev` - The filesystem image backing storage.
     /// * `fs_config` - The [`CocoonFsConfig`] instantiated for the filesystem.
     /// * `alloc_bitmap` - The filesystem's
     ///   [`AllocBitmap`](alloc_bitmap::AllocBitmap), as read through
@@ -11573,7 +11546,7 @@ where
     ///   is being polled.
     pub fn poll(
         self: pin::Pin<&mut Self>,
-        chip: &C,
+        blkdev: &B,
         fs_config: &CocoonFsConfig,
         alloc_bitmap: &alloc_bitmap::AllocBitmap,
         auth_tree: &mut auth_tree::AuthTreeRef<'_, ST>,
@@ -11615,7 +11588,7 @@ where
 
                     let entry_leaf_node_ref = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        chip,
+                        blkdev,
                         fs_config,
                         alloc_bitmap,
                         auth_tree,
@@ -11648,19 +11621,18 @@ where
                         }
                     };
 
-                    let index_root_inode_entry_index = match entry_leaf_node
-                        .lookup(SpecialInode::IndexRoot as u32, &this.tree_layout)
-                    {
-                        Ok(Ok(index_root_inode_entry_index)) => index_root_inode_entry_index,
-                        Ok(Err(_)) => {
-                            this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::SpecialInodeMissing)));
-                        }
-                        Err(e) => {
-                            this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
+                    let index_root_inode_entry_index =
+                        match entry_leaf_node.lookup(SpecialInode::IndexRoot as u32, &this.tree_layout) {
+                            Ok(Ok(index_root_inode_entry_index)) => index_root_inode_entry_index,
+                            Ok(Err(_)) => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(FormatError::SpecialInodeMissing)));
+                            }
+                            Err(e) => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
                     let root_node_extent_ptr = match entry_leaf_node
                         .encoded_entry_extent_ptr(index_root_inode_entry_index, &this.tree_layout)
                     {
@@ -11679,14 +11651,12 @@ where
                         Ok(Some((_, true))) => {
                             // Indirect extent. Not allowed for the index root node.
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(
-                                CocoonFsFormatError::InvalidIndexRootExtents,
-                            )));
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidIndexRootExtents)));
                         }
                         Ok(None) => {
                             // The inode exists, but the extents reference is nil, which is invalid.
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidExtents)));
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
                         }
                         Err(e) => {
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
@@ -11703,7 +11673,7 @@ where
                     {
                         // The encoded root node extent's length must match the tree node size.
                         this.fut_state = InodeIndexBootstrapFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidIndexRootExtents)));
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidIndexRootExtents)));
                     }
 
                     if root_node_extent.begin() == *entry_leaf_node_allocation_blocks_begin {
@@ -11735,7 +11705,7 @@ where
 
                     let root_node_ref = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
-                        chip,
+                        blkdev,
                         fs_config,
                         alloc_bitmap,
                         auth_tree,
@@ -11766,7 +11736,7 @@ where
                             // It's already know that the entry leaf node is not the root, hence the
                             // root cannot be a leaf.
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(CocoonFsFormatError::InvalidIndexNode)));
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidIndexNode)));
                         }
                     };
                     let root_node_level = match root_node.node_level(&this.tree_layout) {
