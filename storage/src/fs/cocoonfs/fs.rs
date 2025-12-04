@@ -1548,7 +1548,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeFuture<ST, B> {
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>> for WriteInodeFuture<ST, B> {
-    type Output = Result<(Transaction, zeroize::Zeroizing<Vec<u8>>, Result<(), NvFsError>), NvFsError>;
+    type Output = (
+        zeroize::Zeroizing<Vec<u8>>,
+        Result<(Transaction, Result<(), NvFsError>), NvFsError>,
+    );
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1568,15 +1571,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     let transaction = match transaction.take() {
                         Some(transaction) => transaction,
                         None => {
+                            let data = mem::take(data);
                             this.fut_state = WriteInodeFutureState::Done;
-                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                            return task::Poll::Ready((data, Err(nvfs_err_internal!())));
                         }
                     };
 
                     if *inode <= inode_index::SPECIAL_INODE_MAX {
                         let data = mem::take(data);
                         this.fut_state = WriteInodeFutureState::Done;
-                        return task::Poll::Ready(Ok((transaction, data, Err(NvFsError::InodeReserved))));
+                        return task::Poll::Ready((data, Ok((transaction, Err(NvFsError::InodeReserved)))));
                     }
 
                     let Transaction {
@@ -1596,22 +1600,23 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     let sync_state_read_guard = match read_sequence.continue_sequence::<ST, B>(fs_instance) {
                         Ok(sync_state) => sync_state,
                         Err(e) => {
+                            let data = write_inode_data_fut.grab_data();
                             this.fut_state = WriteInodeFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready((data, Err(e)));
                         }
                     };
                     let mut sync_state = CocoonFsSyncStateMemberRef::from(&sync_state_read_guard);
 
-                    let (transaction, data, result) = match CocoonFsSyncStateReadFuture::poll(
+                    let (data, transaction, result) = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(write_inode_data_fut),
                         &mut sync_state,
                         &mut rng,
                         cx,
                     ) {
-                        task::Poll::Ready(Ok((transaction, data, result))) => (transaction, data, result),
-                        task::Poll::Ready(Err(e)) => {
+                        task::Poll::Ready((data, Ok((transaction, result)))) => (data, transaction, result),
+                        task::Poll::Ready((data, Err(e))) => {
                             this.fut_state = WriteInodeFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready((data, Err(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
@@ -1621,7 +1626,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                         transaction,
                     };
                     this.fut_state = WriteInodeFutureState::Done;
-                    return task::Poll::Ready(Ok((transaction, data, result)));
+                    return task::Poll::Ready((data, Ok((transaction, result))));
                 }
                 WriteInodeFutureState::Done => unreachable!(),
             }

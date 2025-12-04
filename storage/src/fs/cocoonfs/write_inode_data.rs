@@ -132,6 +132,19 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeDataFuture<ST, B>
             fut_state: WriteInodeDataFutureState::LookupInode { inode_index_lookup_fut },
         }
     }
+
+    /// Steal the input data buffer.
+    ///
+    /// Steal the internally owned input data buffer initially passed to
+    /// [`new()`](Self::new). Intended for use in the upper layers' error
+    /// handling logic, i.e. when the [`WriteInodeDataFuture`] is to get
+    /// cancelled. The [`WriteInodeDataFuture`] must henceforth not get
+    /// [polled](Self::poll) any further.
+    pub fn grab_data(&mut self) -> zeroize::Zeroizing<Vec<u8>> {
+        debug_assert!(!matches!(self.fut_state, WriteInodeDataFutureState::Done));
+        self.fut_state = WriteInodeDataFutureState::Done;
+        mem::take(&mut self.data)
+    }
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
@@ -139,26 +152,21 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 {
     /// Output type of [`poll()`](Self::poll).
     ///
-    /// A two-level [`Result`] is returned upon
-    /// [future](CocoonFsSyncStateReadFuture) completion.
-    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    /// A pair of the input data buffer and a two-level [`Result`] is returned
+    /// upon [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `(data, Err(e))` - The outer level [`Result`] is set to [`Err`] upon
     ///   encountering an internal error and the [`Transaction`] is lost.
-    /// * `Ok((transaction, data, ...))` - Otherwise the outer level [`Result`]
-    ///   is set to [`Ok`] and a tuple of the input [`Transaction`],
-    ///   `transaction`,  the input `data`, and the operation result will get
-    ///   returned within:
-    ///     * `Ok((transaction, data, Err(e)))` - In case of an error, the error
-    ///       reason `e` is returned in an [`Err`].
-    ///     * `Ok((transaction, data, Ok(())))` -  Otherwise, `Ok(())` will get
-    ///       returned for the operation result on success.
-    type Output = Result<
-        (
-            Box<transaction::Transaction>,
-            zeroize::Zeroizing<Vec<u8>>,
-            Result<(), NvFsError>,
-        ),
-        NvFsError,
-    >;
+    /// * `(data, Ok((transaction, ...)))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a pair of the input [`Transaction`]
+    ///   and the operation result will get returned within:
+    ///     * `(data, Ok((transaction, Err(e))))` - In case of an error, the
+    ///       error reason `e` is returned in an [`Err`].
+    ///     * `(data, Ok((transaction, Ok(()))))` -  Otherwise, `Ok(())` will
+    ///       get returned for the operation result on success.
+    type Output = (
+        zeroize::Zeroizing<Vec<u8>>,
+        Result<(Box<transaction::Transaction>, Result<(), NvFsError>), NvFsError>,
+    );
 
     type AuxPollData<'a> = &'a mut dyn rng::RngCoreDispatchable;
 
@@ -792,19 +800,21 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     // All done.
                     transaction.allocs.reset_rollback();
                     this.fut_state = WriteInodeDataFutureState::Done;
-                    return task::Poll::Ready(Ok((transaction, mem::take(&mut this.data), Ok(()))));
+                    let data = mem::take(&mut this.data);
+                    return task::Poll::Ready((data, Ok((transaction, Ok(())))));
                 }
                 WriteInodeDataFutureState::Done => unreachable!(),
             }
         };
 
         this.fut_state = WriteInodeDataFutureState::Done;
+        let data = mem::take(&mut this.data);
         task::Poll::Ready(match transaction.take() {
             Some(mut transaction) => {
                 transaction.allocs.reset_rollback();
-                Ok((transaction, mem::take(&mut this.data), Err(e)))
+                (data, Ok((transaction, Err(e))))
             }
-            None => Err(e),
+            None => (data, Err(e)),
         })
     }
 }

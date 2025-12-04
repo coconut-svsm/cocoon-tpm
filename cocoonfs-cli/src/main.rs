@@ -902,8 +902,8 @@ fn main() {
             )
             .block_on()
             {
-                Ok((rng, Ok((transaction, _data, Ok(()))))) => (transaction, rng),
-                Ok((_, Ok((_, _, Err(e))))) | Ok((_, Err(e))) | Err(e) => {
+                Ok((rng, (_data, Ok((transaction, Ok(())))))) => (transaction, rng),
+                Ok((_, (_, Ok((_, Err(e)))))) | Ok((_, (_, Err(e)))) | Err(e) => {
                     eprintln!(
                         "error: failed to stage file write at CocoonFS transaction: error={:?}",
                         e
