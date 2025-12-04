@@ -380,9 +380,8 @@ fn cocoonfs_test_write_inode_op_helper(
         fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(fs_instance.clone(), write_inode_fut, rng),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let write_inode_result = write_inode_waiter.take().unwrap().unwrap().1;
-    write_inode_result
-        .and_then(|(transaction, _write_inode_data, write_inode_result)| write_inode_result.map(|_| transaction))
+    let write_inode_result = write_inode_waiter.take().unwrap().unwrap().1.1;
+    write_inode_result.and_then(|(transaction, write_inode_result)| write_inode_result.map(|_| transaction))
 }
 
 fn cocoonfs_test_read_inode_op_helper(

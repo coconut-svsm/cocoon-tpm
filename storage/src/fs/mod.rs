@@ -854,24 +854,28 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     /// `NvFs` implementation specific [future](NvFsFuture) type instantiated
     /// through [`write_inode()`](Self::write_inode).
     ///
-    /// A two-level [`Result`] is returned upon [future](NvFsFuture) completion.
-    /// * `Err(e)` -  The outer level [`Result`] is set to [`Err`] upon
+    /// A pair of the the input data buffer and a two-level [`Result`] is
+    /// returned upon [future](NvFsFuture) completion.
+    /// * `(data, Err(e))` -  The outer level [`Result`] is set to [`Err`] upon
     ///   encountering either an internal error or if the consistent read
     ///   sequence implicit to the [`Transaction`](Self::Transaction) has become
     ///   stale, in which case an error `e` of [`Retry`](NvFsError::Retry) will
     ///   be returned. The [`Transaction`](Self::Transaction) originally
     ///   provided to [`write_inode()`](Self::write_inode) is lost.
-    /// * `Ok((transaction, data, ...))` - Otherwise the outer level [`Result`]
-    ///   is set to [`Ok`] and a triplet of the input
-    ///   [`Transaction`](Self::Transaction), the input data buffer and the
-    ///   operation result will get returned within:
-    ///     * `Ok((transaction, data, Err(e)))` - In case of an error, the error
-    ///       reason `e` is returned in an [`Err`].
-    ///     * `Ok((transaction, data, Ok(())))` - Otherwise, `Ok(())` will get
+    /// * `(data, Ok((transaction, ...)))` - Otherwise the outer level
+    ///   [`Result`] is set to [`Ok`] and a pair of the input
+    ///   [`Transaction`](Self::Transaction) and the operation result will get
+    ///   returned within:
+    ///     * `(data, Ok((transaction, Err(e))))` - In case of an error, the
+    ///       error reason `e` is returned in an [`Err`].
+    ///     * `(data, Ok((transaction, Ok(()))))` - Otherwise, `Ok(())` will get
     ///       returned for the operation result on success.
     type WriteInodeFut: NvFsFuture<
             Self,
-            Output = Result<(Self::Transaction, zeroize::Zeroizing<Vec<u8>>, Result<(), NvFsError>), NvFsError>,
+            Output = (
+                zeroize::Zeroizing<Vec<u8>>,
+                Result<(Self::Transaction, Result<(), NvFsError>), NvFsError>,
+            ),
         >;
 
     /// Write an inode's data.
