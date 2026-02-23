@@ -266,7 +266,7 @@ impl<T> ZeroizingFlat<T> {
     ///
     /// <div class="warning">
     ///
-    /// The compiler might emit temorary copies of `value` on the stack not
+    /// The compiler might emit temporary copies of `value` on the stack not
     /// covered by any zeroization.
     ///
     /// </div>
@@ -308,7 +308,7 @@ impl<T> ZeroizingFlat<T> {
     pub fn replace_boxed_with<F: FnOnce() -> T>(mut self: Box<Self>, f: F) -> Box<Self> {
         unsafe { self.value.assume_init_drop() };
         // Temporarily turn the Box<Self> into a Box<ManuallyDrop<Self>> to avoid double
-        // frees upon unwinding from f() -- the formerly wapped valued has just
+        // frees upon unwinding from f() -- the formerly wrapped valued has just
         // been dropped, don't do it again.
         let p_this = Box::into_raw(self) as *mut mem::ManuallyDrop<Self>;
         let mut this = unsafe { Box::from_raw(p_this) };
