@@ -171,14 +171,13 @@ impl<T> ZeroizingFlat<T> {
         // temporary copy on the stack. Whether or not this works out depends on
         // compiler optimizations though.
         let inner = unsafe { self.value.assume_init_read() };
+        let mut this = mem::ManuallyDrop::new(self);
         let r = f(inner);
         #[cfg(feature = "zeroize")]
         {
-            let p_value = &raw mut self.value;
+            let p_value = &raw mut this.value;
             unsafe { zeroize::zeroize_flat_type(p_value) };
         }
-        // Don't invoke drop, the wrapped value was moved into f() above.
-        mem::forget(self);
         r
     }
 
