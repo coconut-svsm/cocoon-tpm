@@ -212,8 +212,7 @@ fn cocoonfs_test_mk_fs_instance_ref<'a>(
 }
 
 fn cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance: <TestCocoonFs as fs::NvFs>::SyncRcPtr) -> TestNvBlkDev {
-    let blkdev = fs_instance.blkdev.snapshot();
-    blkdev
+    fs_instance.blkdev.snapshot()
 }
 
 fn cocoonfs_test_mkfs_op_helper(
@@ -356,8 +355,8 @@ fn cocoonfs_test_commit_transaction_op_helper(
         fs::NvFsFutureAsCoreFuture::<TestCocoonFs, _>::new(fs_instance.clone(), commit_transaction_fut, rng),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let commit_transaction_result = commit_transaction_waiter.take().unwrap().unwrap().1;
-    commit_transaction_result
+
+    commit_transaction_waiter.take().unwrap().unwrap().1
 }
 
 fn cocoonfs_test_write_inode_op_helper(
@@ -449,8 +448,8 @@ fn cocoonfs_test_enumerate_inodes_op_cb<CB: CocoonFsTestEnumerateInodesFutureCal
         ),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let enumerate_inodes_result = enumerate_inodes_waiter.take().unwrap().unwrap().1;
-    enumerate_inodes_result
+
+    enumerate_inodes_waiter.take().unwrap().unwrap().1
 }
 
 trait CocoonFsTestEnumerateInodesFutureCallback: 'static + marker::Unpin + marker::Send {
@@ -720,8 +719,8 @@ fn cocoonfs_test_unlink_inodes_op_cb<CB: CocoonFsTestUnlinkInodesFutureCallback>
         ),
     );
     TestAsyncExecutor::run_to_completion(&executor);
-    let unlink_inodes_result = unlink_inodes_waiter.take().unwrap().unwrap().1;
-    unlink_inodes_result
+
+    unlink_inodes_waiter.take().unwrap().unwrap().1
 }
 
 trait CocoonFsTestUnlinkInodesFutureCallback: 'static + marker::Unpin + marker::Send {
