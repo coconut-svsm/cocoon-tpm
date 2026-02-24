@@ -426,8 +426,7 @@ fn test_hash_drbg_common(hash_alg: tpm2_interface::TpmiAlgHash, entropy: &[u8], 
         let additional_input = Some(io_slices::GenericIoSlicesIter::new(
             additional_input
                 .iter()
-                .map(|buffers| buffers.iter())
-                .flatten()
+                .flat_map(|buffers| buffers.iter())
                 .filter_map(|b| b.map(Ok)),
             None,
         ));
