@@ -1618,7 +1618,7 @@ fn test_set_assoc_cache_single_set_lru_insert() {
     }
 
     for capacity in 1..SetAssocCacheSet::<u32, u32>::MAX_ASSOCIATIVITY + 1 {
-        let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity as u32)).unwrap();
+        let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity)).unwrap();
 
         for i in 0u32..capacity {
             cache.insert(2 * i, 2 * i);
@@ -1663,7 +1663,7 @@ fn test_set_assoc_cache_single_set_lru_mark_access() {
     }
 
     for capacity in 2..SetAssocCacheSet::<u32, u32>::MAX_ASSOCIATIVITY + 1 {
-        let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity as u32)).unwrap();
+        let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity)).unwrap();
 
         for i in 0u32..capacity {
             cache.insert(2 * i, 2 * i);
@@ -1699,7 +1699,7 @@ fn test_set_assoc_cache_single_set_lru_remove() {
     }
 
     for capacity in [4, 8].iter() {
-        let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(*capacity as u32)).unwrap();
+        let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(*capacity)).unwrap();
 
         for i in 0u32..*capacity {
             cache.insert(2 * i, 2 * i);
@@ -1829,14 +1829,13 @@ fn test_set_assoc_cache_reconfigure_single_set_shrink() {
         for new_capacity in 0..capacity {
             let removed = capacity - new_capacity;
             for unoccupied in 0..(removed + 1).min(capacity) + 1 {
-                let mut cache =
-                    SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity as u32)).unwrap();
+                let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity)).unwrap();
 
                 for i in 0u32..capacity - unoccupied {
                     cache.insert(i, i);
                 }
                 cache
-                    .reconfigure(TrivialMapSetToKey {}, iter::once(new_capacity as u32))
+                    .reconfigure(TrivialMapSetToKey {}, iter::once(new_capacity))
                     .unwrap();
                 let retained_end = capacity - unoccupied;
                 let retained_begin = removed.saturating_sub(unoccupied).min(retained_end);
@@ -1899,14 +1898,13 @@ fn test_set_assoc_cache_reconfigure_single_set_grow() {
     for capacity in 0u32..SetAssocCacheSet::<u32, u32>::MAX_ASSOCIATIVITY - 1 {
         for new_capacity in capacity..SetAssocCacheSet::<u32, u32>::MAX_ASSOCIATIVITY + 1 {
             for unoccupied in 0..capacity.min(capacity) + 1 {
-                let mut cache =
-                    SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity as u32)).unwrap();
+                let mut cache = SetAssocCache::<u32, u32, _>::new(TrivialMapSetToKey {}, iter::once(capacity)).unwrap();
 
                 for i in 0u32..capacity - unoccupied {
                     cache.insert(i, i);
                 }
                 cache
-                    .reconfigure(TrivialMapSetToKey {}, iter::once(new_capacity as u32))
+                    .reconfigure(TrivialMapSetToKey {}, iter::once(new_capacity))
                     .unwrap();
                 assert_eq!(
                     cache

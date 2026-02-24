@@ -4491,7 +4491,7 @@ fn digests_per_node_minus_one_inv_mod_u64(digests_per_node_log2: u32) -> u64 {
 #[test]
 fn test_digests_per_node_minus_one_inv_mod_u64() {
     for digests_per_node_log2 in 1u32..=64 {
-        let digests_per_node_minus_one = u64::trailing_bits_mask(digests_per_node_log2 as u32);
+        let digests_per_node_minus_one = u64::trailing_bits_mask(digests_per_node_log2);
         assert_eq!(
             digests_per_node_minus_one.wrapping_mul(digests_per_node_minus_one_inv_mod_u64(digests_per_node_log2)),
             1
