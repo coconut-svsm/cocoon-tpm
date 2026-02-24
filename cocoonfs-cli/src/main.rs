@@ -129,7 +129,7 @@ fn cli_parse_hexstr(arg: &str) -> Result<FixedVec<u8, 4>, clap::error::Error> {
     let len = arg.len().div_ceil(2);
     let mut result = FixedVec::new_with_default(len).unwrap();
 
-    let (src, dst) = if arg.len() % 2 != 0 {
+    let (src, dst) = if !arg.len().is_multiple_of(2) {
         // Pad with a zero nibble at the head.
         result[0] = nibble_from_hex(arg[0])?;
         (&arg[1..], &mut result[1..])
