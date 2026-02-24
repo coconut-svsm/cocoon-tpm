@@ -260,7 +260,7 @@ fn cocoonfs_test_openfs_op_helper(
     blkdev: TestNvBlkDev,
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
-    let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
+    let root_key = zeroize::Zeroizing::new([0u8; 0].to_vec());
     let openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
@@ -276,7 +276,7 @@ fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
     blkdev: TestNvBlkDev,
 ) -> Result<TestNvBlkDev, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
-    let root_key = zeroize::Zeroizing::new([0u8; 0].iter().map(|b| *b).collect::<Vec<u8>>());
+    let root_key = zeroize::Zeroizing::new([0u8; 0].to_vec());
     let mut openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
@@ -366,7 +366,7 @@ fn cocoonfs_test_write_inode_op_helper(
     data: &[u8],
 ) -> Result<<TestCocoonFs as fs::NvFs>::Transaction, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
-    let data = data.iter().copied().collect::<Vec<u8>>();
+    let data = data.to_vec();
     let write_inode_fut = <TestCocoonFs as fs::NvFs>::write_inode(
         &cocoonfs_test_mk_fs_instance_ref(fs_instance),
         transaction,
