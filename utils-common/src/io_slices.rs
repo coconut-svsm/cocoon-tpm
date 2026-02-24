@@ -14,7 +14,7 @@
 //! Define *IO slice iterator* traits for abstracting the different capabilities
 //! of these, and provide implementations for the common cases listed above.
 
-// Lifetimes are not obvious at first sight here, make the explicit.
+// Lifetimes are not obvious at first sight here, make them explicit.
 #![allow(clippy::needless_lifetimes)]
 
 use crate::{bitmanip::BitManip as _, ct_cmp, xor};
