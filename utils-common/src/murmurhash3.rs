@@ -103,3 +103,26 @@ impl MurmurHash3_32 {
         k
     }
 }
+
+#[test]
+pub fn expected_values() {
+    // from https://en.wikipedia.org/wiki/MurmurHash
+    [
+        ("", 0x00000000, 0x00000000),
+        ("", 0x00000001, 0x514e28b7),
+        ("", 0xffffffff, 0x81f16f39),
+        ("test", 0x00000000, 0xba6bd213),
+        ("test", 0x9747b28c, 0x704b81dc),
+        ("Hello, world!", 0x00000000, 0xc0363e43),
+        ("Hello, world!", 0x9747b28c, 0x24884cba),
+        ("The quick brown fox jumps over the lazy dog", 0x00000000, 0x2e4ff723),
+        ("The quick brown fox jumps over the lazy dog", 0x9747b28c, 0x2fa826cd),
+    ]
+    .iter()
+    .for_each(|(data, seed, expected)| {
+        let mut m = MurmurHash3_32::new(*seed);
+        m.update(data.as_bytes());
+        let hash = m.finalize();
+        assert_eq!(hash, *expected);
+    });
+}
