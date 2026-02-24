@@ -136,7 +136,7 @@ impl StdFileNvBlkDev {
         let meta = match volume_file.metadata() {
             Ok(meta) => meta,
             Err(e) => {
-                eprintln!("error: volume stat failed: error={}", e);
+                eprintln!("error: volume stat failed: error={e}");
                 return Err(std_io_error_to_blkdev_io_error(e));
             }
         };
@@ -157,7 +157,7 @@ impl StdFileNvBlkDev {
             .unwrap_or(file_block_size_128b_log2);
 
         if io_block_size_128b_log2 >= usize::BITS - 7 {
-            eprintln!("error: volume block size unsupported: {}B", file_block_size);
+            eprintln!("error: volume block size unsupported: {file_block_size}B");
             return Err(blkdev::NvBlkDevIoError::OperationNotSupported);
         }
 
@@ -540,7 +540,7 @@ impl<R: blkdev::NvBlkDevWriteRequest> blkdev::NvBlkDevFuture<StdFileNvBlkDev> fo
         }
 
         if let Err(e) = inner.volume_file.flush() {
-            eprintln!("error: volume writes flushing failed: error={}", e);
+            eprintln!("error: volume writes flushing failed: error={e}");
             return task::Poll::Ready(Ok((request, Err(std_io_error_to_blkdev_io_error(e)))));
         }
 
@@ -565,12 +565,12 @@ impl blkdev::NvBlkDevFuture<StdFileNvBlkDev> for StdFileNvBlkDevWriteSyncFuture 
     ) -> core::task::Poll<Self::Output> {
         let mut inner = dev.inner.lock();
         if let Err(e) = inner.volume_file.flush() {
-            eprintln!("error: volume writes flushing failed: error={}", e);
+            eprintln!("error: volume writes flushing failed: error={e}");
             return task::Poll::Ready(Err(std_io_error_to_blkdev_io_error(e)));
         }
 
         if let Err(e) = inner.volume_file.sync_data() {
-            eprintln!("error: volume sync request failed: error={}", e);
+            eprintln!("error: volume sync request failed: error={e}");
             return task::Poll::Ready(Err(std_io_error_to_blkdev_io_error(e)));
         }
 
@@ -635,7 +635,7 @@ impl blkdev::NvBlkDevFuture<StdFileNvBlkDev> for StdFileNvBlkDevTrimFuture {
         }
 
         if let Err(e) = inner.volume_file.flush() {
-            eprintln!("error: volume writes flushing failed: error={}", e);
+            eprintln!("error: volume writes flushing failed: error={e}");
             return task::Poll::Ready(Err(std_io_error_to_blkdev_io_error(e)));
         }
 
