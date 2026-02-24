@@ -5184,8 +5184,7 @@ fn test_auth_tree_node_count_to_max_covered_data_block_count() {
             1u64 << node_digests_per_node_log2
         );
 
-        for auth_tree_levels in 2u8..(((u64::BITS - data_digests_per_node_log2) + node_digests_per_node_log2 - 1)
-                / node_digests_per_node_log2) as u8
+        for auth_tree_levels in 2u8..(u64::BITS - data_digests_per_node_log2).div_ceil(node_digests_per_node_log2) as u8
                 + 1 // For the leaf level.
                 + 1
         // For making the iteration boundary inclusive.
