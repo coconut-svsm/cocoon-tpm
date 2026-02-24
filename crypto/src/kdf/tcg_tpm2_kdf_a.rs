@@ -236,7 +236,7 @@ fn test_kdf_a_common(hash_alg: tpm2_interface::TpmiAlgHash, key: &[u8], vecs: &[
     use io_slices::IoSlicesIterCommon as _;
 
     for v in vecs.iter() {
-        let total_output_len = ((v.output_bits + 7) / 8) as usize;
+        let total_output_len = v.output_bits.div_ceil(8) as usize;
         for cfg in 0..4 {
             let context_u = if cfg & 2 != 0 { Some(TEST_KDF_A_CONTEXT_U) } else { None };
             let context_v = if cfg & 1 != 0 { Some(TEST_KDF_A_CONTEXT_V) } else { None };
