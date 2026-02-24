@@ -155,7 +155,7 @@ impl<'a> CocoonFsTestConfig<'a> {
 
         let mut salt = FixedVec::new_with_default(self.layout.salt_len as usize).unwrap();
         let mut salt_chunks = salt.chunks_exact_mut(4);
-        while let Some(salt_chunk) = salt_chunks.next() {
+        for salt_chunk in salt_chunks.by_ref() {
             salt_chunk.copy_from_slice(b"SALT");
         }
         for s in salt_chunks.into_remainder().iter_mut().enumerate() {
