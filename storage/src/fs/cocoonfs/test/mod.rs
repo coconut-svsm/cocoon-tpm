@@ -687,7 +687,7 @@ fn cocoonfs_test_unlink_inodes_op_fnmut_cb<
         CocoonFsTestUnlinkInodesFutureCallback for UnlinkInodesCallback<CB>
     {
         fn call(&mut self, inode: u32, inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<bool, fs::NvFsError> {
-            (&mut self.callback)(inode, inode_data.as_slice())
+            (self.callback)(inode, inode_data.as_slice())
         }
     }
 
