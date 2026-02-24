@@ -36,7 +36,7 @@ impl MurmurHash3_32 {
     ///
     /// * `data` - The data to hash.
     pub fn update(&mut self, mut data: &[u8]) {
-        self.total_len += data.len();
+        self.total_len = self.total_len.wrapping_add(data.len());
 
         if self.data_tail_len != 0 {
             let remaining_len = self.data_tail_len as usize;
