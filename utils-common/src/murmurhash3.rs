@@ -55,14 +55,13 @@ impl MurmurHash3_32 {
             }
         }
 
-        let data_words = data.chunks_exact(4);
-        let data_remainder = data_words.remainder();
+        let (data_words, data_remainder) = data.as_chunks::<4>();
         if !data_remainder.is_empty() {
             self.data_tail[..data_remainder.len()].copy_from_slice(data_remainder);
             self.data_tail_len = data_remainder.len() as u8;
         }
         for k in data_words {
-            let k = u32::from_le_bytes(<[u8; 4]>::try_from(k).unwrap());
+            let k = u32::from_le_bytes(*k);
             self.h = Self::mix_key_body_word(self.h, k);
         }
     }
