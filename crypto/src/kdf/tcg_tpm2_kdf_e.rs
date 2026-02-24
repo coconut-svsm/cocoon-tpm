@@ -99,7 +99,7 @@ impl<'a> TcgTpm2KdfE<'a> {
     fn first_octet_clear_mask(&self) -> u8 {
         // If the number of requested bits is not an even multiple of 8, excess bits in
         // the first produced octet are to be masked off.
-        if self.n_blocks_generated != 0 || self.n_total_output_bits % 8 == 0 {
+        if self.n_blocks_generated != 0 || self.n_total_output_bits.is_multiple_of(8) {
             0u8
         } else {
             !0u8 << (self.n_total_output_bits % 8)
