@@ -2616,7 +2616,7 @@ impl<'a> WalkableIoSlicesIter<'a> for ZeroFilledIoSlices {
         if alignment.is_pow2() {
             Ok(self.remaining & (alignment - 1) == 0)
         } else {
-            Ok(self.remaining % alignment == 0)
+            Ok(self.remaining.is_multiple_of(alignment))
         }
     }
 }
