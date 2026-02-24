@@ -208,7 +208,7 @@ fn cocoonfs_test_mk_fs_instance_ref<'a>(
     fs_instance: &'a <TestCocoonFs as fs::NvFs>::SyncRcPtr,
 ) -> <TestCocoonFs as fs::NvFs>::SyncRcPtrRef<'a> {
     type CocoonFsTestSyncRcPtr = <TestCocoonFs as fs::NvFs>::SyncRcPtr;
-    <CocoonFsTestSyncRcPtr as sync_types::SyncRcPtr<_>>::as_ref(&fs_instance)
+    <CocoonFsTestSyncRcPtr as sync_types::SyncRcPtr<_>>::as_ref(fs_instance)
 }
 
 fn cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance: <TestCocoonFs as fs::NvFs>::SyncRcPtr) -> TestNvBlkDev {
@@ -305,7 +305,7 @@ fn cocoonfs_test_start_read_sequence_op_helper(
 ) -> Result<<TestCocoonFs as fs::NvFs>::ConsistentReadSequence, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let start_read_sequence_fut = <CocoonFs<TestNopSyncTypes, _> as fs::NvFs>::start_read_sequence(
-        &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
+        &cocoonfs_test_mk_fs_instance_ref(fs_instance),
     );
     let executor = TestAsyncExecutor::new();
     let start_read_sequence_fut = TestAsyncExecutor::spawn(
@@ -322,7 +322,7 @@ fn cocoonfs_test_start_transaction_op_helper(
 ) -> Result<<TestCocoonFs as fs::NvFs>::Transaction, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let start_transaction_fut = <CocoonFs<TestNopSyncTypes, _> as fs::NvFs>::start_transaction(
-        &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
+        &cocoonfs_test_mk_fs_instance_ref(fs_instance),
         continued_read_sequence,
     );
     let executor = TestAsyncExecutor::new();
@@ -344,7 +344,7 @@ fn cocoonfs_test_commit_transaction_op_helper(
         transaction.test_set_fail_apply_journal();
     }
     let commit_transaction_fut = <TestCocoonFs as fs::NvFs>::commit_transaction(
-        &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
+        &cocoonfs_test_mk_fs_instance_ref(fs_instance),
         transaction,
         None,
         None,
@@ -369,7 +369,7 @@ fn cocoonfs_test_write_inode_op_helper(
     let rng = Box::new(rng::test_rng());
     let data = data.iter().copied().collect::<Vec<u8>>();
     let write_inode_fut = <TestCocoonFs as fs::NvFs>::write_inode(
-        &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
+        &cocoonfs_test_mk_fs_instance_ref(fs_instance),
         transaction,
         inode,
         zeroize::Zeroizing::new(data),
@@ -391,7 +391,7 @@ fn cocoonfs_test_read_inode_op_helper(
 ) -> Result<(fs::NvFsReadContext<TestCocoonFs>, Option<zeroize::Zeroizing<Vec<u8>>>), fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let read_inode_fut =
-        <TestCocoonFs as fs::NvFs>::read_inode(&cocoonfs_test_mk_fs_instance_ref(&fs_instance), read_context, inode);
+        <TestCocoonFs as fs::NvFs>::read_inode(&cocoonfs_test_mk_fs_instance_ref(fs_instance), read_context, inode);
     let executor = TestAsyncExecutor::new();
     let read_inode_waiter = TestAsyncExecutor::spawn(
         &executor,
@@ -500,7 +500,7 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> CocoonFsTestEnumerateInodesF
             },
             None => {
                 let start_read_sequence_fut =
-                    <TestCocoonFs as fs::NvFs>::start_read_sequence(&cocoonfs_test_mk_fs_instance_ref(&fs_instance));
+                    <TestCocoonFs as fs::NvFs>::start_read_sequence(&cocoonfs_test_mk_fs_instance_ref(fs_instance));
                 CocoonFsTestEnumerateInodesFutureState::StartReadSequence {
                     start_read_sequence_fut,
                     inodes_enumerate_range,
@@ -757,7 +757,7 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> CocoonFsTestUnlinkInodesFuture<
         callback: CB,
     ) -> Result<Self, fs::NvFsError> {
         let unlink_cursor = <TestCocoonFs as fs::NvFs>::unlink_cursor(
-            &cocoonfs_test_mk_fs_instance_ref(&fs_instance),
+            &cocoonfs_test_mk_fs_instance_ref(fs_instance),
             transaction,
             inodes_unlink_range,
         )
