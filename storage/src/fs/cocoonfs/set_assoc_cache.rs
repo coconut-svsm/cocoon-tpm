@@ -1779,8 +1779,7 @@ fn test_set_assoc_cache_iter_ordered() {
     }
 
     for set_capacity in 1..SetAssocCacheSet::<u32, u32>::MAX_ASSOCIATIVITY + 1 {
-        let mut cache =
-            SetAssocCache::<u32, u32, _>::new(Mod3MapSetToKey {}, iter::repeat(set_capacity as u32).take(3)).unwrap();
+        let mut cache = SetAssocCache::<u32, u32, _>::new(Mod3MapSetToKey {}, iter::repeat_n(set_capacity, 3)).unwrap();
 
         for i in 0..3 * set_capacity {
             cache.insert(i, i);
@@ -1796,8 +1795,7 @@ fn test_set_assoc_cache_iter_ordered() {
     }
 
     for set_capacity in 1..9 {
-        let mut cache =
-            SetAssocCache::<u32, u32, _>::new(Mod3MapSetToKey {}, iter::repeat(set_capacity as u32).take(3)).unwrap();
+        let mut cache = SetAssocCache::<u32, u32, _>::new(Mod3MapSetToKey {}, iter::repeat_n(set_capacity, 3)).unwrap();
 
         for i in (0..3 * set_capacity).rev() {
             cache.insert(i, i);
@@ -1968,7 +1966,7 @@ fn test_set_assoc_cache_reconfigure_permutate_sets() {
                         n: sets_count,
                         offset: 0,
                     },
-                    iter::repeat(set_capacity as u32).take(sets_count as usize),
+                    iter::repeat_n(set_capacity, sets_count as usize),
                 )
                 .unwrap();
                 for i in 0u32..sets_count * set_capacity - unoccupied {
@@ -1991,7 +1989,7 @@ fn test_set_assoc_cache_reconfigure_permutate_sets() {
                             n: sets_count,
                             offset: 1,
                         },
-                        iter::repeat(set_capacity as u32).take(sets_count as usize),
+                        iter::repeat_n(set_capacity, sets_count as usize),
                     )
                     .unwrap();
                 assert_eq!(
@@ -2054,11 +2052,9 @@ fn test_set_assoc_cache_reconfigure_merge_sets() {
 
     for set_capacity in 1..SetAssocCacheSet::<u32, u32>::MAX_ASSOCIATIVITY + 1 {
         for mod_map_offset in [0, 1].iter() {
-            let mut cache = SetAssocCache::<u32, u32, _>::new(
-                ModMapSetToKey { n: 2, offset: 0 },
-                iter::repeat(set_capacity as u32).take(2),
-            )
-            .unwrap();
+            let mut cache =
+                SetAssocCache::<u32, u32, _>::new(ModMapSetToKey { n: 2, offset: 0 }, iter::repeat_n(set_capacity, 2))
+                    .unwrap();
             for i in 0u32..2 * set_capacity {
                 cache.insert(i, i);
             }
@@ -2077,7 +2073,7 @@ fn test_set_assoc_cache_reconfigure_merge_sets() {
                         n: 1,
                         offset: *mod_map_offset,
                     },
-                    iter::repeat(set_capacity as u32).take(2),
+                    iter::repeat_n(set_capacity, 2),
                 )
                 .unwrap();
 
