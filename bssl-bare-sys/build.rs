@@ -41,7 +41,7 @@ fn main() {
 
     // Build openssl.
     let bssl_src_dir = "third-party/boringssl";
-    println!("cargo::rerun-if-changed={}", bssl_src_dir);
+    println!("cargo::rerun-if-changed={bssl_src_dir}");
     let mut cmake_config = cmake::Config::new(bssl_src_dir);
     if let Some(integration_cppflags) = integration_cppflags.as_ref() {
         cmake_config.asmflag(integration_cppflags);
@@ -71,7 +71,7 @@ fn main() {
         .into_string()
         .unwrap();
     let status = Command::new("objcopy")
-        .arg(format!("--prefix-symbols={}", LINK_NAME_SYM_PREFIX))
+        .arg(format!("--prefix-symbols={LINK_NAME_SYM_PREFIX}"))
         .arg(&bssl_libcrypto)
         .arg(&bssl_libcrypto)
         .stdout(Stdio::inherit())
@@ -147,7 +147,7 @@ fn main() {
         "vsnprintf",
     ] {
         cmd.arg("--redefine-sym")
-            .arg(format!("{}{}={}", LINK_NAME_SYM_PREFIX, sym, sym));
+            .arg(format!("{LINK_NAME_SYM_PREFIX}{sym}={sym}"));
     }
     let status = cmd
         .arg(&bssl_libcrypto)
@@ -188,7 +188,7 @@ fn main() {
         .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
         .rustified_enum("point_conversion_form_t")
         .parse_callbacks(Box::new(BindgenPrefixLinkNames {}))
-        .clang_arg(format!("-I{}", bssl_src_include_dir));
+        .clang_arg(format!("-I{bssl_src_include_dir}"));
     if let Some(integration_bindgen_cflags) = integration_bindgen_cflags.as_ref() {
         bindings = bindings.clang_args(integration_bindgen_cflags.split_ascii_whitespace());
     }
