@@ -7,7 +7,7 @@
 #[cfg(test)]
 use crate::tpm2_interface;
 use crate::utils_common::io_slices::{self, IoSlicesIterCommon as _};
-use crate::{rng, CryptoError};
+use crate::{CryptoError, rng};
 use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
 use core::mem;
 

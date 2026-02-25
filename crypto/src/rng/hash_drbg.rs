@@ -9,9 +9,8 @@ use alloc::vec::Vec;
 
 use super::{ReseedableRngCore, RngCore, RngGenerateError, RngReseedError};
 use crate::{
-    hash,
+    CryptoError, hash,
     io_slices::{CryptoPeekableIoSlicesIter, CryptoWalkableIoSlicesMutIter, EmptyCryptoIoSlices},
-    CryptoError,
 };
 use crate::{
     tpm2_interface,

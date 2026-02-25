@@ -9,11 +9,11 @@ use alloc::vec::Vec;
 
 use super::{AffinePoint, CurveFieldOps, ProjectivePoint};
 
+use crate::CryptoError;
 use crate::utils_common::{
     alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
     zeroize,
 };
-use crate::CryptoError;
 use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
 use core::array;
 

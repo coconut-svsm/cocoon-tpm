@@ -949,7 +949,8 @@ fn test_point_is_on_curve_common(curve_id: tpm2_interface::TpmEccCurve) {
         &mut cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut point_y),
         &scalar,
         &curve.get_p(),
-    ).unwrap();
+    )
+    .unwrap();
     // Backend implementations may or may not check at point loading
     // time whether the point is on the curve and error out if not.
     let point = match AffinePoint::try_from_plain_coordinates(
@@ -1065,7 +1066,8 @@ fn test_point_is_in_generator_subgroup_common(curve_id: tpm2_interface::TpmEccCu
         &mut cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut point_y),
         &scalar,
         &curve.get_p(),
-    ).unwrap();
+    )
+    .unwrap();
     // Backend implementations may or may not check at point loading
     // time whether the point is on the curve and error out if not.
     let point = match AffinePoint::try_from_plain_coordinates(

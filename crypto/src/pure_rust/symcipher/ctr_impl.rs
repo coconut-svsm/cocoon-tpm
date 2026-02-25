@@ -3,12 +3,12 @@
 // Author: Nicolai Stange <nstange@suse.de>
 
 use cipher::{
+    Block, BlockBackend, BlockCipher, BlockClosure, BlockDecryptMut, BlockEncryptMut, BlockSizeUser, InnerIvInit, Iv,
+    IvState, ParBlocksSizeUser,
     consts::U1,
     crypto_common::{InnerUser, IvSizeUser},
     generic_array::{ArrayLength, GenericArray},
     inout::InOut,
-    Block, BlockBackend, BlockCipher, BlockClosure, BlockDecryptMut, BlockEncryptMut, BlockSizeUser, InnerIvInit, Iv,
-    IvState, ParBlocksSizeUser,
 };
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize as _;

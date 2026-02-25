@@ -4,8 +4,8 @@
 
 //! Implementation of the RSA encryption primitive.
 
-use crate::utils_common::alloc::try_alloc_zeroizing_vec;
 use crate::CryptoError;
+use crate::utils_common::alloc::try_alloc_zeroizing_vec;
 use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
 
 /// RSA encryption primitive.

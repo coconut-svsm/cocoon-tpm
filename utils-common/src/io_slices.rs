@@ -612,10 +612,7 @@ impl<'a, I: IoSlicesMutIter<'a> + PeekableIoSlicesIter<'a>> PeekableIoSlicesMutI
 pub trait MutPeekableIoSlicesMutIter<'a>: IoSlicesMutIter<'a> + PeekableIoSlicesIter<'a> {
     /// The iterator type returned by
     /// [`decoupled_borrow_mut()`](Self::decoupled_borrow_mut).
-    type DecoupledBorrowMutIterType<'b>: MutPeekableIoSlicesMutIter<
-        'b,
-        BackendIteratorError = Self::BackendIteratorError,
-    >
+    type DecoupledBorrowMutIterType<'b>: MutPeekableIoSlicesMutIter<'b, BackendIteratorError = Self::BackendIteratorError>
     where
         Self: 'b;
 
@@ -746,11 +743,11 @@ impl<'a, 'b: 'a, I: Iterator<Item = Result<&'b [u8], BackendIteratorError>>, Bac
 }
 
 impl<
-        'a,
-        'b: 'a,
-        I: DoubleEndedIterator<Item = Result<&'b [u8], BackendIteratorError>>,
-        BackendIteratorError: fmt::Debug,
-    > DoubleEndedIoSlicesIter<'a> for GenericIoSlicesIter<'b, I, BackendIteratorError>
+    'a,
+    'b: 'a,
+    I: DoubleEndedIterator<Item = Result<&'b [u8], BackendIteratorError>>,
+    BackendIteratorError: fmt::Debug,
+> DoubleEndedIoSlicesIter<'a> for GenericIoSlicesIter<'b, I, BackendIteratorError>
 {
     fn next_back_slice(&mut self, max_len: Option<usize>) -> Result<Option<&'a [u8]>, Self::BackendIteratorError> {
         if self.tail.is_none() {
@@ -799,12 +796,8 @@ impl<
     }
 }
 
-impl<
-        'a,
-        'b: 'a,
-        I: Iterator<Item = Result<&'b [u8], BackendIteratorError>> + Clone,
-        BackendIteratorError: fmt::Debug,
-    > WalkableIoSlicesIter<'a> for GenericIoSlicesIter<'b, I, BackendIteratorError>
+impl<'a, 'b: 'a, I: Iterator<Item = Result<&'b [u8], BackendIteratorError>> + Clone, BackendIteratorError: fmt::Debug>
+    WalkableIoSlicesIter<'a> for GenericIoSlicesIter<'b, I, BackendIteratorError>
 {
     fn for_each(&self, cb: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), Self::BackendIteratorError> {
         let mut iter = self.decoupled_borrow();
@@ -817,12 +810,8 @@ impl<
     }
 }
 
-impl<
-        'a,
-        'b: 'a,
-        I: Iterator<Item = Result<&'b [u8], BackendIteratorError>> + Clone,
-        BackendIteratorError: fmt::Debug,
-    > PeekableIoSlicesIter<'a> for GenericIoSlicesIter<'b, I, BackendIteratorError>
+impl<'a, 'b: 'a, I: Iterator<Item = Result<&'b [u8], BackendIteratorError>> + Clone, BackendIteratorError: fmt::Debug>
+    PeekableIoSlicesIter<'a> for GenericIoSlicesIter<'b, I, BackendIteratorError>
 {
     type DecoupledBorrowIterType<'c>
         = GenericIoSlicesIter<

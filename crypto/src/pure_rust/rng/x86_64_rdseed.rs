@@ -9,9 +9,9 @@
 
 use crate::utils_common::zeroize;
 use crate::{
+    CryptoError,
     io_slices::{CryptoPeekableIoSlicesIter, CryptoWalkableIoSlicesMutIter},
     rng::{RngCore, RngGenerateError},
-    CryptoError,
 };
 use core::{arch::asm, convert, mem};
 

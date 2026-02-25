@@ -10,7 +10,7 @@
 extern crate alloc;
 use alloc::boxed::Box;
 
-use crate::{io_slices::CryptoIoSlicesIter, CryptoError};
+use crate::{CryptoError, io_slices::CryptoIoSlicesIter};
 use crate::{
     tpm2_interface,
     utils_common::{

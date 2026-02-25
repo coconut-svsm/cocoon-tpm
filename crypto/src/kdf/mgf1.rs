@@ -5,7 +5,7 @@
 //! Implementation of the MGF1 mask generation function specified in RFC8017.
 
 use super::FixedBlockOutputKdf;
-use crate::{hash, CryptoError};
+use crate::{CryptoError, hash};
 use crate::{
     tpm2_interface,
     utils_common::{

@@ -18,7 +18,7 @@ use super::super::{
 };
 use super::bssl_ec_key::BsslEcKey;
 use crate::ecc::{curve, ecdh, key};
-use crate::{rng, CryptoError};
+use crate::{CryptoError, rng};
 use crate::{
     tpm2_interface,
     utils_common::alloc::{try_alloc_vec, try_alloc_zeroizing_vec},

@@ -7,7 +7,7 @@
 extern crate alloc;
 
 use super::{FixedBlockOutputKdf, Kdf};
-use crate::{hash, io_slices::CryptoWalkableIoSlicesMutIter, CryptoError};
+use crate::{CryptoError, hash, io_slices::CryptoWalkableIoSlicesMutIter};
 use crate::{
     tpm2_interface,
     utils_common::{

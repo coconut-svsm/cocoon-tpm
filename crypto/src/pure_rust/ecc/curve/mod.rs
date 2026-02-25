@@ -7,12 +7,15 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::{ecc::{curve, key}, rng};
+use crate::CryptoError;
 use crate::utils_common::{
     alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
     zeroize,
 };
-use crate::CryptoError;
+use crate::{
+    ecc::{curve, key},
+    rng,
+};
 use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
 
 mod weierstrass_arithmetic;
@@ -263,7 +266,12 @@ impl AffinePoint {
     }
 
     /// Access the coordinates in Montgomery form.
-    fn get_mg_coordinates(&self) -> (cmpa::MpNativeEndianUIntLimbsSlice<'_>, cmpa::MpNativeEndianUIntLimbsSlice<'_>) {
+    fn get_mg_coordinates(
+        &self,
+    ) -> (
+        cmpa::MpNativeEndianUIntLimbsSlice<'_>,
+        cmpa::MpNativeEndianUIntLimbsSlice<'_>,
+    ) {
         (
             cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_x),
             cmpa::MpNativeEndianUIntLimbsSlice::from_limbs(&self.mg_y),
