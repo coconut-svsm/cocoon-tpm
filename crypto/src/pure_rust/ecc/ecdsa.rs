@@ -15,8 +15,9 @@ use crate::utils_common::{
     zeroize,
 };
 use crate::{
+    CryptoError,
     ecc::{curve, gen_random_scalar, key},
-    rng, CryptoError,
+    rng,
 };
 use cmpa::{self, MpMutUInt as _, MpMutUIntSlice as _, MpUIntCommon as _};
 use core::array;

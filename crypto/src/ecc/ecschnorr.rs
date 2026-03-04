@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{curve, gen_random_scalar, key};
-use crate::{hash, rng, CryptoError};
+use crate::{CryptoError, hash, rng};
 use crate::{
     tpm2_interface,
     utils_common::{

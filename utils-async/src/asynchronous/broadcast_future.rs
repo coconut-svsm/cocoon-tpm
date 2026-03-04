@@ -620,7 +620,7 @@ fn test_broadcast_future_broadcast() {
             _aux_data: &mut Self::AuxPollData<'a>,
             _cx: &mut task::Context<'_>,
         ) -> task::Poll<Self::Output> {
-            if self.polled_once == false {
+            if !self.polled_once {
                 self.get_mut().polled_once = true;
                 task::Poll::Pending
             } else {

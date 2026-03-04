@@ -4,5 +4,5 @@
 
 pub(super) mod ecc;
 pub(super) mod hash;
-pub(super) mod symcipher;
 pub(super) mod rng;
+pub(super) mod symcipher;

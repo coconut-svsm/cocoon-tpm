@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{curve, gen_random_scalar};
-use crate::{rng, CryptoError};
+use crate::{CryptoError, rng};
 use crate::{
     tpm2_interface,
     utils_common::{alloc::try_alloc_zeroizing_vec, ct_cmp, zeroize},

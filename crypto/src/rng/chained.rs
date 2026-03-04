@@ -6,8 +6,8 @@
 
 use super::{ReseedableRngCore, RngCore, RngGenerateError, RngReseedFromParentError};
 use crate::{
-    io_slices::{CryptoPeekableIoSlicesIter, CryptoWalkableIoSlicesMutIter, EmptyCryptoIoSlices},
     CryptoError,
+    io_slices::{CryptoPeekableIoSlicesIter, CryptoWalkableIoSlicesMutIter, EmptyCryptoIoSlices},
 };
 
 /// [Random number generator](RngCore) adaptor automatically reseeding a child

@@ -356,7 +356,8 @@ impl ExtentsLayout {
             );
             true
         } else {
-            self.extents_hdr_len % self.extent_payload_len_alignment as u32 == 0
+            self.extents_hdr_len
+                .is_multiple_of(self.extent_payload_len_alignment as u32)
         }
     }
 

@@ -7,7 +7,7 @@
 extern crate alloc;
 
 use super::{FixedBlockOutputKdf, Kdf};
-use crate::{hash, io_slices::CryptoWalkableIoSlicesMutIter, CryptoError};
+use crate::{CryptoError, hash, io_slices::CryptoWalkableIoSlicesMutIter};
 use crate::{
     tpm2_interface,
     utils_common::{alloc::try_alloc_zeroizing_vec, io_slices},
@@ -108,7 +108,7 @@ impl<'a> TcgTpm2KdfA<'a> {
     fn first_octet_clear_mask(&self) -> u8 {
         // If the number of requested bits is not an even multiple of 8, excess bits in
         // the first produced octet are to be masked off at the
-        if self.n_blocks_generated != 0 || self.n_total_output_bits % 8 == 0 {
+        if self.n_blocks_generated != 0 || self.n_total_output_bits.is_multiple_of(8) {
             0u8
         } else {
             !0u8 << (self.n_total_output_bits % 8)
@@ -236,7 +236,7 @@ fn test_kdf_a_common(hash_alg: tpm2_interface::TpmiAlgHash, key: &[u8], vecs: &[
     use io_slices::IoSlicesIterCommon as _;
 
     for v in vecs.iter() {
-        let total_output_len = ((v.output_bits + 7) / 8) as usize;
+        let total_output_len = v.output_bits.div_ceil(8) as usize;
         for cfg in 0..4 {
             let context_u = if cfg & 2 != 0 { Some(TEST_KDF_A_CONTEXT_U) } else { None };
             let context_v = if cfg & 1 != 0 { Some(TEST_KDF_A_CONTEXT_V) } else { None };

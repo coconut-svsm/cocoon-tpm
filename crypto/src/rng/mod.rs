@@ -14,8 +14,8 @@ use crate::utils_common::{
 /// Traits related to and implementation of cryptographic random number
 /// generators.
 use crate::{
-    io_slices::{CryptoPeekableIoSlicesIter, CryptoWalkableIoSlicesMutIter, EmptyCryptoIoSlices},
     CryptoError,
+    io_slices::{CryptoPeekableIoSlicesIter, CryptoWalkableIoSlicesMutIter, EmptyCryptoIoSlices},
 };
 
 use core::convert;

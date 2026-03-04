@@ -15,8 +15,9 @@ fn test_ecdsa() {
     use alloc::vec;
 
     use crate::{
+        CryptoError,
         ecc::{curve, key},
-        rng, CryptoError,
+        rng,
     };
 
     let mut rng = rng::test_rng();

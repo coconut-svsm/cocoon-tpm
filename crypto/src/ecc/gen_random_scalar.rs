@@ -7,7 +7,7 @@
 #[cfg(test)]
 use crate::tpm2_interface;
 use crate::utils_common::io_slices::{self, IoSlicesIterCommon as _};
-use crate::{rng, CryptoError};
+use crate::{CryptoError, rng};
 use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
 use core::mem;
 
@@ -55,7 +55,7 @@ pub fn tcg_tpm2_gen_random_ec_scalar(
     // If order_nbits is not a multiple of 8, shift (extra, result), interpreted as
     // a big-endian integer, to the right so it contains exactly the first
     // order_nbits + 64 bits of randomness obtained above.
-    if order_nbits % 8 != 0 {
+    if !order_nbits.is_multiple_of(8) {
         let rshift_distance = 8 - order_nbits % 8;
         let extra_shifted_out = cmpa::ct_rshift_mp(&mut extra, rshift_distance);
         cmpa::ct_rshift_mp(&mut result, rshift_distance);

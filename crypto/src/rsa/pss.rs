@@ -9,9 +9,9 @@ use alloc::vec::Vec;
 
 use super::key;
 use crate::{
-    hash,
+    CryptoError, hash,
     kdf::{self, Kdf as _},
-    rng, CryptoError,
+    rng,
 };
 use crate::{
     tpm2_interface,

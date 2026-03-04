@@ -8,7 +8,6 @@
 //! [`TpmiAlgHash`](tpm2_interface::TpmiAlgHash) and routed to the respective
 //! implementation.
 
-
 use crate::CryptoError;
 use crate::tpm2_interface;
 

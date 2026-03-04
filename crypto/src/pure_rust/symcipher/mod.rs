@@ -16,10 +16,10 @@ use crate::symcipher::SymBlockCipherAesKeySize;
 use crate::symcipher::SymBlockCipherCamelliaKeySize;
 #[cfg(feature = "sm4")]
 use crate::symcipher::SymBlockCipherSm4KeySize;
-use crate::symcipher::{transform_next_blocks, transform_next_blocks_in_place, SymBlockCipherAlg};
+use crate::symcipher::{SymBlockCipherAlg, transform_next_blocks, transform_next_blocks_in_place};
 use crate::{
-    io_slices::{CryptoPeekableIoSlicesMutIter, CryptoWalkableIoSlicesIter, CryptoWalkableIoSlicesMutIter},
     CryptoError,
+    io_slices::{CryptoPeekableIoSlicesMutIter, CryptoWalkableIoSlicesIter, CryptoWalkableIoSlicesMutIter},
 };
 use crate::{
     tpm2_interface,

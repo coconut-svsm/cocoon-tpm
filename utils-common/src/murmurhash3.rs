@@ -36,7 +36,7 @@ impl MurmurHash3_32 {
     ///
     /// * `data` - The data to hash.
     pub fn update(&mut self, mut data: &[u8]) {
-        self.total_len += data.len();
+        self.total_len = self.total_len.wrapping_add(data.len());
 
         if self.data_tail_len != 0 {
             let remaining_len = self.data_tail_len as usize;
@@ -55,14 +55,13 @@ impl MurmurHash3_32 {
             }
         }
 
-        let data_words = data.chunks_exact(4);
-        let data_remainder = data_words.remainder();
+        let (data_words, data_remainder) = data.as_chunks::<4>();
         if !data_remainder.is_empty() {
             self.data_tail[..data_remainder.len()].copy_from_slice(data_remainder);
             self.data_tail_len = data_remainder.len() as u8;
         }
         for k in data_words {
-            let k = u32::from_le_bytes(<[u8; 4]>::try_from(k).unwrap());
+            let k = u32::from_le_bytes(*k);
             self.h = Self::mix_key_body_word(self.h, k);
         }
     }
@@ -102,4 +101,27 @@ impl MurmurHash3_32 {
         k = k.wrapping_mul(0x1b873593u32);
         k
     }
+}
+
+#[test]
+pub fn expected_values() {
+    // from https://en.wikipedia.org/wiki/MurmurHash
+    [
+        ("", 0x00000000, 0x00000000),
+        ("", 0x00000001, 0x514e28b7),
+        ("", 0xffffffff, 0x81f16f39),
+        ("test", 0x00000000, 0xba6bd213),
+        ("test", 0x9747b28c, 0x704b81dc),
+        ("Hello, world!", 0x00000000, 0xc0363e43),
+        ("Hello, world!", 0x9747b28c, 0x24884cba),
+        ("The quick brown fox jumps over the lazy dog", 0x00000000, 0x2e4ff723),
+        ("The quick brown fox jumps over the lazy dog", 0x9747b28c, 0x2fa826cd),
+    ]
+    .iter()
+    .for_each(|(data, seed, expected)| {
+        let mut m = MurmurHash3_32::new(*seed);
+        m.update(data.as_bytes());
+        let hash = m.finalize();
+        assert_eq!(hash, *expected);
+    });
 }

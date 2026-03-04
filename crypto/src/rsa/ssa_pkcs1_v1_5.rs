@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::key;
-use crate::{hash, CryptoError};
+use crate::{CryptoError, hash};
 use crate::{
     tpm2_interface,
     utils_common::{alloc::try_alloc_vec, zeroize::Zeroize as _},

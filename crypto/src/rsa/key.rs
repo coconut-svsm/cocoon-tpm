@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{crt, encrypt, keygen};
-use crate::{rng, CryptoError};
+use crate::{CryptoError, rng};
 use crate::{
     tpm2_interface,
     utils_common::{

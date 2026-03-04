@@ -16,7 +16,7 @@ use super::super::error::bssl_get_error;
 use super::bssl_ec_key::BsslEcKey;
 use crate::ecc::{curve, key};
 use crate::utils_common::alloc::try_alloc_vec;
-use crate::{rng, CryptoError};
+use crate::{CryptoError, rng};
 use core::ptr;
 
 /// ECDSA signature creation.

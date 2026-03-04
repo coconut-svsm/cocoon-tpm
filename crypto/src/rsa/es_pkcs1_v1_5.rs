@@ -13,7 +13,7 @@ use crate::utils_common::{
     io_slices::{self, IoSlicesIterCommon as _},
     zeroize::{self, Zeroize as _},
 };
-use crate::{rng, CryptoError};
+use crate::{CryptoError, rng};
 use cmpa;
 
 fn fill_padding_with_nonzero_random_bytes(

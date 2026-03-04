@@ -13,9 +13,8 @@ use alloc::vec::Vec;
 use super::{curve, key};
 
 use crate::{
-    hash,
+    CryptoError, hash,
     kdf::{self, Kdf as _},
-    CryptoError,
 };
 use crate::{
     tpm2_interface,
