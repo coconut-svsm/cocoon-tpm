@@ -117,7 +117,7 @@ pub fn xor_bytes(dst: &mut [u8], mask: &[u8]) {
             // dst_bytes_tail_0 corresponds to the tail part of mask_limbs,
             // dst_bytes_tail_1 to mask_bytes_tail.
             let mask_bytes_tail_1 = mask_bytes_tail;
-            let (mask_limbs, mask_limbs_tail) = mask_limbs.split_at(mask_limbs.len());
+            let (mask_limbs, mask_limbs_tail) = mask_limbs.split_at(dst_limbs.len());
             let mask_bytes_tail_0 = cmpa::limb_slice_as_bytes(mask_limbs_tail);
             let (dst_bytes_tail_0, dst_bytes_tail_1) = dst_bytes_tail.split_at_mut(mask_bytes_tail_0.len());
             (
