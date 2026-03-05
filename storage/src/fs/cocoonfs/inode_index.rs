@@ -44,7 +44,7 @@ use crate::{
         zeroize,
     },
 };
-use core::{array, cmp, convert, marker, mem, ops, pin, task};
+use core::{array, cmp, convert, marker, mem, num, ops, pin, task};
 
 #[cfg(doc)]
 use crate::fs::cocoonfs::image_header::MutableImageHeader;
@@ -3374,6 +3374,37 @@ impl<'a, ST: sync_types::SyncTypes> InodeIndexTreeNodeRef<'a, ST> {
     }
 }
 
+/// Expected level of a node to get [read](InodeIndexReadTreeNodeFuture).
+enum ExpectedInodeIndexNodeLevel {
+    /// The node to get read is a leaf.
+    Leaf,
+    /// The node to get read is an internal one.
+    Internal {
+        /// Level of the internal node to get read, if known.
+        node_level: Option<num::NonZero<u32>>,
+    },
+}
+
+impl convert::From<u32> for ExpectedInodeIndexNodeLevel {
+    fn from(value: u32) -> Self {
+        match num::NonZero::<u32>::try_from(value).ok() {
+            None => Self::Leaf,
+            Some(node_level) => Self::Internal {
+                node_level: Some(node_level),
+            },
+        }
+    }
+}
+
+impl convert::From<ExpectedInodeIndexNodeLevel> for Option<u32> {
+    fn from(value: ExpectedInodeIndexNodeLevel) -> Self {
+        match value {
+            ExpectedInodeIndexNodeLevel::Leaf => Some(0),
+            ExpectedInodeIndexNodeLevel::Internal { node_level } => node_level.map(u32::from),
+        }
+    }
+}
+
 /// Read, authenticate and decrypt an inode index B+-tree node, possibly at the
 /// state as last modified by some pending [`Transaction`].
 struct InodeIndexReadTreeNodeFuture<B: blkdev::NvBlkDev> {
@@ -3436,13 +3467,13 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
     fn new(
         transaction: Option<Box<transaction::Transaction>>,
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        expected_node_level: Option<u32>,
+        expected_node_level: ExpectedInodeIndexNodeLevel,
         read_for_update: bool,
     ) -> Self {
         Self {
             fut_state: InodeIndexReadTreeNodeFutureState::Init { transaction },
             node_allocation_blocks_begin,
-            expected_node_level,
+            expected_node_level: expected_node_level.into(),
             encoded_node_buf: FixedVec::new_empty(),
             read_for_update,
         }
@@ -4054,7 +4085,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let read_fut = InodeIndexReadTreeNodeFuture::new(
                         transaction.take(),
                         root_node_allocation_blocks_begin,
-                        Some(root_node_level),
+                        ExpectedInodeIndexNodeLevel::from(root_node_level),
                         false,
                     );
                     this.fut_state = InodeIndexLookupFutureState::ReadTreeNode { read_fut };
@@ -4127,7 +4158,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_fut = InodeIndexReadTreeNodeFuture::new(
                                 transaction,
                                 next_child_node_allocation_blocks_begin,
-                                Some(next_child_node_level),
+                                ExpectedInodeIndexNodeLevel::from(next_child_node_level),
                                 false,
                             );
                             this.fut_state = InodeIndexLookupFutureState::ReadTreeNode { read_fut };
@@ -4422,7 +4453,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_fut = InodeIndexReadTreeNodeFuture::new(
                                 cursor.transaction.take(),
                                 root_node_allocation_blocks_begin,
-                                Some(root_node_level),
+                                ExpectedInodeIndexNodeLevel::from(root_node_level),
                                 root_node_level == 0,
                             );
                             let next_inode = *cursor.inodes_enumerate_range.start();
@@ -4501,7 +4532,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_fut = InodeIndexReadTreeNodeFuture::new(
                                 cursor.transaction.take(),
                                 next_leaf_node_allocation_blocks_begin,
-                                Some(0),
+                                ExpectedInodeIndexNodeLevel::Leaf,
                                 true,
                             );
                             this.fut_state = InodeIndexEnumerateCursorNextFutureState::ReadNextTreeLeafNode {
@@ -4603,7 +4634,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             *read_fut = InodeIndexReadTreeNodeFuture::new(
                                 transaction,
                                 next_child_node_allocation_blocks_begin,
-                                Some(next_child_node_level),
+                                ExpectedInodeIndexNodeLevel::from(next_child_node_level),
                                 next_child_node_level == 0,
                             );
                         }
@@ -5312,7 +5343,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let read_fut = InodeIndexReadTreeNodeFuture::new(
                         Some(transaction),
                         root_node_allocation_blocks_begin,
-                        Some(root_node_level),
+                        ExpectedInodeIndexNodeLevel::from(root_node_level),
                         root_node_level <= 1,
                     );
                     this.fut_state = InodeIndexLookupForInsertFutureState::ReadTreeNode { read_fut };
@@ -5418,7 +5449,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_fut = InodeIndexReadTreeNodeFuture::new(
                                 Some(transaction),
                                 next_child_node_allocation_blocks_begin,
-                                Some(next_child_node_level),
+                                ExpectedInodeIndexNodeLevel::from(next_child_node_level),
                                 next_child_node_level <= 1,
                             );
                             this.fut_state = InodeIndexLookupForInsertFutureState::ReadTreeNode { read_fut };
@@ -6060,7 +6091,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let read_sibling_fut = InodeIndexReadTreeNodeFuture::new(
                         Some(transaction),
                         sibling_child_node_allocation_blocks_begin,
-                        Some(child_node_level),
+                        ExpectedInodeIndexNodeLevel::from(child_node_level),
                         true,
                     );
 
@@ -6227,10 +6258,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 let root_node_allocation_blocks_begin =
                                     transaction.inode_index_updates.root_node_allocation_blocks_begin;
                                 let root_node_level = transaction.inode_index_updates.index_tree_levels - 1;
+                                // When here, parent.node_level == 1, which means the root node is
+                                // definitely not a leaf.
+                                let root_node_level = num::NonZero::<u32>::try_from(root_node_level).ok();
+                                debug_assert!(root_node_level.is_some());
                                 let read_root_fut = InodeIndexReadTreeNodeFuture::new(
                                     Some(transaction),
                                     root_node_allocation_blocks_begin,
-                                    Some(root_node_level),
+                                    ExpectedInodeIndexNodeLevel::Internal {
+                                        node_level: root_node_level,
+                                    },
                                     true,
                                 );
                                 this.fut_state = InodeIndexInsertEntryFutureState::PreemptiveRotateSplitWalkLoadRoot {
@@ -6263,7 +6300,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_right_sibling_fut = InodeIndexReadTreeNodeFuture::new(
                                 Some(transaction),
                                 right_sibling_child_node_allocation_blocks_begin,
-                                Some(child_node_level),
+                                ExpectedInodeIndexNodeLevel::from(child_node_level),
                                 true,
                             );
 
@@ -7483,11 +7520,15 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             Ok(child_node_allocation_blocks_begin) => child_node_allocation_blocks_begin,
                             Err(e) => break (Some(transaction), Err(e)),
                         };
-
+                        // When here, parent_node_level != 1.
+                        let child_node_level = num::NonZero::<u32>::try_from(parent_node_level - 1).ok();
+                        debug_assert!(child_node_level.is_some());
                         let read_child_fut = InodeIndexReadTreeNodeFuture::new(
                             Some(transaction),
                             child_node_allocation_blocks_begin,
-                            Some(parent_node_level - 1),
+                            ExpectedInodeIndexNodeLevel::Internal {
+                                node_level: child_node_level,
+                            },
                             true,
                         );
                         this.fut_state = InodeIndexInsertEntryFutureState::PreemptiveRotateSplitWalkLoadChild {
@@ -8059,7 +8100,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_fut = InodeIndexReadTreeNodeFuture::new(
                                 Some(transaction),
                                 root_node_allocation_blocks_begin,
-                                Some(root_node_level),
+                                ExpectedInodeIndexNodeLevel::from(root_node_level),
                                 root_node_level <= 1,
                             );
                             let next_inode = *cursor.inodes_unlink_range.start();
@@ -8264,7 +8305,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_fut = InodeIndexReadTreeNodeFuture::new(
                                 Some(transaction),
                                 next_leaf_node_allocation_blocks_begin,
-                                Some(0),
+                                ExpectedInodeIndexNodeLevel::Leaf,
                                 true,
                             );
                             this.fut_state = InodeIndexUnlinkCursorNextFutureState::ReadNextTreeLeafNode {
@@ -8396,7 +8437,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             *read_fut = InodeIndexReadTreeNodeFuture::new(
                                 Some(transaction),
                                 next_child_node_allocation_blocks_begin,
-                                Some(next_child_node_level),
+                                ExpectedInodeIndexNodeLevel::from(next_child_node_level),
                                 next_child_node_level <= 1,
                             );
                         }
@@ -9377,10 +9418,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let root_node_allocation_blocks_begin =
                         transaction.inode_index_updates.root_node_allocation_blocks_begin;
                     let root_node_level = transaction.inode_index_updates.index_tree_levels - 1;
+                    // When here, the leaf is not the root.
+                    let root_node_level = num::NonZero::<u32>::try_from(root_node_level).ok();
                     let read_root_fut = InodeIndexReadTreeNodeFuture::new(
                         Some(transaction),
                         root_node_allocation_blocks_begin,
-                        Some(root_node_level),
+                        ExpectedInodeIndexNodeLevel::Internal {
+                            node_level: root_node_level,
+                        },
                         true,
                     );
                     this.fut_state = InodeIndexUnlinkCursorUnlinkInodeFutureState::PreemptiveMergeRotateWalkLoadRoot {
@@ -9472,7 +9517,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let read_sibling_fut = InodeIndexReadTreeNodeFuture::new(
                         Some(transaction),
                         sibling_child_node_allocation_blocks_begin,
-                        Some(child_node_level),
+                        ExpectedInodeIndexNodeLevel::from(child_node_level),
                         true,
                     );
 
@@ -9648,7 +9693,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         let read_right_sibling_fut = InodeIndexReadTreeNodeFuture::new(
                             Some(transaction),
                             right_sibling_child_node_allocation_blocks_begin,
-                            Some(child_node_level),
+                            ExpectedInodeIndexNodeLevel::from(child_node_level),
                             true,
                         );
 
@@ -10410,7 +10455,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let read_child_fut = InodeIndexReadTreeNodeFuture::new(
                         Some(transaction),
                         child_node_allocation_blocks_begin,
-                        Some(parent_node_level - 1),
+                        ExpectedInodeIndexNodeLevel::from(parent_node_level - 1),
                         true,
                     );
 
@@ -11067,7 +11112,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let read_fut = InodeIndexReadTreeNodeFuture::new(
                         Some(transaction),
                         entry_leaf_node_allocation_blocks_begin,
-                        Some(0),
+                        ExpectedInodeIndexNodeLevel::Leaf,
                         true,
                     );
                     this.fut_state = InodeIndexUpdateRootNodeInodeFutureState::ReadEntryLeafTreeNode { read_fut };
@@ -11566,7 +11611,7 @@ where
                     let read_fut = InodeIndexReadTreeNodeFuture::new(
                         None,
                         *entry_leaf_node_allocation_blocks_begin,
-                        Some(0),
+                        ExpectedInodeIndexNodeLevel::Leaf,
                         false,
                     );
                     this.fut_state = InodeIndexBootstrapFutureState::ReadEntryLeafNode {
@@ -11684,7 +11729,12 @@ where
                         };
                     } else {
                         // Read the tree root node in order to determine the tree depth.
-                        let read_fut = InodeIndexReadTreeNodeFuture::new(None, root_node_extent.begin(), None, false);
+                        let read_fut = InodeIndexReadTreeNodeFuture::new(
+                            None,
+                            root_node_extent.begin(),
+                            ExpectedInodeIndexNodeLevel::Internal { node_level: None },
+                            false,
+                        );
                         this.fut_state = InodeIndexBootstrapFutureState::ReadRootNode {
                             root_node_allocation_blocks_begin: root_node_extent.begin(),
                             read_fut,
