@@ -2490,7 +2490,7 @@ where
             return Ok(());
         }
 
-        self.iter0.as_ref().map(|iter0| iter0.for_each(cb)).transpose()?;
+        self.iter1.as_ref().map(|iter1| iter1.for_each(cb)).transpose()?;
         Ok(())
     }
 
