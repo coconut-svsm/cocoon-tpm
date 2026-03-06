@@ -9,8 +9,8 @@ use crate::utils_async::sync_types;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{convert, marker};
 
-/// [`Lock`](sync_types::SyncTypes:::Lock) trait implementation built on Rust
-/// `std` [`Mutex`](std::sync::Mutex).
+/// [`Lock`](sync_types::SyncTypes::Lock) trait implementation built on Rust
+/// `std` [`Mutex`].
 pub struct StdLock<T: marker::Send> {
     mtx: Mutex<T>,
 }
@@ -38,8 +38,8 @@ impl<T: marker::Send> convert::From<T> for StdLock<T> {
     }
 }
 
-/// [`RwLock`](sync_types::SyncTypes:::Lock) trait implementation built on Rust
-/// `std` [`RwLock`](std::sync::rwLock).
+/// [`RwLock`](sync_types::SyncTypes::Lock) trait implementation built on Rust
+/// `std` [`RwLock`].
 pub struct StdRwLock<T: marker::Send + marker::Sync> {
     rwlock: RwLock<T>,
 }
