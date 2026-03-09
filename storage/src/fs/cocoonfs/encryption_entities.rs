@@ -257,12 +257,6 @@ impl EncryptedBlockLayout {
         .map(|l| l.0)
     }
 
-    /// Get the internal copy of
-    /// [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
-    pub fn get_allocation_block_size_128b_log2(&self) -> u8 {
-        self.allocation_block_size_128b_log2
-    }
-
     /// Get the base-2 logarithm of the encrypted block size in units of
     /// [Allocation
     /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).

@@ -349,18 +349,31 @@ struct CliMkfsInfo {
     )]
     auth_tree_node_size_log2: Option<u32>,
 
-    /// Inode index B+-tree node size [default: Allocation Block size].
+    /// Inode index B+-tree leaf node size [default: Allocation Block size].
     ///
-    /// Size of a node in the inode index B+-tree, controlling the tree's
-    /// branching factor. Must be a power of two multiple <= 64 of the
-    /// Allocation Block size.
+    /// Size of a leaf node in the inode index B+-tree, controlling the number
+    /// of inode entries that can be stored in a leaf node. Must be a power of
+    /// two multiple <= 64 of the Allocation Block size.
     #[arg(
-        name = "inode-index-tree-node-size",
+        name = "inode-index-tree-leaf-node-size",
         long,
         value_name = "SIZE",
         value_parser = cli_parse_power_of_two_size_log2::<7>
     )]
-    inode_index_tree_node_size_log2: Option<u32>,
+    inode_index_tree_leaf_node_size_log2: Option<u32>,
+
+    /// Inode index B+-tree internal node size [default: Allocation Block size].
+    ///
+    /// Size of a internal node in the inode index B+-tree, controlling the
+    /// tree's branching factor. Must be a power of two multiple <= 64 of the
+    /// Allocation Block size.
+    #[arg(
+        name = "inode-index-tree-internal-node-size",
+        long,
+        value_name = "SIZE",
+        value_parser = cli_parse_power_of_two_size_log2::<7>
+    )]
+    inode_index_tree_internal_node_size_log2: Option<u32>,
 
     /// Allocation bitmap block size [default: max of 512B and the
     /// Authentication Tree Data Block size].
@@ -493,20 +506,38 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
         (10u32 - 7).saturating_sub(io_block_allocation_blocks_log2 + allocation_block_size_128b_log2)
     };
 
-    let inode_index_tree_node_allocation_blocks_log2 =
-        if let Some(inode_index_tree_node_size_log2) = cli.inode_index_tree_node_size_log2 {
-            let inode_index_tree_node_size_128b_log2 = inode_index_tree_node_size_log2 - 7;
-            if inode_index_tree_node_size_128b_log2 < allocation_block_size_128b_log2
-                || inode_index_tree_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
+    let inode_index_tree_leaf_node_allocation_blocks_log2 =
+        if let Some(inode_index_tree_leaf_node_size_log2) = cli.inode_index_tree_leaf_node_size_log2 {
+            let inode_index_tree_leaf_node_size_128b_log2 = inode_index_tree_leaf_node_size_log2 - 7;
+            if inode_index_tree_leaf_node_size_128b_log2 < allocation_block_size_128b_log2
+                || inode_index_tree_leaf_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
             {
                 let mut cmd = Cli::command();
                 cmd.error(
                     clap::error::ErrorKind::ArgumentConflict,
-                    "inode index tree node size not a multiple of the Allocation Block size between 0 and 64",
+                    "inode index tree leaf node size not a multiple of the Allocation Block size between 0 and 64",
                 )
                 .exit()
             }
-            inode_index_tree_node_size_128b_log2 - allocation_block_size_128b_log2
+            inode_index_tree_leaf_node_size_128b_log2 - allocation_block_size_128b_log2
+        } else {
+            0u32
+        };
+
+    let inode_index_tree_internal_node_allocation_blocks_log2 =
+        if let Some(inode_index_tree_internal_node_size_log2) = cli.inode_index_tree_leaf_node_size_log2 {
+            let inode_index_tree_internal_node_size_128b_log2 = inode_index_tree_internal_node_size_log2 - 7;
+            if inode_index_tree_internal_node_size_128b_log2 < allocation_block_size_128b_log2
+                || inode_index_tree_internal_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
+            {
+                let mut cmd = Cli::command();
+                cmd.error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "inode index tree internal node size not a multiple of the Allocation Block size between 0 and 64",
+                )
+                .exit()
+            }
+            inode_index_tree_internal_node_size_128b_log2 - allocation_block_size_128b_log2
         } else {
             0u32
         };
@@ -589,7 +620,8 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
         auth_tree_node_io_blocks_log2 as u8,
         auth_tree_data_block_allocation_blocks_log2 as u8,
         allocation_bitmap_file_block_allocation_blocks_log2 as u8,
-        inode_index_tree_node_allocation_blocks_log2 as u8,
+        inode_index_tree_leaf_node_allocation_blocks_log2 as u8,
+        inode_index_tree_internal_node_allocation_blocks_log2 as u8,
         collision_resistant_hash, // auth_tree_node_hash_alg
         collision_resistant_hash, // auth_tree_data_hmac_hash_alg
         preimage_resistant_hash,  // auth_tree_root_hmac_hash_alg

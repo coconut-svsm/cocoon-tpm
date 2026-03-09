@@ -327,14 +327,22 @@ pub struct ImageLayout {
     /// overhead.
     pub allocation_bitmap_file_block_allocation_blocks_log2: u8,
 
-    /// Base-2 logarithm of the Index B-Tree node size as specified in units of
+    /// Base-2 logarithm of the Index B-Tree leaf node size as specified in units of
     /// [Allocation Blocks](Self::allocation_block_size_128b_log2).
     ///
-    /// Must be >= the IV size + 4 + 8 + 7 * 12 so that the first node (in
-    /// symmetric order) is guaranteed to always store the first four
-    /// special file entries needed for bootstrapping, as per the minimum
-    /// B-Tree node fill level.
-    pub index_tree_node_allocation_blocks_log2: u8,
+    /// Must be >= the IV size + 4 + 8 + 5 * 12 so that the first node (in symmetric
+    /// order) is guaranteed to always store the first three special file entries needed
+    /// for bootstrapping, as per the minimum B-Tree node fill level. Note that this is
+    /// trivially satisfied for all known possible values of the IV size.
+    pub index_tree_leaf_node_allocation_blocks_log2: u8,
+
+    /// Base-2 logarithm of the Index B-Tree internal node size as specified in units
+    /// of [Allocation Blocks](Self::allocation_block_size_128b_log2).
+    ///
+    /// Must be >= the IV size + 4 + 8 + 3 * 12 so that the the minimum B-Tree node
+    /// fill level is non-zero. Note that this is trivially satisfied for all known
+    /// possible values of the IV size.
+    pub index_tree_internal_node_allocation_blocks_log2: u8,
 
     /// The Hash algorithm to use for non-root authentication tree node
     /// authentication.
@@ -434,7 +442,8 @@ impl ImageLayout {
         auth_tree_node_io_blocks_log2: u8,
         auth_tree_data_block_allocation_blocks_log2: u8,
         allocation_bitmap_file_block_allocation_blocks_log2: u8,
-        index_tree_node_allocation_blocks_log2: u8,
+        index_tree_leaf_node_allocation_blocks_log2: u8,
+        index_tree_internal_node_allocation_blocks_log2: u8,
         auth_tree_node_hash_alg: tpm2_interface::TpmiAlgHash,
         auth_tree_data_hmac_hash_alg: tpm2_interface::TpmiAlgHash,
         auth_tree_root_hmac_hash_alg: tpm2_interface::TpmiAlgHash,
@@ -503,22 +512,30 @@ impl ImageLayout {
             return Err(NvFsError::DimensionsNotSupported);
         }
 
-        if index_tree_node_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= u64::BITS {
-            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
-        }
-        if index_tree_node_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= usize::BITS {
-            return Err(NvFsError::DimensionsNotSupported);
-        }
+        for index_tree_node_allocation_blocks_log2 in [
+            index_tree_leaf_node_allocation_blocks_log2,
+            index_tree_internal_node_allocation_blocks_log2,
+        ] {
+            if index_tree_node_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= u64::BITS {
+                return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
+            }
+            if index_tree_node_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= usize::BITS
+            {
+                return Err(NvFsError::DimensionsNotSupported);
+            }
 
-        // An index tree node block must fit into the region covered by a single
-        // allocation bitmap word.
-        if 1u64 << index_tree_node_allocation_blocks_log2 > alloc_bitmap::BitmapWord::BITS as u64 {
-            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
-        }
-        // Also, an index tree node must be encodable as a direct extent pointer,
-        // because the special index root node inode is encoded that way.
-        if 1u64 << index_tree_node_allocation_blocks_log2 > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS {
-            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
+            // An index tree node block must fit into the region covered by a single
+            // allocation bitmap word.
+            if 1u64 << index_tree_node_allocation_blocks_log2 > alloc_bitmap::BitmapWord::BITS as u64 {
+                return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
+            }
+            // Also, an index tree node must be encodable as a direct extent pointer,
+            // because the special index root node inode is encoded that way.
+            if 1u64 << index_tree_node_allocation_blocks_log2
+                > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
+            {
+                return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
+            }
         }
 
         Ok(Self {
@@ -527,7 +544,8 @@ impl ImageLayout {
             auth_tree_node_io_blocks_log2,
             auth_tree_data_block_allocation_blocks_log2,
             allocation_bitmap_file_block_allocation_blocks_log2,
-            index_tree_node_allocation_blocks_log2,
+            index_tree_leaf_node_allocation_blocks_log2,
+            index_tree_internal_node_allocation_blocks_log2,
             auth_tree_node_hash_alg,
             auth_tree_data_hmac_hash_alg,
             auth_tree_root_hmac_hash_alg,
@@ -539,6 +557,7 @@ impl ImageLayout {
 
     pub const fn encoded_len() -> u8 {
         1u8 + 1
+            + 1
             + 1
             + 1
             + 1
@@ -556,8 +575,9 @@ impl ImageLayout {
         result[2] = self.auth_tree_node_io_blocks_log2;
         result[3] = self.auth_tree_data_block_allocation_blocks_log2;
         result[4] = self.allocation_bitmap_file_block_allocation_blocks_log2;
-        result[5] = self.index_tree_node_allocation_blocks_log2;
-        let mut buf = &mut result[6..];
+        result[5] = self.index_tree_leaf_node_allocation_blocks_log2;
+        result[6] = self.index_tree_internal_node_allocation_blocks_log2;
+        let mut buf = &mut result[7..];
         buf = self
             .auth_tree_node_hash_alg
             .marshal(buf)
@@ -593,9 +613,10 @@ impl ImageLayout {
         let auth_tree_node_io_blocks_log2 = buf[2];
         let auth_tree_data_block_allocation_blocks_log2 = buf[3];
         let allocation_bitmap_file_block_allocation_blocks_log2 = buf[4];
-        let index_tree_node_allocation_blocks_log2 = buf[5];
+        let index_tree_leaf_node_allocation_blocks_log2 = buf[5];
+        let index_tree_internal_node_allocation_blocks_log2 = buf[6];
 
-        let mut buf = &buf[6..];
+        let mut buf = &buf[7..];
         let auth_tree_node_hash_alg;
         (buf, auth_tree_node_hash_alg) = tpm2_interface::TpmiAlgHash::unmarshal(buf).map_err(|e| match e {
             tpm2_interface::TpmErr::Rc(tpm2_interface::TpmRc::HASH) => {
@@ -659,7 +680,8 @@ impl ImageLayout {
             auth_tree_node_io_blocks_log2,
             auth_tree_data_block_allocation_blocks_log2,
             allocation_bitmap_file_block_allocation_blocks_log2,
-            index_tree_node_allocation_blocks_log2,
+            index_tree_leaf_node_allocation_blocks_log2,
+            index_tree_internal_node_allocation_blocks_log2,
             auth_tree_node_hash_alg,
             auth_tree_data_hmac_hash_alg,
             auth_tree_root_hmac_hash_alg,

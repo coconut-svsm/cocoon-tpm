@@ -30,12 +30,13 @@ struct CocoonFsTestLayoutConfig {
     auth_tree_node_io_blocks_log2: u8,
     auth_tree_data_block_allocation_blocks_log2: u8,
     allocation_bitmap_file_block_allocation_blocks_log2: u8,
-    index_tree_node_allocation_blocks_log2: u8,
+    index_tree_leaf_node_allocation_blocks_log2: u8,
+    index_tree_internal_node_allocation_blocks_log2: u8,
 
     salt_len: u8,
 }
 
-const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
+const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 7] = [
     // Base.
     CocoonFsTestLayoutConfig {
         blkdev_io_block_size_128b_log2: 0,
@@ -45,7 +46,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 0,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
     // Device IO Block size > Authentication Tree Data Block.
@@ -57,7 +59,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 2,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
     // Device IO Block size < Authentication Tree Data Block.
@@ -69,7 +72,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 4,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
     // Device IO Block size < Allocation Block.
@@ -81,7 +85,34 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 0,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
+        salt_len: 0,
+    },
+    // Inode Index leaf node size > Inode Index internal node size
+    CocoonFsTestLayoutConfig {
+        blkdev_io_block_size_128b_log2: 0,
+        preferred_blkdev_io_blocks_bulk_log2: 2,
+        allocation_block_size_128b_log2: 0,
+        io_block_allocation_blocks_log2: 0,
+        auth_tree_node_io_blocks_log2: 0,
+        auth_tree_data_block_allocation_blocks_log2: 0,
+        allocation_bitmap_file_block_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 1,
+        index_tree_internal_node_allocation_blocks_log2: 0,
+        salt_len: 0,
+    },
+    // Inode Index leaf node size < Inode Index internal node size
+    CocoonFsTestLayoutConfig {
+        blkdev_io_block_size_128b_log2: 0,
+        preferred_blkdev_io_blocks_bulk_log2: 2,
+        allocation_block_size_128b_log2: 0,
+        io_block_allocation_blocks_log2: 0,
+        auth_tree_node_io_blocks_log2: 0,
+        auth_tree_data_block_allocation_blocks_log2: 0,
+        allocation_bitmap_file_block_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 1,
         salt_len: 0,
     },
     // Realistic.
@@ -93,7 +124,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 1,                       // 1024B
         auth_tree_data_block_allocation_blocks_log2: 2,         //  512B
         allocation_bitmap_file_block_allocation_blocks_log2: 0, //  128B
-        index_tree_node_allocation_blocks_log2: 0,              //  128B
+        index_tree_leaf_node_allocation_blocks_log2: 0,         //  128B
+        index_tree_internal_node_allocation_blocks_log2: 0,     //  128B
         salt_len: 0,
     },
 ];
@@ -135,7 +167,8 @@ impl<'a> CocoonFsTestConfig<'a> {
             self.layout.auth_tree_node_io_blocks_log2,
             self.layout.auth_tree_data_block_allocation_blocks_log2,
             self.layout.allocation_bitmap_file_block_allocation_blocks_log2,
-            self.layout.index_tree_node_allocation_blocks_log2,
+            self.layout.index_tree_leaf_node_allocation_blocks_log2,
+            self.layout.index_tree_internal_node_allocation_blocks_log2,
             self.crypto.auth_tree_node_hash_alg,
             self.crypto.auth_tree_data_hmac_hash_alg,
             self.crypto.auth_tree_root_hmac_hash_alg,

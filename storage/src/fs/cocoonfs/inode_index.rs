@@ -176,20 +176,18 @@ fn lookup_key(
 /// Layout information about the inode index B+-tree.
 #[derive(Clone)]
 pub struct InodeIndexTreeLayout {
-    /// The [`EncryptedBlockLayout`](encryption_entities::EncryptedBlockLayout)
-    /// to be used for the inode index nodes.
-    node_encrypted_block_layout: encryption_entities::EncryptedBlockLayout,
-
+    /// An internal node's encoded payload length.
+    encoded_internal_node_len: usize,
     /// Maximum number of entries (keys) in an internal node.
     max_internal_node_entries: usize,
     /// Minimum number of entries (keys) in an internal node.
     min_internal_node_entries: usize,
     /// Maximum number of entries in a leaf node.
+    /// A leaf node's encoded payload length.
+    encoded_leaf_node_len: usize,
     max_leaf_node_entries: usize,
     /// Minimum number of entries in a leaf node.
     min_leaf_node_entries: usize,
-    /// A node's encoded payload length.
-    encoded_node_len: usize,
 }
 
 impl InodeIndexTreeLayout {
@@ -197,26 +195,34 @@ impl InodeIndexTreeLayout {
     ///
     /// # Arguments:
     ///
-    /// * `node_encrypted_block_layout` - The
+    /// * `leaf_node_encrypted_block_layout` - The
     ///   [`EncryptedBlockLayout`](encryption_entities::EncryptedBlockLayout) to
-    ///   be used for the inode index nodes.
-    fn new(node_encrypted_block_layout: encryption_entities::EncryptedBlockLayout) -> Result<Self, NvFsError> {
+    ///   be used for the inode index leaf nodes.
+    /// * `internal_node_encrypted_block_layout` - The
+    ///   [`EncryptedBlockLayout`](encryption_entities::EncryptedBlockLayout) to
+    ///   be used for the inode index internal nodes.
+    fn new(
+        leaf_node_encrypted_block_layout: &encryption_entities::EncryptedBlockLayout,
+        internal_node_encrypted_block_layout: &encryption_entities::EncryptedBlockLayout,
+    ) -> Result<Self, NvFsError> {
         // The root node gets referenced from the InodeIndex' SpecialInode::IndexRoot
         // inode entry, with an EncodedExtentPtr which must be direct.
-        if 1u64 << node_encrypted_block_layout.get_block_allocation_blocks_log2()
+        let leaf_node_allocation_blocks_log2 = leaf_node_encrypted_block_layout.get_block_allocation_blocks_log2();
+        let internal_node_allocation_blocks_log2 =
+            internal_node_encrypted_block_layout.get_block_allocation_blocks_log2();
+        if 1u64 << (leaf_node_allocation_blocks_log2 as u32).max(internal_node_allocation_blocks_log2 as u32)
             > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
         {
             return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
-
-        let block_len = node_encrypted_block_layout.effective_payload_len()?;
 
         // The format is (in logical order)
         // - four bytes to encode the node level in the B+-tree, counted 1-based from
         //   leaf nodes upwards,
         // - a sequence of EncodedBlockPtrs to the children, (logically) interspersed
         //   with separating keys, i.e. 32 bit inode numbers.
-        let max_internal_node_entries = (block_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
+        let internal_node_max_payload_len = internal_node_encrypted_block_layout.effective_payload_len()?;
+        let max_internal_node_entries = (internal_node_max_payload_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
             / (mem::size_of::<EncodedInodeIndexKeyType>() + EncodedBlockPtr::ENCODED_SIZE as usize);
 
         // This is needed for preemptive node splitting of full nodes to be feasible: 1
@@ -258,7 +264,8 @@ impl InodeIndexTreeLayout {
         // - a sequence of EncodedExtentPtrs to the inodes' extents each, (logically)
         //   logically associated with, a key each, i.e. a 32 bit inode number,
         // - a single block pointer to the next leaf node in symmetric order.
-        let max_leaf_node_entries = (block_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
+        let leaf_node_max_payload_len = leaf_node_encrypted_block_layout.effective_payload_len()?;
+        let max_leaf_node_entries = (leaf_node_max_payload_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
             / (mem::size_of::<EncodedInodeIndexKeyType>() + EncodedExtentPtr::ENCODED_SIZE as usize);
         let min_leaf_node_entries = max_leaf_node_entries.div_ceil(2);
         // Cannot happen, but make it explicit.
@@ -271,24 +278,14 @@ impl InodeIndexTreeLayout {
             + max_leaf_node_entries
                 * (mem::size_of::<EncodedInodeIndexKeyType>() + EncodedExtentPtr::ENCODED_SIZE as usize);
 
-        // By coincidence, the formats of the internal and leaf nodes come to the same
-        // total size, so the max() is effectively a no-op as far as the result is
-        // concerned.
-        let encoded_node_len = encoded_internal_node_len.max(encoded_leaf_node_len);
-
         Ok(Self {
-            node_encrypted_block_layout,
+            encoded_internal_node_len,
             max_internal_node_entries,
             min_internal_node_entries,
+            encoded_leaf_node_len,
             max_leaf_node_entries,
             min_leaf_node_entries,
-            encoded_node_len,
         })
-    }
-
-    /// Get a inode index tree node's encoded payload length.
-    fn encoded_node_len(&self) -> usize {
-        self.encoded_node_len
     }
 }
 
@@ -315,7 +312,7 @@ impl InodeIndexTreeLeafNode {
     ) -> Result<Self, NvFsError> {
         // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is
         // implicitly initialized to SpecialInode::NoInode, as it should be.
-        let encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
+        let encoded_node = FixedVec::new_with_value(layout.encoded_leaf_node_len, 0u8)?;
         let mut n = Self {
             encoded_node,
             entries: 0,
@@ -344,14 +341,17 @@ impl InodeIndexTreeLeafNode {
     ///
     /// * `node_allocation_blocks_begin` - Location of the node on storage.
     /// * `encoded_node` - Buffer containing the encoded node. Its length must
-    ///   match [`InodeIndexTreeLayout::encoded_node_len()`].
+    ///   match [`InodeIndexTreeLayout::encoded_leaf_node_len`].
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    /// * `allocation_block_size_128b_log2` - Value of the filesystem's
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         encoded_node: FixedVec<u8, 7>,
         layout: &InodeIndexTreeLayout,
+        allocation_block_size_128b_log2: u8,
     ) -> Result<Self, NvFsError> {
-        if encoded_node.len() != layout.encoded_node_len {
+        if encoded_node.len() != layout.encoded_leaf_node_len {
             return Err(nvfs_err_internal!());
         }
 
@@ -399,7 +399,7 @@ impl InodeIndexTreeLeafNode {
                 *<&[u8; EncodedExtentPtr::ENCODED_SIZE as usize]>::try_from(encoded_extent_ptr)
                     .map_err(|_| nvfs_err_internal!())?,
             )
-            .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
+            .decode(allocation_block_size_128b_log2 as u32)?
             .is_none()
             {
                 return Err(NvFsError::from(FormatError::InvalidIndexNode));
@@ -412,7 +412,7 @@ impl InodeIndexTreeLeafNode {
                 *<&[u8; EncodedExtentPtr::ENCODED_SIZE as usize]>::try_from(encoded_extent_ptr)
                     .map_err(|_| nvfs_err_internal!())?,
             )
-            .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
+            .decode(allocation_block_size_128b_log2 as u32)?
             .is_some()
             {
                 return Err(NvFsError::from(FormatError::InvalidIndexNode));
@@ -784,7 +784,7 @@ impl InodeIndexTreeLeafNode {
             return Err(nvfs_err_internal!());
         }
 
-        let new_encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
+        let new_encoded_node = FixedVec::new_with_value(layout.encoded_leaf_node_len, 0u8)?;
         let mut new_node = Self {
             encoded_node: new_encoded_node,
             entries: spill_count + (1 - insert_in_left as usize),
@@ -1136,8 +1136,10 @@ impl InodeIndexTreeLeafNode {
     ///
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_node_level(&self, layout: &InodeIndexTreeLayout) -> Result<&[u8; mem::size_of::<u32>()], NvFsError> {
-        <&[u8; mem::size_of::<u32>()]>::try_from(&self.encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..])
-            .map_err(|_| nvfs_err_internal!())
+        <&[u8; mem::size_of::<u32>()]>::try_from(
+            &self.encoded_node[layout.encoded_leaf_node_len - mem::size_of::<u32>()..],
+        )
+        .map_err(|_| nvfs_err_internal!())
     }
 
     /// Get a `mut` reference to the node's encoded tree level.
@@ -1152,7 +1154,7 @@ impl InodeIndexTreeLeafNode {
         layout: &InodeIndexTreeLayout,
     ) -> Result<&mut [u8; mem::size_of::<u32>()], NvFsError> {
         <&mut [u8; mem::size_of::<u32>()]>::try_from(
-            &mut self.encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..],
+            &mut self.encoded_node[layout.encoded_leaf_node_len - mem::size_of::<u32>()..],
         )
         .map_err(|_| nvfs_err_internal!())
     }
@@ -1245,7 +1247,7 @@ impl InodeIndexTreeInternalNode {
 
         // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is
         // implicitly initialized to SpecialInode::NoInode, as it should be.
-        let encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
+        let encoded_node = FixedVec::new_with_value(layout.encoded_internal_node_len, 0u8)?;
         let mut n = Self {
             encoded_node,
             entries: 0,
@@ -1318,14 +1320,17 @@ impl InodeIndexTreeInternalNode {
     ///
     /// * `node_allocation_blocks_begin` - Location of the node on storage.
     /// * `encoded_node` - Buffer containing the encoded node. Its length must
-    ///   match [`InodeIndexTreeLayout::encoded_node_len()`].
+    ///   match [`InodeIndexTreeLayout::encoded_internal_node_len`].
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    /// * `allocation_block_size_128b_log2` - Value of the filesystem's
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     fn decode(
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         encoded_node: FixedVec<u8, 7>,
         layout: &InodeIndexTreeLayout,
+        allocation_block_size_128b_log2: u8,
     ) -> Result<Self, NvFsError> {
-        if encoded_node.len() != layout.encoded_node_len {
+        if encoded_node.len() != layout.encoded_internal_node_len {
             return Err(nvfs_err_internal!());
         }
 
@@ -1373,7 +1378,7 @@ impl InodeIndexTreeInternalNode {
                 *<&[u8; EncodedBlockPtr::ENCODED_SIZE as usize]>::try_from(encoded_child_ptr)
                     .map_err(|_| nvfs_err_internal!())?,
             )
-            .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
+            .decode(allocation_block_size_128b_log2 as u32)?
             .is_none()
             {
                 return Err(NvFsError::from(FormatError::InvalidIndexNode));
@@ -1386,7 +1391,7 @@ impl InodeIndexTreeInternalNode {
                 *<&[u8; EncodedBlockPtr::ENCODED_SIZE as usize]>::try_from(encoded_child_ptr)
                     .map_err(|_| nvfs_err_internal!())?,
             )
-            .decode(layout.node_encrypted_block_layout.get_allocation_block_size_128b_log2() as u32)?
+            .decode(allocation_block_size_128b_log2 as u32)?
             .is_some()
             {
                 return Err(NvFsError::from(FormatError::InvalidIndexNode));
@@ -1825,7 +1830,7 @@ impl InodeIndexTreeInternalNode {
             return Err(nvfs_err_internal!());
         }
 
-        let new_encoded_node = FixedVec::new_with_value(layout.encoded_node_len, 0u8)?;
+        let new_encoded_node = FixedVec::new_with_value(layout.encoded_internal_node_len, 0u8)?;
         let mut new_node = Self {
             encoded_node: new_encoded_node,
             entries: new_node_entries,
@@ -1905,7 +1910,7 @@ impl InodeIndexTreeInternalNode {
         layout: &InodeIndexTreeLayout,
     ) -> Result<(), NvFsError> {
         let left = self;
-        if left.entries + 1 + right.entries > layout.max_leaf_node_entries {
+        if left.entries + 1 + right.entries > layout.max_internal_node_entries {
             return Err(nvfs_err_internal!());
         }
         let keys_spill_len = right.entries * mem::size_of::<EncodedInodeIndexKeyType>();
@@ -1951,7 +1956,7 @@ impl InodeIndexTreeInternalNode {
     fn encoded_child_ptrs(&self, layout: &InodeIndexTreeLayout) -> &[u8] {
         let encoded_child_ptrs_begin = 0;
         let encoded_child_ptrs_end =
-            encoded_child_ptrs_begin + (layout.max_leaf_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
+            encoded_child_ptrs_begin + (layout.max_internal_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
         &self.encoded_node[encoded_child_ptrs_begin..encoded_child_ptrs_end]
     }
 
@@ -1970,7 +1975,7 @@ impl InodeIndexTreeInternalNode {
     fn encoded_child_ptrs_mut(&mut self, layout: &InodeIndexTreeLayout) -> &mut [u8] {
         let encoded_child_ptrs_begin = 0;
         let encoded_child_ptrs_end =
-            encoded_child_ptrs_begin + (layout.max_leaf_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
+            encoded_child_ptrs_begin + (layout.max_internal_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
         &mut self.encoded_node[encoded_child_ptrs_begin..encoded_child_ptrs_end]
     }
 
@@ -1987,9 +1992,9 @@ impl InodeIndexTreeInternalNode {
     ///
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_keys(&self, layout: &InodeIndexTreeLayout) -> &[u8] {
-        let encoded_keys_begin = (layout.max_leaf_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
+        let encoded_keys_begin = (layout.max_internal_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
         let encoded_keys_end =
-            encoded_keys_begin + layout.max_leaf_node_entries * mem::size_of::<EncodedInodeIndexKeyType>();
+            encoded_keys_begin + layout.max_internal_node_entries * mem::size_of::<EncodedInodeIndexKeyType>();
         &self.encoded_node[encoded_keys_begin..encoded_keys_end]
     }
 
@@ -2006,9 +2011,9 @@ impl InodeIndexTreeInternalNode {
     ///
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_keys_mut(&mut self, layout: &InodeIndexTreeLayout) -> &mut [u8] {
-        let encoded_keys_begin = (layout.max_leaf_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
+        let encoded_keys_begin = (layout.max_internal_node_entries + 1) * EncodedBlockPtr::ENCODED_SIZE as usize;
         let encoded_keys_end =
-            encoded_keys_begin + layout.max_leaf_node_entries * mem::size_of::<EncodedInodeIndexKeyType>();
+            encoded_keys_begin + layout.max_internal_node_entries * mem::size_of::<EncodedInodeIndexKeyType>();
         &mut self.encoded_node[encoded_keys_begin..encoded_keys_end]
     }
 
@@ -2020,8 +2025,10 @@ impl InodeIndexTreeInternalNode {
     ///
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
     fn encoded_node_level(&self, layout: &InodeIndexTreeLayout) -> Result<&[u8; mem::size_of::<u32>()], NvFsError> {
-        <&[u8; mem::size_of::<u32>()]>::try_from(&self.encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..])
-            .map_err(|_| nvfs_err_internal!())
+        <&[u8; mem::size_of::<u32>()]>::try_from(
+            &self.encoded_node[layout.encoded_internal_node_len - mem::size_of::<u32>()..],
+        )
+        .map_err(|_| nvfs_err_internal!())
     }
 
     /// Get a `mut` reference to the node's encoded tree level.
@@ -2036,7 +2043,7 @@ impl InodeIndexTreeInternalNode {
         layout: &InodeIndexTreeLayout,
     ) -> Result<&mut [u8; mem::size_of::<u32>()], NvFsError> {
         <&mut [u8; mem::size_of::<u32>()]>::try_from(
-            &mut self.encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..],
+            &mut self.encoded_node[layout.encoded_internal_node_len - mem::size_of::<u32>()..],
         )
         .map_err(|_| nvfs_err_internal!())
     }
@@ -2076,43 +2083,6 @@ enum InodeIndexTreeNode {
 }
 
 impl InodeIndexTreeNode {
-    /// Instantiate a [`InodeIndexTreeNode`] from its encoding.
-    ///
-    ///
-    /// # Arguments:
-    ///
-    /// * `node_allocation_blocks_begin` - Location of the node on storage.
-    /// * `encoded_node` - Buffer containing the encoded node. Its length must
-    ///   match [`InodeIndexTreeLayout::encoded_node_len()`].
-    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
-    fn decode(
-        node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-        encoded_node: FixedVec<u8, 7>,
-        layout: &InodeIndexTreeLayout,
-    ) -> Result<Self, NvFsError> {
-        if encoded_node.len() != layout.encoded_node_len {
-            return Err(nvfs_err_internal!());
-        }
-
-        // Encoded node levels are 1-based, counted from leaf nodes upwards.
-        match u32::from_le_bytes(
-            *<&[u8; mem::size_of::<u32>()]>::try_from(&encoded_node[layout.encoded_node_len - mem::size_of::<u32>()..])
-                .map_err(|_| nvfs_err_internal!())?,
-        ) {
-            0u32 => Err(NvFsError::from(FormatError::InvalidIndexNode)),
-            1u32 => Ok(Self::Leaf(InodeIndexTreeLeafNode::decode(
-                node_allocation_blocks_begin,
-                encoded_node,
-                layout,
-            )?)),
-            _ => Ok(Self::Internal(InodeIndexTreeInternalNode::decode(
-                node_allocation_blocks_begin,
-                encoded_node,
-                layout,
-            )?)),
-        }
-    }
-
     /// Get the node's location on storage.
     fn node_allocation_blocks_begin(&self) -> layout::PhysicalAllocBlockIndex {
         match self {
@@ -2125,9 +2095,10 @@ impl InodeIndexTreeNode {
     ///
     /// # Arguments:
     ///
-    /// * `preallocated_encoded_node` - Buffer to receive the cloned node's
-    ///   encoding. Its length must match
-    ///   [`InodeIndexTreeLayout::encoded_node_len()`].
+    /// * `preallocated_encoded_node` - Buffer to receive the cloned node's encoding. Its length
+    ///   must match either [`InodeIndexTreeLayout::encoded_leaf_node_len`] or
+    ///   [`InodeIndexTreeLayout::encoded_internal_node_len`], depending on wheter `self`
+    ///   stores a [leaf](Self::Leaf) or an [internal](Self::Internal) node.
     fn clone_with_preallocated_buf(&self, mut preallocated_encoded_node: FixedVec<u8, 7>) -> Self {
         match self {
             Self::Internal(InodeIndexTreeInternalNode {
@@ -2492,11 +2463,17 @@ pub struct InodeIndex<ST: sync_types::SyncTypes> {
     /// The current root node's location storage.
     root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     /// [`EncryptedBlockEncryptionInstance`](encryption_entities::EncryptedBlockEncryptionInstance)
-    /// for encrypting inode index tree nodes.
-    tree_node_encryption_instance: encryption_entities::EncryptedBlockEncryptionInstance,
+    /// for encrypting inode index tree leaf nodes.
+    tree_leaf_node_encryption_instance: encryption_entities::EncryptedBlockEncryptionInstance,
     /// [`EncryptedBlockDecryptionInstance`](encryption_entities::EncryptedBlockDecryptionInstance)
-    /// for decrypting inode index tree nodes.
-    tree_node_decryption_instance: encryption_entities::EncryptedBlockDecryptionInstance,
+    /// for decrypting inode index tree leaf nodes.
+    tree_leaf_node_decryption_instance: encryption_entities::EncryptedBlockDecryptionInstance,
+    /// [`EncryptedBlockEncryptionInstance`](encryption_entities::EncryptedBlockEncryptionInstance)
+    /// for encrypting inode index tree internal nodes.
+    tree_internal_node_encryption_instance: encryption_entities::EncryptedBlockEncryptionInstance,
+    /// [`EncryptedBlockDecryptionInstance`](encryption_entities::EncryptedBlockDecryptionInstance)
+    /// for decrypting inode index tree internal nodes.
+    tree_internal_node_decryption_instance: encryption_entities::EncryptedBlockDecryptionInstance,
 }
 
 impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
@@ -2508,7 +2485,7 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
     ///
     /// The returned buffer containing the encrypted entry leaf node will have a
     /// size matching that given by
-    /// [`ImageLayout::index_tree_node_allocation_blocks_log2`].
+    /// [`ImageLayout::index_tree_leaf_node_allocation_blocks_log2`].
     ///
     /// # Arguments:
     ///
@@ -2534,11 +2511,6 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
         keys_cache: &mut keys::KeyCacheRef<ST>,
         rng: &mut dyn rng::RngCoreDispatchable,
     ) -> Result<(Self, FixedVec<u8, 7>), NvFsError> {
-        let tree_node_encrypted_block_layout = encryption_entities::EncryptedBlockLayout::new(
-            image_layout.block_cipher_alg,
-            image_layout.index_tree_node_allocation_blocks_log2,
-            image_layout.allocation_block_size_128b_log2,
-        )?;
         let tree_node_encryption_key = keys::KeyCache::get_key(
             keys_cache,
             root_key,
@@ -2559,15 +2531,36 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
             &tree_node_encryption_key,
         )?;
         drop(tree_node_encryption_key);
-        let tree_node_encryption_instance = encryption_entities::EncryptedBlockEncryptionInstance::new(
-            tree_node_encrypted_block_layout.clone(),
+        let tree_leaf_node_encrypted_block_layout = encryption_entities::EncryptedBlockLayout::new(
+            image_layout.block_cipher_alg,
+            image_layout.index_tree_leaf_node_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        )?;
+        let tree_leaf_node_encryption_instance = encryption_entities::EncryptedBlockEncryptionInstance::new(
+            tree_leaf_node_encrypted_block_layout.clone(),
+            tree_node_encryption_block_cipher_instance.try_clone()?,
+        )?;
+        let tree_leaf_node_decryption_instance = encryption_entities::EncryptedBlockDecryptionInstance::new(
+            tree_leaf_node_encrypted_block_layout.clone(),
+            tree_node_decryption_block_cipher_instance.try_clone()?,
+        )?;
+        let tree_internal_node_encrypted_block_layout = encryption_entities::EncryptedBlockLayout::new(
+            image_layout.block_cipher_alg,
+            image_layout.index_tree_internal_node_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        )?;
+        let tree_internal_node_encryption_instance = encryption_entities::EncryptedBlockEncryptionInstance::new(
+            tree_internal_node_encrypted_block_layout.clone(),
             tree_node_encryption_block_cipher_instance,
         )?;
-        let tree_node_decryption_instance = encryption_entities::EncryptedBlockDecryptionInstance::new(
-            tree_node_encrypted_block_layout.clone(),
+        let tree_internal_node_decryption_instance = encryption_entities::EncryptedBlockDecryptionInstance::new(
+            tree_internal_node_encrypted_block_layout.clone(),
             tree_node_decryption_block_cipher_instance,
         )?;
-        let layout = InodeIndexTreeLayout::new(tree_node_encrypted_block_layout)?;
+        let layout = InodeIndexTreeLayout::new(
+            &tree_leaf_node_encrypted_block_layout,
+            &tree_internal_node_encrypted_block_layout,
+        )?;
 
         let mut entry_leaf_node = InodeIndexTreeLeafNode::new_empty(entry_leaf_node_allocation_blocks_begin, &layout)?;
         entry_leaf_node.insert(
@@ -2586,7 +2579,9 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
         let index_root_inode_entry_extent_ptr = extent_ptr::EncodedExtentPtr::encode(
             Some(&layout::PhysicalAllocBlockRange::from((
                 entry_leaf_node_allocation_blocks_begin,
-                layout::AllocBlockCount::from(1u64 << (image_layout.index_tree_node_allocation_blocks_log2 as u32)),
+                layout::AllocBlockCount::from(
+                    1u64 << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32),
+                ),
             ))),
             false,
         )?;
@@ -2597,12 +2592,12 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
             &layout,
         )?;
 
-        let tree_node_block_size = 1usize
-            << (image_layout.index_tree_node_allocation_blocks_log2 as u32
+        let leaf_node_size = 1usize
+            << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32
                 + image_layout.allocation_block_size_128b_log2 as u32
                 + 7);
-        let mut encrypted_entry_leaf_node = FixedVec::new_with_default(tree_node_block_size)?;
-        tree_node_encryption_instance.encrypt_one_block(
+        let mut encrypted_entry_leaf_node = FixedVec::new_with_default(leaf_node_size)?;
+        tree_leaf_node_encryption_instance.encrypt_one_block(
             io_slices::SingletonIoSliceMut::new(&mut encrypted_entry_leaf_node).map_infallible_err(),
             io_slices::SingletonIoSlice::new(&entry_leaf_node.encoded_node).map_infallible_err(),
             rng,
@@ -2630,8 +2625,10 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
                 index_tree_levels: 1,
                 tree_nodes_cache: ST::RwLock::from(tree_nodes_cache),
                 root_node_allocation_blocks_begin: entry_leaf_node_allocation_blocks_begin,
-                tree_node_encryption_instance,
-                tree_node_decryption_instance,
+                tree_leaf_node_encryption_instance,
+                tree_leaf_node_decryption_instance,
+                tree_internal_node_encryption_instance,
+                tree_internal_node_decryption_instance,
             },
             encrypted_entry_leaf_node,
         ))
@@ -2671,17 +2668,12 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
         self.index_tree_levels = updates.index_tree_levels;
 
         self.tree_nodes_cache.get_mut().reconfigure(updates.index_tree_levels);
-        let tree_node_allocation_blocks_log2 = self
-            .layout
-            .node_encrypted_block_layout
-            .get_block_allocation_blocks_log2();
-        let tree_node_allocation_blocks = layout::AllocBlockCount::from(1u64 << tree_node_allocation_blocks_log2);
         self.tree_nodes_cache
             .get_mut()
             .prune_cond(|tree_node_allocation_blocks_begin, _tree_node_level| {
                 is_range_modified(&layout::PhysicalAllocBlockRange::from((
                     tree_node_allocation_blocks_begin,
-                    tree_node_allocation_blocks,
+                    layout::AllocBlockCount::from(1u64),
                 )))
             });
         for removed_node_allocation_blocks_begin in updates.removed_nodes.iter() {
@@ -2753,7 +2745,7 @@ pub struct TransactionInodeIndexUpdates {
     removed_nodes: Vec<layout::PhysicalAllocBlockIndex>,
     /// Height of the updated inode index B+-tree.
     index_tree_levels: u32,
-    /// Location of th updated inode index B+-tree's root node.
+    /// Location of the updated inode index B+-tree's root node.
     root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     /// Whether or not the inode index inode pointing to the root node still
     /// needs to get updated.
@@ -2917,12 +2909,18 @@ impl TransactionInodeIndexUpdates {
                 Err(e) => return Err(e),
             };
             if leaf_node.node_allocation_blocks_begin == entry_leaf_node_allocation_blocks_begin {
+                let root_node_allocation_blocks_log2 = if self.index_tree_levels == 1 {
+                    fs_config.image_layout.index_tree_leaf_node_allocation_blocks_log2
+                } else {
+                    fs_config.image_layout.index_tree_internal_node_allocation_blocks_log2
+                } as u32;
+
                 if self.root_node_inode_needs_update {
                     Self::update_index_root_node_inode(
                         leaf_node,
                         self.root_node_allocation_blocks_begin,
+                        root_node_allocation_blocks_log2,
                         &fs_sync_state_inode_index.layout,
-                        fs_config.image_layout.index_tree_node_allocation_blocks_log2 as u32,
                     )?;
                     self.root_node_inode_needs_update = false;
                 }
@@ -2938,7 +2936,12 @@ impl TransactionInodeIndexUpdates {
         let node_range = layout::PhysicalAllocBlockRange::from((
             staged_node_update.node.node_allocation_blocks_begin(),
             layout::AllocBlockCount::from(
-                1u64 << (fs_config.image_layout.index_tree_node_allocation_blocks_log2 as u32),
+                1u64 << (match &staged_node_update.node {
+                    InodeIndexTreeNode::Leaf(_) => fs_config.image_layout.index_tree_leaf_node_allocation_blocks_log2,
+                    InodeIndexTreeNode::Internal(_) => {
+                        fs_config.image_layout.index_tree_internal_node_allocation_blocks_log2
+                    }
+                } as u32),
             ),
         ));
 
@@ -2956,19 +2959,22 @@ impl TransactionInodeIndexUpdates {
             &update_states_allocation_blocks_range,
             fs_config.image_layout.allocation_block_size_128b_log2 as u32,
         )?;
-        let encoded_node_buf = match &staged_node_update.node {
-            InodeIndexTreeNode::Internal(internal_node) => internal_node.encoded_node.as_slice(),
-            InodeIndexTreeNode::Leaf(leaf_node) => leaf_node.encoded_node.as_slice(),
+        let (tree_node_encryption_instance, encoded_node_buf) = match &staged_node_update.node {
+            InodeIndexTreeNode::Internal(internal_node) => (
+                &fs_sync_state_inode_index.tree_internal_node_encryption_instance,
+                internal_node.encoded_node.as_slice(),
+            ),
+            InodeIndexTreeNode::Leaf(leaf_node) => (
+                &fs_sync_state_inode_index.tree_leaf_node_encryption_instance,
+                leaf_node.encoded_node.as_slice(),
+            ),
         };
-        if let Err(e) = fs_sync_state_inode_index
-            .tree_node_encryption_instance
-            .encrypt_one_block(
-                transaction_updates_states
-                    .iter_allocation_blocks_update_staging_bufs_mut(&update_states_allocation_blocks_range)?,
-                io_slices::SingletonIoSlice::new(encoded_node_buf).map_infallible_err(),
-                rng,
-            )
-        {
+        if let Err(e) = tree_node_encryption_instance.encrypt_one_block(
+            transaction_updates_states
+                .iter_allocation_blocks_update_staging_bufs_mut(&update_states_allocation_blocks_range)?,
+            io_slices::SingletonIoSlice::new(encoded_node_buf).map_infallible_err(),
+            rng,
+        ) {
             // The Allocation Block's allocated for the Index Tree Nodes in the node update
             // staging slot will not get freed or repurposed for anything else,
             // the only way to make forward-progress for the transaction is to
@@ -3203,14 +3209,16 @@ impl TransactionInodeIndexUpdates {
     /// * `entry_leaf_node` - The entry leaf node to update.
     /// * `root_node_allocation_blocks_begin` - Update storage location of the
     ///   root node.
+    /// * `root_node_allocation_blocks_log2` - Verbatim copy of either
+    ///   [`ImageLayout::index_tree_leaf_node_allocation_blocks_log2`] or
+    ///   [`ImageLayout::index_tree_internal_node_allocation_blocks_log2`],
+    ///   depending on whether the root node is a leaf or not.
     /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
-    /// * `index_tree_node_allocation_blocks_log2` - Verbatim copy of
-    ///   [`ImageLayout::index_tree_node_allocation_blocks_log2`].
     fn update_index_root_node_inode(
         entry_leaf_node: &mut InodeIndexTreeLeafNode,
         root_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
+        root_node_allocation_blocks_log2: u32,
         layout: &InodeIndexTreeLayout,
-        index_tree_node_allocation_blocks_log2: u32,
     ) -> Result<(), NvFsError> {
         let root_inode_entry_pos_in_node = match entry_leaf_node.lookup(SpecialInode::IndexRoot as u32, layout)? {
             Ok(root_inode_entry_pos_in_node) => root_inode_entry_pos_in_node,
@@ -3222,7 +3230,7 @@ impl TransactionInodeIndexUpdates {
         let root_node_extent_ptr = extent_ptr::EncodedExtentPtr::encode(
             Some(&layout::PhysicalAllocBlockRange::from((
                 root_node_allocation_blocks_begin,
-                layout::AllocBlockCount::from(1u64 << index_tree_node_allocation_blocks_log2),
+                layout::AllocBlockCount::from(1u64 << root_node_allocation_blocks_log2),
             ))),
             false,
         )?;
@@ -3244,7 +3252,7 @@ impl TransactionInodeIndexUpdates {
 ///   produced by [`ImageLayout::preauth_cca_protection_hmac_hash_alg`].
 /// * `encrypted_node_data` - The encrypted entry leaf node data. The buffer's
 ///   length must match the node size given by
-///   [`ImageLayout::index_tree_node_allocation_blocks_log2`].
+///   [`ImageLayout::index_tree_leaf_node_allocation_blocks_log2`].
 /// * `image_layout` - The filesystem's [`ImageLayout`].
 /// * `root_key` - The filesystem's root key.
 /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
@@ -3375,6 +3383,7 @@ impl<'a, ST: sync_types::SyncTypes> InodeIndexTreeNodeRef<'a, ST> {
 }
 
 /// Expected level of a node to get [read](InodeIndexReadTreeNodeFuture).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ExpectedInodeIndexNodeLevel {
     /// The node to get read is a leaf.
     Leaf,
@@ -3410,7 +3419,7 @@ impl convert::From<ExpectedInodeIndexNodeLevel> for Option<u32> {
 struct InodeIndexReadTreeNodeFuture<B: blkdev::NvBlkDev> {
     fut_state: InodeIndexReadTreeNodeFutureState<B>,
     node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-    expected_node_level: Option<u32>,
+    expected_node_level: ExpectedInodeIndexNodeLevel,
     encoded_node_buf: FixedVec<u8, 7>,
     read_for_update: bool,
 }
@@ -3473,7 +3482,7 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
         Self {
             fut_state: InodeIndexReadTreeNodeFutureState::Init { transaction },
             node_allocation_blocks_begin,
-            expected_node_level: expected_node_level.into(),
+            expected_node_level,
             encoded_node_buf: FixedVec::new_empty(),
             read_for_update,
         }
@@ -3496,11 +3505,16 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
     ///   instance's inode
     ///   index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
     ///   [`tree_nodes_cache` member](InodeIndex::tree_nodes_cache).
-    /// * `fs_sync_state_inode_index_tree_node_decryption_instance` - The
+    /// * `fs_sync_state_inode_index_tree_leaf_node_decryption_instance` - The
     ///   [filesystem instance's inode
     ///   index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
-    ///   [`tree_node_decryption_instance`
-    ///   member](InodeIndex::tree_node_decryption_instance).
+    ///   [`tree_leaf_node_decryption_instance`
+    ///   member](InodeIndex::tree_leaf_node_decryption_instance).
+    /// * `fs_sync_state_inode_index_tree_internal_node_decryption_instance` - The
+    ///   [filesystem instance's inode
+    ///   index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
+    ///   [`tree_internal_node_decryption_instance`
+    ///   member](InodeIndex::tree_internal_node_decryption_instance).
     /// * `fs_sync_state_read_buffer` - The [filesystem instance's read
     ///   buffer](crate::fs::cocoonfs::fs::CocoonFsSyncState::read_buffer).
     /// * `cx` - The context of the asynchronous task on whose behalf the future
@@ -3515,7 +3529,8 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
         fs_sync_state_auth_tree: &mut auth_tree::AuthTreeRef<'_, ST>,
         fs_sync_state_inode_index_tree_layout: &InodeIndexTreeLayout,
         fs_sync_state_inode_index_tree_nodes_cache: &'a ST::RwLock<InodeIndexTreeNodeCache>,
-        fs_sync_state_inode_index_tree_node_decryption_instance: &encryption_entities::EncryptedBlockDecryptionInstance,
+        fs_sync_state_inode_index_tree_leaf_node_decryption_instance: &encryption_entities::EncryptedBlockDecryptionInstance,
+        fs_sync_state_inode_index_tree_internal_node_decryption_instance: &encryption_entities::EncryptedBlockDecryptionInstance,
         fs_sync_state_read_buffer: &read_buffer::ReadBuffer<ST>,
         cx: &mut core::task::Context<'_>,
     ) -> task::Poll<(
@@ -3530,12 +3545,15 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                     transaction: fut_transaction,
                 } => {
                     let node_allocation_blocks_begin = this.node_allocation_blocks_begin;
-                    let expected_node_level = this.expected_node_level;
                     let image_layout = &fs_config.image_layout;
                     let node_range = layout::PhysicalAllocBlockRange::from((
                         node_allocation_blocks_begin,
                         layout::AllocBlockCount::from(
-                            1u64 << (image_layout.index_tree_node_allocation_blocks_log2 as u32),
+                            1u64 << (if this.expected_node_level == ExpectedInodeIndexNodeLevel::Leaf {
+                                image_layout.index_tree_leaf_node_allocation_blocks_log2
+                            } else {
+                                image_layout.index_tree_internal_node_allocation_blocks_log2
+                            } as u32),
                         ),
                     ));
 
@@ -3551,10 +3569,15 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                             if let Some(entry) = nodes_staged_updates_slot.as_ref() {
                                 if entry.node.node_allocation_blocks_begin() == node_allocation_blocks_begin {
                                     // Check that the node level matches expectations.
-                                    if expected_node_level
-                                        .map(|expected_node_level| entry.node_level != expected_node_level)
-                                        .unwrap_or(false)
-                                    {
+                                    if match this.expected_node_level {
+                                        ExpectedInodeIndexNodeLevel::Leaf => entry.node_level != 0,
+                                        ExpectedInodeIndexNodeLevel::Internal {
+                                            node_level: expected_node_level,
+                                        } => match expected_node_level {
+                                            None => entry.node_level == 0,
+                                            Some(node_level) => entry.node_level != u32::from(node_level),
+                                        },
+                                    } {
                                         this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                                         return task::Poll::Ready((
                                             Some(transaction),
@@ -3574,22 +3597,26 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
 
                         // Otherwise, if the node is among the supplied transaction's cached updated
                         // nodes, return a reference to that.
-                        if let Some(cache_entry_index) = transaction
-                            .inode_index_updates
-                            .updated_tree_nodes_cache
-                            .lookup(node_allocation_blocks_begin, expected_node_level)
+                        if let Some(cache_entry_index) =
+                            transaction.inode_index_updates.updated_tree_nodes_cache.lookup(
+                                node_allocation_blocks_begin,
+                                Option::<u32>::from(this.expected_node_level),
+                            )
                         {
                             // Check that the node level matches expectations.
-                            if expected_node_level
-                                .map(|expected_node_level| {
-                                    transaction
-                                        .inode_index_updates
-                                        .updated_tree_nodes_cache
-                                        .get_entry_node_level(cache_entry_index)
-                                        != expected_node_level
-                                })
-                                .unwrap_or(false)
-                            {
+                            let entry_node_level = transaction
+                                .inode_index_updates
+                                .updated_tree_nodes_cache
+                                .get_entry_node_level(cache_entry_index);
+                            if match this.expected_node_level {
+                                ExpectedInodeIndexNodeLevel::Leaf => entry_node_level != 0,
+                                ExpectedInodeIndexNodeLevel::Internal {
+                                    node_level: expected_node_level,
+                                } => match expected_node_level {
+                                    None => entry_node_level == 0,
+                                    Some(node_level) => entry_node_level != u32::from(node_level),
+                                },
+                            } {
                                 this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                                 return task::Poll::Ready((
                                     Some(transaction),
@@ -3692,7 +3719,13 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                     // cache lock.
                     if this.read_for_update {
                         let tree_layout = fs_sync_state_inode_index_tree_layout;
-                        this.encoded_node_buf = match FixedVec::new_with_default(tree_layout.encoded_node_len) {
+                        this.encoded_node_buf = match FixedVec::new_with_default(
+                            if this.expected_node_level == ExpectedInodeIndexNodeLevel::Leaf {
+                                tree_layout.encoded_leaf_node_len
+                            } else {
+                                tree_layout.encoded_internal_node_len
+                            },
+                        ) {
                             Ok(encoded_node_buf) => encoded_node_buf,
                             Err(e) => {
                                 let transaction = fut_transaction.take();
@@ -3703,16 +3736,21 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                     }
 
                     let nodes_cache_guard = fs_sync_state_inode_index_tree_nodes_cache.read();
-                    if let Some(cache_entry_index) =
-                        nodes_cache_guard.lookup(node_allocation_blocks_begin, expected_node_level)
-                    {
+                    if let Some(cache_entry_index) = nodes_cache_guard.lookup(
+                        node_allocation_blocks_begin,
+                        Option::<u32>::from(this.expected_node_level),
+                    ) {
                         // Check that the node level matches expectations.
-                        if expected_node_level
-                            .map(|expected_node_level| {
-                                nodes_cache_guard.get_entry_node_level(cache_entry_index) != expected_node_level
-                            })
-                            .unwrap_or(false)
-                        {
+                        let entry_node_level = nodes_cache_guard.get_entry_node_level(cache_entry_index);
+                        if match this.expected_node_level {
+                            ExpectedInodeIndexNodeLevel::Leaf => entry_node_level != 0,
+                            ExpectedInodeIndexNodeLevel::Internal {
+                                node_level: expected_node_level,
+                            } => match expected_node_level {
+                                None => entry_node_level == 0,
+                                Some(node_level) => entry_node_level != u32::from(node_level),
+                            },
+                        } {
                             let transaction = fut_transaction.take();
                             this.fut_state = InodeIndexReadTreeNodeFutureState::Done;
                             return task::Poll::Ready((
@@ -3871,48 +3909,92 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                     // Allocate the decryption target buffer if that has not happened yet.
                     let tree_layout = fs_sync_state_inode_index_tree_layout;
                     let mut encoded_node_buf = mem::take(&mut this.encoded_node_buf);
-                    if encoded_node_buf.is_empty() {
-                        encoded_node_buf = match FixedVec::new_with_default(tree_layout.encoded_node_len) {
-                            Ok(encoded_node_buf) => encoded_node_buf,
-                            Err(e) => {
-                                let transaction = encrypted_node.into_transaction();
-                                return task::Poll::Ready((transaction, Err(NvFsError::from(e))));
+                    let (transaction, node, node_level) = match this.expected_node_level {
+                        ExpectedInodeIndexNodeLevel::Leaf => {
+                            if encoded_node_buf.is_empty() {
+                                encoded_node_buf = match FixedVec::new_with_default(tree_layout.encoded_leaf_node_len) {
+                                    Ok(encoded_node_buf) => encoded_node_buf,
+                                    Err(e) => {
+                                        let transaction = encrypted_node.into_transaction();
+                                        return task::Poll::Ready((transaction, Err(NvFsError::from(e))));
+                                    }
+                                };
                             }
-                        };
-                    }
-                    if let Err(e) = fs_sync_state_inode_index_tree_node_decryption_instance.decrypt_one_block(
-                        io_slices::SingletonIoSliceMut::new(&mut encoded_node_buf).map_infallible_err(),
-                        io_slices::GenericIoSlicesIter::new(encrypted_node.iter_allocation_blocks_bufs(), None),
-                    ) {
-                        return task::Poll::Ready((encrypted_node.into_transaction(), Err(e)));
-                    }
 
-                    let transaction = encrypted_node.into_transaction();
-                    let node = match InodeIndexTreeNode::decode(
-                        this.node_allocation_blocks_begin,
-                        encoded_node_buf,
-                        tree_layout,
-                    ) {
-                        Ok(node) => node,
-                        Err(e) => {
-                            return task::Poll::Ready((transaction, Err(e)));
+                            if let Err(e) = fs_sync_state_inode_index_tree_leaf_node_decryption_instance
+                                .decrypt_one_block(
+                                    io_slices::SingletonIoSliceMut::new(&mut encoded_node_buf).map_infallible_err(),
+                                    io_slices::GenericIoSlicesIter::new(
+                                        encrypted_node.iter_allocation_blocks_bufs(),
+                                        None,
+                                    ),
+                                )
+                            {
+                                return task::Poll::Ready((encrypted_node.into_transaction(), Err(e)));
+                            }
+                            let transaction = encrypted_node.into_transaction();
+
+                            match InodeIndexTreeLeafNode::decode(
+                                this.node_allocation_blocks_begin,
+                                encoded_node_buf,
+                                tree_layout,
+                                fs_config.image_layout.allocation_block_size_128b_log2,
+                            ) {
+                                Ok(node) => (transaction, InodeIndexTreeNode::Leaf(node), 0),
+                                Err(e) => return task::Poll::Ready((transaction, Err(e))),
+                            }
+                        }
+                        ExpectedInodeIndexNodeLevel::Internal {
+                            node_level: expected_node_level,
+                        } => {
+                            if encoded_node_buf.is_empty() {
+                                encoded_node_buf =
+                                    match FixedVec::new_with_default(tree_layout.encoded_internal_node_len) {
+                                        Ok(encoded_node_buf) => encoded_node_buf,
+                                        Err(e) => {
+                                            let transaction = encrypted_node.into_transaction();
+                                            return task::Poll::Ready((transaction, Err(NvFsError::from(e))));
+                                        }
+                                    };
+                            }
+
+                            if let Err(e) = fs_sync_state_inode_index_tree_internal_node_decryption_instance
+                                .decrypt_one_block(
+                                    io_slices::SingletonIoSliceMut::new(&mut encoded_node_buf).map_infallible_err(),
+                                    io_slices::GenericIoSlicesIter::new(
+                                        encrypted_node.iter_allocation_blocks_bufs(),
+                                        None,
+                                    ),
+                                )
+                            {
+                                return task::Poll::Ready((encrypted_node.into_transaction(), Err(e)));
+                            }
+                            let transaction = encrypted_node.into_transaction();
+
+                            let node = match InodeIndexTreeInternalNode::decode(
+                                this.node_allocation_blocks_begin,
+                                encoded_node_buf,
+                                tree_layout,
+                                fs_config.image_layout.allocation_block_size_128b_log2,
+                            ) {
+                                Ok(node) => node,
+                                Err(e) => return task::Poll::Ready((transaction, Err(e))),
+                            };
+                            let node_level = match node.node_level(tree_layout) {
+                                Ok(node_level) => node_level,
+                                Err(e) => return task::Poll::Ready((transaction, Err(e))),
+                            };
+                            if let Some(expected_node_level) = expected_node_level {
+                                if node_level != u32::from(expected_node_level) {
+                                    return task::Poll::Ready((
+                                        transaction,
+                                        Err(NvFsError::from(FormatError::InvalidIndexNode)),
+                                    ));
+                                }
+                            }
+                            (transaction, InodeIndexTreeNode::Internal(node), node_level)
                         }
                     };
-
-                    let node_level = match &node {
-                        InodeIndexTreeNode::Internal(internal_node) => match internal_node.node_level(tree_layout) {
-                            Ok(node_level) => node_level,
-                            Err(e) => return task::Poll::Ready((transaction, Err(e))),
-                        },
-                        InodeIndexTreeNode::Leaf(_) => 0,
-                    };
-                    if this
-                        .expected_node_level
-                        .map(|expected_node_level| node_level != expected_node_level)
-                        .unwrap_or(false)
-                    {
-                        return task::Poll::Ready((transaction, Err(NvFsError::from(FormatError::InvalidIndexNode))));
-                    }
 
                     return task::Poll::Ready(if !this.read_for_update {
                         if is_modified_by_transaction {
@@ -4099,7 +4181,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -4133,12 +4216,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             };
 
                             let transaction = returned_transaction.or(node_ref.into_transaction());
-
-                            let next_child_node_allocation_blocks_begin = match next_child_ptr.decode(
-                                tree_layout
-                                    .node_encrypted_block_layout
-                                    .get_allocation_block_size_128b_log2() as u32,
-                            ) {
+                            let next_child_node_allocation_blocks_begin = match next_child_ptr
+                                .decode(fs_instance.fs_config.image_layout.allocation_block_size_128b_log2 as u32)
+                            {
                                 Ok(next_child_node_allocation_blocks_begin) => {
                                     match next_child_node_allocation_blocks_begin {
                                         Some(next_child_node_allocation_blocks_begin) => {
@@ -4426,7 +4506,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         None => break (None, None, nvfs_err_internal!()),
                     };
 
-                    let tree_layout = &fs_instance_sync_state.inode_index.layout;
                     match &mut cursor.tree_position {
                         None => {
                             // First time to retrieve the next inode on this cursor.
@@ -4510,9 +4589,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 .encoded_next_leaf_node_ptr(&fs_instance_sync_state.inode_index.layout)
                                 .and_then(|next_leaf_ptr| {
                                     EncodedBlockPtr::from(*next_leaf_ptr).decode(
-                                        tree_layout
-                                            .node_encrypted_block_layout
-                                            .get_allocation_block_size_128b_log2()
+                                        fs_instance_sync_state
+                                            .get_fs_ref()
+                                            .fs_config
+                                            .image_layout
+                                            .allocation_block_size_128b_log2
                                             as u32,
                                     )
                                 }) {
@@ -4566,7 +4647,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -4603,10 +4685,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 .entry_child_ptr(next_child_index, tree_layout)
                                 .and_then(|next_child_ptr| {
                                     next_child_ptr.decode(
-                                        tree_layout
-                                            .node_encrypted_block_layout
-                                            .get_allocation_block_size_128b_log2()
-                                            as u32,
+                                        fs_instance.fs_config.image_layout.allocation_block_size_128b_log2 as u32,
                                     )
                                 }) {
                                 Ok(next_child_node_allocation_blocks_begin) => next_child_node_allocation_blocks_begin,
@@ -4734,7 +4813,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -5357,7 +5437,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -5392,11 +5473,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 }
                             };
 
-                            let next_child_node_allocation_blocks_begin = match next_child_ptr.decode(
-                                tree_layout
-                                    .node_encrypted_block_layout
-                                    .get_allocation_block_size_128b_log2() as u32,
-                            ) {
+                            let next_child_node_allocation_blocks_begin = match next_child_ptr
+                                .decode(fs_instance.fs_config.image_layout.allocation_block_size_128b_log2 as u32)
+                            {
                                 Ok(next_child_node_allocation_blocks_begin) => {
                                     match next_child_node_allocation_blocks_begin {
                                         Some(next_child_node_allocation_blocks_begin) => {
@@ -5578,14 +5657,31 @@ enum InodeIndexInsertEntryFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBl
         read_sibling_fut: InodeIndexReadTreeNodeFuture<B>,
         at_left_sibling: bool,
     },
-    SplitRootNode {
+    SplitLeafRootNodeAllocateNewRoot {
+        nodes_staged_updates_old_root_slot_index: usize,
+        allocate_fut: AllocateBlockFuture<ST, B>,
+    },
+    SplitLeafRootNodeAllocateNewSibling {
+        nodes_staged_updates_old_root_slot_index: usize,
+        allocated_new_root_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
+        allocate_fut: AllocateBlockFuture<ST, B>,
+    },
+    SplitRootNodeAllocateNewNodes {
         nodes_staged_updates_old_root_slot_index: usize,
         allocate_fut: AllocateBlocksFuture<ST, B>,
+    },
+    SplitRootNode {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<transaction::Transaction>>,
+        nodes_staged_updates_old_root_slot_index: usize,
+        allocated_nodes_blocks: [layout::PhysicalAllocBlockIndex; 2],
     },
     SplitNode {
         nodes_staged_updates_parent_slot_index: usize,
         nodes_staged_updates_child_slot_index: usize,
         child_index_in_parent: usize,
+        child_is_leaf: bool,
         allocate_fut: AllocateBlockFuture<ST, B>,
     },
     PreemptiveRotateSplitWalkLoadRoot {
@@ -6008,21 +6104,42 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         debug_assert_eq!(transaction.inode_index_updates.index_tree_levels, 1);
                         let fs_instance = fs_instance_sync_state.get_fs_ref();
                         let image_layout = &fs_instance.fs_config.image_layout;
-                        let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
-                            &fs_instance,
-                            transaction,
-                            image_layout.index_tree_node_allocation_blocks_log2 as u32,
-                            2,
-                            false,
-                        ) {
-                            Ok(allocate_fut) => allocate_fut,
-                            Err((transaction, e)) => break (transaction, Err(e)),
-                        };
+                        if image_layout.index_tree_leaf_node_allocation_blocks_log2
+                            == image_layout.index_tree_internal_node_allocation_blocks_log2
+                        {
+                            // The leaf and internal node sizes match, allocate the new root and sibling in one step.
+                            let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
+                                &fs_instance,
+                                transaction,
+                                image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
+                                2,
+                                false,
+                            ) {
+                                Ok(allocate_fut) => allocate_fut,
+                                Err((transaction, e)) => break (transaction, Err(e)),
+                            };
 
-                        this.fut_state = InodeIndexInsertEntryFutureState::SplitRootNode {
-                            nodes_staged_updates_old_root_slot_index: nodes_staged_updates_leaf_slot_index,
-                            allocate_fut,
-                        };
+                            this.fut_state = InodeIndexInsertEntryFutureState::SplitRootNodeAllocateNewNodes {
+                                nodes_staged_updates_old_root_slot_index: nodes_staged_updates_leaf_slot_index,
+                                allocate_fut,
+                            };
+                        } else {
+                            // The leaf and internal node sizes differ, allocate the new root and sibling separately.
+                            let allocate_fut = match AllocateBlockFuture::<ST, B>::new(
+                                &fs_instance,
+                                transaction,
+                                image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
+                                false,
+                            ) {
+                                Ok(allocate_fut) => allocate_fut,
+                                Err((transaction, e)) => break (transaction, Err(e)),
+                            };
+
+                            this.fut_state = InodeIndexInsertEntryFutureState::SplitLeafRootNodeAllocateNewRoot {
+                                nodes_staged_updates_old_root_slot_index: nodes_staged_updates_leaf_slot_index,
+                                allocate_fut,
+                            };
+                        }
                     }
                 }
                 InodeIndexInsertEntryFutureState::TryRotatePrepare {
@@ -6071,9 +6188,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         .encoded_entry_child_ptr(sibling_child_index_in_parent, tree_layout)
                         .and_then(|sibling_child_ptr| {
                             EncodedBlockPtr::from(*sibling_child_ptr).decode(
-                                tree_layout
-                                    .node_encrypted_block_layout
-                                    .get_allocation_block_size_128b_log2() as u32,
+                                fs_instance_sync_state
+                                    .get_fs_ref()
+                                    .fs_config
+                                    .image_layout
+                                    .allocation_block_size_128b_log2 as u32,
                             )
                         })
                         .and_then(|sibling_child_node_allocation_blocks_begin| {
@@ -6129,7 +6248,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -6228,6 +6348,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             Err(e) => break (Some(transaction), Err(e)),
                         };
 
+                        let image_layout = &fs_instance.fs_config.image_layout;
                         if !*at_left_sibling || *child_index_in_parent == parent_node.entries {
                             // No right sibling or it has just been tried with negative outcome. If
                             // the child is not the leaf, then we're in a preemptive split-rotate
@@ -6238,11 +6359,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 parent_node_level == 1 || parent_node.entries != tree_layout.max_internal_node_entries
                             );
                             if parent_node_level != 1 || parent_node.entries != tree_layout.max_internal_node_entries {
-                                let image_layout = &fs_instance.fs_config.image_layout;
                                 let allocate_fut = match AllocateBlockFuture::new(
                                     &fs_instance,
                                     transaction,
-                                    image_layout.index_tree_node_allocation_blocks_log2 as u32,
+                                    if parent_node_level == 1 {
+                                        image_layout.index_tree_leaf_node_allocation_blocks_log2
+                                    } else {
+                                        image_layout.index_tree_internal_node_allocation_blocks_log2
+                                    } as u32,
                                     false,
                                 ) {
                                     Ok(allocate_fut) => allocate_fut,
@@ -6252,6 +6376,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     nodes_staged_updates_parent_slot_index: *nodes_staged_updates_parent_slot_index,
                                     nodes_staged_updates_child_slot_index: *nodes_staged_updates_child_slot_index,
                                     child_index_in_parent: *child_index_in_parent,
+                                    child_is_leaf: parent_node_level == 1,
                                     allocate_fut,
                                 };
                             } else {
@@ -6280,12 +6405,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let right_sibling_child_node_allocation_blocks_begin = match parent_node
                                 .encoded_entry_child_ptr(right_sibling_child_index, tree_layout)
                                 .and_then(|sibling_child_ptr| {
-                                    EncodedBlockPtr::from(*sibling_child_ptr).decode(
-                                        tree_layout
-                                            .node_encrypted_block_layout
-                                            .get_allocation_block_size_128b_log2()
-                                            as u32,
-                                    )
+                                    EncodedBlockPtr::from(*sibling_child_ptr)
+                                        .decode(image_layout.allocation_block_size_128b_log2 as u32)
                                 })
                                 .and_then(|sibling_child_node_allocation_blocks_begin| {
                                     sibling_child_node_allocation_blocks_begin
@@ -6616,11 +6737,102 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         }
                     }
                 }
-                InodeIndexInsertEntryFutureState::SplitRootNode {
+                InodeIndexInsertEntryFutureState::SplitLeafRootNodeAllocateNewRoot {
                     nodes_staged_updates_old_root_slot_index,
                     allocate_fut,
                 } => {
-                    let (mut transaction, allocated_nodes_blocks) = match CocoonFsSyncStateReadFuture::poll(
+                    let (transaction, allocated_new_root_allocation_blocks_begin) =
+                        match CocoonFsSyncStateReadFuture::poll(
+                            pin::Pin::new(allocate_fut),
+                            fs_instance_sync_state,
+                            &mut (),
+                            cx,
+                        ) {
+                            task::Poll::Ready(Ok((transaction, Ok(allocated_new_root_allocation_blocks_begin)))) => {
+                                (transaction, allocated_new_root_allocation_blocks_begin)
+                            }
+                            task::Poll::Ready(Ok((transaction, Err(e)))) => break (Some(transaction), Err(e)),
+                            task::Poll::Ready(Err(e)) => break (None, Err(e)),
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let image_layout = &fs_instance.fs_config.image_layout;
+                    let allocate_fut = match AllocateBlockFuture::new(
+                        &fs_instance,
+                        transaction,
+                        image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32,
+                        false,
+                    ) {
+                        Ok(allocate_fut) => allocate_fut,
+                        Err((transaction, e)) => {
+                            break match transaction {
+                                Some(transaction) => {
+                                    match transaction.rollback_block_allocation(
+                                        allocated_new_root_allocation_blocks_begin,
+                                        image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
+                                        &fs_instance_sync_state.alloc_bitmap,
+                                    ) {
+                                        Ok(transaction) => (Some(transaction), Err(e)),
+                                        Err(e) => (None, Err(e)),
+                                    }
+                                }
+                                None => (None, Err(e)),
+                            };
+                        }
+                    };
+
+                    this.fut_state = InodeIndexInsertEntryFutureState::SplitLeafRootNodeAllocateNewSibling {
+                        nodes_staged_updates_old_root_slot_index: *nodes_staged_updates_old_root_slot_index,
+                        allocated_new_root_allocation_blocks_begin,
+                        allocate_fut,
+                    };
+                }
+                InodeIndexInsertEntryFutureState::SplitLeafRootNodeAllocateNewSibling {
+                    nodes_staged_updates_old_root_slot_index,
+                    allocated_new_root_allocation_blocks_begin,
+                    allocate_fut,
+                } => {
+                    let (transaction, allocated_new_sibling_allocation_blocks_begin) =
+                        match CocoonFsSyncStateReadFuture::poll(
+                            pin::Pin::new(allocate_fut),
+                            fs_instance_sync_state,
+                            &mut (),
+                            cx,
+                        ) {
+                            task::Poll::Ready(Ok((transaction, Ok(allocated_new_sibling_allocation_blocks_begin)))) => {
+                                (transaction, allocated_new_sibling_allocation_blocks_begin)
+                            }
+                            task::Poll::Ready(Ok((transaction, Err(e)))) => {
+                                let fs_instance = fs_instance_sync_state.get_fs_ref();
+                                let image_layout = &fs_instance.fs_config.image_layout;
+                                break match transaction.rollback_block_allocation(
+                                    *allocated_new_root_allocation_blocks_begin,
+                                    image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
+                                    &fs_instance_sync_state.alloc_bitmap,
+                                ) {
+                                    Ok(transaction) => (Some(transaction), Err(e)),
+                                    Err(e) => (None, Err(e)),
+                                };
+                            }
+                            task::Poll::Ready(Err(e)) => break (None, Err(e)),
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    this.fut_state = InodeIndexInsertEntryFutureState::SplitRootNode {
+                        transaction: Some(transaction),
+                        nodes_staged_updates_old_root_slot_index: *nodes_staged_updates_old_root_slot_index,
+                        allocated_nodes_blocks: [
+                            *allocated_new_root_allocation_blocks_begin,
+                            allocated_new_sibling_allocation_blocks_begin,
+                        ],
+                    };
+                }
+                InodeIndexInsertEntryFutureState::SplitRootNodeAllocateNewNodes {
+                    nodes_staged_updates_old_root_slot_index,
+                    allocate_fut,
+                } => {
+                    let (transaction, allocated_nodes_blocks) = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(allocate_fut),
                         fs_instance_sync_state,
                         &mut (),
@@ -6632,6 +6844,22 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         task::Poll::Ready(Ok((transaction, Err(e)))) => break (Some(transaction), Err(e)),
                         task::Poll::Ready(Err(e)) => break (None, Err(e)),
                         task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    this.fut_state = InodeIndexInsertEntryFutureState::SplitRootNode {
+                        transaction: Some(transaction),
+                        nodes_staged_updates_old_root_slot_index: *nodes_staged_updates_old_root_slot_index,
+                        allocated_nodes_blocks: [allocated_nodes_blocks[0], allocated_nodes_blocks[1]],
+                    };
+                }
+                InodeIndexInsertEntryFutureState::SplitRootNode {
+                    transaction,
+                    nodes_staged_updates_old_root_slot_index,
+                    allocated_nodes_blocks,
+                } => {
+                    let mut transaction = match transaction.take() {
+                        Some(transaction) => transaction,
+                        None => break (None, Err(nvfs_err_internal!())),
                     };
 
                     let (
@@ -6647,14 +6875,32 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                     let image_layout = &fs_instance.fs_config.image_layout;
 
+                    let new_root_node_level = transaction.inode_index_updates.index_tree_levels;
                     let rollback_nodes_blocks_allocation =
                         |transaction: Box<transaction::Transaction>,
-                         allocated_nodes_blocks: &[layout::PhysicalAllocBlockIndex]| {
-                            transaction.rollback_blocks_allocation(
-                                allocated_nodes_blocks.iter().copied(),
-                                image_layout.index_tree_node_allocation_blocks_log2 as u32,
-                                fs_sync_state_alloc_bitmap,
-                            )
+                         allocated_nodes_blocks: &[layout::PhysicalAllocBlockIndex; 2]| {
+                            if new_root_node_level > 1
+                                || image_layout.index_tree_leaf_node_allocation_blocks_log2
+                                    == image_layout.index_tree_internal_node_allocation_blocks_log2
+                            {
+                                transaction.rollback_blocks_allocation(
+                                    allocated_nodes_blocks.iter().copied(),
+                                    image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
+                                    fs_sync_state_alloc_bitmap,
+                                )
+                            } else {
+                                transaction
+                                    .rollback_block_allocation(
+                                        allocated_nodes_blocks[0],
+                                        image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
+                                        fs_sync_state_alloc_bitmap,
+                                    )?
+                                    .rollback_block_allocation(
+                                        allocated_nodes_blocks[1],
+                                        image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32,
+                                        fs_sync_state_alloc_bitmap,
+                                    )
+                            }
                         };
 
                     // Get the two new nodes some update staging blocks. Do it before the actual
@@ -6682,7 +6928,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         ) {
                             Ok(nodes_staged_updates_new_root_slot_index) => nodes_staged_updates_new_root_slot_index,
                             Err(e) => {
-                                break match rollback_nodes_blocks_allocation(transaction, &allocated_nodes_blocks) {
+                                break match rollback_nodes_blocks_allocation(transaction, allocated_nodes_blocks) {
                                     Ok(transaction) => (Some(transaction), Err(e)),
                                     Err(e) => (None, Err(e)),
                                 };
@@ -6690,7 +6936,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         };
 
                     // Allocate a new root before the split, as the memory allocation could fail.
-                    let new_root_node_level = transaction.inode_index_updates.index_tree_levels;
                     let tree_layout = &fs_sync_state_inode_index.layout;
                     let mut new_empty_root_node = match InodeIndexTreeInternalNode::new_empty_root(
                         allocated_nodes_blocks[0],
@@ -6699,7 +6944,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     ) {
                         Ok(new_empty_root_node) => new_empty_root_node,
                         Err(e) => {
-                            break match rollback_nodes_blocks_allocation(transaction, &allocated_nodes_blocks) {
+                            break match rollback_nodes_blocks_allocation(transaction, allocated_nodes_blocks) {
                                 Ok(transaction) => (Some(transaction), Err(e)),
                                 Err(e) => (None, Err(e)),
                             };
@@ -6731,7 +6976,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         ) {
                         Ok(nodes_staged_updates_new_sibling_slot_index) => nodes_staged_updates_new_sibling_slot_index,
                         Err(e) => {
-                            break match rollback_nodes_blocks_allocation(transaction, &allocated_nodes_blocks) {
+                            break match rollback_nodes_blocks_allocation(transaction, allocated_nodes_blocks) {
                                 Ok(transaction) => (Some(transaction), Err(e)),
                                 Err(e) => (None, Err(e)),
                             };
@@ -6745,7 +6990,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         ) {
                             Ok(nodes_staged_updates_old_root_slot) => nodes_staged_updates_old_root_slot,
                             Err(e) => {
-                                break match rollback_nodes_blocks_allocation(transaction, &allocated_nodes_blocks) {
+                                break match rollback_nodes_blocks_allocation(transaction, allocated_nodes_blocks) {
                                     Ok(transaction) => (Some(transaction), Err(e)),
                                     Err(e) => (None, Err(e)),
                                 };
@@ -6770,7 +7015,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         } else {
                                             break match rollback_nodes_blocks_allocation(
                                                 transaction,
-                                                &allocated_nodes_blocks,
+                                                allocated_nodes_blocks,
                                             ) {
                                                 Ok(transaction) => (Some(transaction), Err(e)),
                                                 Err(e) => (None, Err(e)),
@@ -6786,7 +7031,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         // It is known at this point that the entry does not exist yet.
                                         break match rollback_nodes_blocks_allocation(
                                             transaction,
-                                            &allocated_nodes_blocks,
+                                            allocated_nodes_blocks,
                                         ) {
                                             Ok(transaction) => (Some(transaction), Err(nvfs_err_internal!())),
                                             Err(e) => (None, Err(e)),
@@ -6795,7 +7040,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     Err(e) => {
                                         break match rollback_nodes_blocks_allocation(
                                             transaction,
-                                            &allocated_nodes_blocks,
+                                            allocated_nodes_blocks,
                                         ) {
                                             Ok(transaction) => (Some(transaction), Err(e)),
                                             Err(e) => (None, Err(e)),
@@ -6874,7 +7119,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                                         break match rollback_nodes_blocks_allocation(
                                             transaction,
-                                            &allocated_nodes_blocks,
+                                            allocated_nodes_blocks,
                                         ) {
                                             Ok(transaction) => (Some(transaction), Err(e)),
                                             Err(e) => (None, Err(e)),
@@ -6971,6 +7216,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     nodes_staged_updates_parent_slot_index,
                     nodes_staged_updates_child_slot_index,
                     child_index_in_parent,
+                    child_is_leaf,
                     allocate_fut,
                 } => {
                     let (mut transaction, allocated_node_block) = match CocoonFsSyncStateReadFuture::poll(
@@ -7005,7 +7251,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                          allocated_node_block: layout::PhysicalAllocBlockIndex| {
                             transaction.rollback_block_allocation(
                                 allocated_node_block,
-                                image_layout.index_tree_node_allocation_blocks_log2 as u32,
+                                if *child_is_leaf {
+                                    image_layout.index_tree_leaf_node_allocation_blocks_log2
+                                } else {
+                                    image_layout.index_tree_internal_node_allocation_blocks_log2
+                                } as u32,
                                 fs_sync_state_alloc_bitmap,
                             )
                         };
@@ -7283,7 +7533,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -7371,7 +7622,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
                             &fs_instance,
                             transaction,
-                            image_layout.index_tree_node_allocation_blocks_log2 as u32,
+                            image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
                             2,
                             false,
                         ) {
@@ -7379,7 +7630,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             Err((transaction, e)) => break (transaction, Err(e)),
                         };
 
-                        this.fut_state = InodeIndexInsertEntryFutureState::SplitRootNode {
+                        this.fut_state = InodeIndexInsertEntryFutureState::SplitRootNodeAllocateNewNodes {
                             nodes_staged_updates_old_root_slot_index: nodes_staged_updates_root_slot_index,
                             allocate_fut,
                         }
@@ -7490,7 +7741,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         let allocate_fut = match AllocateBlockFuture::new(
                             &fs_instance,
                             transaction,
-                            image_layout.index_tree_node_allocation_blocks_log2 as u32,
+                            image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32,
                             false,
                         ) {
                             Ok(allocate_fut) => allocate_fut,
@@ -7501,6 +7752,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             nodes_staged_updates_parent_slot_index: nodes_staged_updates_leaf_parent_slot_index,
                             nodes_staged_updates_child_slot_index: nodes_staged_updates_leaf_slot_index,
                             child_index_in_parent,
+                            child_is_leaf: true,
                             allocate_fut,
                         };
                     } else {
@@ -7508,10 +7760,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             .entry_child_ptr(child_index_in_parent, tree_layout)
                             .and_then(|child_ptr| {
                                 EncodedBlockPtr::from(*child_ptr).decode(
-                                    tree_layout
-                                        .node_encrypted_block_layout
-                                        .get_allocation_block_size_128b_log2()
-                                        as u32,
+                                    fs_instance_sync_state
+                                        .get_fs_ref()
+                                        .fs_config
+                                        .image_layout
+                                        .allocation_block_size_128b_log2 as u32,
                                 )
                             })
                             .and_then(|child_node_allocation_blocks_begin| {
@@ -7565,7 +7818,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -8082,7 +8336,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         None => break (Some(cursor), None, nvfs_err_internal!()),
                     };
 
-                    let tree_layout = &fs_instance_sync_state.inode_index.layout;
                     match &mut cursor.tree_position {
                         None => {
                             // First time to retrieve the next inode on this cursor.
@@ -8170,15 +8423,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                             // The current leaf node has been exhausted, move to the next one, if
                             // any.
+                            let fs_instance = fs_instance_sync_state.get_fs_ref();
+                            let image_layout = &fs_instance.fs_config.image_layout;
                             let next_leaf_node_allocation_blocks_begin = match leaf_node
                                 .encoded_next_leaf_node_ptr(&fs_instance_sync_state.inode_index.layout)
                                 .and_then(|next_leaf_ptr| {
-                                    EncodedBlockPtr::from(*next_leaf_ptr).decode(
-                                        tree_layout
-                                            .node_encrypted_block_layout
-                                            .get_allocation_block_size_128b_log2()
-                                            as u32,
-                                    )
+                                    EncodedBlockPtr::from(*next_leaf_ptr)
+                                        .decode(image_layout.allocation_block_size_128b_log2 as u32)
                                 }) {
                                 Ok(next_leaf_node_allocation_blocks_begin) => next_leaf_node_allocation_blocks_begin,
                                 Err(e) => break (Some(cursor), Some(transaction), e),
@@ -8250,12 +8501,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     let next_child_node_allocation_blocks_begin = match leaf_parent_node
                                         .entry_child_ptr(leaf_node_child_entry_in_parent + 1, tree_layout)
                                         .and_then(|child_ptr| {
-                                            EncodedBlockPtr::from(*child_ptr).decode(
-                                                tree_layout
-                                                    .node_encrypted_block_layout
-                                                    .get_allocation_block_size_128b_log2()
-                                                    as u32,
-                                            )
+                                            EncodedBlockPtr::from(*child_ptr)
+                                                .decode(image_layout.allocation_block_size_128b_log2 as u32)
                                         }) {
                                         Ok(next_child_node_allocation_blocks_begin) => {
                                             next_child_node_allocation_blocks_begin
@@ -8340,7 +8587,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -8377,10 +8625,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 .entry_child_ptr(next_child_index, tree_layout)
                                 .and_then(|next_child_ptr| {
                                     next_child_ptr.decode(
-                                        tree_layout
-                                            .node_encrypted_block_layout
-                                            .get_allocation_block_size_128b_log2()
-                                            as u32,
+                                        fs_instance.fs_config.image_layout.allocation_block_size_128b_log2 as u32,
                                     )
                                 }) {
                                 Ok(next_child_node_allocation_blocks_begin) => next_child_node_allocation_blocks_begin,
@@ -8556,7 +8801,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -9497,9 +9743,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         .encoded_entry_child_ptr(sibling_child_index_in_parent, tree_layout)
                         .and_then(|sibling_child_ptr| {
                             EncodedBlockPtr::from(*sibling_child_ptr).decode(
-                                tree_layout
-                                    .node_encrypted_block_layout
-                                    .get_allocation_block_size_128b_log2() as u32,
+                                fs_instance_sync_state
+                                    .get_fs_ref()
+                                    .fs_config
+                                    .image_layout
+                                    .allocation_block_size_128b_log2 as u32,
                             )
                         })
                         .and_then(|sibling_child_node_allocation_blocks_begin| {
@@ -9559,7 +9807,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -9673,12 +9922,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         let right_sibling_child_node_allocation_blocks_begin = match parent_node
                             .encoded_entry_child_ptr(right_sibling_child_index, tree_layout)
                             .and_then(|sibling_child_ptr| {
-                                EncodedBlockPtr::from(*sibling_child_ptr).decode(
-                                    tree_layout
-                                        .node_encrypted_block_layout
-                                        .get_allocation_block_size_128b_log2()
-                                        as u32,
-                                )
+                                EncodedBlockPtr::from(*sibling_child_ptr)
+                                    .decode(fs_instance.fs_config.image_layout.allocation_block_size_128b_log2 as u32)
                             })
                             .and_then(|sibling_child_node_allocation_blocks_begin| {
                                 sibling_child_node_allocation_blocks_begin
@@ -9849,16 +10094,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                                 // Free up the right node's backing Allocation Blocks now before the
                                 // point of no return, as the associated memory allocation can fail.
-                                let index_tree_node_allocation_blocks_log2 = fs_instance
+                                let index_tree_internal_node_allocation_blocks_log2 = fs_instance
                                     .fs_config
                                     .image_layout
-                                    .index_tree_node_allocation_blocks_log2
+                                    .index_tree_internal_node_allocation_blocks_log2
                                     as u32;
                                 if let Err(e) = transaction::Transaction::free_block(
                                     &mut transaction.allocs,
                                     &mut transaction.auth_tree_data_blocks_update_states,
                                     right_child_node.node_allocation_blocks_begin,
-                                    index_tree_node_allocation_blocks_log2,
+                                    index_tree_internal_node_allocation_blocks_log2,
                                 ) {
                                     break (Some(cursor), Some(transaction), e);
                                 }
@@ -9876,7 +10121,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
                                             right_child_node_node_allocation_blocks_begin,
-                                            index_tree_node_allocation_blocks_log2,
+                                            index_tree_internal_node_allocation_blocks_log2,
                                             fs_sync_state_alloc_bitmap,
                                         ) {
                                             Ok(transaction) => transaction,
@@ -9888,13 +10133,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         &mut transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         parent_node.node_allocation_blocks_begin,
-                                        index_tree_node_allocation_blocks_log2,
+                                        index_tree_internal_node_allocation_blocks_log2,
                                     ) {
                                         let right_child_node_node_allocation_blocks_begin =
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
                                             right_child_node_node_allocation_blocks_begin,
-                                            index_tree_node_allocation_blocks_log2,
+                                            index_tree_internal_node_allocation_blocks_log2,
                                             fs_sync_state_alloc_bitmap,
                                         ) {
                                             Ok(transaction) => transaction,
@@ -10153,16 +10398,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                                 // Free up the right node's backing Allocation Blocks now before the
                                 // point of no return, as the associated memory allocation can fail.
-                                let index_tree_node_allocation_blocks_log2 = fs_instance
-                                    .fs_config
-                                    .image_layout
-                                    .index_tree_node_allocation_blocks_log2
-                                    as u32;
+                                let image_layout = &fs_instance.fs_config.image_layout;
+                                let index_tree_leaf_node_allocation_blocks_log2 =
+                                    image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32;
                                 if let Err(e) = transaction::Transaction::free_block(
                                     &mut transaction.allocs,
                                     &mut transaction.auth_tree_data_blocks_update_states,
                                     right_child_node.node_allocation_blocks_begin,
-                                    index_tree_node_allocation_blocks_log2,
+                                    index_tree_leaf_node_allocation_blocks_log2,
                                 ) {
                                     let transaction = match rollback_inode_extents_deallocation(transaction) {
                                         Ok(transaction) => transaction,
@@ -10180,7 +10423,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
                                             right_child_node_node_allocation_blocks_begin,
-                                            index_tree_node_allocation_blocks_log2,
+                                            index_tree_leaf_node_allocation_blocks_log2,
                                             fs_sync_state_alloc_bitmap,
                                         ) {
                                             Ok(transaction) => transaction,
@@ -10196,13 +10439,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         &mut transaction.allocs,
                                         &mut transaction.auth_tree_data_blocks_update_states,
                                         parent_node.node_allocation_blocks_begin,
-                                        index_tree_node_allocation_blocks_log2,
+                                        image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
                                     ) {
                                         let right_child_node_node_allocation_blocks_begin =
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
                                             right_child_node_node_allocation_blocks_begin,
-                                            index_tree_node_allocation_blocks_log2,
+                                            index_tree_leaf_node_allocation_blocks_log2,
                                             fs_sync_state_alloc_bitmap,
                                         ) {
                                             Ok(transaction) => transaction,
@@ -10359,7 +10602,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -10440,9 +10684,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         .entry_child_ptr(child_index_in_parent, tree_layout)
                         .and_then(|child_ptr| {
                             EncodedBlockPtr::from(*child_ptr).decode(
-                                tree_layout
-                                    .node_encrypted_block_layout
-                                    .get_allocation_block_size_128b_log2() as u32,
+                                fs_instance_sync_state
+                                    .get_fs_ref()
+                                    .fs_config
+                                    .image_layout
+                                    .allocation_block_size_128b_log2 as u32,
                             )
                         })
                         .and_then(|child_node_allocation_blocks_begin| {
@@ -10494,7 +10740,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -11137,7 +11384,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &mut fs_sync_state_auth_tree,
                         &fs_sync_state_inode_index.layout,
                         &fs_sync_state_inode_index.tree_nodes_cache,
-                        &fs_sync_state_inode_index.tree_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_leaf_node_decryption_instance,
+                        &fs_sync_state_inode_index.tree_internal_node_decryption_instance,
                         fs_sync_state_read_buffer,
                         cx,
                     ) {
@@ -11173,8 +11421,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         }
                     };
 
-                    let root_node_allocation_blocks_begin =
-                        transaction.inode_index_updates.root_node_allocation_blocks_begin;
                     // Get the entry leaf node an update staging slot.
                     let nodes_staged_updates_entry_leaf_slot_index = match entry_leaf_node_ref {
                         InodeIndexTreeNodeRefForUpdate::Owned {
@@ -11232,14 +11478,24 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             return task::Poll::Ready(Ok((transaction, Err(nvfs_err_internal!()))));
                         }
                     };
-                    if let Err(e) = TransactionInodeIndexUpdates::update_index_root_node_inode(
-                        entry_leaf_node,
-                        root_node_allocation_blocks_begin,
-                        &fs_sync_state_inode_index.layout,
+                    let root_node_allocation_blocks_begin =
+                        transaction.inode_index_updates.root_node_allocation_blocks_begin;
+                    let root_node_allocation_blocks_log2 = if transaction.inode_index_updates.index_tree_levels == 1 {
                         fs_instance
                             .fs_config
                             .image_layout
-                            .index_tree_node_allocation_blocks_log2 as u32,
+                            .index_tree_leaf_node_allocation_blocks_log2
+                    } else {
+                        fs_instance
+                            .fs_config
+                            .image_layout
+                            .index_tree_internal_node_allocation_blocks_log2
+                    } as u32;
+                    if let Err(e) = TransactionInodeIndexUpdates::update_index_root_node_inode(
+                        entry_leaf_node,
+                        root_node_allocation_blocks_begin,
+                        root_node_allocation_blocks_log2,
+                        &fs_sync_state_inode_index.layout,
                     ) {
                         this.fut_state = InodeIndexUpdateRootNodeInodeFutureState::Done;
                         return task::Poll::Ready(Ok((transaction, Err(e))));
@@ -11328,7 +11584,7 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutu
             match &mut this.fut_state {
                 InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutureState::Init => {
                     let node_allocation_blocks = layout::AllocBlockCount::from(
-                        1u64 << (image_layout.index_tree_node_allocation_blocks_log2 as u32),
+                        1u64 << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32),
                     );
                     // The addition does not overflow, both addends have the upper seven bits clear.
                     let entry_leaf_node_extent = layout::PhysicalAllocBlockRange::new(
@@ -11383,16 +11639,6 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutu
 
                     // Ok, decrypt.  For the key domain, note that SpecialInode::IndexRoot is
                     // considered to represent the inode index as a whole in this context here.
-                    let tree_node_encrypted_block_layout = match encryption_entities::EncryptedBlockLayout::new(
-                        image_layout.block_cipher_alg,
-                        image_layout.index_tree_node_allocation_blocks_log2,
-                        image_layout.allocation_block_size_128b_log2,
-                    ) {
-                        Ok(inode_index_tree_node_encryption_block_layout) => {
-                            inode_index_tree_node_encryption_block_layout
-                        }
-                        Err(e) => break Err(e),
-                    };
                     let tree_node_encryption_key = match keys::KeyCache::get_key(
                         keys_cache,
                         root_key,
@@ -11417,36 +11663,57 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutu
                             Err(e) => break Err(NvFsError::from(e)),
                         };
                     drop(tree_node_encryption_key);
-                    let tree_node_decryption_instance = match encryption_entities::EncryptedBlockDecryptionInstance::new(
-                        tree_node_encrypted_block_layout.clone(),
-                        tree_node_decryption_block_cipher_instance,
+                    let tree_leaf_node_encrypted_block_layout = match encryption_entities::EncryptedBlockLayout::new(
+                        image_layout.block_cipher_alg,
+                        image_layout.index_tree_leaf_node_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
                     ) {
-                        Ok(tree_node_decryption_instance) => tree_node_decryption_instance,
+                        Ok(tree_leaf_node_encryption_block_layout) => tree_leaf_node_encryption_block_layout,
                         Err(e) => break Err(e),
                     };
-                    let tree_layout = match inode_index::InodeIndexTreeLayout::new(tree_node_encrypted_block_layout) {
+                    let tree_internal_node_encrypted_block_layout = match encryption_entities::EncryptedBlockLayout::new(
+                        image_layout.block_cipher_alg,
+                        image_layout.index_tree_internal_node_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                    ) {
+                        Ok(tree_internal_node_encryption_block_layout) => tree_internal_node_encryption_block_layout,
+                        Err(e) => break Err(e),
+                    };
+                    let tree_leaf_node_decryption_instance =
+                        match encryption_entities::EncryptedBlockDecryptionInstance::new(
+                            tree_leaf_node_encrypted_block_layout.clone(),
+                            tree_node_decryption_block_cipher_instance,
+                        ) {
+                            Ok(tree_node_decryption_instance) => tree_node_decryption_instance,
+                            Err(e) => break Err(e),
+                        };
+                    let tree_layout = match inode_index::InodeIndexTreeLayout::new(
+                        &tree_leaf_node_encrypted_block_layout,
+                        &tree_internal_node_encrypted_block_layout,
+                    ) {
                         Ok(inode_index_tree_layout) => inode_index_tree_layout,
                         Err(e) => break Err(e),
                     };
-                    let tree_node_encoded_len = tree_layout.encoded_node_len();
-                    let mut decrypted_entry_leaf_node = match FixedVec::new_with_default(tree_node_encoded_len) {
-                        Ok(decrypted_entry_leaf_node) => decrypted_entry_leaf_node,
-                        Err(e) => break Err(NvFsError::from(e)),
-                    };
-                    if let Err(e) = tree_node_decryption_instance.decrypt_one_block(
+                    let mut decrypted_entry_leaf_node =
+                        match FixedVec::new_with_default(tree_layout.encoded_leaf_node_len) {
+                            Ok(decrypted_entry_leaf_node) => decrypted_entry_leaf_node,
+                            Err(e) => break Err(NvFsError::from(e)),
+                        };
+                    if let Err(e) = tree_leaf_node_decryption_instance.decrypt_one_block(
                         io_slices::SingletonIoSliceMut::new(&mut decrypted_entry_leaf_node).map_infallible_err(),
                         io_slices::SingletonIoSlice::new(&encrypted_entry_leaf_node).map_infallible_err(),
                     ) {
                         break Err(e);
                     }
                     drop(encrypted_entry_leaf_node);
-                    drop(tree_node_decryption_instance);
+                    drop(tree_leaf_node_decryption_instance);
 
                     // Decode.
                     let entry_leaf_node = match inode_index::InodeIndexTreeLeafNode::decode(
                         this.entry_leaf_node_allocation_blocks_begin,
                         decrypted_entry_leaf_node,
                         &tree_layout,
+                        image_layout.allocation_block_size_128b_log2,
                     ) {
                         Ok(inode_index_entry_leaf_node) => inode_index_entry_leaf_node,
                         Err(e) => break Err(e),
@@ -11471,8 +11738,10 @@ where
 {
     entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
     tree_layout: InodeIndexTreeLayout,
-    tree_node_encryption_instance: Option<encryption_entities::EncryptedBlockEncryptionInstance>,
-    tree_node_decryption_instance: Option<encryption_entities::EncryptedBlockDecryptionInstance>,
+    tree_leaf_node_encryption_instance: Option<encryption_entities::EncryptedBlockEncryptionInstance>,
+    tree_leaf_node_decryption_instance: Option<encryption_entities::EncryptedBlockDecryptionInstance>,
+    tree_internal_node_encryption_instance: Option<encryption_entities::EncryptedBlockEncryptionInstance>,
+    tree_internal_node_decryption_instance: Option<encryption_entities::EncryptedBlockDecryptionInstance>,
     tree_nodes_cache: ST::RwLock<InodeIndexTreeNodeCache>,
     fut_state: InodeIndexBootstrapFutureState<B>,
 }
@@ -11522,11 +11791,6 @@ where
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<ST>,
     ) -> Result<Self, NvFsError> {
-        let tree_node_encrypted_block_layout = encryption_entities::EncryptedBlockLayout::new(
-            image_layout.block_cipher_alg,
-            image_layout.index_tree_node_allocation_blocks_log2,
-            image_layout.allocation_block_size_128b_log2,
-        )?;
         let tree_node_encryption_key = keys::KeyCache::get_key(
             keys_cache,
             root_key,
@@ -11547,23 +11811,45 @@ where
             &tree_node_encryption_key,
         )?;
         drop(tree_node_encryption_key);
-        let tree_node_encryption_instance = encryption_entities::EncryptedBlockEncryptionInstance::new(
-            tree_node_encrypted_block_layout.clone(),
+        let tree_leaf_node_encrypted_block_layout = encryption_entities::EncryptedBlockLayout::new(
+            image_layout.block_cipher_alg,
+            image_layout.index_tree_leaf_node_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        )?;
+        let tree_leaf_node_encryption_instance = encryption_entities::EncryptedBlockEncryptionInstance::new(
+            tree_leaf_node_encrypted_block_layout.clone(),
+            tree_node_encryption_block_cipher_instance.try_clone()?,
+        )?;
+        let tree_leaf_node_decryption_instance = encryption_entities::EncryptedBlockDecryptionInstance::new(
+            tree_leaf_node_encrypted_block_layout.clone(),
+            tree_node_decryption_block_cipher_instance.try_clone()?,
+        )?;
+        let tree_internal_node_encrypted_block_layout = encryption_entities::EncryptedBlockLayout::new(
+            image_layout.block_cipher_alg,
+            image_layout.index_tree_internal_node_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        )?;
+        let tree_internal_node_encryption_instance = encryption_entities::EncryptedBlockEncryptionInstance::new(
+            tree_internal_node_encrypted_block_layout.clone(),
             tree_node_encryption_block_cipher_instance,
         )?;
-        let tree_node_decryption_instance = encryption_entities::EncryptedBlockDecryptionInstance::new(
-            tree_node_encrypted_block_layout.clone(),
+        let tree_internal_node_decryption_instance = encryption_entities::EncryptedBlockDecryptionInstance::new(
+            tree_internal_node_encrypted_block_layout.clone(),
             tree_node_decryption_block_cipher_instance,
         )?;
-
-        let tree_layout = InodeIndexTreeLayout::new(tree_node_encrypted_block_layout)?;
+        let tree_layout = InodeIndexTreeLayout::new(
+            &tree_leaf_node_encrypted_block_layout,
+            &tree_internal_node_encrypted_block_layout,
+        )?;
         let tree_nodes_cache = InodeIndexTreeNodeCache::new(&tree_layout, 1);
 
         Ok(Self {
             entry_leaf_node_preauth_cca_protection_digest,
             tree_layout,
-            tree_node_encryption_instance: Some(tree_node_encryption_instance),
-            tree_node_decryption_instance: Some(tree_node_decryption_instance),
+            tree_leaf_node_encryption_instance: Some(tree_leaf_node_encryption_instance),
+            tree_leaf_node_decryption_instance: Some(tree_leaf_node_decryption_instance),
+            tree_internal_node_encryption_instance: Some(tree_internal_node_encryption_instance),
+            tree_internal_node_decryption_instance: Some(tree_internal_node_decryption_instance),
             tree_nodes_cache: ST::RwLock::from(tree_nodes_cache),
             fut_state: InodeIndexBootstrapFutureState::Init {
                 entry_leaf_node_allocation_blocks_begin,
@@ -11623,13 +11909,21 @@ where
                     entry_leaf_node_allocation_blocks_begin,
                     read_fut,
                 } => {
-                    let tree_node_decryption_instance = match this.tree_node_decryption_instance.as_ref() {
-                        Some(tree_node_decryption_instance) => tree_node_decryption_instance,
+                    let tree_leaf_node_decryption_instance = match this.tree_leaf_node_decryption_instance.as_ref() {
+                        Some(tree_leaf_node_decryption_instance) => tree_leaf_node_decryption_instance,
                         None => {
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
                             return task::Poll::Ready(Err(nvfs_err_internal!()));
                         }
                     };
+                    let tree_internal_node_decryption_instance =
+                        match this.tree_internal_node_decryption_instance.as_ref() {
+                            Some(tree_internal_node_decryption_instance) => tree_internal_node_decryption_instance,
+                            None => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(nvfs_err_internal!()));
+                            }
+                        };
 
                     let entry_leaf_node_ref = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
@@ -11639,7 +11933,8 @@ where
                         auth_tree,
                         &this.tree_layout,
                         &this.tree_nodes_cache,
-                        tree_node_decryption_instance,
+                        tree_leaf_node_decryption_instance,
+                        tree_internal_node_decryption_instance,
                         read_buffer,
                         cx,
                     ) {
@@ -11710,10 +12005,11 @@ where
                     };
                     if root_node_extent.block_count()
                         != layout::AllocBlockCount::from(
-                            1u64 << (this
-                                .tree_layout
-                                .node_encrypted_block_layout
-                                .get_block_allocation_blocks_log2() as u32),
+                            1u64 << (if root_node_extent.begin() == *entry_leaf_node_allocation_blocks_begin {
+                                fs_config.image_layout.index_tree_leaf_node_allocation_blocks_log2
+                            } else {
+                                fs_config.image_layout.index_tree_internal_node_allocation_blocks_log2
+                            } as u32),
                         )
                     {
                         // The encoded root node extent's length must match the tree node size.
@@ -11745,13 +12041,21 @@ where
                     root_node_allocation_blocks_begin,
                     read_fut,
                 } => {
-                    let tree_node_decryption_instance = match this.tree_node_decryption_instance.as_ref() {
-                        Some(tree_node_decryption_instance) => tree_node_decryption_instance,
+                    let tree_leaf_node_decryption_instance = match this.tree_leaf_node_decryption_instance.as_ref() {
+                        Some(tree_leaf_node_decryption_instance) => tree_leaf_node_decryption_instance,
                         None => {
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
                             return task::Poll::Ready(Err(nvfs_err_internal!()));
                         }
                     };
+                    let tree_internal_node_decryption_instance =
+                        match this.tree_internal_node_decryption_instance.as_ref() {
+                            Some(tree_internal_node_decryption_instance) => tree_internal_node_decryption_instance,
+                            None => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(nvfs_err_internal!()));
+                            }
+                        };
 
                     let root_node_ref = match InodeIndexReadTreeNodeFuture::poll(
                         pin::Pin::new(read_fut),
@@ -11761,7 +12065,8 @@ where
                         auth_tree,
                         &this.tree_layout,
                         &this.tree_nodes_cache,
-                        tree_node_decryption_instance,
+                        tree_leaf_node_decryption_instance,
+                        tree_internal_node_decryption_instance,
                         read_buffer,
                         cx,
                     ) {
@@ -11845,20 +12150,36 @@ where
                     root_node_allocation_blocks_begin,
                     root_node_level,
                 } => {
-                    let tree_node_encryption_instance = match this.tree_node_encryption_instance.take() {
-                        Some(tree_node_encryption_instance) => tree_node_encryption_instance,
+                    let tree_leaf_node_encryption_instance = match this.tree_leaf_node_encryption_instance.take() {
+                        Some(tree_leaf_node_encryption_instance) => tree_leaf_node_encryption_instance,
                         None => {
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
                             return task::Poll::Ready(Err(nvfs_err_internal!()));
                         }
                     };
-                    let tree_node_decryption_instance = match this.tree_node_decryption_instance.take() {
-                        Some(tree_node_decryption_instance) => tree_node_decryption_instance,
+                    let tree_leaf_node_decryption_instance = match this.tree_leaf_node_decryption_instance.take() {
+                        Some(tree_leaf_node_decryption_instance) => tree_leaf_node_decryption_instance,
                         None => {
                             this.fut_state = InodeIndexBootstrapFutureState::Done;
                             return task::Poll::Ready(Err(nvfs_err_internal!()));
                         }
                     };
+                    let tree_internal_node_encryption_instance =
+                        match this.tree_internal_node_encryption_instance.take() {
+                            Some(tree_internal_node_encryption_instance) => tree_internal_node_encryption_instance,
+                            None => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(nvfs_err_internal!()));
+                            }
+                        };
+                    let tree_internal_node_decryption_instance =
+                        match this.tree_internal_node_decryption_instance.take() {
+                            Some(tree_internal_node_decryption_instance) => tree_internal_node_decryption_instance,
+                            None => {
+                                this.fut_state = InodeIndexBootstrapFutureState::Done;
+                                return task::Poll::Ready(Err(nvfs_err_internal!()));
+                            }
+                        };
                     let inode_index = InodeIndex {
                         layout: this.tree_layout.clone(),
                         entry_leaf_node_preauth_cca_protection_digest: mem::take(
@@ -11870,8 +12191,10 @@ where
                             ST::RwLock::from(InodeIndexTreeNodeCache::new(&this.tree_layout, 0)),
                         ),
                         root_node_allocation_blocks_begin: *root_node_allocation_blocks_begin,
-                        tree_node_encryption_instance,
-                        tree_node_decryption_instance,
+                        tree_leaf_node_encryption_instance,
+                        tree_leaf_node_decryption_instance,
+                        tree_internal_node_encryption_instance,
+                        tree_internal_node_decryption_instance,
                     };
                     this.fut_state = InodeIndexBootstrapFutureState::Done;
                     return task::Poll::Ready(Ok(inode_index));

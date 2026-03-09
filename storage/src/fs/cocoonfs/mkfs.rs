@@ -152,7 +152,7 @@ impl MkFsLayout {
         // locality -- updating the entry leaf node will also involve updating
         // the mutable header part.
         let inode_index_entry_leaf_node_allocation_blocks =
-            layout::AllocBlockCount::from(1u64 << (image_layout.index_tree_node_allocation_blocks_log2 as u32));
+            layout::AllocBlockCount::from(1u64 << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32));
         let inode_index_entry_leaf_node_allocation_blocks_begin =
             if journal_log_head_extent.begin() - image_header_end >= inode_index_entry_leaf_node_allocation_blocks {
                 image_header_end
@@ -622,7 +622,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
         if let Err(e) = alloc_bitmap.set_in_range(
             &layout::PhysicalAllocBlockRange::from((
                 mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin,
-                layout::AllocBlockCount::from(1u64 << (image_layout.index_tree_node_allocation_blocks_log2 as u32)),
+                layout::AllocBlockCount::from(
+                    1u64 << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32),
+                ),
             )),
             true,
         ) {
@@ -1019,7 +1021,7 @@ where
                         let image_layout = &fs_init_data.mkfs_layout.image_layout;
                         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                         let allocation_blocks_in_inode_index_tree_node =
-                            1usize << (image_layout.index_tree_node_allocation_blocks_log2 as u32);
+                            1usize << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32);
                         while *next_allocation_block_in_inode_index_entry_leaf_node
                             != allocation_blocks_in_inode_index_tree_node
                         {
@@ -1134,7 +1136,7 @@ where
                     // Device IO block size in length.
                     debug_assert_eq!(
                         (u64::from(mkfs_layout.alloc_bitmap_file_extent.end() - tail_data_allocation_blocks_begin)
-                            >> (image_layout.index_tree_node_allocation_blocks_log2 as u32))
+                            >> (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32))
                             as usize,
                         alloc_bitmap_partial_blkdev_io_block_file_blocks.len(),
                     );
@@ -1208,7 +1210,7 @@ where
                         );
                         let cur_tail_data_allocation_block_index = next_tail_data_allocation_block_index;
                         next_tail_data_allocation_block_index +=
-                            1usize << (image_layout.index_tree_node_allocation_blocks_log2 as u32);
+                            1usize << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32);
                         if let Err(e) = io_slices::BuffersSliceIoSlicesMutIter::new(
                             &mut tail_data_allocation_blocks
                                 [cur_tail_data_allocation_block_index..next_tail_data_allocation_block_index],
@@ -1482,7 +1484,7 @@ where
                         );
                         mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin
                             + layout::AllocBlockCount::from(
-                                1u64 << (image_layout.index_tree_node_allocation_blocks_log2 as u32),
+                                1u64 << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32),
                             )
                     } else {
                         mutable_image_header_allocation_blocks_range.end()
@@ -1740,7 +1742,7 @@ where
                             );
                             mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin
                                 + layout::AllocBlockCount::from(
-                                    1u64 << (image_layout.index_tree_node_allocation_blocks_log2 as u32),
+                                    1u64 << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32),
                                 )
                         } else {
                             mkfs_layout.image_header_end
