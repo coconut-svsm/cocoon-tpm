@@ -237,8 +237,8 @@ with it, but there's no explicit entry for it in the inode index -- the number i
 purposes.
 
 For completeness in this context: inode number 0 is reserved for a special "no inode" value, inode number 4 is currently
-not allocated and reserved. Note that the minimum inode index B+-tree node fill-level is such that inodes 1 to 4 will
-always be found in the leftmost leaf, which is referred to as the [*inode index entry leaf
+not allocated and reserved. Note that the minimum inode index B+-tree leaf node fill-level is such that inodes 1 to 3
+will always be found in the leftmost leaf, which is referred to as the [*inode index entry leaf
 node*](#def-inode-index-entry-leaf-node). The location of the inode index entry leaf node is referenced from the
 [mutable image header](#sec-mutable-image-header) and enables discovering all the other metadata structures at
 filesystem opening time.
@@ -1019,7 +1019,7 @@ pointer pointing to the head of some [chained extents](#sec-encryption-entity-ch
 The inode index is organized as a B+-tree, with a node size as specified by the
 [`index_tree_node_allocation_blocks_log2`](#def-image-layout) filesystem configuration parameter.
 
-The minimum leaf node fill level is constrained to be >= 4, so that inodes 1-4 are always found in the leftmost leaf
+The minimum leaf node fill level is constrained to be >= 3, so that inodes 1-3 are always found in the leftmost leaf
 node, the [*inode index entry leaf node*]{#def-inode-index-entry-leaf-node}. The location of the inode index entry leaf
 node is specified in the [mutable image header](#sec-mutable-image-header). Among those four special inodes is inode 3
 allocated to the inode index root node. The index entry for this inode must always specify the location of the index
@@ -1035,8 +1035,8 @@ number, a subdomain value of `INODE_KEY_SUBDOMAIN_DATA`, and a key purpose of
 Let $B$ denote a decrypted index node's maximum possible payload size in units of bytes. The maximum number of entries
 in a leaf node is then given by $M_{\textrm{leaf}} = \left\lfloor\frac{B - 12}{12}\right\rfloor$. The minimum leaf node
 fill level is set to $m_\textrm{leaf} = \left\lceil\frac{M_\textrm{leaf}}{2}\right\rceil$. $B$ must be large enough so
-that the constraint $m_\textrm{leaf} >= 4$ holds. Note that with a minimum inode index block size of 128B, and a maximum
-IV length of 32B, the $m_\textrm{leaf} >= 4$ is automatically fulfilled.
+that the constraint $m_\textrm{leaf} >= 3$ holds. Note that with a minimum inode index block size of 128B, and a maximum
+IV length of 32B, the $m_\textrm{leaf} >= 3$ is automatically fulfilled.
 
 The leaf node format is as follows:
 
@@ -1071,7 +1071,7 @@ entries, i.e. separating keys, in an internal node is then given by $M_{\textrm{
 
 Implementations might want to preemptively split full nodes or merge pairs of nodes at minimum fill level when walking
 down a path from the root for insertion or deletion. By coincidence, $M_\textrm{internal} = M_\textrm{leaf}$ and from
-the constraint $m_\textrm{leaf} >= 4$, it follows that $M_\textrm{internal} = M_\textrm{leaf} >= 7 > 2$, as is required
+the constraint $m_\textrm{leaf} >= 4$, it follows that $M_\textrm{internal} = M_\textrm{leaf} >= 5 > 2$, as is required
 for supporting preemptive node splitting of full nodes. Note that $m_\textrm{internal}$ has been defined specifically in
 a way to enable preemptive splitting of full nodes as well as merging nodes at the minimum fill level, even for even
 values of $M_\textrm{internal}$.
@@ -1392,7 +1392,7 @@ bootstrapping the authentication, the opening process is outlined below:
     decrypt it.
 7.  Lookup the [authentication tree](#sec-auth-tree) and [allocation bitmap file](#sec-allocation-bitmap) inodes in the
     decrypted inode index entry leaf node. Remember that the minimum inode index B+-tree minimum leaf node fill level
-    is defined so that inodes 1-4 will always be found in that node.
+    is defined so that inodes 1-3 will always be found in that node.
 8.  If the inode index entries for the authentication tree or allocation bitmap files contain indirect references to
     [extents lists](#sec-enc-extents-list), stored in the inline authenticated variant of the [encrypted chained
     extents](#sec-encryption-entity-chained-extents), then decrypt while verifying against the inline authentication.

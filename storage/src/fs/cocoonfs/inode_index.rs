@@ -262,7 +262,7 @@ impl InodeIndexTreeLayout {
             / (mem::size_of::<EncodedInodeIndexKeyType>() + EncodedExtentPtr::ENCODED_SIZE as usize);
         let min_leaf_node_entries = max_leaf_node_entries.div_ceil(2);
         // Cannot happen, but make it explicit.
-        if min_leaf_node_entries < 4 {
+        if min_leaf_node_entries < 3 {
             return Err(NvFsError::from(FormatError::InvalidIndexConfig));
         }
 
