@@ -2565,7 +2565,8 @@ pub struct ZeroFilledIoSlices {
 }
 
 impl ZeroFilledIoSlices {
-    const ZEROES_BUFFER: [u8; 16] = [0u8; 16];
+    pub const CHUNK_SIZE: usize = 16;
+    const ZEROES_BUFFER: [u8; Self::CHUNK_SIZE] = [0u8; Self::CHUNK_SIZE];
 
     /// Instantiate a `ZeroFilledIoSlices`.
     ///
