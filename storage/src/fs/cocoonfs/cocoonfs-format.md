@@ -536,7 +536,7 @@ follows:
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 | 1     |`index_tree_node_allocation_blocks_log2`             |Size of an [inode index](#sec-inode-index) B+-tree node,|
 |       |                                                     |specified as the base-2 logarithm in units of Allocation|
-|       |                                                     |blocks. Must be <= 64.                                  |
+|       |                                                     |blocks. Must be <= 6.                                   |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 | 2     |`auth_tree_node_hash_alg`                            |[TCG algorithm identifier](#bib-tcgalg25) of the hash   |
 |       |                                                     |algorithm to be used for [digesting the descendant,     |
