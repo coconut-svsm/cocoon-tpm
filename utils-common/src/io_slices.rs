@@ -2663,5 +2663,61 @@ mod tests {
                 assert!(io_slice.all_lengths_multiple_of(4223).unwrap());
             }
         }
+
+        #[test]
+        fn ioslicesiterchain() {
+            let buffer1 = [0u8, 1, 2, 3, 4];
+            let slices1 = [buffer1.as_slice()];
+            let buffer2 = [5u8, 6, 7];
+            let slices2 = [buffer2.as_slice()];
+            let buffer3 = [5u8, 6, 7, 8, 9];
+            let slices3 = [buffer3.as_slice()];
+
+            {
+                // total len
+                let chain = IoSlicesIterChain::new(
+                    BuffersSliceIoSlicesIter::new(&slices1),
+                    BuffersSliceIoSlicesIter::new(&slices2),
+                );
+
+                assert_eq!(chain.total_len().unwrap(), buffer1.len() + buffer2.len());
+            }
+
+            {
+                // for each
+                let chain = IoSlicesIterChain::new(
+                    BuffersSliceIoSlicesIter::new(&slices1),
+                    BuffersSliceIoSlicesIter::new(&slices2),
+                );
+                let all_slices = [buffer1.as_slice(), buffer2.as_slice()];
+                let mut i = all_slices.iter();
+
+                chain
+                    .for_each(&mut |v| {
+                        assert_eq!(v, *i.next().unwrap());
+                        true
+                    })
+                    .unwrap();
+                assert!(i.next().is_none());
+            }
+
+            {
+                // all_lengths_multiple_of
+                {
+                    let chain_same_length = IoSlicesIterChain::new(
+                        BuffersSliceIoSlicesIter::new(&slices1),
+                        BuffersSliceIoSlicesIter::new(&slices3),
+                    );
+                    assert!(chain_same_length.all_lengths_multiple_of(5).unwrap());
+                }
+                {
+                    let chain_different_length = IoSlicesIterChain::new(
+                        BuffersSliceIoSlicesIter::new(&slices1),
+                        BuffersSliceIoSlicesIter::new(&slices2),
+                    );
+                    assert!(!chain_different_length.all_lengths_multiple_of(5).unwrap());
+                }
+            }
+        }
     }
 }
