@@ -2720,5 +2720,38 @@ mod tests {
                 }
             }
         }
+
+        #[test]
+        fn zero_filled_io_slices() {
+            const LEN: usize = ZeroFilledIoSlices::CHUNK_SIZE * 2 + 3;
+            let slice = ZeroFilledIoSlices::new(LEN);
+            {
+                // total len
+                assert_eq!(slice.total_len().unwrap(), LEN);
+            }
+
+            {
+                // for each
+                let expected1 = [0u8; ZeroFilledIoSlices::CHUNK_SIZE];
+                let expected2 = [0u8; 3];
+                let expected = [expected1.as_slice(), expected1.as_slice(), expected2.as_slice()];
+                let mut i = expected.iter();
+                slice
+                    .for_each(&mut |v| {
+                        assert_eq!(v, *i.next().unwrap());
+                        true
+                    })
+                    .unwrap();
+                assert!(i.next().is_none());
+            }
+
+            {
+                // all_lengths_multiple_of
+                assert!(slice.all_lengths_multiple_of(1).unwrap());
+                assert!(!slice.all_lengths_multiple_of(4).unwrap());
+                assert!(slice.all_lengths_multiple_of(5).unwrap());
+                assert!(!slice.all_lengths_multiple_of(17).unwrap());
+            }
+        }
     }
 }
