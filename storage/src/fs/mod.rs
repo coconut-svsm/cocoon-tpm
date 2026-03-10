@@ -345,7 +345,7 @@ pub trait NvFsFuture<FS: NvFs>: 'static + marker::Send {
 ///
 /// In contrast to common general-purpose filesystems, it is not assumed that
 /// arbitrary filenames or any sort of hierarchic directory structure is
-/// supported: inodes are identified and referred to directly by `u32` integers.
+/// supported: inodes are identified and referred to directly by `u64` integers.
 ///
 /// Moreover, it is expected that individual files are generally small and that
 /// it's affordable to always read or write them as a whole -- partial reads or
@@ -848,7 +848,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     fn read_inode(
         this: &Self::SyncRcPtrRef<'_>,
         context: Option<NvFsReadContext<Self>>,
-        inode: u32,
+        inode: u64,
     ) -> Self::ReadInodeFut;
 
     /// `NvFs` implementation specific [future](NvFsFuture) type instantiated
@@ -913,7 +913,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     fn write_inode(
         this: &Self::SyncRcPtrRef<'_>,
         transaction: Self::Transaction,
-        inode: u32,
+        inode: u64,
         data: zeroize::Zeroizing<Vec<u8>>,
     ) -> Self::WriteInodeFut;
 
@@ -960,7 +960,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     fn enumerate_cursor(
         this: &Self::SyncRcPtrRef<'_>,
         context: NvFsReadContext<Self>,
-        inodes_enumerate_range: ops::RangeInclusive<u32>,
+        inodes_enumerate_range: ops::RangeInclusive<u64>,
     ) -> Result<Result<Self::EnumerateCursor, (NvFsReadContext<Self>, NvFsError)>, NvFsError>;
 
     /// `NvFs` implementation specific [`NvFsUnlinkCursor`] type returned by
@@ -1007,7 +1007,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     fn unlink_cursor(
         this: &Self::SyncRcPtrRef<'_>,
         transaction: Self::Transaction,
-        inodes_unlink_range: ops::RangeInclusive<u32>,
+        inodes_unlink_range: ops::RangeInclusive<u64>,
     ) -> Result<Result<Self::UnlinkCursor, (Self::Transaction, NvFsError)>, NvFsError>;
 }
 
@@ -1066,7 +1066,7 @@ pub trait NvFsEnumerateCursor<FS: NvFs>: Sized {
     ///           specified enumeration range.
     ///         * `Ok((cursor, Ok(Some(inode))))` - The next inode existing in
     ///           the specified enumeration range has number `inode`.
-    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<u32>, NvFsError>), NvFsError>>;
+    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<u64>, NvFsError>), NvFsError>>;
 
     /// Move the cursor to the next existing inode in the enumeration range.
     ///
@@ -1167,7 +1167,7 @@ pub trait NvFsUnlinkCursor<FS: NvFs>: Sized {
     ///           specified unlinking range.
     ///         * `Ok((cursor, Ok(Some(inode))))` - The next inode existing in
     ///           the specified unlinking range has number `inode`.
-    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<u32>, NvFsError>), NvFsError>>;
+    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<u64>, NvFsError>), NvFsError>>;
 
     /// Move the cursor to the next existing inode in the unlinking range.
     ///

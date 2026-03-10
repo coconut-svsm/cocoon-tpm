@@ -229,8 +229,8 @@ struct CliWriteFileArgs {
     enable_trimming: bool,
 
     /// Inode number of the file to write to.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u32).range(6..))]
-    inode: u32,
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    inode: u64,
 }
 
 #[derive(clap::Args)]
@@ -247,8 +247,8 @@ struct CliReadFileArgs {
     enable_trimming: bool,
 
     /// Inode number of the file to read from.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u32).range(6..))]
-    inode: u32,
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    inode: u64,
 }
 
 #[derive(clap::Args)]
@@ -271,8 +271,8 @@ struct CliRemoveFile {
     enable_trimming: bool,
 
     /// Inode number to delete.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u32).range(6..))]
-    inode: u32,
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    inode: u64,
 }
 
 #[derive(clap::Args)]
@@ -1047,7 +1047,7 @@ fn main() {
                 NvFsReadContext::Committed {
                     seq: consistent_read_sequence,
                 },
-                6..=u32::MAX,
+                6..=u64::MAX,
             ) {
                 Ok(Ok(enumerate_cursor)) => enumerate_cursor,
                 Ok(Err((_, e))) | Err(e) => {

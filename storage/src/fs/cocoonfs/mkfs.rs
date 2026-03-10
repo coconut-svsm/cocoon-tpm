@@ -1249,7 +1249,7 @@ where
                                     [cur_tail_data_allocation_block_index..next_tail_data_allocation_block_index],
                             )
                             .map_infallible_err(),
-                            inode_index::SpecialInode::AuthTree as u32,
+                            inode_index::SpecialInode::AuthTree as inode_index::InodeIndexKeyType,
                             iter::once(mkfs_layout.auth_tree_extent),
                             auth_tree_inode_extents_list_extents.iter(),
                             image_layout,
@@ -1279,7 +1279,7 @@ where
                                     [cur_tail_data_allocation_block_index..next_tail_data_allocation_block_index],
                             )
                             .map_infallible_err(),
-                            inode_index::SpecialInode::AllocBitmap as u32,
+                            inode_index::SpecialInode::AllocBitmap as inode_index::InodeIndexKeyType,
                             iter::once(mkfs_layout.alloc_bitmap_file_extent),
                             alloc_bitmap_inode_extents_list_extents.iter(),
                             image_layout,

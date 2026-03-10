@@ -55,7 +55,7 @@ use transaction::Transaction;
 ///
 /// * `inode` - The inode number.
 fn extents_list_is_pre_auth_cca_protected(inode: InodeIndexKeyType) -> bool {
-    inode == SpecialInode::AuthTree as u32 || inode == SpecialInode::AllocBitmap as u32
+    inode == SpecialInode::AuthTree as InodeIndexKeyType || inode == SpecialInode::AllocBitmap as InodeIndexKeyType
 }
 
 /// Check whether an inode's extents qualify for a direct [`EncodedExtentPtr`]

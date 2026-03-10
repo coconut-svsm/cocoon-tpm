@@ -125,11 +125,12 @@ the other algorithms as found in the image header as additional input.
 
 ### Filesystem model
 The filesystem model implemented by CocoonFs is a very limited one: there's no directory hierarchy and "file names" are
-simply 32 bit integers, i.e. inode numbers.
+simply 64 bit integers, i.e. inode numbers.
 
 It is expected that some inode numbers or ranges thereof get statically assigned to a specific application purpose. For
-example, when storing a software TPM's state, it would be natural to reserve the ranges 0x01000000-0x01ffffff for the
-storage of NV indices and 0x81000000-0x81ffffff for persistent objects, c.f. \[[TCGTPM19B](#bib-tcgtpm19b)\].
+example, when storing a software TPM's state, it would be natural to reserve e.g. the ranges
+`0x54504d00_01000000-0x54504d00_01ffffff` for the storage of NV indices and `0x54504d00_81000000-0x54504d00_81ffffff`
+for persistent objects, c.f. \[[TCGTPM19B](#bib-tcgtpm19b)\].
 
 Note that for the anticipated CocoonFs usage scenarios, i.e. the storage of core TEE state, it will likely always be
 possible to make such static assignments at development time and thus, it is certainly desirable to avoid the overhead
@@ -770,7 +771,7 @@ The root key is derived from the externally supplied key material by invoking `K
 The input parameters to subkey derivation are
 
 * The derived key's cryptographic purpose, i.e. one of the constants defined in the table above.
-* A pair of two 32 bit integers specifying a "domain" and "subdomain".
+* A pair of a 64 bit and a 32 bit integer, specifying a "domain" and "subdomain".
 
 Unless otherwise noted, the domain is set to an inode number associated with the to be derived key and subdomain is one
 of
@@ -789,8 +790,8 @@ invoking `KDFa()` with its parameters set to:
 * `hashAlg` - [`kdf_hash_alg`](#def-image-layout).
 * `key` - The root key derived from externally supplied key material as described in the previous section above.
 * `label` - A single byte set to the desired key purpose input as a parameter to the subkey derivation.
-* `context` - The concatenation of the input "domain" and "subdomain" values, encoded as 32 bit integers in
-  little-endian format each.
+* `context` - The concatenation of the input "domain" and "subdomain" values, encoded as 64 and 32 bit integers in
+  little-endian format respectively.
 * `bits` - A key size suitable for the specified cryptographic purpose and determined as follows:
 
   +-----------------------------------------+--------------------------------------------------------------------+
@@ -1015,7 +1016,7 @@ size), but ensures that
   representable as a 64 bit integer.
 
 ## [Inode index]{#sec-inode-index}
-Inodes are identified by positive 32 bit integers. The inode index tracks the allocated inodes and their associated
+Inodes are identified by positive 64 bit integers. The inode index tracks the allocated inodes and their associated
 locations on storage each, either by means of a direct [encoded extent pointer](#sec-enc-extent-ptr) or by an "indirect"
 pointer pointing to the head of some [chained extents](#sec-encryption-entity-chained-extents) storing the inode's
 [extents list](#sec-enc-extents-list).
@@ -1039,7 +1040,7 @@ number, a subdomain value of `INODE_KEY_SUBDOMAIN_DATA`, and a key purpose of
 ### Inode index leaf node format
 Let $B_{\textrm{leaf}}$ denote a decrypted index leaf node's maximum possible payload size in units of bytes. The
 maximum number of entries in a leaf node is then given by
-$M_{\textrm{leaf}} = \left\lfloor\frac{B_{\textrm{leaf}} - 12}{12}\right\rfloor$.
+$M_{\textrm{leaf}} = \left\lfloor\frac{B_{\textrm{leaf}} - 12}{16}\right\rfloor$.
 The minimum leaf node fill level is set to $m_\textrm{leaf} = \left\lceil\frac{M_\textrm{leaf}}{2}\right\rceil$.
 $B_{\textrm{leaf}}$ must be large enough so that the constraint $m_\textrm{leaf} >= 3$ holds. Note that with a minimum
 inode index leaf node block size of 128B, and a maximum IV length of 16B, the $m_\textrm{leaf} >= 3$ is automatically fulfilled.
@@ -1056,11 +1057,11 @@ The leaf node format is as follows:
 |$8$ to $8 + 8\cdot M_\textrm{leaf}$                            |The inode entries associated [encoded extent          |
 |                                                               |pointers](#sec-enc-extent-ptr).                       |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8 + 8\cdot M_\textrm{leaf}$ to $8 + 12\cdot M_\textrm{leaf}$  |The inode entries associated keys, i.e. the inode     |
-|                                                               |numbers, encoded as 32 bit integers in little endian  |
+|$8 + 8\cdot M_\textrm{leaf}$ to $8 + 16\cdot M_\textrm{leaf}$  |The inode entries associated keys, i.e. the inode     |
+|                                                               |numbers, encoded as 64 bit integers in little endian  |
 |                                                               |format.                                               |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8 + 12\cdot M_\textrm{leaf}$ to $12 + 12\cdot M_\textrm{leaf}$|The node level, fixed to 1 for leaf nodes, encoded as |
+|$8 + 16\cdot M_\textrm{leaf}$ to $12 + 16\cdot M_\textrm{leaf}$|The node level, fixed to 1 for leaf nodes, encoded as |
 |                                                               |a 32 bit integer in little-endian format.             |
 +---------------------------------------------------------------+------------------------------------------------------+
 
@@ -1089,7 +1090,7 @@ values of $M_\textrm{internal}$.
 |$0$ to $8 + 8\cdot M_\textrm{internal}$                                |[Encoded block pointers](#sec-enc-block-ptr)  |
 |                                                                       |to the node's children.                       |
 +-----------------------------------------------------------------------+----------------------------------------------+
-|$8 + 8\cdot M_\textrm{internal}$ to $8 + 12\cdot M_\textrm{internal}$  |The separator keys, encoded as 32 bit integers|
+|$8 + 8\cdot M_\textrm{internal}$ to $8 + 12\cdot M_\textrm{internal}$  |The separator keys, encoded as 64 bit integers|
 |                                                                       |in little-endian format.                      |
 +-----------------------------------------------------------------------+----------------------------------------------+
 |$8 + 12\cdot M_\textrm{internal}$ to $12 + 12\cdot M_\textrm{internal}$|The node level, counted 1-based from the leaf |
@@ -1147,7 +1148,7 @@ subdomain value of `INODE_KEY_SUBDOMAIN_EXTENTS_LIST`, and a key purpose of
 [`KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH`](#sec-key-derivation). The authenticated associated data for the encrypted
 chained extents' inline authentication is set to
 
-1. The inode number as a 32 bit integer, encoded in little-endian format.
+1. The inode number as a 64 bit integer, encoded in little-endian format.
 2. A format version identifier byte of constant 0.
 3. An identifier byte of constant 2 identifying the type of authenticated associated data for the encrypted chained
    extents' inline authentication.

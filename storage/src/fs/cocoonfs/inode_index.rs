@@ -54,7 +54,7 @@ use layout::ImageLayout;
 use transaction::Transaction;
 
 /// Special inodes reserved for internal filesystem use.
-#[repr(u32)]
+#[repr(u64)]
 pub enum SpecialInode {
     #[allow(dead_code)]
     NoInode = 0,
@@ -67,7 +67,7 @@ pub enum SpecialInode {
 }
 
 /// Maximum value allocated to [`SpecialInode`]s.
-pub const SPECIAL_INODE_MAX: u32 = SpecialInode::JournalLog as u32;
+pub const SPECIAL_INODE_MAX: u64 = SpecialInode::JournalLog as u64;
 
 /// [Subdomain](keys::KeyId) identifiers used for key derivation in the context
 /// of some inode.
@@ -80,7 +80,7 @@ pub enum InodeKeySubdomain {
 }
 
 /// Key type for the inode index B+-tree's entries.
-pub type InodeIndexKeyType = u32;
+pub type InodeIndexKeyType = u64;
 /// Encoded [`InodeIndexKeyType`].
 type EncodedInodeIndexKeyType = [u8; mem::size_of::<InodeIndexKeyType>()];
 
@@ -220,7 +220,7 @@ impl InodeIndexTreeLayout {
         // - four bytes to encode the node level in the B+-tree, counted 1-based from
         //   leaf nodes upwards,
         // - a sequence of EncodedBlockPtrs to the children, (logically) interspersed
-        //   with separating keys, i.e. 32 bit inode numbers.
+        //   with separating keys, i.e. 64 bit inode numbers.
         let internal_node_max_payload_len = internal_node_encrypted_block_layout.effective_payload_len()?;
         let max_internal_node_entries = (internal_node_max_payload_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
             / (mem::size_of::<EncodedInodeIndexKeyType>() + EncodedBlockPtr::ENCODED_SIZE as usize);
@@ -262,7 +262,7 @@ impl InodeIndexTreeLayout {
         // - four bytes to encode the node level in the B+-tree, counted 1-based from
         //   leaf nodes upwards,
         // - a sequence of EncodedExtentPtrs to the inodes' extents each, (logically)
-        //   logically associated with, a key each, i.e. a 32 bit inode number,
+        //   logically associated with, a key each, i.e. a 64 bit inode number,
         // - a single block pointer to the next leaf node in symmetric order.
         let leaf_node_max_payload_len = leaf_node_encrypted_block_layout.effective_payload_len()?;
         let max_leaf_node_entries = (leaf_node_max_payload_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
@@ -2515,7 +2515,7 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
             keys_cache,
             root_key,
             &keys::KeyId::new(
-                SpecialInode::IndexRoot as u32,
+                SpecialInode::IndexRoot as u64,
                 InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),
@@ -3220,13 +3220,14 @@ impl TransactionInodeIndexUpdates {
         root_node_allocation_blocks_log2: u32,
         layout: &InodeIndexTreeLayout,
     ) -> Result<(), NvFsError> {
-        let root_inode_entry_pos_in_node = match entry_leaf_node.lookup(SpecialInode::IndexRoot as u32, layout)? {
-            Ok(root_inode_entry_pos_in_node) => root_inode_entry_pos_in_node,
-            Err(_insertion_pos) => {
-                // The index root inode must be always there.
-                return Err(nvfs_err_internal!());
-            }
-        };
+        let root_inode_entry_pos_in_node =
+            match entry_leaf_node.lookup(SpecialInode::IndexRoot as InodeIndexKeyType, layout)? {
+                Ok(root_inode_entry_pos_in_node) => root_inode_entry_pos_in_node,
+                Err(_insertion_pos) => {
+                    // The index root inode must be always there.
+                    return Err(nvfs_err_internal!());
+                }
+            };
         let root_node_extent_ptr = extent_ptr::EncodedExtentPtr::encode(
             Some(&layout::PhysicalAllocBlockRange::from((
                 root_node_allocation_blocks_begin,
@@ -3235,7 +3236,7 @@ impl TransactionInodeIndexUpdates {
             false,
         )?;
         entry_leaf_node.insert(
-            SpecialInode::IndexRoot as u32,
+            SpecialInode::IndexRoot as InodeIndexKeyType,
             root_node_extent_ptr,
             Some(Ok(root_inode_entry_pos_in_node)),
             layout,
@@ -3276,7 +3277,7 @@ fn entry_leaf_node_preautch_cca_hmac<'a, ST: sync_types::SyncTypes, SI: crypto::
         keys_cache,
         root_key,
         &keys::KeyId::new(
-            SpecialInode::IndexRoot as u32,
+            SpecialInode::IndexRoot as InodeIndexKeyType,
             InodeKeySubdomain::InodeData as u32,
             keys::KeyPurpose::PreAuthCcaProtectionAuthentication,
         ),
@@ -11800,7 +11801,7 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadEntryLeafTreeNodePreauthCcaProtectedFutu
                         keys_cache,
                         root_key,
                         &keys::KeyId::new(
-                            SpecialInode::IndexRoot as u32,
+                            SpecialInode::IndexRoot as u64,
                             InodeKeySubdomain::InodeData as u32,
                             keys::KeyPurpose::Encryption,
                         ),
@@ -11952,7 +11953,7 @@ where
             keys_cache,
             root_key,
             &keys::KeyId::new(
-                SpecialInode::IndexRoot as u32,
+                SpecialInode::IndexRoot as u64,
                 InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),
@@ -12119,7 +12120,7 @@ where
                     };
 
                     let index_root_inode_entry_index =
-                        match entry_leaf_node.lookup(SpecialInode::IndexRoot as u32, &this.tree_layout) {
+                        match entry_leaf_node.lookup(SpecialInode::IndexRoot as InodeIndexKeyType, &this.tree_layout) {
                             Ok(Ok(index_root_inode_entry_index)) => index_root_inode_entry_index,
                             Ok(Err(_)) => {
                                 this.fut_state = InodeIndexBootstrapFutureState::Done;

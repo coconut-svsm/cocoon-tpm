@@ -494,7 +494,7 @@ impl JournalLog {
             fs_sync_state_keys_cache,
             fs_root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::JournalLog as u32,
+                inode_index::SpecialInode::JournalLog as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),
@@ -510,7 +510,7 @@ impl JournalLog {
             fs_sync_state_keys_cache,
             fs_root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::JournalLog as u32,
+                inode_index::SpecialInode::JournalLog as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::PreAuthCcaProtectionAuthentication,
             ),
@@ -548,7 +548,7 @@ impl JournalLog {
             fs_sync_state_keys_cache,
             fs_root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::JournalLog as u32,
+                inode_index::SpecialInode::JournalLog as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),
@@ -564,7 +564,7 @@ impl JournalLog {
             fs_sync_state_keys_cache,
             fs_root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::JournalLog as u32,
+                inode_index::SpecialInode::JournalLog as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::PreAuthCcaProtectionAuthentication,
             ),
@@ -749,7 +749,7 @@ impl JournalLog {
             fs_sync_state_keys_cache,
             &fs_config.root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::AllocBitmap as u32,
+                inode_index::SpecialInode::AllocBitmap as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::PreAuthCcaProtectionAuthentication,
             ),
@@ -935,7 +935,7 @@ impl JournalLog {
             keys_cache,
             root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::AllocBitmap as u32,
+                inode_index::SpecialInode::AllocBitmap as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::PreAuthCcaProtectionAuthentication,
             ),

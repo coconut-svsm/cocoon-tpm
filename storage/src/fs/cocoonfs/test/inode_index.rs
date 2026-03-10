@@ -28,58 +28,58 @@ fn enumerate_inodes() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
                 fs::NvFsReadContext::Transaction { transaction } => transaction,
                 _ => panic!("Transaction read context not returned back."),
             };
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Enumerate the exact range through the uncommitted transaction
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x10u32..=0x19,
+                0x10u64..=0x19,
             )
             .unwrap();
             let transaction = match read_context {
                 fs::NvFsReadContext::Transaction { transaction } => transaction,
                 _ => panic!("Transaction read context not returned back."),
             };
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Enumerate a subrange through the uncommitted transaction
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x11u32..=0x18,
+                0x11u64..=0x18,
             )
             .unwrap();
             let transaction = match read_context {
                 fs::NvFsReadContext::Transaction { transaction } => transaction,
                 _ => panic!("Transaction read context not returned back."),
             };
-            assert!(inodes.iter().copied().eq(0x11u32..=0x18));
+            assert!(inodes.iter().copied().eq(0x11u64..=0x18));
 
             // Now commit and enumerate from the FS.
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             // Enumerate the full range.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Enumerate the exact range.
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x10..=0x19).unwrap();
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Enumerate a subrange.
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x11..=0x18).unwrap();
-            assert!(inodes.iter().copied().eq(0x11u32..=0x18));
+            assert!(inodes.iter().copied().eq(0x11u64..=0x18));
 
             // Close the FS, open and try to enumerate again.
             let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
@@ -87,18 +87,18 @@ fn enumerate_inodes() {
 
             // Enumerate the full range.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Enumerate the exact range.
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x10..=0x19).unwrap();
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Enumerate a subrange.
             let (_read_context, inodes) =
                 cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x11..=0x18).unwrap();
-            assert!(inodes.iter().copied().eq(0x11u32..=0x18));
+            assert!(inodes.iter().copied().eq(0x11u64..=0x18));
         }
     }
 }
@@ -132,7 +132,7 @@ fn create_many_inodes_forward() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -146,7 +146,7 @@ fn create_many_inodes_forward() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -165,7 +165,7 @@ fn create_many_inodes_forward() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -193,7 +193,7 @@ fn create_many_inodes_forward_sliced() {
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
-            for inode in (0x10..0x1010).step_by(2) {
+            for inode in (0x10u64..0x1010).step_by(2) {
                 transaction = cocoonfs_test_write_inode_op_helper(
                     &fs_instance,
                     transaction,
@@ -202,7 +202,8 @@ fn create_many_inodes_forward_sliced() {
                 )
                 .unwrap();
             }
-            for inode in (0x10..0x1010).step_by(2) {
+
+            for inode in (0x10u64..0x1010).step_by(2) {
                 let inode = inode + 1;
                 transaction = cocoonfs_test_write_inode_op_helper(
                     &fs_instance,
@@ -218,7 +219,7 @@ fn create_many_inodes_forward_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -232,7 +233,7 @@ fn create_many_inodes_forward_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -251,7 +252,7 @@ fn create_many_inodes_forward_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -279,7 +280,8 @@ fn create_many_inodes_backward() {
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
-            for inode in (0x10..0x1010).rev() {
+            for inode in (0x10u32..0x1010).rev() {
+                let inode = inode as u64;
                 transaction = cocoonfs_test_write_inode_op_helper(
                     &fs_instance,
                     transaction,
@@ -294,7 +296,7 @@ fn create_many_inodes_backward() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -308,7 +310,7 @@ fn create_many_inodes_backward() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -327,7 +329,7 @@ fn create_many_inodes_backward() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -355,8 +357,8 @@ fn create_many_inodes_backward_sliced() {
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
-            for inode in (0x10..0x1010).step_by(2).rev() {
-                let inode = inode + 1;
+            for inode in (0x10u32..0x1010).step_by(2).rev() {
+                let inode = inode as u64 + 1;
                 transaction = cocoonfs_test_write_inode_op_helper(
                     &fs_instance,
                     transaction,
@@ -365,7 +367,8 @@ fn create_many_inodes_backward_sliced() {
                 )
                 .unwrap();
             }
-            for inode in (0x10..0x1010).step_by(2).rev() {
+            for inode in (0x10u32..0x1010).step_by(2).rev() {
+                let inode = inode as u64;
                 transaction = cocoonfs_test_write_inode_op_helper(
                     &fs_instance,
                     transaction,
@@ -380,7 +383,7 @@ fn create_many_inodes_backward_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -394,7 +397,7 @@ fn create_many_inodes_backward_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -413,7 +416,7 @@ fn create_many_inodes_backward_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -458,7 +461,7 @@ fn create_many_inodes_inner_to_outer() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -472,7 +475,7 @@ fn create_many_inodes_inner_to_outer() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -491,7 +494,7 @@ fn create_many_inodes_inner_to_outer() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -547,7 +550,7 @@ fn create_many_inodes_inner_to_outer_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -561,7 +564,7 @@ fn create_many_inodes_inner_to_outer_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -580,7 +583,7 @@ fn create_many_inodes_inner_to_outer_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -608,8 +611,9 @@ fn create_many_inodes_outer_to_inner() {
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
-            for i in (0x0..0x0800).rev() {
+            for i in (0x0u32..0x0800).rev() {
                 for inode in [0x10 + 0x800 - i - 1, 0x10 + 0x800 + i] {
+                    let inode = inode as u64;
                     transaction = cocoonfs_test_write_inode_op_helper(
                         &fs_instance,
                         transaction,
@@ -625,7 +629,7 @@ fn create_many_inodes_outer_to_inner() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -639,7 +643,7 @@ fn create_many_inodes_outer_to_inner() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -658,7 +662,7 @@ fn create_many_inodes_outer_to_inner() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -686,8 +690,9 @@ fn create_many_inodes_outer_to_inner_sliced() {
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
-            for i in (0x0..0x0800).step_by(2).rev() {
+            for i in (0x0u32..0x0800).step_by(2).rev() {
                 for inode in [0x10 + 0x800 - i - 2, 0x10 + 0x800 + i + 1] {
+                    let inode = inode as u64;
                     transaction = cocoonfs_test_write_inode_op_helper(
                         &fs_instance,
                         transaction,
@@ -697,8 +702,9 @@ fn create_many_inodes_outer_to_inner_sliced() {
                     .unwrap();
                 }
             }
-            for i in (0x0..0x0800).step_by(2).rev() {
+            for i in (0x0u32..0x0800).step_by(2).rev() {
                 for inode in [0x10 + 0x800 - i - 1, 0x10 + 0x800 + i] {
+                    let inode = inode as u64;
                     transaction = cocoonfs_test_write_inode_op_helper(
                         &fs_instance,
                         transaction,
@@ -714,7 +720,7 @@ fn create_many_inodes_outer_to_inner_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -728,7 +734,7 @@ fn create_many_inodes_outer_to_inner_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations. This verifies
@@ -747,7 +753,7 @@ fn create_many_inodes_outer_to_inner_sliced() {
 
             // Enumerate to verify the inodes are still there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Read all inode's contents and verify they match expectations.
@@ -777,23 +783,23 @@ fn unlink_uncommitted_inodes() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
                 fs::NvFsReadContext::Transaction { transaction } => transaction,
                 _ => panic!("Transaction read context not returned back."),
             };
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Now unlink.
-            let transaction = cocoonfs_test_unlink_inodes_op_uncond(&fs_instance, transaction, 0x10u32..=0x19).unwrap();
+            let transaction = cocoonfs_test_unlink_inodes_op_uncond(&fs_instance, transaction, 0x10u64..=0x19).unwrap();
 
             // Verify they're gone.
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -806,7 +812,7 @@ fn unlink_uncommitted_inodes() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -814,7 +820,7 @@ fn unlink_uncommitted_inodes() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -837,18 +843,18 @@ fn unlink_committed_inodes() {
 
             // Verify the inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
-            assert!(inodes.iter().copied().eq(0x10u32..=0x19));
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
+            assert!(inodes.iter().copied().eq(0x10u64..=0x19));
 
             // Now unlink.
             let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
-            let transaction = cocoonfs_test_unlink_inodes_op_uncond(&fs_instance, transaction, 0x10u32..=0x19).unwrap();
+            let transaction = cocoonfs_test_unlink_inodes_op_uncond(&fs_instance, transaction, 0x10u64..=0x19).unwrap();
 
             // Verify they're gone when enumerated through the transaction.
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -862,7 +868,7 @@ fn unlink_committed_inodes() {
 
             // Verify the inodes are gone.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -870,7 +876,7 @@ fn unlink_committed_inodes() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -905,12 +911,12 @@ fn unlink_many_inodes_forward() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
-            for inode in 0x10u32..0x1010 {
+            for inode in 0x10u64..0x1010 {
                 // Verify that the inode points still points at its data after all the
                 // unlinking.
                 let (read_context, inode_data) = cocoonfs_test_read_inode_op_helper(
@@ -934,7 +940,7 @@ fn unlink_many_inodes_forward() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -947,7 +953,7 @@ fn unlink_many_inodes_forward() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -955,7 +961,7 @@ fn unlink_many_inodes_forward() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -990,7 +996,7 @@ fn unlink_many_inodes_forward_sliced() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
@@ -1040,7 +1046,7 @@ fn unlink_many_inodes_forward_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -1053,7 +1059,7 @@ fn unlink_many_inodes_forward_sliced() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -1061,7 +1067,7 @@ fn unlink_many_inodes_forward_sliced() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -1096,12 +1102,13 @@ fn unlink_many_inodes_backward() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
-            for inode in (0x10..0x1010).rev() {
+            for inode in (0x10u32..0x1010).rev() {
+                let inode = inode as u64;
                 // Verify that the inode points still points at its data after all the
                 // unlinking.
                 let (read_context, inode_data) = cocoonfs_test_read_inode_op_helper(
@@ -1125,7 +1132,7 @@ fn unlink_many_inodes_backward() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -1138,7 +1145,7 @@ fn unlink_many_inodes_backward() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -1146,7 +1153,7 @@ fn unlink_many_inodes_backward() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -1181,13 +1188,13 @@ fn unlink_many_inodes_backward_sliced() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
-            for inode in (0x10..0x1010).step_by(2).rev() {
-                let inode = inode + 1;
+            for inode in (0x10u32..0x1010).step_by(2).rev() {
+                let inode = inode as u64 + 1;
 
                 // Verify that the inode points still points at its data after all the
                 // unlinking.
@@ -1207,7 +1214,8 @@ fn unlink_many_inodes_backward_sliced() {
                 // And unlink.
                 transaction = cocoonfs_test_unlink_inodes_op_uncond(&fs_instance, transaction, inode..=inode).unwrap();
             }
-            for inode in (0x10..0x1010).step_by(2).rev() {
+            for inode in (0x10u32..0x1010).step_by(2).rev() {
+                let inode = inode as u64;
                 // Verify that the inode points still points at its data after all the
                 // unlinking.
                 let (read_context, inode_data) = cocoonfs_test_read_inode_op_helper(
@@ -1231,7 +1239,7 @@ fn unlink_many_inodes_backward_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -1244,7 +1252,7 @@ fn unlink_many_inodes_backward_sliced() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -1252,7 +1260,7 @@ fn unlink_many_inodes_backward_sliced() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -1287,7 +1295,7 @@ fn unlink_many_inodes_inner_to_outer() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
@@ -1319,7 +1327,7 @@ fn unlink_many_inodes_inner_to_outer() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -1332,7 +1340,7 @@ fn unlink_many_inodes_inner_to_outer() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -1340,7 +1348,7 @@ fn unlink_many_inodes_inner_to_outer() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -1375,7 +1383,7 @@ fn unlink_many_inodes_inner_to_outer_sliced() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
@@ -1429,7 +1437,7 @@ fn unlink_many_inodes_inner_to_outer_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -1442,7 +1450,7 @@ fn unlink_many_inodes_inner_to_outer_sliced() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -1450,7 +1458,7 @@ fn unlink_many_inodes_inner_to_outer_sliced() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -1485,13 +1493,14 @@ fn unlink_many_inodes_outer_to_inner() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
-            for i in (0x0..0x0800).rev() {
+            for i in (0x0u32..0x0800).rev() {
                 for inode in [0x10 + 0x800 - i - 1, 0x10 + 0x800 + i] {
+                    let inode = inode as u64;
                     // Verify that the inode points still points at its data after all the
                     // unlinking.
                     let (read_context, inode_data) = cocoonfs_test_read_inode_op_helper(
@@ -1517,7 +1526,7 @@ fn unlink_many_inodes_outer_to_inner() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -1530,7 +1539,7 @@ fn unlink_many_inodes_outer_to_inner() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -1538,7 +1547,7 @@ fn unlink_many_inodes_outer_to_inner() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
@@ -1573,13 +1582,14 @@ fn unlink_many_inodes_outer_to_inner_sliced() {
 
             // Verify all inodes are there.
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.iter().copied().eq(0x10..0x1010));
 
             // Unlink all inodes.
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
-            for i in (0x0..0x0800).step_by(2).rev() {
+            for i in (0x0u32..0x0800).step_by(2).rev() {
                 for inode in [0x10 + 0x800 - i - 2, 0x10 + 0x800 + i + 1] {
+                    let inode = inode as u64;
                     // Verify that the inode points still points at its data after all the
                     // unlinking.
                     let (read_context, inode_data) = cocoonfs_test_read_inode_op_helper(
@@ -1600,8 +1610,9 @@ fn unlink_many_inodes_outer_to_inner_sliced() {
                         cocoonfs_test_unlink_inodes_op_uncond(&fs_instance, transaction, inode..=inode).unwrap();
                 }
             }
-            for i in (0x0..0x0800).step_by(2).rev() {
+            for i in (0x0u32..0x0800).step_by(2).rev() {
                 for inode in [0x10 + 0x800 - i - 1, 0x10 + 0x800 + i] {
+                    let inode = inode as u64;
                     // Verify that the inode points still points at its data after all the
                     // unlinking.
                     let (read_context, inode_data) = cocoonfs_test_read_inode_op_helper(
@@ -1627,7 +1638,7 @@ fn unlink_many_inodes_outer_to_inner_sliced() {
             let (read_context, inodes) = cocoonfs_test_enumerate_inodes_op_collect(
                 &fs_instance,
                 Some(fs::NvFsReadContext::Transaction { transaction }),
-                0x0..=u32::MAX,
+                0x0..=u64::MAX,
             )
             .unwrap();
             let transaction = match read_context {
@@ -1640,7 +1651,7 @@ fn unlink_many_inodes_outer_to_inner_sliced() {
             cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
 
             // Close the FS, open and try to enumerate again.
@@ -1648,7 +1659,7 @@ fn unlink_many_inodes_outer_to_inner_sliced() {
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
 
             let (_read_context, inodes) =
-                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u32::MAX).unwrap();
+                cocoonfs_test_enumerate_inodes_op_collect(&fs_instance, None, 0x0..=u64::MAX).unwrap();
             assert!(inodes.is_empty());
         }
     }
