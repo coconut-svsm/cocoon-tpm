@@ -4295,6 +4295,7 @@ pub struct InodeIndexEnumerateCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlk
     inodes_enumerate_range: ops::RangeInclusive<InodeIndexKeyType>,
     transaction: Option<Box<transaction::Transaction>>,
     tree_position: Option<InodeIndexEnumerateCursorTreePosition>,
+    in_final_leaf_node: bool,
     at_end: bool,
     _phantom: marker::PhantomData<fn() -> (ST, B)>,
 }
@@ -4327,6 +4328,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexEnumerateCursor<S
             inodes_enumerate_range,
             transaction: None,
             tree_position: None,
+            in_final_leaf_node: false,
             at_end: false,
             _phantom: marker::PhantomData,
         }) {
@@ -4443,6 +4445,7 @@ enum InodeIndexEnumerateCursorNextFutureState<ST: sync_types::SyncTypes, B: blkd
         // reference on Self. Has its transaction moved temporarily into read_fut.
         cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
         next_inode: InodeIndexKeyType,
+        is_final_leaf_node: bool,
         read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
     ReadNextTreeLeafNode {
@@ -4540,6 +4543,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 InodeIndexEnumerateCursorNextFutureState::LookupNextInodeWalkReadTreeNode {
                                     cursor: Some(cursor),
                                     next_inode,
+                                    is_final_leaf_node: false,
                                     read_fut,
                                 };
                         }
@@ -4585,20 +4589,26 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                             // The current leaf node has been exhausted, move to the next one, if
                             // any.
-                            let next_leaf_node_allocation_blocks_begin = match leaf_node
-                                .encoded_next_leaf_node_ptr(&fs_instance_sync_state.inode_index.layout)
-                                .and_then(|next_leaf_ptr| {
-                                    EncodedBlockPtr::from(*next_leaf_ptr).decode(
-                                        fs_instance_sync_state
-                                            .get_fs_ref()
-                                            .fs_config
-                                            .image_layout
-                                            .allocation_block_size_128b_log2
-                                            as u32,
-                                    )
-                                }) {
-                                Ok(next_leaf_node_allocation_blocks_begin) => next_leaf_node_allocation_blocks_begin,
-                                Err(e) => break (Some(cursor), None, e),
+                            let next_leaf_node_allocation_blocks_begin = if !cursor.in_final_leaf_node {
+                                match leaf_node
+                                    .encoded_next_leaf_node_ptr(&fs_instance_sync_state.inode_index.layout)
+                                    .and_then(|next_leaf_ptr| {
+                                        EncodedBlockPtr::from(*next_leaf_ptr).decode(
+                                            fs_instance_sync_state
+                                                .get_fs_ref()
+                                                .fs_config
+                                                .image_layout
+                                                .allocation_block_size_128b_log2
+                                                as u32,
+                                        )
+                                    }) {
+                                    Ok(next_leaf_node_allocation_blocks_begin) => {
+                                        next_leaf_node_allocation_blocks_begin
+                                    }
+                                    Err(e) => break (Some(cursor), None, e),
+                                }
+                            } else {
+                                None
                             };
                             let next_leaf_node_allocation_blocks_begin = match next_leaf_node_allocation_blocks_begin {
                                 Some(next_leaf_node_allocation_blocks_begin) => next_leaf_node_allocation_blocks_begin,
@@ -4626,6 +4636,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 InodeIndexEnumerateCursorNextFutureState::LookupNextInodeWalkReadTreeNode {
                     cursor: fut_cursor,
                     next_inode,
+                    is_final_leaf_node,
                     read_fut,
                 } => {
                     let (
@@ -4707,9 +4718,28 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 }
                             };
 
+                            let next_child_node_level = node_level - 1;
+                            // If the next node to read will be a leaf, and the separator key indicates
+                            // that all existing inode entries overlapping with the query range are
+                            // to be found there, then set is_final_leaf_node in order to avoid
+                            // an unnecessary leaf node chain walk.
+                            if next_child_node_level == 1 && next_child_index != internal_node.entries {
+                                match internal_node.get_separator_key(next_child_index, tree_layout) {
+                                    Ok(next_leaf_node_keys_range_begin) => {
+                                        if InodeIndexKeyType::from_le_bytes(next_leaf_node_keys_range_begin)
+                                            > *cursor.inodes_enumerate_range.end()
+                                        {
+                                            *is_final_leaf_node = true;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
+                                    }
+                                }
+                            }
+
                             *fut_cursor = Some(cursor);
                             let transaction = returned_transaction.or(node_ref.into_transaction());
-                            let next_child_node_level = node_level - 1;
                             *read_fut = InodeIndexReadTreeNodeFuture::new(
                                 transaction,
                                 next_child_node_allocation_blocks_begin,
@@ -4723,9 +4753,33 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 Ok(Ok(entry_index_in_leaf_node)) => entry_index_in_leaf_node,
                                 Ok(Err(entry_index_in_leaf_node)) => {
                                     if entry_index_in_leaf_node == leaf_node.entries {
-                                        // No inodes in range. Still update the cursor's tree_position so
-                                        // that the nodes will perhaps get added to the caches as
-                                        // appropriate upon return.
+                                        // The first leaf node's inodes are all less than the query
+                                        // range, move to the next one, if any and if it is not already
+                                        // known that all inodes in that one would come after the
+                                        // query range.
+                                        let next_leaf_node_allocation_blocks_begin = if !*is_final_leaf_node {
+                                            match leaf_node.encoded_next_leaf_node_ptr(tree_layout).and_then(
+                                                |next_leaf_ptr| {
+                                                    EncodedBlockPtr::from(*next_leaf_ptr).decode(
+                                                        fs_instance
+                                                            .fs_config
+                                                            .image_layout
+                                                            .allocation_block_size_128b_log2
+                                                            as u32,
+                                                    )
+                                                },
+                                            ) {
+                                                Ok(next_leaf_node_allocation_blocks_begin) => {
+                                                    next_leaf_node_allocation_blocks_begin
+                                                }
+                                                Err(e) => break (Some(cursor), None, e),
+                                            }
+                                        } else {
+                                            None
+                                        };
+
+                                        // Update the cursor's tree_position so that the nodes will
+                                        // perhaps get added to the caches as appropriate.
                                         let (transaction, node_ref) =
                                             InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
                                         cursor.transaction = transaction.or(returned_transaction);
@@ -4739,12 +4793,27 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             leaf_node: node_ref,
                                             entry_index_in_leaf_node,
                                         });
-                                        this.fut_state =
-                                            InodeIndexEnumerateCursorNextFutureState::InodesRangeExhausted {
+
+                                        this.fut_state = match next_leaf_node_allocation_blocks_begin {
+                                            Some(next_leaf_node_allocation_blocks_begin) => {
+                                                let read_fut = InodeIndexReadTreeNodeFuture::new(
+                                                    cursor.transaction.take(),
+                                                    next_leaf_node_allocation_blocks_begin,
+                                                    ExpectedInodeIndexNodeLevel::Leaf,
+                                                    true,
+                                                );
+                                                InodeIndexEnumerateCursorNextFutureState::ReadNextTreeLeafNode {
+                                                    cursor: Some(cursor),
+                                                    read_fut,
+                                                }
+                                            }
+                                            None => InodeIndexEnumerateCursorNextFutureState::InodesRangeExhausted {
                                                 cursor: Some(cursor),
-                                            };
+                                            },
+                                        };
                                         continue;
                                     }
+
                                     entry_index_in_leaf_node
                                 }
                                 Err(e) => {
@@ -4782,6 +4851,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 };
                                 continue;
                             }
+                            cursor.in_final_leaf_node |= *is_final_leaf_node;
                             if inode == *cursor.inodes_enumerate_range.end() {
                                 cursor.at_end = true;
                             }
@@ -4891,7 +4961,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Err(e) => break (Some(cursor), None, e),
                     };
 
-                    if inode < *cursor.inodes_enumerate_range.end() {
+                    if inode <= *cursor.inodes_enumerate_range.end() {
+                        if inode == *cursor.inodes_enumerate_range.end() {
+                            cursor.at_end = true;
+                        }
                         this.fut_state = InodeIndexEnumerateCursorNextFutureState::Done;
                         return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
                     } else {
@@ -8074,6 +8147,7 @@ pub struct InodeIndexUnlinkCursor<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev
     // reference on Self.
     transaction: Option<Box<transaction::Transaction>>,
     tree_position: Option<InodeIndexUnlinkCursorTreePosition>,
+    in_final_leaf_node: bool,
     at_end: bool,
     _phantom: marker::PhantomData<fn() -> (ST, B)>,
 }
@@ -8110,6 +8184,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexUnlinkCursor<ST, 
             inodes_unlink_range,
             transaction: None,
             tree_position: None,
+            in_final_leaf_node: false,
             at_end: false,
             _phantom: marker::PhantomData,
         }) {
@@ -8267,6 +8342,7 @@ enum InodeIndexUnlinkCursorNextFutureState<ST: sync_types::SyncTypes, B: blkdev:
         // reference on Self. Has its transaction moved temporarily into read_fut.
         cursor: Option<Box<InodeIndexUnlinkCursor<ST, B>>>,
         next_inode: InodeIndexKeyType,
+        is_final_leaf_node: bool,
         found_leaf_parent_node: Option<InodeIndexTreeNodeRefForUpdate>,
         read_fut: InodeIndexReadTreeNodeFuture<B>,
     },
@@ -8360,6 +8436,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             this.fut_state = InodeIndexUnlinkCursorNextFutureState::LookupNextInodeWalkReadTreeNode {
                                 cursor: Some(cursor),
                                 next_inode,
+                                is_final_leaf_node: false,
                                 found_leaf_parent_node: None,
                                 read_fut,
                             };
@@ -8425,14 +8502,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             // any.
                             let fs_instance = fs_instance_sync_state.get_fs_ref();
                             let image_layout = &fs_instance.fs_config.image_layout;
-                            let next_leaf_node_allocation_blocks_begin = match leaf_node
-                                .encoded_next_leaf_node_ptr(&fs_instance_sync_state.inode_index.layout)
-                                .and_then(|next_leaf_ptr| {
-                                    EncodedBlockPtr::from(*next_leaf_ptr)
-                                        .decode(image_layout.allocation_block_size_128b_log2 as u32)
-                                }) {
-                                Ok(next_leaf_node_allocation_blocks_begin) => next_leaf_node_allocation_blocks_begin,
-                                Err(e) => break (Some(cursor), Some(transaction), e),
+                            let next_leaf_node_allocation_blocks_begin = if !cursor.in_final_leaf_node {
+                                match leaf_node
+                                    .encoded_next_leaf_node_ptr(&fs_instance_sync_state.inode_index.layout)
+                                    .and_then(|next_leaf_ptr| {
+                                        EncodedBlockPtr::from(*next_leaf_ptr)
+                                            .decode(image_layout.allocation_block_size_128b_log2 as u32)
+                                    }) {
+                                    Ok(next_leaf_node_allocation_blocks_begin) => {
+                                        next_leaf_node_allocation_blocks_begin
+                                    }
+                                    Err(e) => break (Some(cursor), Some(transaction), e),
+                                }
+                            } else {
+                                None
                             };
                             let next_leaf_node_allocation_blocks_begin = match next_leaf_node_allocation_blocks_begin {
                                 Some(next_leaf_node_allocation_blocks_begin) => next_leaf_node_allocation_blocks_begin,
@@ -8566,6 +8649,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     cursor: fut_cursor,
                     next_inode,
                     found_leaf_parent_node,
+                    is_final_leaf_node,
                     read_fut,
                 } => {
                     let (
@@ -8648,6 +8732,29 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             };
 
                             let transaction = if node_level == 1 {
+                                // The next node to read will be a leaf. If the separator key indicates
+                                // that all existing inode entries overlapping with the query range are
+                                // to be found there, then set is_final_leaf_node in order to avoid
+                                // an unnecessary leaf node chain walk.
+                                if next_child_index != internal_node.entries {
+                                    match internal_node.get_separator_key(next_child_index, tree_layout) {
+                                        Ok(next_leaf_node_keys_range_begin) => {
+                                            if InodeIndexKeyType::from_le_bytes(next_leaf_node_keys_range_begin)
+                                                > *cursor.inodes_unlink_range.end()
+                                            {
+                                                *is_final_leaf_node = true;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            break (
+                                                Some(cursor),
+                                                returned_transaction.or(node_ref.into_transaction()),
+                                                e,
+                                            );
+                                        }
+                                    }
+                                }
+
                                 // The bottom internal node had been read for update.
                                 // Turn the node_ref into a InodeIndexTreeNodeRefForUpdate, obtain
                                 // the transaction back, and store the node in Self::found_leaf_parent_node.
@@ -8692,6 +8799,31 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 Ok(Ok(entry_index_in_leaf_node)) => entry_index_in_leaf_node,
                                 Ok(Err(entry_index_in_leaf_node)) => {
                                     if entry_index_in_leaf_node == leaf_node.entries {
+                                        // The first leaf node's inodes are all less than the query
+                                        // range, move to the next one, if any and if it is not already
+                                        // known that all inodes in that one would come after the
+                                        // query range.
+                                        let next_leaf_node_allocation_blocks_begin = if !*is_final_leaf_node {
+                                            match leaf_node.encoded_next_leaf_node_ptr(tree_layout).and_then(
+                                                |next_leaf_ptr| {
+                                                    EncodedBlockPtr::from(*next_leaf_ptr).decode(
+                                                        fs_instance
+                                                            .fs_config
+                                                            .image_layout
+                                                            .allocation_block_size_128b_log2
+                                                            as u32,
+                                                    )
+                                                },
+                                            ) {
+                                                Ok(next_leaf_node_allocation_blocks_begin) => {
+                                                    next_leaf_node_allocation_blocks_begin
+                                                }
+                                                Err(e) => break (Some(cursor), None, e),
+                                            }
+                                        } else {
+                                            None
+                                        };
+
                                         // No inodes in range. Still update the cursor's tree_position so
                                         // that the nodes will perhaps get added to the caches as
                                         // appropriate upon return.
@@ -8716,11 +8848,27 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             entry_index_in_leaf_node,
                                             inode: None,
                                         });
-                                        this.fut_state = InodeIndexUnlinkCursorNextFutureState::InodesRangeExhausted {
-                                            cursor: Some(cursor),
+
+                                        this.fut_state = match next_leaf_node_allocation_blocks_begin {
+                                            Some(next_leaf_node_allocation_blocks_begin) => {
+                                                let read_fut = InodeIndexReadTreeNodeFuture::new(
+                                                    cursor.transaction.take(),
+                                                    next_leaf_node_allocation_blocks_begin,
+                                                    ExpectedInodeIndexNodeLevel::Leaf,
+                                                    true,
+                                                );
+                                                InodeIndexUnlinkCursorNextFutureState::ReadNextTreeLeafNode {
+                                                    cursor: Some(cursor),
+                                                    read_fut,
+                                                }
+                                            }
+                                            None => InodeIndexUnlinkCursorNextFutureState::InodesRangeExhausted {
+                                                cursor: Some(cursor),
+                                            },
                                         };
                                         continue;
                                     }
+
                                     entry_index_in_leaf_node
                                 }
                                 Err(e) => {
@@ -8766,6 +8914,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 };
                                 continue;
                             }
+                            cursor.in_final_leaf_node |= *is_final_leaf_node;
                             if inode == *cursor.inodes_unlink_range.end() {
                                 cursor.at_end = true;
                             }
@@ -8895,11 +9044,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                     cursor.transaction = Some(transaction);
 
-                    if inode < *cursor.inodes_unlink_range.end() {
+                    if inode <= *cursor.inodes_unlink_range.end() {
                         tree_position.inode = Some(InodeIndexUnlinkCursorTreePositionInodeEntry {
                             inode,
                             inode_extents: None,
                         });
+                        if inode == *cursor.inodes_unlink_range.end() {
+                            cursor.at_end = true;
+                        }
                         this.fut_state = InodeIndexUnlinkCursorNextFutureState::Done;
                         return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
                     } else {
