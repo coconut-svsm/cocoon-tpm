@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Implementation of [`ReadExtentUnauthenticatedFuture`] and
@@ -282,7 +282,7 @@ impl<B: blkdev::NvBlkDev> ReadChainedExtentsPreAuthCcaProtectedFuture<B> {
         plain_data_extents_hdr_len: usize,
         authenticated_associated_data: Vec<u8>,
         extent_alignment_allocation_blocks_log2: u8,
-        key_domain: u32,
+        key_domain: u64,
         key_subdomain: u32,
         image_layout: &layout::ImageLayout,
         root_key: &keys::RootKey,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 SUSE LLC
+// Copyright 2025-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 use cocoon_tpm_crypto as crypto;
@@ -229,8 +229,12 @@ struct CliWriteFileArgs {
     enable_trimming: bool,
 
     /// Inode number of the file to write to.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u32).range(6..))]
-    inode: u32,
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    inode: u64,
+
+    /// Flags value to set for the inode.
+    #[arg(value_name="INODE-FLAGS", value_parser = clap::value_parser!(u8), default_value_t = 0)]
+    inode_flags: u8,
 }
 
 #[derive(clap::Args)]
@@ -247,8 +251,8 @@ struct CliReadFileArgs {
     enable_trimming: bool,
 
     /// Inode number of the file to read from.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u32).range(6..))]
-    inode: u32,
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    inode: u64,
 }
 
 #[derive(clap::Args)]
@@ -271,8 +275,8 @@ struct CliRemoveFile {
     enable_trimming: bool,
 
     /// Inode number to delete.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u32).range(6..))]
-    inode: u32,
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    inode: u64,
 }
 
 #[derive(clap::Args)]
@@ -349,18 +353,31 @@ struct CliMkfsInfo {
     )]
     auth_tree_node_size_log2: Option<u32>,
 
-    /// Inode index B+-tree node size [default: Allocation Block size].
+    /// Inode index B+-tree leaf node size [default: Allocation Block size].
     ///
-    /// Size of a node in the inode index B+-tree, controlling the tree's
-    /// branching factor. Must be a power of two multiple <= 64 of the
-    /// Allocation Block size.
+    /// Size of a leaf node in the inode index B+-tree, controlling the number
+    /// of inode entries that can be stored in a leaf node. Must be a power of
+    /// two multiple <= 64 of the Allocation Block size.
     #[arg(
-        name = "inode-index-tree-node-size",
+        name = "inode-index-tree-leaf-node-size",
         long,
         value_name = "SIZE",
         value_parser = cli_parse_power_of_two_size_log2::<7>
     )]
-    inode_index_tree_node_size_log2: Option<u32>,
+    inode_index_tree_leaf_node_size_log2: Option<u32>,
+
+    /// Inode index B+-tree internal node size [default: Allocation Block size].
+    ///
+    /// Size of a internal node in the inode index B+-tree, controlling the
+    /// tree's branching factor. Must be a power of two multiple <= 64 of the
+    /// Allocation Block size.
+    #[arg(
+        name = "inode-index-tree-internal-node-size",
+        long,
+        value_name = "SIZE",
+        value_parser = cli_parse_power_of_two_size_log2::<7>
+    )]
+    inode_index_tree_internal_node_size_log2: Option<u32>,
 
     /// Allocation bitmap block size [default: max of 512B and the
     /// Authentication Tree Data Block size].
@@ -493,20 +510,38 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
         (10u32 - 7).saturating_sub(io_block_allocation_blocks_log2 + allocation_block_size_128b_log2)
     };
 
-    let inode_index_tree_node_allocation_blocks_log2 =
-        if let Some(inode_index_tree_node_size_log2) = cli.inode_index_tree_node_size_log2 {
-            let inode_index_tree_node_size_128b_log2 = inode_index_tree_node_size_log2 - 7;
-            if inode_index_tree_node_size_128b_log2 < allocation_block_size_128b_log2
-                || inode_index_tree_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
+    let inode_index_tree_leaf_node_allocation_blocks_log2 =
+        if let Some(inode_index_tree_leaf_node_size_log2) = cli.inode_index_tree_leaf_node_size_log2 {
+            let inode_index_tree_leaf_node_size_128b_log2 = inode_index_tree_leaf_node_size_log2 - 7;
+            if inode_index_tree_leaf_node_size_128b_log2 < allocation_block_size_128b_log2
+                || inode_index_tree_leaf_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
             {
                 let mut cmd = Cli::command();
                 cmd.error(
                     clap::error::ErrorKind::ArgumentConflict,
-                    "inode index tree node size not a multiple of the Allocation Block size between 0 and 64",
+                    "inode index tree leaf node size not a multiple of the Allocation Block size between 0 and 64",
                 )
                 .exit()
             }
-            inode_index_tree_node_size_128b_log2 - allocation_block_size_128b_log2
+            inode_index_tree_leaf_node_size_128b_log2 - allocation_block_size_128b_log2
+        } else {
+            0u32
+        };
+
+    let inode_index_tree_internal_node_allocation_blocks_log2 =
+        if let Some(inode_index_tree_internal_node_size_log2) = cli.inode_index_tree_leaf_node_size_log2 {
+            let inode_index_tree_internal_node_size_128b_log2 = inode_index_tree_internal_node_size_log2 - 7;
+            if inode_index_tree_internal_node_size_128b_log2 < allocation_block_size_128b_log2
+                || inode_index_tree_internal_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
+            {
+                let mut cmd = Cli::command();
+                cmd.error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "inode index tree internal node size not a multiple of the Allocation Block size between 0 and 64",
+                )
+                .exit()
+            }
+            inode_index_tree_internal_node_size_128b_log2 - allocation_block_size_128b_log2
         } else {
             0u32
         };
@@ -589,7 +624,8 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
         auth_tree_node_io_blocks_log2 as u8,
         auth_tree_data_block_allocation_blocks_log2 as u8,
         allocation_bitmap_file_block_allocation_blocks_log2 as u8,
-        inode_index_tree_node_allocation_blocks_log2 as u8,
+        inode_index_tree_leaf_node_allocation_blocks_log2 as u8,
+        inode_index_tree_internal_node_allocation_blocks_log2 as u8,
         collision_resistant_hash, // auth_tree_node_hash_alg
         collision_resistant_hash, // auth_tree_data_hmac_hash_alg
         preimage_resistant_hash,  // auth_tree_root_hmac_hash_alg
@@ -890,6 +926,8 @@ fn main() {
                     &cocoonfs_mk_fs_instance_ref(&fs_instance),
                     transaction,
                     cli_write_file_args.inode,
+                    cli_write_file_args.inode_flags,
+                    0xffu8,
                     zeroize::Zeroizing::new(data),
                 ),
                 rng,
@@ -941,7 +979,7 @@ fn main() {
                 cli_read_file_args.enable_trimming,
             );
 
-            let data = match NvFsFutureAsCoreFuture::new(
+            let result = match NvFsFutureAsCoreFuture::new(
                 fs_instance.clone(),
                 <CocoonFsType as NvFs>::read_inode(
                     &cocoonfs_mk_fs_instance_ref(&fs_instance),
@@ -952,15 +990,15 @@ fn main() {
             )
             .block_on()
             {
-                Ok((_rng, Ok((_read_seq, Ok(data))))) => data,
+                Ok((_rng, Ok((_read_seq, Ok(result))))) => result,
                 Ok((_, Ok((_, Err(e))))) | Ok((_, Err(e))) | Err(e) => {
                     eprintln!("error: failed to read CocoonFS inode data: error={e:?}");
                     std::process::exit(6);
                 }
             };
 
-            let data = match data {
-                Some(data) => data,
+            let data = match result {
+                Some(result) => result.1,
                 None => {
                     eprintln!("error: CocoonFS inode doesn't exist");
                     std::process::exit(6);
@@ -1015,7 +1053,7 @@ fn main() {
                 NvFsReadContext::Committed {
                     seq: consistent_read_sequence,
                 },
-                6..=u32::MAX,
+                6..=u64::MAX,
             ) {
                 Ok(Ok(enumerate_cursor)) => enumerate_cursor,
                 Ok(Err((_, e))) | Err(e) => {
@@ -1037,7 +1075,8 @@ fn main() {
 
                 match inode {
                     Some(inode) => {
-                        println!("{inode}")
+                        let (inode, inode_flags) = inode;
+                        println!("{inode} {inode_flags:#04x}")
                     }
                     None => break,
                 };

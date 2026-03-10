@@ -61,7 +61,7 @@ pub enum KeyPurpose {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KeyId {
     /// Domain, usually an inode number.
-    domain: u32,
+    domain: u64,
     /// Subdomain identifier further specifying the scope of the key within the
     /// given [`domain`](Self::domain).
     subdomain: u32,
@@ -78,7 +78,7 @@ impl KeyId {
     /// * `subdomain` - Subdomain identifier further specifying the scope of the
     ///   key within the given `domain`.
     /// * `purpose` - The cryptographic purpose the key is to be used for.
-    pub fn new(domain: u32, subdomain: u32, purpose: KeyPurpose) -> Self {
+    pub fn new(domain: u64, subdomain: u32, purpose: KeyPurpose) -> Self {
         Self {
             domain,
             subdomain,
@@ -535,11 +535,11 @@ impl RootKey {
             KeyPurpose::Encryption => self.block_cipher_key_len,
         };
         let mut key = zeroize::Zeroizing::new(FixedVec::new_with_default(key_len)?);
-        let mut full_domain = [0u8; 2 * mem::size_of::<u32>()];
+        let mut full_domain = [0u8; mem::size_of::<u64>() +  mem::size_of::<u32>()];
         // split_array_mut() is unstable.
-        *<&mut [u8; mem::size_of::<u32>()]>::try_from(&mut full_domain[..mem::size_of::<u32>()])
+        *<&mut [u8; mem::size_of::<u64>()]>::try_from(&mut full_domain[..mem::size_of::<u64>()])
             .map_err(|_| nvfs_err_internal!())? = key_id.domain.to_le_bytes();
-        *<&mut [u8; mem::size_of::<u32>()]>::try_from(&mut full_domain[mem::size_of::<u32>()..])
+        *<&mut [u8; mem::size_of::<u32>()]>::try_from(&mut full_domain[mem::size_of::<u64>()..])
             .map_err(|_| nvfs_err_internal!())? = key_id.subdomain.to_le_bytes();
         kdf::tcg_tpm2_kdf_a::TcgTpm2KdfA::new(
             self.kdf_hash_alg,

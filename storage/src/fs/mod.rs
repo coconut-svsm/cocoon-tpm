@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Storage backend filesystem traits and definitions.
@@ -345,7 +345,7 @@ pub trait NvFsFuture<FS: NvFs>: 'static + marker::Send {
 ///
 /// In contrast to common general-purpose filesystems, it is not assumed that
 /// arbitrary filenames or any sort of hierarchic directory structure is
-/// supported: inodes are identified and referred to directly by `u32` integers.
+/// supported: inodes are identified and referred to directly by `u64` integers.
 ///
 /// Moreover, it is expected that individual files are generally small and that
 /// it's affordable to always read or write them as a whole -- partial reads or
@@ -354,6 +354,9 @@ pub trait NvFsFuture<FS: NvFs>: 'static + marker::Send {
 /// each file update, thereby achieving stronger security properties than what's
 /// provided by common block layer based encryption scheme like e.g. XTS or
 /// CBC-ESSIV.
+///
+/// In addition to the data, an `u8` flags value available for free use by
+/// applications is associated with each allocated inode.
 ///
 /// # Execution model
 ///
@@ -807,14 +810,15 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     ///       [`Ok`] is returned:
     ///         * `Ok((read_context, Ok(None)))` - The inode attempted to read
     ///           does not exist.
-    ///         * `Ok((read_context, Ok(Some(data))))` - The inode exists and
-    ///           its data is available as `data`.
+    ///         * `Ok((read_context, Ok(Some((inode_flags, data)))))` - The inode
+    ///           exists and its inode flags and data are available as `inode_flags`
+    ///           and `data` respectively.
     type ReadInodeFut: NvFsFuture<
             Self,
             Output = Result<
                 (
                     NvFsReadContext<Self>,
-                    Result<Option<zeroize::Zeroizing<Vec<u8>>>, NvFsError>,
+                    Result<Option<(u8, zeroize::Zeroizing<Vec<u8>>)>, NvFsError>,
                 ),
                 NvFsError,
             >,
@@ -848,7 +852,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     fn read_inode(
         this: &Self::SyncRcPtrRef<'_>,
         context: Option<NvFsReadContext<Self>>,
-        inode: u32,
+        inode: u64,
     ) -> Self::ReadInodeFut;
 
     /// `NvFs` implementation specific [future](NvFsFuture) type instantiated
@@ -903,17 +907,30 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     /// * return an error of
     ///   [`FailedDataUpdateRead`](NvFsError::FailedDataUpdateRead).
     ///
-    /// Which of the two options is taken is **not** and invariant of the `NvFs`
+    /// Which of the two options is taken is **not** an invariant of the `NvFs`
     /// implementation, it may depend on `transaction`'s modification
     /// history and its current internal state.
     ///
     /// A subsequent successful write to or [deletion](Self::unlink_cursor) of
     /// `inode` via `transaction` will return its data back into a
     /// determinate state.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [transaction](Self::Transaction) to stage the update at.
+    /// * `inode` - The inode to update.
+    /// * `inode_flags` - The flags to associate with `inode`. The value is masked by
+    ///   `inode_flags_mask`. If `inode` exists already, then only the bits set in
+    ///   `inode_flags_mask` are updated to the value specified at the corresponding position in
+    ///   `inode_flags`.
+    /// * `inode_flags_mask` - The bitmask to apply to `inode_flags`.
+    /// * `data` - The data to write.
     fn write_inode(
         this: &Self::SyncRcPtrRef<'_>,
         transaction: Self::Transaction,
-        inode: u32,
+        inode: u64,
+        inode_flags: u8,
+        inode_flags_mask: u8,
         data: zeroize::Zeroizing<Vec<u8>>,
     ) -> Self::WriteInodeFut;
 
@@ -960,7 +977,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     fn enumerate_cursor(
         this: &Self::SyncRcPtrRef<'_>,
         context: NvFsReadContext<Self>,
-        inodes_enumerate_range: ops::RangeInclusive<u32>,
+        inodes_enumerate_range: ops::RangeInclusive<u64>,
     ) -> Result<Result<Self::EnumerateCursor, (NvFsReadContext<Self>, NvFsError)>, NvFsError>;
 
     /// `NvFs` implementation specific [`NvFsUnlinkCursor`] type returned by
@@ -1007,7 +1024,7 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     fn unlink_cursor(
         this: &Self::SyncRcPtrRef<'_>,
         transaction: Self::Transaction,
-        inodes_unlink_range: ops::RangeInclusive<u32>,
+        inodes_unlink_range: ops::RangeInclusive<u64>,
     ) -> Result<Result<Self::UnlinkCursor, (Self::Transaction, NvFsError)>, NvFsError>;
 }
 
@@ -1064,9 +1081,10 @@ pub trait NvFsEnumerateCursor<FS: NvFs>: Sized {
     ///       [`Ok`] is returned:
     ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
     ///           specified enumeration range.
-    ///         * `Ok((cursor, Ok(Some(inode))))` - The next inode existing in
-    ///           the specified enumeration range has number `inode`.
-    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<u32>, NvFsError>), NvFsError>>;
+    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next inode
+    ///           existing in the specified enumeration range has number `inode`
+    ///           and flags `inode_flags`.
+    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<(u64, u8)>, NvFsError>), NvFsError>>;
 
     /// Move the cursor to the next existing inode in the enumeration range.
     ///
@@ -1165,9 +1183,10 @@ pub trait NvFsUnlinkCursor<FS: NvFs>: Sized {
     ///       [`Ok`] is returned:
     ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
     ///           specified unlinking range.
-    ///         * `Ok((cursor, Ok(Some(inode))))` - The next inode existing in
-    ///           the specified unlinking range has number `inode`.
-    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<u32>, NvFsError>), NvFsError>>;
+    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next inode
+    ///           existing in the specified unlinking range has number `inode` and
+    ///           flags `inode_flags`.
+    type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<(u64, u8)>, NvFsError>), NvFsError>>;
 
     /// Move the cursor to the next existing inode in the unlinking range.
     ///

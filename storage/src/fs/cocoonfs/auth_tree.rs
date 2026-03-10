@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Functionality related to the authentication tree.
@@ -1452,7 +1452,7 @@ impl AuthTreeConfig {
         }
         let data_digests_per_node_log2 = (node_size_log2 - data_digest_len_log2) as u8;
         let data_hmac_key = root_key.derive_key(&keys::KeyId::new(
-            inode_index::SpecialInode::AuthTree as u32,
+            inode_index::SpecialInode::AuthTree as u64,
             0,
             keys::KeyPurpose::AuthenticationData,
         ))?;
@@ -1519,7 +1519,7 @@ impl AuthTreeConfig {
 
         let root_hmac_hash_alg = image_layout.auth_tree_root_hmac_hash_alg;
         let root_hmac_key = root_key.derive_key(&keys::KeyId::new(
-            inode_index::SpecialInode::AuthTree as u32,
+            inode_index::SpecialInode::AuthTree as u64,
             0,
             keys::KeyPurpose::AuthenticationRoot,
         ))?;

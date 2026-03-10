@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Implementation of [`OpenFsFuture`].
@@ -552,9 +552,10 @@ where
                         };
 
                     // Lookup the entries for the AuthTree and AllocBitmap special inodes.
-                    let auth_tree_inode_entry_index = match inode_index_entry_leaf_node
-                        .lookup(inode_index::SpecialInode::AuthTree as u32, &inode_index_tree_layout)
-                    {
+                    let auth_tree_inode_entry_index = match inode_index_entry_leaf_node.lookup(
+                        inode_index::SpecialInode::AuthTree as inode_index::InodeIndexKeyType,
+                        &inode_index_tree_layout,
+                    ) {
                         Ok(Ok(auth_tree_entry_index)) => auth_tree_entry_index,
                         Ok(Err(_)) => break NvFsError::from(FormatError::SpecialInodeMissing),
                         Err(e) => break e,
@@ -566,9 +567,10 @@ where
                         Err(e) => break e,
                     };
 
-                    let alloc_bitmap_inode_entry_index = match inode_index_entry_leaf_node
-                        .lookup(inode_index::SpecialInode::AllocBitmap as u32, &inode_index_tree_layout)
-                    {
+                    let alloc_bitmap_inode_entry_index = match inode_index_entry_leaf_node.lookup(
+                        inode_index::SpecialInode::AllocBitmap as inode_index::InodeIndexKeyType,
+                        &inode_index_tree_layout,
+                    ) {
                         Ok(Ok(alloc_bitmap_entry_index)) => alloc_bitmap_entry_index,
                         Ok(Err(_)) => break NvFsError::from(FormatError::SpecialInodeMissing),
                         Err(e) => break e,
@@ -587,7 +589,7 @@ where
                             // Indirect extent.
                             let read_auth_tree_inode_extents_list_fut =
                                 match inode_extents_list::InodeExtentsListReadPreAuthFuture::new(
-                                    inode_index::SpecialInode::AuthTree as u32,
+                                    inode_index::SpecialInode::AuthTree as inode_index::InodeIndexKeyType,
                                     &auth_tree_extent_ptr,
                                     &fs_config.root_key,
                                     &mut keys_cache,
@@ -666,7 +668,7 @@ where
 
                             let read_alloc_bitmap_inode_extents_list_fut =
                                 match inode_extents_list::InodeExtentsListReadPreAuthFuture::new(
-                                    inode_index::SpecialInode::AllocBitmap as u32,
+                                    inode_index::SpecialInode::AllocBitmap as inode_index::InodeIndexKeyType,
                                     alloc_bitmap_inode_entry_extent_ptr,
                                     &fs_config.root_key,
                                     &mut keys_cache,

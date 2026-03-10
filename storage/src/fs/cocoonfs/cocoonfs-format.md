@@ -5,7 +5,7 @@ body { max-width: 72em !important; }
 ```
 # CocoonFs format specification
 
-Copyright 2023-2025 SUSE LLC
+Copyright 2023-2026 SUSE LLC
 
 Licensed under CC BY-SA 4.0
 
@@ -125,15 +125,19 @@ the other algorithms as found in the image header as additional input.
 
 ### Filesystem model
 The filesystem model implemented by CocoonFs is a very limited one: there's no directory hierarchy and "file names" are
-simply 32 bit integers, i.e. inode numbers.
+simply 64 bit integers, i.e. inode numbers.
 
 It is expected that some inode numbers or ranges thereof get statically assigned to a specific application purpose. For
-example, when storing a software TPM's state, it would be natural to reserve the ranges 0x01000000-0x01ffffff for the
-storage of NV indices and 0x81000000-0x81ffffff for persistent objects, c.f. \[[TCGTPM19B](#bib-tcgtpm19b)\].
+example, when storing a software TPM's state, it would be natural to reserve e.g. the ranges
+`0x54504d00_01000000-0x54504d00_01ffffff` for the storage of NV indices and `0x54504d00_81000000-0x54504d00_81ffffff`
+for persistent objects, c.f. \[[TCGTPM19B](#bib-tcgtpm19b)\].
 
 Note that for the anticipated CocoonFs usage scenarios, i.e. the storage of core TEE state, it will likely always be
 possible to make such static assignments at development time and thus, it is certainly desirable to avoid the overhead
 of updating directory metadata structures.
+
+In addition to the data itself, a set of flags is associated with each allocated inode, 8 of which are freely available
+for application use.
 
 ### [Journal]{#sec-introduction-journal}
 For robustness against service interruptions, e.g. power cuts, crashes and alike, CocoonFs implements a journal.
@@ -237,8 +241,8 @@ with it, but there's no explicit entry for it in the inode index -- the number i
 purposes.
 
 For completeness in this context: inode number 0 is reserved for a special "no inode" value, inode number 4 is currently
-not allocated and reserved. Note that the minimum inode index B+-tree node fill-level is such that inodes 1 to 4 will
-always be found in the leftmost leaf, which is referred to as the [*inode index entry leaf
+not allocated and reserved. Note that the minimum inode index B+-tree leaf node fill-level is such that inodes 1 to 3
+will always be found in the leftmost leaf, which is referred to as the [*inode index entry leaf
 node*](#def-inode-index-entry-leaf-node). The location of the inode index entry leaf node is referenced from the
 [mutable image header](#sec-mutable-image-header) and enables discovering all the other metadata structures at
 filesystem opening time.
@@ -491,7 +495,7 @@ The static image header starts at offset zero, its format is:
 +----------------+----------------------------------------------------------------------------------+
 |1               |The filesystem format version. Fixed to 0.                                        |
 +----------------+----------------------------------------------------------------------------------+
-|20              |The set of filesystem image layout parameters, c.f. further below.                |
+|21              |The set of filesystem image layout parameters, c.f. further below.                |
 +----------------+----------------------------------------------------------------------------------+
 |1               |The salt length.                                                                  |
 +----------------+----------------------------------------------------------------------------------+
@@ -514,7 +518,7 @@ follows:
 |length |                                                     |                                                        |
 |  in   |                                                     |                                                        |
 | bytes |                                                     |                                                        |
-+=======+=====================================================+========================================================+
++-------+-----------------------------------------------------+--------------------------------------------------------+
 | 1     |`allocation_block_size_128b_log2`                    |Size of an [Allocation Block](#def-allocation-block),   |
 |       |                                                     |specified as the base-2 logarithm of the size in units  |
 |       |                                                     |of 128B.                                                |
@@ -534,9 +538,13 @@ follows:
 |       |                                                     |block](#sec-allocation-bitmap), specified as the base-2 |
 |       |                                                     |logarithm in units of Allocation blocks.                |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
-| 1     |`index_tree_node_allocation_blocks_log2`             |Size of an [inode index](#sec-inode-index) B+-tree node,|
-|       |                                                     |specified as the base-2 logarithm in units of Allocation|
-|       |                                                     |blocks. Must be <= 64.                                  |
+| 1     |`index_tree_leaf_node_allocation_blocks_log2`        |Size of an [inode index](#sec-inode-index) B+-tree leaf |
+|       |                                                     |node, specified as the base-2 logarithm in units of     |
+|       |                                                     |Allocation blocks. Must be <= 6.                        |
++-------+-----------------------------------------------------+--------------------------------------------------------+
+| 1     |`index_tree_internal_node_allocation_blocks_log2`    |Size of an [inode index](#sec-inode-index) B+-tree      |
+|       |                                                     |internal node, specified as the base-2 logarithm in     |
+|       |                                                     |units of Allocation blocks. Must be <= 6.               |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 | 2     |`auth_tree_node_hash_alg`                            |[TCG algorithm identifier](#bib-tcgalg25) of the hash   |
 |       |                                                     |algorithm to be used for [digesting the descendant,     |
@@ -660,7 +668,7 @@ required for the actual filesystem creation and is of the following format:
 +----------------+------------------------------------------------------------------------------------+
 |1               |The filesystem creation info header format version. Fixed to 0.                     |
 +----------------+------------------------------------------------------------------------------------+
-|20              |The set of filesystem image layout parameters, encoded in the same                  |
+|21              |The set of filesystem image layout parameters, encoded in the same                  |
 |                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
 +----------------+------------------------------------------------------------------------------------+
 |8               |The desired filesystem image size in units of [Allocation                           |
@@ -766,7 +774,7 @@ The root key is derived from the externally supplied key material by invoking `K
 The input parameters to subkey derivation are
 
 * The derived key's cryptographic purpose, i.e. one of the constants defined in the table above.
-* A pair of two 32 bit integers specifying a "domain" and "subdomain".
+* A pair of a 64 bit and a 32 bit integer, specifying a "domain" and "subdomain".
 
 Unless otherwise noted, the domain is set to an inode number associated with the to be derived key and subdomain is one
 of
@@ -785,8 +793,8 @@ invoking `KDFa()` with its parameters set to:
 * `hashAlg` - [`kdf_hash_alg`](#def-image-layout).
 * `key` - The root key derived from externally supplied key material as described in the previous section above.
 * `label` - A single byte set to the desired key purpose input as a parameter to the subkey derivation.
-* `context` - The concatenation of the input "domain" and "subdomain" values, encoded as 32 bit integers in
-  little-endian format each.
+* `context` - The concatenation of the input "domain" and "subdomain" values, encoded as 64 and 32 bit integers in
+  little-endian format respectively.
 * `bits` - A key size suitable for the specified cryptographic purpose and determined as follows:
 
   +-----------------------------------------+--------------------------------------------------------------------+
@@ -1011,15 +1019,18 @@ size), but ensures that
   representable as a 64 bit integer.
 
 ## [Inode index]{#sec-inode-index}
-Inodes are identified by positive 32 bit integers. The inode index tracks the allocated inodes and their associated
-locations on storage each, either by means of a direct [encoded extent pointer](#sec-enc-extent-ptr) or by an "indirect"
-pointer pointing to the head of some [chained extents](#sec-encryption-entity-chained-extents) storing the inode's
-[extents list](#sec-enc-extents-list).
+Inodes are identified by positive 64 bit integers. The inode index tracks the allocated inodes and a set of associated
+flags as well as the locations of inode data on storage each. The inode flags are stored as 32 bit integers in
+little-endian format, of which the least significant 8 bits are freely available for application use, and the remaining
+24 bits are reserved and constant zero. The location of each inode's data on storage is represented either by means of a
+direct [encoded extent pointer](#sec-enc-extent-ptr) or by an "indirect" pointer pointing to the head of some [chained
+extents](#sec-encryption-entity-chained-extents) storing the inode's [extents list](#sec-enc-extents-list).
 
-The inode index is organized as a B+-tree, with a node size as specified by the
-[`index_tree_node_allocation_blocks_log2`](#def-image-layout) filesystem configuration parameter.
+The inode index is organized as a B+-tree, with node sizes as specified by the
+[`index_tree_leaf_node_allocation_blocks_log2`](#def-image-layout) and
+[`index_tree_internal_node_allocation_blocks_log2`](#def-image-layout) filesystem configuration parameters respectively.
 
-The minimum leaf node fill level is constrained to be >= 4, so that inodes 1-4 are always found in the leftmost leaf
+The minimum leaf node fill level is constrained to be >= 3, so that inodes 1-3 are always found in the leftmost leaf
 node, the [*inode index entry leaf node*]{#def-inode-index-entry-leaf-node}. The location of the inode index entry leaf
 node is specified in the [mutable image header](#sec-mutable-image-header). Among those four special inodes is inode 3
 allocated to the inode index root node. The index entry for this inode must always specify the location of the index
@@ -1032,11 +1043,13 @@ number, a subdomain value of `INODE_KEY_SUBDOMAIN_DATA`, and a key purpose of
 [`KEY_PURPOSE_ENCRYPTION`](#sec-key-derivation).
 
 ### Inode index leaf node format
-Let $B$ denote a decrypted index node's maximum possible payload size in units of bytes. The maximum number of entries
-in a leaf node is then given by $M_{\textrm{leaf}} = \left\lfloor\frac{B - 12}{12}\right\rfloor$. The minimum leaf node
-fill level is set to $m_\textrm{leaf} = \left\lceil\frac{M_\textrm{leaf}}{2}\right\rceil$. $B$ must be large enough so
-that the constraint $m_\textrm{leaf} >= 4$ holds. Note that with a minimum inode index block size of 128B, and a maximum
-IV length of 32B, the $m_\textrm{leaf} >= 4$ is automatically fulfilled.
+Let $B_{\textrm{leaf}}$ denote a decrypted index leaf node's maximum possible payload size in units of bytes. The
+maximum number of entries in a leaf node is then given by
+$M_{\textrm{leaf}} = \left\lfloor\frac{B_{\textrm{leaf}} - 12}{20}\right\rfloor$.
+The minimum leaf node fill level is set to $m_\textrm{leaf} = \left\lceil\frac{M_\textrm{leaf}}{2}\right\rceil$.
+$B_{\textrm{leaf}}$ must be large enough so that the constraint $m_\textrm{leaf} >= 3$ holds. Note that with a minimum
+inode index leaf node block size of 128B, and a maximum IV length of 16B, the $m_\textrm{leaf} >= 3$ is automatically
+fulfilled.
 
 The leaf node format is as follows:
 
@@ -1047,33 +1060,38 @@ The leaf node format is as follows:
 |                                                               |next leaf node in tree order, if any, or NIL          |
 |                                                               |otherwise.                                            |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8$ to $8 + 8\cdot M_\textrm{leaf}$                            |The inode entries associated [encoded extent          |
+|$8$ to $8 + 8\cdot M_\textrm{leaf}$                            |The inode entries' associated [encoded extent         |
 |                                                               |pointers](#sec-enc-extent-ptr).                       |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8 + 8\cdot M_\textrm{leaf}$ to $8 + 12\cdot M_\textrm{leaf}$  |The inode entries associated keys, i.e. the inode     |
-|                                                               |numbers, encoded as 32 bit integers in little endian  |
+|$8 + 8\cdot M_\textrm{leaf}$ to $8 + 16\cdot M_\textrm{leaf}$  |The inode entries' associated keys, i.e. the inode    |
+|                                                               |numbers, encoded as 64 bit integers in little endian  |
 |                                                               |format.                                               |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8 + 12\cdot M_\textrm{leaf}$ to $12 + 12\cdot M_\textrm{leaf}$|The node level, fixed to 1 for leaf nodes, encoded as |
+|$8 + 16\cdot M_\textrm{leaf}$ to $8 + 20\cdot M_\textrm{leaf}$ |The inode entries' associated flags, encoded as 32 bit|
+|                                                               |integers in little-endian format.                     |
++---------------------------------------------------------------+------------------------------------------------------+
+|$8 + 20\cdot M_\textrm{leaf}$ to $12 + 20\cdot M_\textrm{leaf}$|The node level, fixed to 1 for leaf nodes, encoded as |
 |                                                               |a 32 bit integer in little-endian format.             |
 +---------------------------------------------------------------+------------------------------------------------------+
 
-For $i\in\{0\ldots M_\textrm{leaf} - 1\}$, the i'th [encoded extent pointer](#sec-enc-extent-ptr) is associated with the
-i'th key. Unoccupied entries have a key value of 0, i.e. the special "no inode" value, and an encoded extent pointer
-value of NIL. The unoccupied slots must all be at the tail. The occupied entries must be sorted by the inode number. No
-leaf node with less than $m_\textrm{leaf}$ nodes may exist, except for possibly at the tree root.
+For $i\in\{0\ldots M_\textrm{leaf} - 1\}$, the i'th inode flags entry and i'th [encoded extent
+pointer](#sec-enc-extent-ptr) are associated with the i'th key respectively. Unoccupied entries have a key value of 0,
+i.e. the special "no inode" value, the inode flags all unset and an encoded extent pointer value of NIL. The unoccupied
+slots must all be at the tail. The occupied entries must be sorted by the inode number. No leaf node with less than
+$m_\textrm{leaf}$ nodes may exist, except for possibly at the tree root.
 
 ### Inode index internal node format
-Let $B$ denote a decrypted index node's maximum possible payload size in units of bytes again. The maximum number of
-entries, i.e. separating keys, in an internal node is then given by $M_{\textrm{internal}} = \left\lfloor\frac{B -
-12}{12}\right\rfloor$. The minimum internal node fill level is set to $m_\textrm{internal} =
-\left\lfloor\frac{M_\textrm{internal} - 1}{2}\right\rfloor$.
+Let $B_{\textrm{internal}}$ denote a decrypted index internal node's maximum possible payload size in units of
+bytes. The maximum number of entries, i.e. separating keys, in an internal node is then given by
+$M_{\textrm{internal}} = \left\lfloor\frac{B_{\textrm{internal}} - 12}{12}\right\rfloor$.
+The minimum internal node fill level is set to
+$m_\textrm{internal} = \left\lfloor\frac{M_\textrm{internal} - 1}{2}\right\rfloor$. $B_{\textrm{internal}}$ must be
+large enough so that the constraint $m_\textrm{leaf} >= 1$ holds. Note that with a minimum inode index internal node
+block size of 128B, and a maximum IV length of 16B, the $m_\textrm{internal} >= 1$ is automatically fulfilled.
 
 Implementations might want to preemptively split full nodes or merge pairs of nodes at minimum fill level when walking
-down a path from the root for insertion or deletion. By coincidence, $M_\textrm{internal} = M_\textrm{leaf}$ and from
-the constraint $m_\textrm{leaf} >= 4$, it follows that $M_\textrm{internal} = M_\textrm{leaf} >= 7 > 2$, as is required
-for supporting preemptive node splitting of full nodes. Note that $m_\textrm{internal}$ has been defined specifically in
-a way to enable preemptive splitting of full nodes as well as merging nodes at the minimum fill level, even for even
+down a path from the root for insertion or deletion.Note that $m_\textrm{internal}$ has been defined specifically in a
+way to enable preemptive splitting of full nodes as well as merging nodes at the minimum fill level, even for even
 values of $M_\textrm{internal}$.
 
 +-----------------------------------------------------------------------+----------------------------------------------+
@@ -1082,7 +1100,7 @@ values of $M_\textrm{internal}$.
 |$0$ to $8 + 8\cdot M_\textrm{internal}$                                |[Encoded block pointers](#sec-enc-block-ptr)  |
 |                                                                       |to the node's children.                       |
 +-----------------------------------------------------------------------+----------------------------------------------+
-|$8 + 8\cdot M_\textrm{internal}$ to $8 + 12\cdot M_\textrm{internal}$  |The separator keys, encoded as 32 bit integers|
+|$8 + 8\cdot M_\textrm{internal}$ to $8 + 12\cdot M_\textrm{internal}$  |The separator keys, encoded as 64 bit integers|
 |                                                                       |in little-endian format.                      |
 +-----------------------------------------------------------------------+----------------------------------------------+
 |$8 + 12\cdot M_\textrm{internal}$ to $12 + 12\cdot M_\textrm{internal}$|The node level, counted 1-based from the leaf |
@@ -1112,7 +1130,7 @@ index' associated inode number, a subdomain value of `INODE_KEY_SUBDOMAIN_DATA`,
 [`KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH`](#sec-key-derivation), over
 
 1. the encrypted entry leaf node's data, of size as determined by
-   [`index_tree_node_allocation_blocks_log2`](#def-image-layout)
+   [`index_tree_leaf_node_allocation_blocks_log2`](#def-image-layout)
 2. and an [authentication context](#sec-auth-context) formed as follows:
    1. [`block_cipher_alg`](#def-image-layout) encoded as a pair of two 16 bit integers, encoded in big-endian format
       each.
@@ -1140,7 +1158,7 @@ subdomain value of `INODE_KEY_SUBDOMAIN_EXTENTS_LIST`, and a key purpose of
 [`KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH`](#sec-key-derivation). The authenticated associated data for the encrypted
 chained extents' inline authentication is set to
 
-1. The inode number as a 32 bit integer, encoded in little-endian format.
+1. The inode number as a 64 bit integer, encoded in little-endian format.
 2. A format version identifier byte of constant 0.
 3. An identifier byte of constant 2 identifying the type of authenticated associated data for the encrypted chained
    extents' inline authentication.
@@ -1392,7 +1410,7 @@ bootstrapping the authentication, the opening process is outlined below:
     decrypt it.
 7.  Lookup the [authentication tree](#sec-auth-tree) and [allocation bitmap file](#sec-allocation-bitmap) inodes in the
     decrypted inode index entry leaf node. Remember that the minimum inode index B+-tree minimum leaf node fill level
-    is defined so that inodes 1-4 will always be found in that node.
+    is defined so that inodes 1-3 will always be found in that node.
 8.  If the inode index entries for the authentication tree or allocation bitmap files contain indirect references to
     [extents lists](#sec-enc-extents-list), stored in the inline authenticated variant of the [encrypted chained
     extents](#sec-encryption-entity-chained-extents), then decrypt while verifying against the inline authentication.

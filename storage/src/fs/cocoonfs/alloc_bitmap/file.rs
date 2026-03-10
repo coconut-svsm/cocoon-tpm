@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Implementation of [`AllocBitmapFile`] and related functionality.
@@ -393,7 +393,7 @@ impl AllocBitmapFile {
             fs_sync_state_keys_cache,
             fs_root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::AllocBitmap as u32,
+                inode_index::SpecialInode::AllocBitmap as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),
@@ -595,7 +595,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadFuture<B> {
             keys_cache,
             root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::AllocBitmap as u32,
+                inode_index::SpecialInode::AllocBitmap as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),
@@ -905,7 +905,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
             keys_cache,
             root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::AllocBitmap as u32,
+                inode_index::SpecialInode::AllocBitmap as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),
@@ -1562,7 +1562,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
             keys_cache,
             root_key,
             &keys::KeyId::new(
-                inode_index::SpecialInode::AllocBitmap as u32,
+                inode_index::SpecialInode::AllocBitmap as u64,
                 inode_index::InodeKeySubdomain::InodeData as u32,
                 keys::KeyPurpose::Encryption,
             ),

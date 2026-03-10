@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Encrypt to and decrypt from the various defined encryption entity formats.
@@ -255,12 +255,6 @@ impl EncryptedBlockLayout {
             self.block_cipher_alg.block_cipher_block_len,
         )
         .map(|l| l.0)
-    }
-
-    /// Get the internal copy of
-    /// [`ImageLayout::allocation_block_size_128b_log2`](layout::ImageLayout::allocation_block_size_128b_log2).
-    pub fn get_allocation_block_size_128b_log2(&self) -> u8 {
-        self.allocation_block_size_128b_log2
     }
 
     /// Get the base-2 logarithm of the encrypted block size in units of
