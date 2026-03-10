@@ -4900,6 +4900,29 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         None => break (None, None, nvfs_err_internal!()),
                     };
 
+                    let leaf_node = match node_ref.get_node() {
+                        Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
+                        Ok(InodeIndexTreeNode::Internal(_)) => {
+                            break (
+                                Some(cursor),
+                                node_ref.into_transaction(),
+                                NvFsError::from(FormatError::InvalidIndexNode),
+                            );
+                        }
+                        Err(e) => break (Some(cursor), node_ref.into_transaction(), e),
+                    };
+                    if leaf_node.entries == 0 {
+                        break (
+                            Some(cursor),
+                            node_ref.into_transaction(),
+                            NvFsError::from(FormatError::InvalidIndexNode),
+                        );
+                    }
+                    let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
+                        Ok(inode) => inode,
+                        Err(e) => break (Some(cursor), node_ref.into_transaction(), e),
+                    };
+
                     let (transaction, node_ref) = InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
                     cursor.transaction = transaction.or(returned_transaction);
                     let node_ref = match node_ref {
@@ -4909,7 +4932,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         }
                     };
 
-                    let tree_position = match cursor.tree_position.as_mut() {
+                    match cursor.tree_position.as_mut() {
                         Some(tree_position) => {
                             let prev_leaf_node = mem::replace(&mut tree_position.leaf_node, node_ref);
                             tree_position.entry_index_in_leaf_node = 0;
@@ -4928,7 +4951,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             .insert(0, prev_leaf_node),
                                         None => {
                                             // How can it have been modified by a transaction if there is none?
-                                            break (Some(cursor), None, nvfs_err_internal!());
+                                            break (None, None, nvfs_err_internal!());
                                         }
                                     };
                                 } else {
@@ -4936,30 +4959,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     tree_nodes_cache_guard.insert(0, prev_leaf_node);
                                 }
                             }
-
-                            tree_position
                         }
-                        None => cursor.tree_position.insert(InodeIndexEnumerateCursorTreePosition {
-                            leaf_node: node_ref,
-                            entry_index_in_leaf_node: 0,
-                        }),
-                    };
-
-                    let leaf_node = match tree_position.get_leaf_node(cursor.transaction.as_deref()) {
-                        Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
-                        Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
+                        None => {
+                            cursor.tree_position = Some(InodeIndexEnumerateCursorTreePosition {
+                                leaf_node: node_ref,
+                                entry_index_in_leaf_node: 0,
+                            });
                         }
-                        Err(e) => break (Some(cursor), None, e),
-                    };
-
-                    if leaf_node.entries == 0 {
-                        break (Some(cursor), None, NvFsError::from(FormatError::InvalidIndexNode));
                     }
-                    let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
-                        Ok(inode) => inode,
-                        Err(e) => break (Some(cursor), None, e),
-                    };
 
                     if inode <= *cursor.inodes_enumerate_range.end() {
                         if inode == *cursor.inodes_enumerate_range.end() {
@@ -8968,18 +8975,40 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     };
 
                     let (transaction, node_ref) = InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
-                    let transaction = transaction.or(returned_transaction);
-                    let node_ref = match node_ref {
-                        Ok(node_ref) => node_ref,
-                        Err(e) => {
-                            break (Some(cursor), transaction, e);
-                        }
-                    };
-                    let mut transaction = match transaction {
+                    let mut transaction = match transaction.or(returned_transaction) {
                         Some(transaction) => transaction,
                         None => {
                             break (None, None, nvfs_err_internal!());
                         }
+                    };
+                    let node_ref = match node_ref {
+                        Ok(node_ref) => node_ref,
+                        Err(e) => {
+                            break (Some(cursor), Some(transaction), e);
+                        }
+                    };
+
+                    let leaf_node = match node_ref.get_node(&transaction) {
+                        Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
+                        Ok(InodeIndexTreeNode::Internal(_)) => {
+                            break (
+                                Some(cursor),
+                                Some(transaction),
+                                NvFsError::from(FormatError::InvalidIndexNode),
+                            );
+                        }
+                        Err(e) => break (Some(cursor), Some(transaction), e),
+                    };
+                    if leaf_node.entries == 0 {
+                        break (
+                            Some(cursor),
+                            Some(transaction),
+                            NvFsError::from(FormatError::InvalidIndexNode),
+                        );
+                    }
+                    let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
+                        Ok(inode) => inode,
+                        Err(e) => break (Some(cursor), Some(transaction), e),
                     };
 
                     let tree_position = match cursor.tree_position.as_mut() {
@@ -9016,30 +9045,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             entry_index_in_leaf_node: 0,
                             inode: None,
                         }),
-                    };
-
-                    let leaf_node = match tree_position.leaf_node.get_node(&transaction) {
-                        Ok(InodeIndexTreeNode::Leaf(leaf_node)) => leaf_node,
-                        Ok(InodeIndexTreeNode::Internal(_)) => {
-                            break (
-                                Some(cursor),
-                                Some(transaction),
-                                NvFsError::from(FormatError::InvalidIndexNode),
-                            );
-                        }
-                        Err(e) => break (Some(cursor), Some(transaction), e),
-                    };
-
-                    if leaf_node.entries == 0 {
-                        break (
-                            Some(cursor),
-                            Some(transaction),
-                            NvFsError::from(FormatError::InvalidIndexNode),
-                        );
-                    }
-                    let inode = match leaf_node.entry_inode(0, &fs_sync_state_inode_index.layout) {
-                        Ok(inode) => inode,
-                        Err(e) => break (Some(cursor), Some(transaction), e),
                     };
 
                     cursor.transaction = Some(transaction);
