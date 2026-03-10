@@ -5,7 +5,7 @@ body { max-width: 72em !important; }
 ```
 # CocoonFs format specification
 
-Copyright 2023-2025 SUSE LLC
+Copyright 2023-2026 SUSE LLC
 
 Licensed under CC BY-SA 4.0
 

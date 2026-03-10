@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 SUSE LLC
+// Copyright 2025-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 use cocoon_tpm_crypto as crypto;
