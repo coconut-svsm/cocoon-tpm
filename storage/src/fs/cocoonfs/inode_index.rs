@@ -84,6 +84,15 @@ pub type InodeIndexKeyType = u64;
 /// Encoded [`InodeIndexKeyType`].
 type EncodedInodeIndexKeyType = [u8; mem::size_of::<InodeIndexKeyType>()];
 
+/// Type for the flags in an inode index entry.
+pub type InodeIndexEntryFlags = u32;
+/// Encoded [`InodeIndexEntryFlags`].
+type EncodedInodeIndexEntryFlags = [u8; mem::size_of::<InodeIndexEntryFlags>()];
+/// Reserved [`InodeIndexEntryFlags`] flags.
+///
+/// Currently any but least significant `8` bits freely available to users are reserved.
+const INODE_INDEX_ENTRY_FLAGS_RESERVED: InodeIndexEntryFlags = !((!0u8) as InodeIndexEntryFlags);
+
 /// Encode a [`InodeIndexKeyType`].
 fn encode_key(key: InodeIndexKeyType) -> EncodedInodeIndexKeyType {
     key.to_le_bytes()
@@ -261,12 +270,14 @@ impl InodeIndexTreeLayout {
         // The format is (in logical order)
         // - four bytes to encode the node level in the B+-tree, counted 1-based from
         //   leaf nodes upwards,
-        // - a sequence of EncodedExtentPtrs to the inodes' extents each, (logically)
-        //   logically associated with, a key each, i.e. a 64 bit inode number,
+        // - a sequence of inode entries, each comprising the 64 bit inode number, a 32 bit inode
+        //   flags value as well as the EncodedExtentPtr to the respective inode's extents,
         // - a single block pointer to the next leaf node in symmetric order.
         let leaf_node_max_payload_len = leaf_node_encrypted_block_layout.effective_payload_len()?;
         let max_leaf_node_entries = (leaf_node_max_payload_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
-            / (mem::size_of::<EncodedInodeIndexKeyType>() + EncodedExtentPtr::ENCODED_SIZE as usize);
+            / (mem::size_of::<EncodedInodeIndexKeyType>()
+                + mem::size_of::<EncodedInodeIndexEntryFlags>()
+                + EncodedExtentPtr::ENCODED_SIZE as usize);
         let min_leaf_node_entries = max_leaf_node_entries.div_ceil(2);
         // Cannot happen, but make it explicit.
         if min_leaf_node_entries < 3 {
@@ -276,7 +287,9 @@ impl InodeIndexTreeLayout {
         let encoded_leaf_node_len = 4
             + EncodedBlockPtr::ENCODED_SIZE as usize
             + max_leaf_node_entries
-                * (mem::size_of::<EncodedInodeIndexKeyType>() + EncodedExtentPtr::ENCODED_SIZE as usize);
+                * (mem::size_of::<EncodedInodeIndexKeyType>()
+                    + mem::size_of::<EncodedInodeIndexEntryFlags>()
+                    + EncodedExtentPtr::ENCODED_SIZE as usize);
 
         Ok(Self {
             encoded_internal_node_len,
@@ -310,8 +323,9 @@ impl InodeIndexTreeLeafNode {
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         layout: &InodeIndexTreeLayout,
     ) -> Result<Self, NvFsError> {
-        // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is
-        // implicitly initialized to SpecialInode::NoInode, as it should be.
+        // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is implicitly
+        // initialized to SpecialInode::NoInode and the ->encoded_entry_flags[] are all clear, as it
+        // should be.
         let encoded_node = FixedVec::new_with_value(layout.encoded_leaf_node_len, 0u8)?;
         let mut n = Self {
             encoded_node,
@@ -419,6 +433,32 @@ impl InodeIndexTreeLeafNode {
             }
         }
 
+        let allocated_encoded_entries_flags_end = n.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let entries_flags = n.encoded_entries_flags(layout);
+        for encoded_entry_flags in entries_flags[..allocated_encoded_entries_flags_end]
+            .chunks_exact(mem::size_of::<EncodedInodeIndexEntryFlags>())
+        {
+            if InodeIndexEntryFlags::from_le_bytes(
+                *<&[u8; mem::size_of::<EncodedInodeIndexEntryFlags>()]>::try_from(encoded_entry_flags)
+                    .map_err(|_| nvfs_err_internal!())?,
+            ) & INODE_INDEX_ENTRY_FLAGS_RESERVED
+                != 0
+            {
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
+            }
+        }
+        for encoded_entry_flags in entries_flags[allocated_encoded_entries_flags_end..]
+            .chunks_exact(mem::size_of::<EncodedInodeIndexEntryFlags>())
+        {
+            if InodeIndexEntryFlags::from_le_bytes(
+                *<&[u8; mem::size_of::<EncodedInodeIndexEntryFlags>()]>::try_from(encoded_entry_flags)
+                    .map_err(|_| nvfs_err_internal!())?,
+            ) != 0
+            {
+                return Err(NvFsError::from(FormatError::InvalidIndexNode));
+            }
+        }
+
         Ok(n)
     }
 
@@ -477,6 +517,25 @@ impl InodeIndexTreeLeafNode {
         ))
     }
 
+    /// Get an entry's associated [`InodeIndexEntryFlags`].
+    ///
+    /// Will fail only upon an internal logic error, e.g. when `entry_index` is
+    /// out of bounds.
+    ///
+    /// # Arguments:
+    ///
+    /// * `entry_index` - The entry's index.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    fn entry_flags(
+        &self,
+        entry_index: usize,
+        layout: &InodeIndexTreeLayout,
+    ) -> Result<InodeIndexEntryFlags, NvFsError> {
+        Ok(InodeIndexEntryFlags::from_le_bytes(
+            *self.encoded_entry_flags(entry_index, layout)?,
+        ))
+    }
+
     /// Insert a new or update an existing entry.
     ///
     /// Insert a new or update an existing entry for inode number `key` to point
@@ -488,6 +547,7 @@ impl InodeIndexTreeLeafNode {
     ///
     /// * `key` - The inode number to insert an entry for or update an existing
     ///   entry of.
+    /// * `flags` - The inode index entry flags to store in the entry.
     /// * `extent_ptr` - The [`EncodedExtentPtr`] to store in the entry.
     /// * `insertion_pos` - Optional insertion position, if known. Must be equal
     ///   to the result of [`lookup()`](Self::lookup) if specified, i.e. either
@@ -497,6 +557,7 @@ impl InodeIndexTreeLeafNode {
     fn insert(
         &mut self,
         key: InodeIndexKeyType,
+        flags: InodeIndexEntryFlags,
         extent_ptr: EncodedExtentPtr,
         insertion_pos: Option<Result<usize, usize>>,
         layout: &InodeIndexTreeLayout,
@@ -507,6 +568,7 @@ impl InodeIndexTreeLeafNode {
         };
         let insertion_pos = match insertion_pos {
             Ok(existing_pos) => {
+                *self.encoded_entry_flags_mut(existing_pos, layout)? = flags.to_le_bytes();
                 *self.encoded_entry_extent_ptr_mut(existing_pos, layout)? = *extent_ptr;
                 return Ok(());
             }
@@ -544,6 +606,20 @@ impl InodeIndexTreeLeafNode {
         )
         .map_err(|_| nvfs_err_internal!())? = *extent_ptr;
 
+        let entries_flags_insertion_pos = insertion_pos * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let moved_entries_flags_begin = entries_flags_insertion_pos;
+        let moved_entries_flags_end = self.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let entries_flags = self.encoded_entries_flags_mut(layout);
+        entries_flags.copy_within(
+            moved_entries_flags_begin..moved_entries_flags_end,
+            moved_entries_flags_begin + mem::size_of::<EncodedInodeIndexEntryFlags>(),
+        );
+        *<&mut [u8; mem::size_of::<EncodedInodeIndexEntryFlags>()]>::try_from(
+            &mut entries_flags[entries_flags_insertion_pos
+                ..entries_flags_insertion_pos + mem::size_of::<EncodedInodeIndexEntryFlags>()],
+        )
+        .map_err(|_| nvfs_err_internal!())? = flags.to_le_bytes();
+
         self.entries += 1;
 
         Ok(())
@@ -570,6 +646,20 @@ impl InodeIndexTreeLeafNode {
         // Fill the newly vacant key slot at the tail with a value of
         // SpecialInode::NoInode.
         keys[moved_keys_end - mem::size_of::<EncodedInodeIndexKeyType>()..moved_keys_end].fill(0u8);
+
+        let entries_flags_removal_pos = removal_pos * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let moved_entries_flags_begin = entries_flags_removal_pos + mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let moved_entries_flags_end = self.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let entries_flags = self.encoded_entries_flags_mut(layout);
+        entries_flags.copy_within(
+            moved_entries_flags_begin..moved_entries_flags_end,
+            entries_flags_removal_pos,
+        );
+        *<&mut [u8; mem::size_of::<EncodedInodeIndexEntryFlags>()]>::try_from(
+            &mut entries_flags
+                [moved_entries_flags_end - mem::size_of::<EncodedInodeIndexEntryFlags>()..moved_entries_flags_end],
+        )
+        .map_err(|_| nvfs_err_internal!())? = (0 as InodeIndexEntryFlags).to_le_bytes();
 
         let extent_ptrs_removal_pos = removal_pos * EncodedExtentPtr::ENCODED_SIZE as usize;
         let moved_extent_ptrs_begin = extent_ptrs_removal_pos + EncodedExtentPtr::ENCODED_SIZE as usize;
@@ -636,6 +726,21 @@ impl InodeIndexTreeLeafNode {
         let new_parent_separator_key =
             *<&EncodedInodeIndexKeyType>::try_from(&src_keys[..mem::size_of::<EncodedInodeIndexKeyType>()])
                 .map_err(|_| nvfs_err_internal!())?;
+
+        let entries_flags_spill_len = count * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let dst_entries_flags_spill_begin = left.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let dst_entries_flags_spill_end = dst_entries_flags_spill_begin + entries_flags_spill_len;
+        let src_entries_flags_spill_end = entries_flags_spill_len;
+        let src_entries_flags = right.encoded_entries_flags_mut(layout);
+        // Spill count EncodedInodeIndexEntryFlags from right to left.
+        left.encoded_entries_flags_mut(layout)[dst_entries_flags_spill_begin..dst_entries_flags_spill_end]
+            .copy_from_slice(&src_entries_flags[..src_entries_flags_spill_end]);
+        // Memmove the right node's remaining EncodedInodeIndexEntryFlags to the front and clear out the tail
+        // accordingly.
+        let src_original_entries_flags_end = original_src_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        src_entries_flags.copy_within(src_entries_flags_spill_end..src_original_entries_flags_end, 0);
+        src_entries_flags[src_original_entries_flags_end - entries_flags_spill_len..src_original_entries_flags_end]
+            .fill(0);
 
         let extent_ptrs_spill_len = count * EncodedExtentPtr::ENCODED_SIZE as usize;
         let dst_extent_ptrs_spill_begin = left.entries * EncodedExtentPtr::ENCODED_SIZE as usize;
@@ -716,6 +821,22 @@ impl InodeIndexTreeLeafNode {
             *<&EncodedInodeIndexKeyType>::try_from(&dst_keys[..mem::size_of::<EncodedInodeIndexKeyType>()])
                 .map_err(|_| nvfs_err_internal!())?;
 
+        let entries_flags_spill_len = count * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let src_entries_flags_spill_end = original_src_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let src_entries_flags_spill_begin = src_entries_flags_spill_end - entries_flags_spill_len;
+        let dst_entries_flags_spill_end = entries_flags_spill_len;
+        let dst_entries_flags = right.encoded_entries_flags_mut(layout);
+        let src_entries_flags = left.encoded_entries_flags_mut(layout);
+        // Make room for count new EncodedInodeIndexEntryFlags at the right node's head by memmoving
+        // the existing ones towards the tail.
+        let dst_original_entries_flags_end = original_dst_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        dst_entries_flags.copy_within(..dst_original_entries_flags_end, dst_entries_flags_spill_end);
+        // Spill count EncodedInodeIndexEntryFlags from left to right.
+        dst_entries_flags[..dst_entries_flags_spill_end]
+            .copy_from_slice(&src_entries_flags[src_entries_flags_spill_begin..src_entries_flags_spill_end]);
+        // Clear out all EncodedInodeIndexEntryFlags entries that became vacant at the src' tail.
+        src_entries_flags[src_entries_flags_spill_begin..src_entries_flags_spill_end].fill(0);
+
         let extent_ptrs_spill_len = count * EncodedExtentPtr::ENCODED_SIZE as usize;
         let src_extent_ptrs_spill_end = original_src_entries * EncodedExtentPtr::ENCODED_SIZE as usize;
         let src_extent_ptrs_spill_begin = src_extent_ptrs_spill_end - extent_ptrs_spill_len;
@@ -758,6 +879,7 @@ impl InodeIndexTreeLeafNode {
     /// * `self` - The node to split. Will become the left sibling after the
     ///   split.
     /// * `key` - The new entry's inode number.
+    /// * `flags` - The inode index entry flags to store in the entry.
     /// * `extent_ptr` - The new entry's [`EncodedExtentPtr`] value.
     /// * `insertion_pos` - The insertion position for the new entry, defined
     ///   relative to the node's entry sequence from before the split. Must be
@@ -768,6 +890,7 @@ impl InodeIndexTreeLeafNode {
     fn split_insert(
         &mut self,
         key: InodeIndexKeyType,
+        flags: InodeIndexEntryFlags,
         extent_ptr: EncodedExtentPtr,
         insertion_pos: usize,
         new_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
@@ -796,22 +919,31 @@ impl InodeIndexTreeLeafNode {
         let keys_spill_len = spill_count * mem::size_of::<EncodedInodeIndexKeyType>();
         let src_keys_spill_end = original_src_entries * mem::size_of::<EncodedInodeIndexKeyType>();
         let src_keys_spill_begin = src_keys_spill_end - keys_spill_len;
+        let entries_flags_spill_len = spill_count * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let src_entries_flags_spill_end = original_src_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let src_entries_flags_spill_begin = src_entries_flags_spill_end - entries_flags_spill_len;
         let extent_ptrs_spill_len = spill_count * EncodedExtentPtr::ENCODED_SIZE as usize;
         let src_extent_ptrs_spill_end = original_src_entries * EncodedExtentPtr::ENCODED_SIZE as usize;
         let src_extent_ptrs_spill_begin = src_extent_ptrs_spill_end - extent_ptrs_spill_len;
         let src_keys = self.encoded_keys(layout);
+        let src_entries_flags = self.encoded_entries_flags(layout);
         let src_extent_ptrs = self.encoded_entries_extent_ptrs(layout);
         if insert_in_left {
             let dst_keys_spill_end = keys_spill_len;
             let dst_keys = new_node.encoded_keys_mut(layout);
             dst_keys[..dst_keys_spill_end].copy_from_slice(&src_keys[src_keys_spill_begin..src_keys_spill_end]);
 
+            let dst_entries_flags_spill_end = entries_flags_spill_len;
+            let dst_entries_flags = new_node.encoded_entries_flags_mut(layout);
+            dst_entries_flags[..dst_entries_flags_spill_end]
+                .copy_from_slice(&src_entries_flags[src_entries_flags_spill_begin..src_entries_flags_spill_end]);
+
             let dst_extent_ptrs_spill_end = extent_ptrs_spill_len;
             let dst_extent_ptrs = new_node.encoded_entries_extent_ptrs_mut(layout);
             dst_extent_ptrs[..dst_extent_ptrs_spill_end]
                 .copy_from_slice(&src_extent_ptrs[src_extent_ptrs_spill_begin..src_extent_ptrs_spill_end]);
             self.entries -= spill_count;
-            self.insert(key, extent_ptr, Some(Err(insertion_pos)), layout)?;
+            self.insert(key, flags, extent_ptr, Some(Err(insertion_pos)), layout)?;
         } else {
             // Determine the insertion position relative to the right node.
             let insertion_pos = insertion_pos - (original_src_entries - spill_count);
@@ -838,6 +970,33 @@ impl InodeIndexTreeLeafNode {
             // Spill second batch.
             dst_keys[dst_keys_spill_batch2_begin..dst_keys_spill_batch2_end]
                 .copy_from_slice(&src_keys[src_keys_spill_batch2_begin..src_keys_spill_batch2_end]);
+
+            let entries_flags_batch1_len = insertion_pos * mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let entries_flags_batch2_len = entries_flags_spill_len - entries_flags_batch1_len;
+            let src_entries_flags_spill_batch1_begin = src_entries_flags_spill_begin;
+            let src_entries_flags_spill_batch1_end = src_entries_flags_spill_batch1_begin + entries_flags_batch1_len;
+            let src_entries_flags_spill_batch2_begin = src_entries_flags_spill_batch1_end;
+            let src_entries_flags_spill_batch2_end = src_entries_flags_spill_end;
+            let dst_entries_flags_spill_batch1_end = entries_flags_batch1_len;
+            // Skip over one slot for the insertion.
+            let dst_entries_flags_spill_batch2_begin =
+                dst_entries_flags_spill_batch1_end + mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let dst_entries_flags_spill_batch2_end = dst_entries_flags_spill_batch2_begin + entries_flags_batch2_len;
+            let dst_entries_flags = new_node.encoded_entries_flags_mut(layout);
+            // Spill first batch.
+            dst_entries_flags[..dst_entries_flags_spill_batch1_end].copy_from_slice(
+                &src_entries_flags[src_entries_flags_spill_batch1_begin..src_entries_flags_spill_batch1_end],
+            );
+            // Insert the new flags at the target position inbetween the two spill batches.
+            *<&mut EncodedInodeIndexEntryFlags>::try_from(
+                &mut dst_entries_flags[dst_entries_flags_spill_batch1_end..dst_entries_flags_spill_batch2_begin],
+            )
+            .map_err(|_| nvfs_err_internal!())? = flags.to_le_bytes();
+            // Spill second batch.
+            dst_entries_flags[dst_entries_flags_spill_batch2_begin..dst_entries_flags_spill_batch2_end]
+                .copy_from_slice(
+                    &src_entries_flags[src_entries_flags_spill_batch2_begin..src_entries_flags_spill_batch2_end],
+                );
 
             let extent_ptrs_batch1_len = insertion_pos * EncodedExtentPtr::ENCODED_SIZE as usize;
             let extent_ptrs_batch2_len = extent_ptrs_spill_len - extent_ptrs_batch1_len;
@@ -876,6 +1035,14 @@ impl InodeIndexTreeLeafNode {
         let src_keys_clear_end = original_src_entries * mem::size_of::<EncodedInodeIndexKeyType>();
         let src_keys = self.encoded_keys_mut(layout);
         src_keys[src_keys_clear_begin..src_keys_clear_end].fill(0u8);
+
+        // The remainder of dst_entries_flags is initialized to all-zeroes by the FixedVec
+        // allocation above already. Take care of the EncodedInodeIndexEntryFlags removed from self.
+        let src_entries_flags_clear_begin = self.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let src_entries_flags_clear_end = original_src_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let src_entries_flags = self.encoded_entries_flags_mut(layout);
+        src_entries_flags[src_entries_flags_clear_begin..src_entries_flags_clear_end].fill(0u8);
+
         let src_extent_ptrs_clear_begin = self.entries * EncodedExtentPtr::ENCODED_SIZE as usize;
         let src_extent_ptrs_clear_end = original_src_entries * EncodedExtentPtr::ENCODED_SIZE as usize;
         let src_extent_ptrs = self.encoded_entries_extent_ptrs_mut(layout);
@@ -947,6 +1114,15 @@ impl InodeIndexTreeLeafNode {
             left.encoded_keys_mut(layout)[dst_keys_spill_begin..dst_keys_spill_end]
                 .copy_from_slice(&src_keys[..src_keys_spill_end]);
 
+            let entries_flags_spill_len = right.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let dst_entries_flags_spill_begin = left.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let dst_entries_flags_spill_end = dst_entries_flags_spill_begin + entries_flags_spill_len;
+            let src_entries_flags_spill_end = entries_flags_spill_len;
+            let src_entries_flags = right.encoded_entries_flags(layout);
+            // Spill all EncodedInodeIndexEntryFlags from right to left.
+            left.encoded_entries_flags_mut(layout)[dst_entries_flags_spill_begin..dst_entries_flags_spill_end]
+                .copy_from_slice(&src_entries_flags[..src_entries_flags_spill_end]);
+
             let extent_ptrs_spill_len = right.entries * EncodedExtentPtr::ENCODED_SIZE as usize;
             let dst_extent_ptrs_spill_begin = left.entries * EncodedExtentPtr::ENCODED_SIZE as usize;
             let dst_extent_ptrs_spill_end = dst_extent_ptrs_spill_begin + extent_ptrs_spill_len;
@@ -979,6 +1155,32 @@ impl InodeIndexTreeLeafNode {
             // Spill second batch.
             dst_keys[dst_keys_spill_batch2_begin..dst_keys_spill_batch2_end]
                 .copy_from_slice(&src_keys[src_keys_spill_batch2_begin..src_keys_spill_batch2_end]);
+
+            let entries_flags_spill_batch1_len = removal_pos * mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let entries_flags_spill_batch2_len =
+                (right.entries - removal_pos - 1) * mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let dst_entries_flags_spill_batch1_begin = left.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let dst_entries_flags_spill_batch1_end =
+                dst_entries_flags_spill_batch1_begin + entries_flags_spill_batch1_len;
+            let dst_entries_flags_spill_batch2_begin = dst_entries_flags_spill_batch1_end;
+            let dst_entries_flags_spill_batch2_end =
+                dst_entries_flags_spill_batch2_begin + entries_flags_spill_batch2_len;
+            let src_entries_flags_spill_batch1_end = entries_flags_spill_batch1_len;
+            // Skip over one slot for the removal.
+            let src_entries_flags_spill_batch2_begin =
+                src_entries_flags_spill_batch1_end + mem::size_of::<EncodedInodeIndexEntryFlags>();
+            let src_entries_flags_spill_batch2_end =
+                src_entries_flags_spill_batch2_begin + entries_flags_spill_batch2_len;
+            let dst_entries_flags = left.encoded_entries_flags_mut(layout);
+            let src_entries_flags = right.encoded_entries_flags(layout);
+            // Spill first batch.
+            dst_entries_flags[dst_entries_flags_spill_batch1_begin..dst_entries_flags_spill_batch1_end]
+                .copy_from_slice(&src_entries_flags[..src_entries_flags_spill_batch1_end]);
+            // Spill second batch.
+            dst_entries_flags[dst_entries_flags_spill_batch2_begin..dst_entries_flags_spill_batch2_end]
+                .copy_from_slice(
+                    &src_entries_flags[src_entries_flags_spill_batch2_begin..src_entries_flags_spill_batch2_end],
+                );
 
             let extent_ptrs_spill_batch1_len = removal_pos * EncodedExtentPtr::ENCODED_SIZE as usize;
             let extent_ptrs_spill_batch2_len =
@@ -1128,6 +1330,48 @@ impl InodeIndexTreeLeafNode {
         &mut self.encoded_node[encoded_keys_begin..encoded_keys_end]
     }
 
+    /// Get a shared reference to the node's encoded sequence of the inode
+    /// entries' associated inode flags.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_leaf_node_entries`] entries, not only the
+    /// allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    fn encoded_entries_flags(&self, layout: &InodeIndexTreeLayout) -> &[u8] {
+        let encoded_entries_flags_begin = EncodedBlockPtr::ENCODED_SIZE as usize
+            + layout.max_leaf_node_entries
+                * (EncodedExtentPtr::ENCODED_SIZE as usize + mem::size_of::<EncodedInodeIndexKeyType>());
+        let encoded_entries_flags_end =
+            encoded_entries_flags_begin + layout.max_leaf_node_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        &self.encoded_node[encoded_entries_flags_begin..encoded_entries_flags_end]
+    }
+
+    /// Get a `mut` reference to the node's encoded sequence of the inode
+    /// entries' associated inode flags.
+    ///
+    /// The returned slice will comprise all possible, i.e.
+    /// [`InodeIndexTreeLayout::max_leaf_node_entries`] entries, not only the
+    /// allocated ones.
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    fn encoded_entries_flags_mut(&mut self, layout: &InodeIndexTreeLayout) -> &mut [u8] {
+        let encoded_entries_flags_begin = EncodedBlockPtr::ENCODED_SIZE as usize
+            + layout.max_leaf_node_entries
+                * (EncodedExtentPtr::ENCODED_SIZE as usize + mem::size_of::<EncodedInodeIndexKeyType>());
+        let encoded_entries_flags_end =
+            encoded_entries_flags_begin + layout.max_leaf_node_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        &mut self.encoded_node[encoded_entries_flags_begin..encoded_entries_flags_end]
+    }
+
     /// Get a shared reference to the node's encoded tree level.
     ///
     /// Will fail only upon an internal logic error.
@@ -1205,6 +1449,54 @@ impl InodeIndexTreeLeafNode {
         }
         <&mut [u8; EncodedExtentPtr::ENCODED_SIZE as usize]>::try_from(&mut encoded_extent_ptrs[entry_begin..entry_end])
             .map_err(|_| nvfs_err_internal!())
+    }
+
+    /// Get a shared reference to an inode entry's associated [`EncodedInodeIndexEntryFlags`].
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index` - Index of the entry.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    fn encoded_entry_flags(
+        &self,
+        index: usize,
+        layout: &InodeIndexTreeLayout,
+    ) -> Result<&[u8; mem::size_of::<EncodedInodeIndexEntryFlags>()], NvFsError> {
+        let entry_begin = index * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let entry_end = entry_begin + mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let encoded_entries_flags = self.encoded_entries_flags(layout);
+        if encoded_entries_flags.len() < entry_end {
+            return Err(nvfs_err_internal!());
+        }
+        <&[u8; mem::size_of::<EncodedInodeIndexEntryFlags>()]>::try_from(&encoded_entries_flags[entry_begin..entry_end])
+            .map_err(|_| nvfs_err_internal!())
+    }
+
+    /// Get a `mut` reference to an inode entry's associated [`EncodedInodeIndexEntryFlags`].
+    ///
+    /// Will fail only upon an internal logic error.
+    ///
+    /// # Arguments:
+    ///
+    /// * `index` - Index of the entry.
+    /// * `layout` - The filesystem's [`InodeIndexTreeLayout`].
+    fn encoded_entry_flags_mut(
+        &mut self,
+        index: usize,
+        layout: &InodeIndexTreeLayout,
+    ) -> Result<&mut [u8; mem::size_of::<EncodedInodeIndexEntryFlags>()], NvFsError> {
+        let entry_begin = index * mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let entry_end = entry_begin + mem::size_of::<EncodedInodeIndexEntryFlags>();
+        let encoded_entries_flags = self.encoded_entries_flags_mut(layout);
+        if encoded_entries_flags.len() < entry_end {
+            return Err(nvfs_err_internal!());
+        }
+        <&mut [u8; mem::size_of::<EncodedInodeIndexEntryFlags>()]>::try_from(
+            &mut encoded_entries_flags[entry_begin..entry_end],
+        )
+        .map_err(|_| nvfs_err_internal!())
     }
 }
 
@@ -2565,12 +2857,14 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
         let mut entry_leaf_node = InodeIndexTreeLeafNode::new_empty(entry_leaf_node_allocation_blocks_begin, &layout)?;
         entry_leaf_node.insert(
             SpecialInode::AuthTree as InodeIndexKeyType,
+            0,
             auth_tree_inode_entry_extent_ptr,
             None,
             &layout,
         )?;
         entry_leaf_node.insert(
             SpecialInode::AllocBitmap as InodeIndexKeyType,
+            0,
             alloc_bitmap_inode_entry_extent_ptr,
             None,
             &layout,
@@ -2587,6 +2881,7 @@ impl<ST: sync_types::SyncTypes> InodeIndex<ST> {
         )?;
         entry_leaf_node.insert(
             SpecialInode::IndexRoot as InodeIndexKeyType,
+            0,
             index_root_inode_entry_extent_ptr,
             None,
             &layout,
@@ -3237,6 +3532,7 @@ impl TransactionInodeIndexUpdates {
         )?;
         entry_leaf_node.insert(
             SpecialInode::IndexRoot as InodeIndexKeyType,
+            0,
             root_node_extent_ptr,
             Some(Ok(root_inode_entry_pos_in_node)),
             layout,
@@ -5386,14 +5682,14 @@ impl InodeIndexTreeNodeRefForUpdate {
 /// * [`InodeIndexInsertEntryFuture`]
 pub struct InodeIndexLookupForInsertResult {
     inode: InodeIndexKeyType,
-    preexisting_entry_extent_ptr: Option<EncodedExtentPtr>,
+    preexisting_entry: Option<(InodeIndexEntryFlags, EncodedExtentPtr)>,
     leaf_node: InodeIndexTreeNodeRefForUpdate,
     leaf_parent_node: Option<InodeIndexTreeNodeRefForUpdate>,
 }
 
 impl InodeIndexLookupForInsertResult {
     pub fn get_preexisting_extent_ptr(&self) -> Option<EncodedExtentPtr> {
-        self.preexisting_entry_extent_ptr
+        self.preexisting_entry.map(|entry| entry.1)
     }
 }
 
@@ -5622,16 +5918,24 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
-                            let preexisting_entry_extent_ptr = match preexisting_entry_index {
+                            let preexisting_entry = match preexisting_entry_index {
                                 Ok(preexisting_entry_index) => {
-                                    match leaf_node.encoded_entry_extent_ptr(preexisting_entry_index, tree_layout) {
+                                    let preexisting_entry_flags =
+                                        match leaf_node.entry_flags(preexisting_entry_index, tree_layout) {
+                                            Ok(preexisting_entry_flags) => preexisting_entry_flags,
+                                            Err(e) => break (returned_transaction.or(node_ref.into_transaction()), e),
+                                        };
+                                    let preexisting_entry_extent_ptr = match leaf_node
+                                        .encoded_entry_extent_ptr(preexisting_entry_index, tree_layout)
+                                    {
                                         Ok(preexisting_entry_extent_ptr) => {
-                                            Some(EncodedExtentPtr::from(*preexisting_entry_extent_ptr))
+                                            EncodedExtentPtr::from(*preexisting_entry_extent_ptr)
                                         }
                                         Err(e) => {
                                             break (returned_transaction.or(node_ref.into_transaction()), e);
                                         }
-                                    }
+                                    };
+                                    Some((preexisting_entry_flags, preexisting_entry_extent_ptr))
                                 }
                                 Err(_) => None,
                             };
@@ -5658,9 +5962,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             // If no entry will have to get inserted, or there's enough room in the
                             // node, then the parent will not be needed. Don't carry it around then,
                             // dismiss it from here and possibly move into a cache as appropriate.
-                            if preexisting_entry_extent_ptr.is_some()
-                                || leaf_node_entries < tree_layout.max_leaf_node_entries
-                            {
+                            if preexisting_entry.is_some() || leaf_node_entries < tree_layout.max_leaf_node_entries {
                                 if let Some(InodeIndexTreeNodeRefForUpdate::Owned {
                                     node: parent_node,
                                     is_modified_by_transaction: parent_node_is_modified_by_transaction,
@@ -5685,7 +5987,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 transaction,
                                 Ok(InodeIndexLookupForInsertResult {
                                     inode: this.inode,
-                                    preexisting_entry_extent_ptr,
+                                    preexisting_entry,
                                     leaf_node: node_ref,
                                     leaf_parent_node: this.found_leaf_parent_node.take(),
                                 }),
@@ -5712,6 +6014,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 /// Insert or update an inode entry.
 pub struct InodeIndexInsertEntryFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     lookup_result: InodeIndexLookupForInsertResult,
+    entry_flags: InodeIndexEntryFlags,
+    entry_flags_mask: InodeIndexEntryFlags,
     pending_inode_extents_reallocation: InodeExtentsPendingReallocation,
     pending_inode_extents_list_update: InodeExtentsListPendingUpdate,
     fut_state: InodeIndexInsertEntryFutureState<ST, B>,
@@ -5826,6 +6130,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexInsertEntryFuture
     /// * `transaction` - The [`Transaction`] to which to stage the updates.
     /// * `lookup_result` - The [`InodeIndexLookupForInsertResult`] for the
     ///   inode to modify.
+    /// * `entry_flags` - The inode index entry flags flags for the inode entry.
+    ///   The value is masked by `entry_flags_mask`. If an inode index entry
+    ///   for the inode identified by `lookup_result` exists already,
+    ///   then only the bits set in `entry_flags_mask` are updated to the
+    ///   value specified at the corresponding position in `entry_flags`.
+    /// * `entry_flags_mask` - The bitmask to apply to `entry_flags`.
     /// * `pending_inode_extents_reallocation` - The inode's pending data
     ///   extents (re)allocations. Consumed on success, returned from
     ///   [`poll`](Self::poll) upon failure.
@@ -5836,11 +6146,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexInsertEntryFuture
     pub fn new(
         transaction: Box<transaction::Transaction>,
         lookup_result: InodeIndexLookupForInsertResult,
+        mut entry_flags: InodeIndexEntryFlags,
+        entry_flags_mask: InodeIndexEntryFlags,
         pending_inode_extents_reallocation: InodeExtentsPendingReallocation,
         pending_inode_extents_list_update: InodeExtentsListPendingUpdate,
     ) -> Self {
+        entry_flags &= entry_flags_mask;
         Self {
             lookup_result,
+            entry_flags,
+            entry_flags_mask,
             pending_inode_extents_reallocation,
             pending_inode_extents_list_update,
             fut_state: InodeIndexInsertEntryFutureState::Init {
@@ -5902,13 +6217,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         None => break (None, Err(nvfs_err_internal!())),
                     };
 
-                    if let Some(lookup_result_preexisting_extent_ptr) =
-                        this.lookup_result.preexisting_entry_extent_ptr.as_ref()
-                    {
-                        if *lookup_result_preexisting_extent_ptr
-                            == this
-                                .pending_inode_extents_list_update
-                                .get_inode_index_entry_extent_ptr()
+                    if let Some(lookup_result_preexisting_entry) = this.lookup_result.preexisting_entry.as_ref() {
+                        if ((lookup_result_preexisting_entry.0 ^ this.entry_flags) & this.entry_flags_mask == 0)
+                            && lookup_result_preexisting_entry.1
+                                == this
+                                    .pending_inode_extents_list_update
+                                    .get_inode_index_entry_extent_ptr()
                         {
                             // The inode entry is already up-to-date and we're almost done. Now that
                             // it is known that no non-revertable allocations will be made for index
@@ -6023,7 +6337,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     };
 
                     // Try to update the leaf node directly, which is possible if either there's a
-                    // preexisting entry for the inode or already or the node has enough capacity
+                    // preexisting entry for the inode already or the node has enough capacity
                     // left.
                     let [nodes_staged_updates_leaf_slot] =
                         match TransactionInodeIndexUpdates::get_tree_nodes_staged_updates_slots_mut(
@@ -6040,7 +6354,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     };
 
                     let tree_layout = &fs_instance_sync_state.inode_index.layout;
-                    if this.lookup_result.preexisting_entry_extent_ptr.is_some()
+                    if this.lookup_result.preexisting_entry.is_some()
                         || staged_update_leaf_node.entries < tree_layout.max_leaf_node_entries
                     {
                         // Now that it is known that no non-revertable allocations will be made for
@@ -6073,8 +6387,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             };
                         }
 
+                        let entry_flags = this
+                            .lookup_result
+                            .preexisting_entry
+                            .as_ref()
+                            .map(|preexisting_entry| preexisting_entry.0 & !this.entry_flags_mask)
+                            .unwrap_or(0)
+                            | this.entry_flags;
                         if let Err(e) = staged_update_leaf_node.insert(
                             this.lookup_result.inode,
+                            entry_flags,
                             this.pending_inode_extents_list_update
                                 .get_inode_index_entry_extent_ptr(),
                             None,
@@ -6805,6 +7127,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                             if let Err(e) = leaf_node.insert(
                                 this.lookup_result.inode,
+                                this.entry_flags,
                                 this.pending_inode_extents_list_update
                                     .get_inode_index_entry_extent_ptr(),
                                 None,
@@ -7161,6 +7484,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                                 match old_root_node.split_insert(
                                     this.lookup_result.inode,
+                                    this.entry_flags,
                                     this.pending_inode_extents_list_update
                                         .get_inode_index_entry_extent_ptr(),
                                     insertion_pos,
@@ -7478,6 +7802,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                             match child_node.split_insert(
                                 this.lookup_result.inode,
+                                this.entry_flags,
                                 this.pending_inode_extents_list_update
                                     .get_inode_index_entry_extent_ptr(),
                                 insertion_pos,

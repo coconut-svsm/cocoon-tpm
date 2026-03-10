@@ -136,6 +136,9 @@ Note that for the anticipated CocoonFs usage scenarios, i.e. the storage of core
 possible to make such static assignments at development time and thus, it is certainly desirable to avoid the overhead
 of updating directory metadata structures.
 
+In addition to the data itself, a set of flags is associated with each allocated inode, 8 of which are freely available
+for application use.
+
 ### [Journal]{#sec-introduction-journal}
 For robustness against service interruptions, e.g. power cuts, crashes and alike, CocoonFs implements a journal.
 
@@ -1016,10 +1019,12 @@ size), but ensures that
   representable as a 64 bit integer.
 
 ## [Inode index]{#sec-inode-index}
-Inodes are identified by positive 64 bit integers. The inode index tracks the allocated inodes and their associated
-locations on storage each, either by means of a direct [encoded extent pointer](#sec-enc-extent-ptr) or by an "indirect"
-pointer pointing to the head of some [chained extents](#sec-encryption-entity-chained-extents) storing the inode's
-[extents list](#sec-enc-extents-list).
+Inodes are identified by positive 64 bit integers. The inode index tracks the allocated inodes and a set of associated
+flags as well as the locations of inode data on storage each. The inode flags are stored as 32 bit integers in
+little-endian format, of which the least significant 8 bits are freely available for application use, and the remaining
+24 bits are reserved and constant zero. The location of each inode's data on storage is represented either by means of a
+direct [encoded extent pointer](#sec-enc-extent-ptr) or by an "indirect" pointer pointing to the head of some [chained
+extents](#sec-encryption-entity-chained-extents) storing the inode's [extents list](#sec-enc-extents-list).
 
 The inode index is organized as a B+-tree, with node sizes as specified by the
 [`index_tree_leaf_node_allocation_blocks_log2`](#def-image-layout) and
@@ -1040,10 +1045,11 @@ number, a subdomain value of `INODE_KEY_SUBDOMAIN_DATA`, and a key purpose of
 ### Inode index leaf node format
 Let $B_{\textrm{leaf}}$ denote a decrypted index leaf node's maximum possible payload size in units of bytes. The
 maximum number of entries in a leaf node is then given by
-$M_{\textrm{leaf}} = \left\lfloor\frac{B_{\textrm{leaf}} - 12}{16}\right\rfloor$.
+$M_{\textrm{leaf}} = \left\lfloor\frac{B_{\textrm{leaf}} - 12}{20}\right\rfloor$.
 The minimum leaf node fill level is set to $m_\textrm{leaf} = \left\lceil\frac{M_\textrm{leaf}}{2}\right\rceil$.
 $B_{\textrm{leaf}}$ must be large enough so that the constraint $m_\textrm{leaf} >= 3$ holds. Note that with a minimum
-inode index leaf node block size of 128B, and a maximum IV length of 16B, the $m_\textrm{leaf} >= 3$ is automatically fulfilled.
+inode index leaf node block size of 128B, and a maximum IV length of 16B, the $m_\textrm{leaf} >= 3$ is automatically
+fulfilled.
 
 The leaf node format is as follows:
 
@@ -1054,21 +1060,25 @@ The leaf node format is as follows:
 |                                                               |next leaf node in tree order, if any, or NIL          |
 |                                                               |otherwise.                                            |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8$ to $8 + 8\cdot M_\textrm{leaf}$                            |The inode entries associated [encoded extent          |
+|$8$ to $8 + 8\cdot M_\textrm{leaf}$                            |The inode entries' associated [encoded extent         |
 |                                                               |pointers](#sec-enc-extent-ptr).                       |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8 + 8\cdot M_\textrm{leaf}$ to $8 + 16\cdot M_\textrm{leaf}$  |The inode entries associated keys, i.e. the inode     |
+|$8 + 8\cdot M_\textrm{leaf}$ to $8 + 16\cdot M_\textrm{leaf}$  |The inode entries' associated keys, i.e. the inode    |
 |                                                               |numbers, encoded as 64 bit integers in little endian  |
 |                                                               |format.                                               |
 +---------------------------------------------------------------+------------------------------------------------------+
-|$8 + 16\cdot M_\textrm{leaf}$ to $12 + 16\cdot M_\textrm{leaf}$|The node level, fixed to 1 for leaf nodes, encoded as |
+|$8 + 16\cdot M_\textrm{leaf}$ to $8 + 20\cdot M_\textrm{leaf}$ |The inode entries' associated flags, encoded as 32 bit|
+|                                                               |integers in little-endian format.                     |
++---------------------------------------------------------------+------------------------------------------------------+
+|$8 + 20\cdot M_\textrm{leaf}$ to $12 + 20\cdot M_\textrm{leaf}$|The node level, fixed to 1 for leaf nodes, encoded as |
 |                                                               |a 32 bit integer in little-endian format.             |
 +---------------------------------------------------------------+------------------------------------------------------+
 
-For $i\in\{0\ldots M_\textrm{leaf} - 1\}$, the i'th [encoded extent pointer](#sec-enc-extent-ptr) is associated with the
-i'th key. Unoccupied entries have a key value of 0, i.e. the special "no inode" value, and an encoded extent pointer
-value of NIL. The unoccupied slots must all be at the tail. The occupied entries must be sorted by the inode number. No
-leaf node with less than $m_\textrm{leaf}$ nodes may exist, except for possibly at the tree root.
+For $i\in\{0\ldots M_\textrm{leaf} - 1\}$, the i'th inode flags entry and i'th [encoded extent
+pointer](#sec-enc-extent-ptr) are associated with the i'th key respectively. Unoccupied entries have a key value of 0,
+i.e. the special "no inode" value, the inode flags all unset and an encoded extent pointer value of NIL. The unoccupied
+slots must all be at the tail. The occupied entries must be sorted by the inode number. No leaf node with less than
+$m_\textrm{leaf}$ nodes may exist, except for possibly at the tree root.
 
 ### Inode index internal node format
 Let $B_{\textrm{internal}}$ denote a decrypted index internal node's maximum possible payload size in units of

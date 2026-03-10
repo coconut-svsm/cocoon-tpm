@@ -749,6 +749,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let inode_index_insert_entry_fut = InodeIndexInsertEntryFuture::new(
                         transaction,
                         inode_index_lookup_result,
+                        0,
+                        0,
                         pending_inode_extents_reallocation,
                         pending_inode_extents_list_update,
                     );
