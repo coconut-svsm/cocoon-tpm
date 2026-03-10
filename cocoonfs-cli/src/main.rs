@@ -231,6 +231,10 @@ struct CliWriteFileArgs {
     /// Inode number of the file to write to.
     #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
     inode: u64,
+
+    /// Flags value to set for the inode.
+    #[arg(value_name="INODE-FLAGS", value_parser = clap::value_parser!(u8), default_value_t = 0)]
+    inode_flags: u8,
 }
 
 #[derive(clap::Args)]
@@ -922,6 +926,8 @@ fn main() {
                     &cocoonfs_mk_fs_instance_ref(&fs_instance),
                     transaction,
                     cli_write_file_args.inode,
+                    cli_write_file_args.inode_flags,
+                    0xffu8,
                     zeroize::Zeroizing::new(data),
                 ),
                 rng,
@@ -973,7 +979,7 @@ fn main() {
                 cli_read_file_args.enable_trimming,
             );
 
-            let data = match NvFsFutureAsCoreFuture::new(
+            let result = match NvFsFutureAsCoreFuture::new(
                 fs_instance.clone(),
                 <CocoonFsType as NvFs>::read_inode(
                     &cocoonfs_mk_fs_instance_ref(&fs_instance),
@@ -984,15 +990,15 @@ fn main() {
             )
             .block_on()
             {
-                Ok((_rng, Ok((_read_seq, Ok(data))))) => data,
+                Ok((_rng, Ok((_read_seq, Ok(result))))) => result,
                 Ok((_, Ok((_, Err(e))))) | Ok((_, Err(e))) | Err(e) => {
                     eprintln!("error: failed to read CocoonFS inode data: error={e:?}");
                     std::process::exit(6);
                 }
             };
 
-            let data = match data {
-                Some(data) => data,
+            let data = match result {
+                Some(result) => result.1,
                 None => {
                     eprintln!("error: CocoonFS inode doesn't exist");
                     std::process::exit(6);
@@ -1069,7 +1075,8 @@ fn main() {
 
                 match inode {
                     Some(inode) => {
-                        println!("{inode}")
+                        let (inode, inode_flags) = inode;
+                        println!("{inode} {inode_flags:#04x}")
                     }
                     None => break,
                 };

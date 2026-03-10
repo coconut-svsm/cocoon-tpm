@@ -20,7 +20,7 @@ use crate::{
             fs::{AllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             inode_extents_list::{InodeExtentsListReadFuture, InodeExtentsListWriteFuture},
             inode_index::{
-                InodeIndexInsertEntryFuture, InodeIndexKeyType, InodeIndexLookupForInsertFuture,
+                InodeIndexEntryFlags, InodeIndexInsertEntryFuture, InodeIndexKeyType, InodeIndexLookupForInsertFuture,
                 InodeIndexLookupForInsertResult, InodeKeySubdomain,
             },
             keys, layout, transaction,
@@ -46,6 +46,8 @@ use transaction::Transaction;
 /// [`NvFs::write_inode()`](crate::fs::NvFs::write_inode).
 pub struct WriteInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
+    inode_flags: InodeIndexEntryFlags,
+    inode_flags_mask: InodeIndexEntryFlags,
     data: zeroize::Zeroizing<Vec<u8>>,
     fut_state: WriteInodeDataFutureState<ST, B>,
 }
@@ -117,10 +119,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeDataFuture<ST, B>
     /// * `transaction` - The [`Transaction`] to stage the updates at.
     /// * `inode` - The inode whose contents to update. It will get created if
     ///   not existing yet.
+    /// * `inode_flags` - The flags to associate with `inode`. The value is masked by
+    ///   `inode_flags_mask`. If `inode` exists already, then only the bits set in
+    ///   `inode_flags_mask` are updated to the value specified at the corresponding position in
+    ///   `inode_flags`.
+    /// * `inode_flags_mask` - The bitmask to apply to `inode_flags`.
     /// * `data` - The inode's new data.
     pub fn new(
         mut transaction: Box<transaction::Transaction>,
         inode: InodeIndexKeyType,
+        inode_flags: InodeIndexEntryFlags,
+        inode_flags_mask: InodeIndexEntryFlags,
         data: zeroize::Zeroizing<Vec<u8>>,
     ) -> Self {
         // Start in a clean rollback state.
@@ -128,6 +137,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeDataFuture<ST, B>
         let inode_index_lookup_fut = InodeIndexLookupForInsertFuture::new(transaction, inode);
         Self {
             inode,
+            inode_flags,
+            inode_flags_mask,
             data,
             fut_state: WriteInodeDataFutureState::LookupInode { inode_index_lookup_fut },
         }
@@ -749,8 +760,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let inode_index_insert_entry_fut = InodeIndexInsertEntryFuture::new(
                         transaction,
                         inode_index_lookup_result,
-                        0,
-                        0,
+                        this.inode_flags,
+                        this.inode_flags_mask,
                         pending_inode_extents_reallocation,
                         pending_inode_extents_list_update,
                     );

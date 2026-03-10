@@ -18,7 +18,7 @@ use crate::{
             extents,
             fs::{CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             inode_extents_list::InodeExtentsListReadFuture,
-            inode_index::{InodeIndexKeyType, InodeIndexLookupFuture, InodeKeySubdomain},
+            inode_index::{InodeIndexEntryFlags, InodeIndexKeyType, InodeIndexLookupFuture, InodeKeySubdomain},
             keys,
             read_authenticate_extent::ReadAuthenticateExtentFuture,
             transaction,
@@ -41,6 +41,7 @@ use core::{mem, pin, task};
 /// [`NvFs::read_inode()`](crate::fs::NvFs::read_inode).
 pub struct ReadInodeDataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     inode: InodeIndexKeyType,
+    inode_flags: InodeIndexEntryFlags,
     fut_state: ReadInodeDataFutureState<ST, B>,
 }
 
@@ -85,6 +86,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadInodeDataFuture<ST, B> 
     pub fn new(transaction: Option<Box<transaction::Transaction>>, inode: InodeIndexKeyType) -> Self {
         Self {
             inode,
+            inode_flags: 0,
             fut_state: ReadInodeDataFutureState::LookupInode {
                 inode_index_lookup_fut: InodeIndexLookupFuture::new(transaction, inode),
             },
@@ -104,16 +106,19 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadInodeDataFuture<ST, B> 
     /// * `transaction` - Optional [`Transaction`](transaction::Transaction) to
     ///   read through.
     /// * `inode` - The inode whose data to read.
+    /// * `inode_flags` - The `inode`'s flags previously obtained from the inode index.
     /// * `inode_extents` - The `inode`'s data extents previously obtained from
     ///   the inode index. If `transaction` is specified, then they must be
     ///   consistent with its view on the inode index state.
     pub fn new_with_inode_extents(
         transaction: Option<Box<transaction::Transaction>>,
         inode: InodeIndexKeyType,
+        inode_flags: InodeIndexEntryFlags,
         inode_extents: extents::PhysicalExtents,
     ) -> Self {
         Self {
             inode,
+            inode_flags,
             fut_state: ReadInodeDataFutureState::ReadInodeDataExtentsPrepare {
                 transaction,
                 inode_extents,
@@ -132,7 +137,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
     /// it doesn't.
     type Output = (
         Option<Box<transaction::Transaction>>,
-        Result<Option<zeroize::Zeroizing<Vec<u8>>>, NvFsError>,
+        Result<Option<(InodeIndexEntryFlags, zeroize::Zeroizing<Vec<u8>>)>, NvFsError>,
     );
 
     type AuxPollData<'a> = ();
@@ -148,7 +153,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
         let (returned_transaction, e) = loop {
             match &mut this.fut_state {
                 ReadInodeDataFutureState::LookupInode { inode_index_lookup_fut } => {
-                    let (transaction, inode_index_entry_extent_ptr) = match CocoonFsSyncStateReadFuture::poll(
+                    let (transaction, inode_index_entry) = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(inode_index_lookup_fut),
                         fs_instance_sync_state,
                         &mut (),
@@ -161,14 +166,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let inode_index_entry_extent_ptr = match inode_index_entry_extent_ptr {
-                        Some(inode_index_entry_extent_ptr) => inode_index_entry_extent_ptr,
+                    let inode_index_entry = match inode_index_entry {
+                        Some(inode_index_entry) => inode_index_entry,
                         None => {
                             // Inode does not exist.
                             this.fut_state = ReadInodeDataFutureState::Done;
                             return task::Poll::Ready((transaction, Ok(None)));
                         }
                     };
+                    let (inode_index_entry_flags, inode_index_entry_extent_ptr) = inode_index_entry;
+                    this.inode_flags = inode_index_entry_flags;
 
                     let (
                         fs_instance,
@@ -376,7 +383,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         result_buf.resize(original_result_buf_len - padding_len, 0u8);
 
                         this.fut_state = ReadInodeDataFutureState::Done;
-                        return task::Poll::Ready((transaction, Ok(Some(result_buf))));
+                        return task::Poll::Ready((transaction, Ok(Some((this.inode_flags, result_buf)))));
                     }
                 }
                 ReadInodeDataFutureState::Done => unreachable!(),

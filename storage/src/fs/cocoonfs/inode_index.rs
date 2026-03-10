@@ -4387,11 +4387,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexLookupFuture<ST, 
     /// of the [`Transaction`] and eventually returns it back from
     /// [`poll()`](Self::poll) upon completion.
     ///
-    /// If `read_for_update` is true, then the returned
-    /// [`InodeIndexTreeNodeRef`] will be convertible to
-    /// an [`InodeIndexTreeNodeRefForUpdate`] via
-    /// [`InodeIndexTreeNodeRefForUpdate::try_from_node_ref()`].
-    ///
     /// # Arguments:
     ///
     /// * `transaction` - Optional [`Transaction`] to read through. If `Some`,
@@ -4424,7 +4419,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
     /// [`EncodedExtentPtr`] or `None` if the inode has no entry.
     type Output = (
         Option<Box<transaction::Transaction>>,
-        Result<Option<extent_ptr::EncodedExtentPtr>, NvFsError>,
+        Result<Option<(InodeIndexEntryFlags, extent_ptr::EncodedExtentPtr)>, NvFsError>,
     );
 
     type AuxPollData<'a> = ();
@@ -4548,13 +4543,21 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
-                            let entry_extent_ptr = match entry_index {
-                                Ok(entry_index) => match leaf_node.encoded_entry_extent_ptr(entry_index, tree_layout) {
-                                    Ok(entry_extent_ptr) => Some(EncodedExtentPtr::from(*entry_extent_ptr)),
-                                    Err(e) => {
-                                        break (returned_transaction.or(node_ref.into_transaction()), e);
-                                    }
-                                },
+                            let entry = match entry_index {
+                                Ok(entry_index) => {
+                                    let entry_flags = match leaf_node.entry_flags(entry_index, tree_layout) {
+                                        Ok(entry_flags) => entry_flags,
+                                        Err(e) => break (returned_transaction.or(node_ref.into_transaction()), e),
+                                    };
+                                    let entry_extent_ptr =
+                                        match leaf_node.encoded_entry_extent_ptr(entry_index, tree_layout) {
+                                            Ok(entry_extent_ptr) => EncodedExtentPtr::from(*entry_extent_ptr),
+                                            Err(e) => {
+                                                break (returned_transaction.or(node_ref.into_transaction()), e);
+                                            }
+                                        };
+                                    Some((entry_flags, entry_extent_ptr))
+                                }
                                 Err(_) => None,
                             };
 
@@ -4562,7 +4565,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             this.fut_state = InodeIndexLookupFutureState::Done;
                             return task::Poll::Ready((
                                 returned_transaction.or(node_ref.into_transaction()),
-                                Ok(entry_extent_ptr),
+                                Ok(entry),
                             ));
                         }
                         Err(e) => {
@@ -4783,7 +4786,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
     type Output = Result<
         (
             Box<InodeIndexEnumerateCursor<ST, B>>,
-            Result<Option<InodeIndexKeyType>, NvFsError>,
+            Result<Option<(InodeIndexKeyType, InodeIndexEntryFlags)>, NvFsError>,
         ),
         NvFsError,
     >;
@@ -4880,8 +4883,15 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 if inode == *cursor.inodes_enumerate_range.end() {
                                     cursor.at_end = true;
                                 }
+                                let inode_flags = match leaf_node.entry_flags(
+                                    tree_position.entry_index_in_leaf_node,
+                                    &fs_instance_sync_state.inode_index.layout,
+                                ) {
+                                    Ok(inode_flags) => inode_flags,
+                                    Err(e) => break (Some(cursor), None, e),
+                                };
                                 this.fut_state = InodeIndexEnumerateCursorNextFutureState::Done;
-                                return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
+                                return task::Poll::Ready(Ok((cursor, Ok(Some((inode, inode_flags))))));
                             }
 
                             // The current leaf node has been exhausted, move to the next one, if
@@ -5124,6 +5134,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
+                            let inode_flags = match leaf_node.entry_flags(entry_index_in_leaf_node, tree_layout) {
+                                Ok(inode_flags) => inode_flags,
+                                Err(e) => {
+                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
+                                }
+                            };
 
                             let (transaction, node_ref) = InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
                             cursor.transaction = transaction.or(returned_transaction);
@@ -5155,7 +5171,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                             cursor.tree_position = Some(tree_position);
                             this.fut_state = InodeIndexEnumerateCursorNextFutureState::Done;
-                            return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
+                            return task::Poll::Ready(Ok((cursor, Ok(Some((inode, inode_flags))))));
                         }
                         Err(e) => break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e),
                     }
@@ -5219,6 +5235,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Ok(inode) => inode,
                         Err(e) => break (Some(cursor), node_ref.into_transaction(), e),
                     };
+                    let inode_flags = match leaf_node.entry_flags(0, &fs_sync_state_inode_index.layout) {
+                        Ok(inode_flags) => inode_flags,
+                        Err(e) => break (Some(cursor), node_ref.into_transaction(), e),
+                    };
 
                     let (transaction, node_ref) = InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
                     cursor.transaction = transaction.or(returned_transaction);
@@ -5270,7 +5290,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             cursor.at_end = true;
                         }
                         this.fut_state = InodeIndexEnumerateCursorNextFutureState::Done;
-                        return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
+                        return task::Poll::Ready(Ok((cursor, Ok(Some((inode, inode_flags))))));
                     } else {
                         this.fut_state =
                             InodeIndexEnumerateCursorNextFutureState::InodesRangeExhausted { cursor: Some(cursor) };
@@ -5350,6 +5370,7 @@ enum InodeIndexEnumerateCursorReadInodeDataFutureState<ST: sync_types::SyncTypes
         // reference on Self. Has its transaction moved temporarily into read_inode_extents_list_fut.
         cursor: Option<Box<InodeIndexEnumerateCursor<ST, B>>>,
         inode: InodeIndexKeyType,
+        inode_index_entry_flags: InodeIndexEntryFlags,
         read_inode_extents_list_fut: InodeExtentsListReadFuture<ST, B>,
     },
     ReadInodeData {
@@ -5421,6 +5442,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Ok(inode) => inode,
                         Err(e) => break (Some(cursor), None, e),
                     };
+                    let inode_index_entry_flags = match leaf_node.entry_flags(
+                        tree_position.entry_index_in_leaf_node,
+                        &fs_instance_sync_state.inode_index.layout,
+                    ) {
+                        Ok(inode_index_entry_flags) => inode_index_entry_flags,
+                        Err(e) => break (Some(cursor), None, e),
+                    };
                     let inode_index_entry_extent_ptr = match leaf_node.entry_extent_ptr(
                         tree_position.entry_index_in_leaf_node,
                         &fs_instance_sync_state.inode_index.layout,
@@ -5443,6 +5471,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_inode_data_fut = ReadInodeDataFuture::new_with_inode_extents(
                                 cursor.transaction.take(),
                                 inode,
+                                inode_index_entry_flags,
                                 inode_extents,
                             );
                             this.fut_state = InodeIndexEnumerateCursorReadInodeDataFutureState::ReadInodeData {
@@ -5476,6 +5505,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             this.fut_state = InodeIndexEnumerateCursorReadInodeDataFutureState::ReadInodeExtentsList {
                                 cursor: Some(cursor),
                                 inode,
+                                inode_index_entry_flags,
                                 read_inode_extents_list_fut,
                             };
                         }
@@ -5486,6 +5516,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 InodeIndexEnumerateCursorReadInodeDataFutureState::ReadInodeExtentsList {
                     cursor,
                     inode,
+                    inode_index_entry_flags,
                     read_inode_extents_list_fut,
                 } => {
                     let (returned_transaction, _inode_extents_list_extents, inode_extents) =
@@ -5510,8 +5541,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         None => break (None, returned_transaction, nvfs_err_internal!()),
                     };
 
-                    let read_inode_data_fut =
-                        ReadInodeDataFuture::new_with_inode_extents(returned_transaction, *inode, inode_extents);
+                    let read_inode_data_fut = ReadInodeDataFuture::new_with_inode_extents(
+                        returned_transaction,
+                        *inode,
+                        *inode_index_entry_flags,
+                        inode_extents,
+                    );
                     this.fut_state = InodeIndexEnumerateCursorReadInodeDataFutureState::ReadInodeData {
                         cursor: Some(cursor),
                         read_inode_data_fut,
@@ -5521,7 +5556,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     cursor,
                     read_inode_data_fut,
                 } => {
-                    let (returned_transaction, inode_data) = match CocoonFsSyncStateReadFuture::poll(
+                    let (returned_transaction, result) = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(read_inode_data_fut),
                         fs_instance_sync_state,
                         &mut (),
@@ -5542,8 +5577,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                     // When here from the InodeIndexEnumerateCursor, it is known that the inode
                     // exists.
-                    let inode_data = match inode_data {
-                        Some(inode_data) => inode_data,
+                    let inode_data = match result {
+                        Some(result) => result.1,
                         None => break (Some(cursor), None, nvfs_err_internal!()),
                     };
 
@@ -8640,6 +8675,8 @@ struct InodeIndexUnlinkCursorTreePosition {
 struct InodeIndexUnlinkCursorTreePositionInodeEntry {
     /// The inode number.
     inode: InodeIndexKeyType,
+    /// The inode index entry flags.
+    inode_flags: InodeIndexEntryFlags,
     /// The inode's extents list if read already.
     ///
     /// The inode's extents list gets read lazily when needed, either on behalf
@@ -8712,12 +8749,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
     ///       [`Ok`] is returned:
     ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
     ///           specified enumeration range.
-    ///         * `Ok((cursor, Ok(Some(inode))))` - The next inode existing in
-    ///           the specified enumeration range has number `inode`.
+    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next inode
+    ///           existing in the specified enumeration range has number `inode`
+    ///           and flags `inode_flags`.
     type Output = Result<
         (
             Box<InodeIndexUnlinkCursor<ST, B>>,
-            Result<Option<InodeIndexKeyType>, NvFsError>,
+            Result<Option<(InodeIndexKeyType, InodeIndexEntryFlags)>, NvFsError>,
         ),
         NvFsError,
     >;
@@ -8819,16 +8857,26 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     };
                                     continue;
                                 }
+                                let inode_flags = match leaf_node.entry_flags(
+                                    tree_position.entry_index_in_leaf_node,
+                                    &fs_instance_sync_state.inode_index.layout,
+                                ) {
+                                    Ok(inode_flags) => inode_flags,
+                                    Err(e) => {
+                                        break (Some(cursor), Some(transaction), e);
+                                    }
+                                };
                                 if inode == *cursor.inodes_unlink_range.end() {
                                     cursor.at_end = true;
                                 }
                                 tree_position.inode = Some(InodeIndexUnlinkCursorTreePositionInodeEntry {
                                     inode,
+                                    inode_flags,
                                     inode_extents: None,
                                 });
                                 cursor.transaction = Some(transaction);
                                 this.fut_state = InodeIndexUnlinkCursorNextFutureState::Done;
-                                return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
+                                return task::Poll::Ready(Ok((cursor, Ok(Some((inode, inode_flags))))));
                             }
 
                             // The current leaf node has been exhausted, move to the next one, if
@@ -9215,6 +9263,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
                                 }
                             };
+                            let inode_flags = match leaf_node.entry_flags(entry_index_in_leaf_node, tree_layout) {
+                                Ok(inode_flags) => inode_flags,
+                                Err(e) => {
+                                    break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e);
+                                }
+                            };
 
                             let (transaction, node_ref) = InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
                             let transaction = transaction.or(returned_transaction);
@@ -9254,11 +9308,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                             tree_position.inode = Some(InodeIndexUnlinkCursorTreePositionInodeEntry {
                                 inode,
+                                inode_flags,
                                 inode_extents: None,
                             });
                             cursor.tree_position = Some(tree_position);
                             this.fut_state = InodeIndexUnlinkCursorNextFutureState::Done;
-                            return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
+                            return task::Poll::Ready(Ok((cursor, Ok(Some((inode, inode_flags))))));
                         }
                         Err(e) => break (Some(cursor), returned_transaction.or(node_ref.into_transaction()), e),
                     }
@@ -9336,6 +9391,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Ok(inode) => inode,
                         Err(e) => break (Some(cursor), Some(transaction), e),
                     };
+                    let inode_flags = match leaf_node.entry_flags(0, &fs_sync_state_inode_index.layout) {
+                        Ok(inode_flags) => inode_flags,
+                        Err(e) => {
+                            break (Some(cursor), Some(transaction), e);
+                        }
+                    };
 
                     let tree_position = match cursor.tree_position.as_mut() {
                         Some(tree_position) => {
@@ -9378,13 +9439,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     if inode <= *cursor.inodes_unlink_range.end() {
                         tree_position.inode = Some(InodeIndexUnlinkCursorTreePositionInodeEntry {
                             inode,
+                            inode_flags,
                             inode_extents: None,
                         });
                         if inode == *cursor.inodes_unlink_range.end() {
                             cursor.at_end = true;
                         }
                         this.fut_state = InodeIndexUnlinkCursorNextFutureState::Done;
-                        return task::Poll::Ready(Ok((cursor, Ok(Some(inode)))));
+                        return task::Poll::Ready(Ok((cursor, Ok(Some((inode, inode_flags))))));
                     } else {
                         this.fut_state =
                             InodeIndexUnlinkCursorNextFutureState::InodesRangeExhausted { cursor: Some(cursor) };
@@ -11529,6 +11591,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         let read_inode_data_fut = ReadInodeDataFuture::new_with_inode_extents(
                             Some(transaction),
                             tree_position_inode.inode,
+                            tree_position_inode.inode_flags,
                             inode_extents,
                         );
                         this.fut_state = InodeIndexUnlinkCursorReadInodeDataFutureState::ReadInodeData {
@@ -11574,6 +11637,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let read_inode_data_fut = ReadInodeDataFuture::new_with_inode_extents(
                                 Some(transaction),
                                 tree_position_inode.inode,
+                                tree_position_inode.inode_flags,
                                 inode_extents,
                             );
                             this.fut_state = InodeIndexUnlinkCursorReadInodeDataFutureState::ReadInodeData {
@@ -11667,6 +11731,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let read_inode_data_fut = ReadInodeDataFuture::new_with_inode_extents(
                         Some(transaction),
                         tree_position_inode.inode,
+                        tree_position_inode.inode_flags,
                         inode_extents,
                     );
                     this.fut_state = InodeIndexUnlinkCursorReadInodeDataFutureState::ReadInodeData {
@@ -11678,7 +11743,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     cursor,
                     read_inode_data_fut,
                 } => {
-                    let (returned_transaction, inode_data) = match CocoonFsSyncStateReadFuture::poll(
+                    let (returned_transaction, result) = match CocoonFsSyncStateReadFuture::poll(
                         pin::Pin::new(read_inode_data_fut),
                         fs_instance_sync_state,
                         &mut (),
@@ -11702,8 +11767,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     };
 
                     // When here from the InodeIndexUnlinkCursor, it is known that the inode exists.
-                    let inode_data = match inode_data {
-                        Some(inode_data) => inode_data,
+                    let inode_data = match result {
+                        Some(result) => result.1,
                         None => break (Some(cursor), Some(transaction), nvfs_err_internal!()),
                     };
 

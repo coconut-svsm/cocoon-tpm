@@ -908,9 +908,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFs for CocoonFs<ST, B
         _this: &Self::SyncRcPtrRef<'_>,
         transaction: Self::Transaction,
         inode: u64,
+        inode_flags: u8,
+        inode_flags_mask: u8,
         data: zeroize::Zeroizing<Vec<u8>>,
     ) -> Self::WriteInodeFut {
-        WriteInodeFuture::new(transaction, inode, data)
+        WriteInodeFuture::new(transaction, inode, inode_flags, inode_flags_mask, data)
     }
 
     type EnumerateCursor = EnumerateCursor<ST, B>;
@@ -1400,7 +1402,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
     type Output = Result<
         (
             fs::NvFsReadContext<CocoonFs<ST, B>>,
-            Result<Option<zeroize::Zeroizing<Vec<u8>>>, NvFsError>,
+            Result<Option<(u8, zeroize::Zeroizing<Vec<u8>>)>, NvFsError>,
         ),
         NvFsError,
     >;
@@ -1504,7 +1506,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     };
 
                     this.fut_state = ReadInodeFutureState::Done;
-                    return task::Poll::Ready(Ok((context, result)));
+                    return task::Poll::Ready(Ok((
+                        context,
+                        result.map(|result| result.map(|(inode_flags, data)| (inode_flags as u8, data))),
+                    )));
                 }
                 ReadInodeFutureState::Done => unreachable!(),
             };
@@ -1526,6 +1531,8 @@ enum WriteInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
         // reference on Self.
         transaction: Option<Transaction>,
         inode: u64,
+        inode_flags: u8,
+        inode_flags_mask: u8,
         data: zeroize::Zeroizing<Vec<u8>>,
     },
     WriteInodeData {
@@ -1536,11 +1543,19 @@ enum WriteInodeFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeFuture<ST, B> {
-    fn new(transaction: Transaction, inode: u64, data: zeroize::Zeroizing<Vec<u8>>) -> Self {
+    fn new(
+        transaction: Transaction,
+        inode: u64,
+        inode_flags: u8,
+        inode_flags_mask: u8,
+        data: zeroize::Zeroizing<Vec<u8>>,
+    ) -> Self {
         Self {
             fut_state: WriteInodeFutureState::Init {
                 transaction: Some(transaction),
                 inode,
+                inode_flags,
+                inode_flags_mask,
                 data,
             },
         }
@@ -1566,6 +1581,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                 WriteInodeFutureState::Init {
                     transaction,
                     inode,
+                    inode_flags,
+                    inode_flags_mask,
                     data,
                 } => {
                     let transaction = match transaction.take() {
@@ -1587,7 +1604,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                         read_sequence,
                         transaction,
                     } = transaction;
-                    let write_inode_data_fut = WriteInodeDataFuture::new(transaction, *inode, mem::take(data));
+                    let write_inode_data_fut = WriteInodeDataFuture::new(
+                        transaction,
+                        *inode,
+                        *inode_flags as inode_index::InodeIndexEntryFlags,
+                        *inode_flags_mask as inode_index::InodeIndexEntryFlags,
+                        mem::take(data),
+                    );
                     this.fut_state = WriteInodeFutureState::WriteInodeData {
                         read_sequence,
                         write_inode_data_fut,
@@ -1753,7 +1776,7 @@ pub struct EnumerateCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlk
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
     for EnumerateCursorNextFuture<ST, B>
 {
-    type Output = Result<(EnumerateCursor<ST, B>, Result<Option<u64>, NvFsError>), NvFsError>;
+    type Output = Result<(EnumerateCursor<ST, B>, Result<Option<(u64, u8)>, NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1777,7 +1800,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     read_sequence: this.read_sequence,
                     with_transaction: this.with_transaction,
                 },
-                result,
+                result.map(|result| result.map(|(inode, inode_flags)| (inode, inode_flags as u8))),
             ))),
             task::Poll::Ready(Err(e)) => task::Poll::Ready(Err(e)),
             task::Poll::Pending => task::Poll::Pending,
@@ -1912,7 +1935,7 @@ pub struct UnlinkCursorNextFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev
 }
 
 impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>> for UnlinkCursorNextFuture<ST, B> {
-    type Output = Result<(UnlinkCursor<ST, B>, Result<Option<u64>, NvFsError>), NvFsError>;
+    type Output = Result<(UnlinkCursor<ST, B>, Result<Option<(u64, u8)>, NvFsError>), NvFsError>;
 
     fn poll(
         self: pin::Pin<&mut Self>,
@@ -1935,7 +1958,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
                     cursor,
                     read_sequence: this.read_sequence,
                 },
-                result,
+                result.map(|result| result.map(|(inode, inode_flags)| (inode, inode_flags as u8))),
             ))),
             task::Poll::Ready(Err(e)) => task::Poll::Ready(Err(e)),
             task::Poll::Pending => task::Poll::Pending,
