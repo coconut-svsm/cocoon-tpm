@@ -2849,5 +2849,62 @@ mod tests {
                 assert!(!io_slice.all_lengths_multiple_of(5).unwrap());
             }
         }
+
+        #[test]
+        fn genericiosliceiter() {
+            let prefix = [0u8, 1];
+            let buffer1 = [2u8, 3, 4, 5];
+            let buffer2 = [6u8, 7, 8, 9];
+            {
+                // without "head"
+                let iter = GenericIoSlicesIter::new(
+                    [Ok::<_, convert::Infallible>(buffer1.as_slice()), Ok(buffer2.as_slice())].into_iter(),
+                    None,
+                );
+
+                // total_len
+                assert_eq!(iter.total_len().unwrap(), buffer1.len() + buffer2.len());
+
+                // all_lengths_multiple_of
+                assert!(iter.all_lengths_multiple_of(4).unwrap());
+                assert!(!iter.all_lengths_multiple_of(5).unwrap());
+
+                // for_each
+                let slices = [buffer1.as_slice(), buffer2.as_slice()];
+                let mut i = slices.iter();
+                iter.for_each(&mut |v| {
+                    assert_eq!(v, *i.next().unwrap());
+                    true
+                })
+                .unwrap();
+                assert!(i.next().is_none());
+            }
+
+            {
+                // with "head"
+                let iter = GenericIoSlicesIter::new(
+                    [Ok::<_, convert::Infallible>(buffer1.as_slice()), Ok(buffer2.as_slice())].into_iter(),
+                    Some(prefix.as_slice()),
+                );
+
+                // total_len
+                assert_eq!(iter.total_len().unwrap(), buffer1.len() + buffer2.len() + prefix.len());
+
+                // all_lengths_multiple_of
+                assert!(iter.all_lengths_multiple_of(2).unwrap());
+                assert!(!iter.all_lengths_multiple_of(4).unwrap());
+                assert!(!iter.all_lengths_multiple_of(5).unwrap());
+
+                // for_each
+                let slices = [prefix.as_slice(), buffer1.as_slice(), buffer2.as_slice()];
+                let mut i = slices.iter();
+                iter.for_each(&mut |v| {
+                    assert_eq!(v, *i.next().unwrap());
+                    true
+                })
+                .unwrap();
+                assert!(i.next().is_none());
+            }
+        }
     }
 }
