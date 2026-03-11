@@ -2817,5 +2817,37 @@ mod tests {
                 }
             }
         }
+
+        #[test]
+        fn singeltoniosliceiter() {
+            let slice = [0u8, 1, 2, 3, 4, 5];
+            {
+                // total len
+                let io_slice = SingletonIoSlice::new(&slice);
+                assert_eq!(io_slice.total_len().unwrap(), 6);
+            }
+
+            {
+                // for each
+                let io_slice = SingletonIoSlice::new(&slice);
+                let slices = [slice.as_slice()];
+                let mut i = slices.iter();
+                io_slice
+                    .for_each(&mut |v| {
+                        assert_eq!(v, *i.next().unwrap());
+                        true
+                    })
+                    .unwrap();
+                assert!(i.next().is_none());
+            }
+
+            {
+                // all_lengths_multiple_of
+                let io_slice = SingletonIoSlice::new(&slice);
+                assert!(io_slice.all_lengths_multiple_of(6).unwrap());
+                assert!(io_slice.all_lengths_multiple_of(3).unwrap());
+                assert!(!io_slice.all_lengths_multiple_of(5).unwrap());
+            }
+        }
     }
 }
