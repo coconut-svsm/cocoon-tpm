@@ -2906,5 +2906,31 @@ mod tests {
                 assert!(i.next().is_none());
             }
         }
+
+        #[test]
+        fn covariantioslicesiter() {
+            let buffer1 = [0u8, 1];
+            let buffer2 = [2u8, 3, 4, 5, 6, 7, 8, 9];
+            let slices = [buffer1.as_slice(), buffer2.as_slice()];
+
+            let mut iter1 = BuffersSliceIoSlicesIter::new(&slices);
+            let iter = iter1.as_ref();
+
+            // total len
+            assert_eq!(iter.total_len().unwrap(), buffer1.len() + buffer2.len());
+
+            // all_lengths_multiple_of
+            assert!(iter.all_lengths_multiple_of(2).unwrap());
+            assert!(!iter.all_lengths_multiple_of(4).unwrap());
+
+            // for_each
+            let mut i = slices.iter();
+            iter.for_each(&mut |v| {
+                assert_eq!(v, *i.next().unwrap());
+                true
+            })
+            .unwrap();
+            assert!(i.next().is_none());
+        }
     }
 }
