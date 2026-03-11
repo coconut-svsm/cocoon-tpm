@@ -2753,5 +2753,69 @@ mod tests {
                 assert!(!slice.all_lengths_multiple_of(17).unwrap());
             }
         }
+
+        #[test]
+        fn io_slices_take_exact() {
+            let buffer1 = [0u8, 1];
+            let buffer2 = [2u8, 3, 4, 5, 6, 7, 8, 9];
+            let slices = [buffer1.as_slice(), buffer2.as_slice()];
+
+            {
+                // total len
+                let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(5);
+
+                assert_eq!(take_exact.total_len().unwrap(), 5);
+            }
+
+            {
+                let mut take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(4);
+                assert_eq!(take_exact.next_slice(None).unwrap().unwrap(), buffer1);
+                assert_eq!(take_exact.next_slice(None).unwrap().unwrap(), &buffer2[0..2]);
+                assert!(take_exact.next_slice(None).unwrap().is_none());
+            }
+
+            {
+                // for each
+                let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(4);
+                let all_slices = [buffer1.as_slice(), &buffer2[0..2]];
+                let mut i = all_slices.iter();
+
+                take_exact
+                    .for_each(&mut |v| {
+                        assert_eq!(v, *i.next().unwrap());
+                        true
+                    })
+                    .unwrap();
+                assert!(i.next().is_none());
+            }
+
+            {
+                // all_lengths_multiple_of
+                {
+                    let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(4);
+                    // Lengths are 2 and 2
+                    assert!(take_exact.all_lengths_multiple_of(2).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(4).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(5).unwrap());
+                }
+                {
+                    let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(3);
+                    // Lengths are 2 and 1
+                    assert!(take_exact.all_lengths_multiple_of(1).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(3).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(4).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(5).unwrap());
+                }
+                {
+                    let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(5);
+                    // Lengths are 2 and 3.
+                    assert!(take_exact.all_lengths_multiple_of(1).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(2).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(3).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(4).unwrap());
+                    assert!(!take_exact.all_lengths_multiple_of(5).unwrap());
+                }
+            }
+        }
     }
 }
