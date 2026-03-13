@@ -36,7 +36,7 @@ struct StdFileNvBlkDevInner {
     /// failed state.
     ///
     /// The failed state is typically entered once a query for
-    /// [`volume_file`](Self::volume_size) fails, and the value in
+    /// [`volume_file`](Self::volume_file) fails, and the value in
     /// [`io_blocks`](Self::io_blocks) has therefore become stale.
     failed: bool,
 }
