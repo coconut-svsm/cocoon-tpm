@@ -546,20 +546,20 @@ pub trait WalkableIoSlicesIter<'a>: IoSlicesIter<'a> {
     ///
     /// * [`BackendIteratorError`](IoSlicesIterCommon::BackendIteratorError) -
     ///   Error specific to the trait implementation.
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        let mut all_aligned = true;
+    fn all_lengths_multiple_of(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+        let mut all_multiple_of = true;
         if alignment.is_pow2() {
             self.for_each(&mut |slice| {
-                all_aligned &= slice.len() & (alignment - 1) == 0;
-                all_aligned
+                all_multiple_of &= slice.len() & (alignment - 1) == 0;
+                all_multiple_of
             })?;
         } else {
             self.for_each(&mut |slice| {
-                all_aligned &= slice.len() % alignment == 0;
-                all_aligned
+                all_multiple_of &= slice.len() % alignment == 0;
+                all_multiple_of
             })?;
         }
-        Ok(all_aligned)
+        Ok(all_multiple_of)
     }
 }
 
@@ -1908,7 +1908,7 @@ impl<'a> WalkableIoSlicesIter<'a> for EmptyIoSlices {
         Ok(0)
     }
 
-    fn all_aligned_to(&self, _alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+    fn all_lengths_multiple_of(&self, _alignment: usize) -> Result<bool, Self::BackendIteratorError> {
         Ok(true)
     }
 }
@@ -2025,8 +2025,8 @@ where
         self.iter.total_len().map_err(|e| (self.f)(e))
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        self.iter.all_aligned_to(alignment).map_err(|e| (self.f)(e))
+    fn all_lengths_multiple_of(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+        self.iter.all_lengths_multiple_of(alignment).map_err(|e| (self.f)(e))
     }
 }
 
@@ -2138,8 +2138,8 @@ impl<'a, 'b: 'a, I: ?Sized + WalkableIoSlicesIter<'b>> WalkableIoSlicesIter<'a>
         (*self.iter).total_len()
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        (*self.iter).all_aligned_to(alignment)
+    fn all_lengths_multiple_of(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+        (*self.iter).all_lengths_multiple_of(alignment)
     }
 }
 
@@ -2499,17 +2499,17 @@ where
             + self.iter1.as_ref().map(|iter1| iter1.total_len()).unwrap_or(Ok(0))?)
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+    fn all_lengths_multiple_of(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
         Ok(self
             .iter0
             .as_ref()
-            .map(|iter0| iter0.all_aligned_to(alignment))
+            .map(|iter0| iter0.all_lengths_multiple_of(alignment))
             .transpose()?
             .unwrap_or(true)
             && self
                 .iter1
                 .as_ref()
-                .map(|iter1| iter1.all_aligned_to(alignment))
+                .map(|iter1| iter1.all_lengths_multiple_of(alignment))
                 .transpose()?
                 .unwrap_or(true))
     }
@@ -2612,7 +2612,7 @@ impl<'a> WalkableIoSlicesIter<'a> for ZeroFilledIoSlices {
         Ok(self.remaining)
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+    fn all_lengths_multiple_of(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
         if alignment.is_pow2() {
             Ok(self.remaining & (alignment - 1) == 0)
         } else {
