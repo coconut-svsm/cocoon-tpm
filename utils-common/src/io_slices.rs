@@ -535,31 +535,36 @@ pub trait WalkableIoSlicesIter<'a>: IoSlicesIter<'a> {
         Ok(l)
     }
 
-    /// Test whether all of an *IO slice iterator's* byte slice's length have a
-    /// given alignment.
+    /// Test whether all of an *IO slice iterator's* byte slice's lengths are a
+    /// multiple of a given divisor.
+    ///
+    /// Returns `false` if `divisor` is zero.
     ///
     /// # Arguments:
     ///
-    /// * `alignment` - The desired alignment.
+    /// * `divisor` - The desired divisor.
     ///
     /// # Errors:
     ///
     /// * [`BackendIteratorError`](IoSlicesIterCommon::BackendIteratorError) -
     ///   Error specific to the trait implementation.
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        let mut all_aligned = true;
-        if alignment.is_pow2() {
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        if divisor == 0 {
+            return Ok(false);
+        }
+        let mut all_multiple_of = true;
+        if divisor.is_pow2() {
             self.for_each(&mut |slice| {
-                all_aligned &= slice.len() & (alignment - 1) == 0;
-                all_aligned
+                all_multiple_of &= slice.len() & (divisor - 1) == 0;
+                all_multiple_of
             })?;
         } else {
             self.for_each(&mut |slice| {
-                all_aligned &= slice.len() % alignment == 0;
-                all_aligned
+                all_multiple_of &= slice.len() % divisor == 0;
+                all_multiple_of
             })?;
         }
-        Ok(all_aligned)
+        Ok(all_multiple_of)
     }
 }
 
@@ -1908,8 +1913,8 @@ impl<'a> WalkableIoSlicesIter<'a> for EmptyIoSlices {
         Ok(0)
     }
 
-    fn all_aligned_to(&self, _alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        Ok(true)
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        Ok(divisor != 0)
     }
 }
 
@@ -2025,8 +2030,8 @@ where
         self.iter.total_len().map_err(|e| (self.f)(e))
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        self.iter.all_aligned_to(alignment).map_err(|e| (self.f)(e))
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        self.iter.all_lengths_multiple_of(divisor).map_err(|e| (self.f)(e))
     }
 }
 
@@ -2138,8 +2143,8 @@ impl<'a, 'b: 'a, I: ?Sized + WalkableIoSlicesIter<'b>> WalkableIoSlicesIter<'a>
         (*self.iter).total_len()
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        (*self.iter).all_aligned_to(alignment)
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        (*self.iter).all_lengths_multiple_of(divisor)
     }
 }
 
@@ -2499,17 +2504,20 @@ where
             + self.iter1.as_ref().map(|iter1| iter1.total_len()).unwrap_or(Ok(0))?)
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        if divisor == 0 {
+            return Ok(false);
+        }
         Ok(self
             .iter0
             .as_ref()
-            .map(|iter0| iter0.all_aligned_to(alignment))
+            .map(|iter0| iter0.all_lengths_multiple_of(divisor))
             .transpose()?
             .unwrap_or(true)
             && self
                 .iter1
                 .as_ref()
-                .map(|iter1| iter1.all_aligned_to(alignment))
+                .map(|iter1| iter1.all_lengths_multiple_of(divisor))
                 .transpose()?
                 .unwrap_or(true))
     }
@@ -2612,11 +2620,13 @@ impl<'a> WalkableIoSlicesIter<'a> for ZeroFilledIoSlices {
         Ok(self.remaining)
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        if alignment.is_pow2() {
-            Ok(self.remaining & (alignment - 1) == 0)
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        if divisor == 0 {
+            Ok(false)
+        } else if divisor.is_pow2() {
+            Ok(self.remaining & (divisor - 1) == 0)
         } else {
-            Ok(self.remaining.is_multiple_of(alignment))
+            Ok(self.remaining.is_multiple_of(divisor))
         }
     }
 }
