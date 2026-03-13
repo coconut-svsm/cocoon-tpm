@@ -4574,7 +4574,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
         Ok(())
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+    fn all_lengths_multiple_of(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
         if alignment.is_pow2() && alignment <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
@@ -4583,19 +4583,19 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
                 .map(|slice| slice.len() & (alignment - 1) == 0)
                 .unwrap_or(true))
         } else {
-            let mut all_aligned = true;
+            let mut all_multiple_of = true;
             if alignment.is_pow2() {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() & (alignment - 1) == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() & (alignment - 1) == 0;
+                    all_multiple_of
                 })?;
             } else {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() % alignment == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() % alignment == 0;
+                    all_multiple_of
                 })?;
             }
-            Ok(all_aligned)
+            Ok(all_multiple_of)
         }
     }
 }
@@ -4728,7 +4728,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
         Ok(())
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
+    fn all_lengths_multiple_of(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
         if alignment.is_pow2() && alignment <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
@@ -4737,19 +4737,19 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
                 .map(|slice| slice.len() & (alignment - 1) == 0)
                 .unwrap_or(true))
         } else {
-            let mut all_aligned = true;
+            let mut all_multiple_of = true;
             if alignment.is_pow2() {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() & (alignment - 1) == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() & (alignment - 1) == 0;
+                    all_multiple_of
                 })?;
             } else {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() % alignment == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() % alignment == 0;
+                    all_multiple_of
                 })?;
             }
-            Ok(all_aligned)
+            Ok(all_multiple_of)
         }
     }
 }
