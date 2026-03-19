@@ -10,4 +10,7 @@ fn main() {
     // println!("cargo::metadata=CXXFLAGS=");
     // println!("cargo::metadata=LINK_SEARCH={}", ...);
     // println!("cargo::metadata=LINK_LIB={}", ...);
+
+    // Set the CMAKE_SYSTEM_NAME for embedded/standalone builds
+    // println!("cargo::metadata=CMAKE_SYSTEM_NAME=Generic");
 }

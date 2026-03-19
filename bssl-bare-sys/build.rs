@@ -26,18 +26,12 @@ fn main() {
     let bssl_libcrypto = out_path.join("build").join("libcrypto.a");
     let _ = std::fs::remove_file(bssl_libcrypto);
 
-    let mut integration_cppflags = None;
-    let mut integration_cflags = None;
-    let mut integration_cxxflags = None;
-    let mut integration_asflags = None;
-    let mut integration_bindgen_cflags = None;
-    if cfg!(feature = "target-integration") {
-        integration_cppflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_CPPFLAGS").ok();
-        integration_cflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_CFLAGS").ok();
-        integration_cxxflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_CXXFLAGS").ok();
-        integration_asflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_ASFLAGS").ok();
-        integration_bindgen_cflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_BINDGEN_CFLAGS").ok();
-    }
+    let integration_cppflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_CPPFLAGS").ok();
+    let integration_cflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_CFLAGS").ok();
+    let integration_cxxflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_CXXFLAGS").ok();
+    let integration_asflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_ASFLAGS").ok();
+    let integration_bindgen_cflags = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_BINDGEN_CFLAGS").ok();
+    let integration_cmake_system_name = env::var("DEP_BSSL_BARE_SYS_TARGET_INTEGRATION_CMAKE_SYSTEM_NAME").ok();
 
     // Build openssl.
     let bssl_src_dir = "third-party/boringssl";
@@ -57,8 +51,8 @@ fn main() {
     if let Some(integration_asflags) = integration_asflags.as_ref() {
         cmake_config.asmflag(integration_asflags);
     }
-    if cfg!(feature = "target-integration") {
-        cmake_config.configure_arg("-DCMAKE_SYSTEM_NAME=Generic");
+    if let Some(cmake_system_name) = integration_cmake_system_name.as_ref() {
+        cmake_config.configure_arg(format!("-DCMAKE_SYSTEM_NAME={cmake_system_name}"));
     }
     cmake_config.build_target("crypto");
     let bssl_dst_path = cmake_config.build();
