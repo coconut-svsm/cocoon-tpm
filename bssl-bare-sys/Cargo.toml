@@ -103,10 +103,9 @@ exclude = [
 [lib]
 
 [features]
-target-integration = ["dep:cocoon-tpm-bssl-bare-sys-target-integration"]
 
 [dependencies]
-cocoon-tpm-bssl-bare-sys-target-integration = { version = "0.1.1", optional = true }
+cocoon-tpm-bssl-bare-sys-target-integration = { version = "0.1.1" }
 
 [build-dependencies]
 bindgen = "0.71.1"
