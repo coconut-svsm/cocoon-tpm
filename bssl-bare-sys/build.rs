@@ -139,6 +139,8 @@ fn main() {
         "sysconf",
         "time",
         "vsnprintf",
+        // C++ runtime symbols (libstdc++).
+        "_ZSt21__glibcxx_assert_failPKciS0_S0_",
     ] {
         cmd.arg("--redefine-sym")
             .arg(format!("{LINK_NAME_SYM_PREFIX}{sym}={sym}"));

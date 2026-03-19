@@ -13,4 +13,10 @@ fn main() {
 
     // Set the CMAKE_SYSTEM_NAME for embedded/standalone builds
     // println!("cargo::metadata=CMAKE_SYSTEM_NAME=Generic");
+
+    // BoringSSL contains C++ code. This default integration stub targets a
+    // regular host environment, so link libstdc++. Embedded projects should
+    // replace this crate (via Cargo's [patch] mechanism) and provide
+    // whatever C++ runtime is appropriate for their environment.
+    println!("cargo::rustc-link-lib=stdc++");
 }
