@@ -2630,3 +2630,38 @@ impl<'a> PeekableIoSlicesIter<'a> for ZeroFilledIoSlices {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod walkableioslicesiter {
+        use super::*;
+
+        #[test]
+        fn emptyioslices() {
+            let io_slice = EmptyIoSlices::default();
+            {
+                // total len
+                assert_eq!(io_slice.total_len().unwrap(), 0);
+            }
+
+            {
+                // for each
+                io_slice
+                    .for_each(&mut |_| {
+                        assert!(false, "This should never be called");
+                        true
+                    })
+                    .unwrap();
+            }
+
+            {
+                // all_lengths_multiple_of
+                assert!(io_slice.all_lengths_multiple_of(5).unwrap());
+                assert!(io_slice.all_lengths_multiple_of(1).unwrap());
+                assert!(io_slice.all_lengths_multiple_of(4223).unwrap());
+            }
+        }
+    }
+}
