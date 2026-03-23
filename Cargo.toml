@@ -5,6 +5,7 @@ members = [
 	"crypto",
 	"bssl-bare-sys",
 	"bssl-bare-sys-target-integration",
+	"ossl-bare-sys",
 	"ossl-bare-sys-target-integration",
 	"storage",
 	"tpm2-interface",
@@ -15,6 +16,7 @@ members = [
 [patch.crates-io]
 cocoon-tpm-bssl-bare-sys = { path = "bssl-bare-sys" }
 cocoon-tpm-bssl-bare-sys-target-integration = { path = "bssl-bare-sys-target-integration" }
+cocoon-tpm-ossl-bare-sys = { path = "ossl-bare-sys" }
 cocoon-tpm-ossl-bare-sys-target-integration = { path = "ossl-bare-sys-target-integration" }
 cocoon-tpm-crypto = { path = "crypto" }
 cocoon-tpm-storage = { path = "storage" }
