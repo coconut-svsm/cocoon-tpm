@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 SUSE LLC
+// Copyright 2025-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 extern crate alloc;
@@ -30,12 +30,13 @@ struct CocoonFsTestLayoutConfig {
     auth_tree_node_io_blocks_log2: u8,
     auth_tree_data_block_allocation_blocks_log2: u8,
     allocation_bitmap_file_block_allocation_blocks_log2: u8,
-    index_tree_node_allocation_blocks_log2: u8,
+    index_tree_leaf_node_allocation_blocks_log2: u8,
+    index_tree_internal_node_allocation_blocks_log2: u8,
 
     salt_len: u8,
 }
 
-const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
+const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 7] = [
     // Base.
     CocoonFsTestLayoutConfig {
         blkdev_io_block_size_128b_log2: 0,
@@ -45,7 +46,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 0,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
     // Device IO Block size > Authentication Tree Data Block.
@@ -57,7 +59,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 2,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
     // Device IO Block size < Authentication Tree Data Block.
@@ -69,7 +72,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 4,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
         salt_len: 0,
     },
     // Device IO Block size < Allocation Block.
@@ -81,7 +85,34 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 0,
         auth_tree_data_block_allocation_blocks_log2: 0,
         allocation_bitmap_file_block_allocation_blocks_log2: 0,
-        index_tree_node_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 0,
+        salt_len: 0,
+    },
+    // Inode Index leaf node size > Inode Index internal node size
+    CocoonFsTestLayoutConfig {
+        blkdev_io_block_size_128b_log2: 0,
+        preferred_blkdev_io_blocks_bulk_log2: 2,
+        allocation_block_size_128b_log2: 0,
+        io_block_allocation_blocks_log2: 0,
+        auth_tree_node_io_blocks_log2: 0,
+        auth_tree_data_block_allocation_blocks_log2: 0,
+        allocation_bitmap_file_block_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 1,
+        index_tree_internal_node_allocation_blocks_log2: 0,
+        salt_len: 0,
+    },
+    // Inode Index leaf node size < Inode Index internal node size
+    CocoonFsTestLayoutConfig {
+        blkdev_io_block_size_128b_log2: 0,
+        preferred_blkdev_io_blocks_bulk_log2: 2,
+        allocation_block_size_128b_log2: 0,
+        io_block_allocation_blocks_log2: 0,
+        auth_tree_node_io_blocks_log2: 0,
+        auth_tree_data_block_allocation_blocks_log2: 0,
+        allocation_bitmap_file_block_allocation_blocks_log2: 0,
+        index_tree_leaf_node_allocation_blocks_log2: 0,
+        index_tree_internal_node_allocation_blocks_log2: 1,
         salt_len: 0,
     },
     // Realistic.
@@ -93,7 +124,8 @@ const COCOONFS_TEST_LAYOUT_CONFIGS: [CocoonFsTestLayoutConfig; 5] = [
         auth_tree_node_io_blocks_log2: 1,                       // 1024B
         auth_tree_data_block_allocation_blocks_log2: 2,         //  512B
         allocation_bitmap_file_block_allocation_blocks_log2: 0, //  128B
-        index_tree_node_allocation_blocks_log2: 0,              //  128B
+        index_tree_leaf_node_allocation_blocks_log2: 0,         //  128B
+        index_tree_internal_node_allocation_blocks_log2: 0,     //  128B
         salt_len: 0,
     },
 ];
@@ -135,7 +167,8 @@ impl<'a> CocoonFsTestConfig<'a> {
             self.layout.auth_tree_node_io_blocks_log2,
             self.layout.auth_tree_data_block_allocation_blocks_log2,
             self.layout.allocation_bitmap_file_block_allocation_blocks_log2,
-            self.layout.index_tree_node_allocation_blocks_log2,
+            self.layout.index_tree_leaf_node_allocation_blocks_log2,
+            self.layout.index_tree_internal_node_allocation_blocks_log2,
             self.crypto.auth_tree_node_hash_alg,
             self.crypto.auth_tree_data_hmac_hash_alg,
             self.crypto.auth_tree_root_hmac_hash_alg,
@@ -362,7 +395,7 @@ fn cocoonfs_test_commit_transaction_op_helper(
 fn cocoonfs_test_write_inode_op_helper(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     transaction: <TestCocoonFs as fs::NvFs>::Transaction,
-    inode: u32,
+    inode: u64,
     data: &[u8],
 ) -> Result<<TestCocoonFs as fs::NvFs>::Transaction, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
@@ -371,6 +404,9 @@ fn cocoonfs_test_write_inode_op_helper(
         &cocoonfs_test_mk_fs_instance_ref(fs_instance),
         transaction,
         inode,
+        // Use the least significant bits of the inode number for the flags.
+        inode as u8,
+        0xffu8,
         zeroize::Zeroizing::new(data),
     );
     let executor = TestAsyncExecutor::new();
@@ -386,7 +422,7 @@ fn cocoonfs_test_write_inode_op_helper(
 fn cocoonfs_test_read_inode_op_helper(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
-    inode: u32,
+    inode: u64,
 ) -> Result<(fs::NvFsReadContext<TestCocoonFs>, Option<zeroize::Zeroizing<Vec<u8>>>), fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let read_inode_fut =
@@ -398,20 +434,32 @@ fn cocoonfs_test_read_inode_op_helper(
     );
     TestAsyncExecutor::run_to_completion(&executor);
     let read_inode_result = read_inode_waiter.take().unwrap().unwrap().1;
-    read_inode_result.and_then(|(read_context, read_inode_result)| read_inode_result.map(|data| (read_context, data)))
+    read_inode_result.and_then(|(read_context, read_inode_result)| {
+        read_inode_result.map(|read_inode_result| {
+            (
+                read_context,
+                read_inode_result.map(|(inode_flags, data)| {
+                    // Verify that the inode flags match the least significant bits of the inode number,
+                    // c.f. cocoonfs_test_write_inode_op_helper().
+                    assert_eq!(inode as u8, inode_flags);
+                    data
+                }),
+            )
+        })
+    })
 }
 
 fn cocoonfs_test_enumerate_inodes_op_collect(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
-    inodes_enumerate_range: ops::RangeInclusive<u32>,
-) -> Result<(fs::NvFsReadContext<TestCocoonFs>, Vec<u32>), fs::NvFsError> {
+    inodes_enumerate_range: ops::RangeInclusive<u64>,
+) -> Result<(fs::NvFsReadContext<TestCocoonFs>, Vec<u64>), fs::NvFsError> {
     struct CollectInodesCallback {
-        collected_inodes: Vec<u32>,
+        collected_inodes: Vec<u64>,
     }
 
     impl CocoonFsTestEnumerateInodesFutureCallback for CollectInodesCallback {
-        fn call(&mut self, inode: u32, _inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<(), fs::NvFsError> {
+        fn call(&mut self, inode: u64, _inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<(), fs::NvFsError> {
             self.collected_inodes.push(inode);
             Ok(())
         }
@@ -432,7 +480,7 @@ fn cocoonfs_test_enumerate_inodes_op_collect(
 fn cocoonfs_test_enumerate_inodes_op_cb<CB: CocoonFsTestEnumerateInodesFutureCallback>(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
-    inodes_enumerate_range: ops::RangeInclusive<u32>,
+    inodes_enumerate_range: ops::RangeInclusive<u64>,
     callback: CB,
 ) -> Result<(fs::NvFsReadContext<TestCocoonFs>, CB), fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
@@ -453,7 +501,7 @@ fn cocoonfs_test_enumerate_inodes_op_cb<CB: CocoonFsTestEnumerateInodesFutureCal
 }
 
 trait CocoonFsTestEnumerateInodesFutureCallback: 'static + marker::Unpin + marker::Send {
-    fn call(&mut self, inode: u32, inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<(), fs::NvFsError>;
+    fn call(&mut self, inode: u64, inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<(), fs::NvFsError>;
 }
 
 struct CocoonFsTestEnumerateInodesFuture<CB: CocoonFsTestEnumerateInodesFutureCallback> {
@@ -466,19 +514,19 @@ struct CocoonFsTestEnumerateInodesFuture<CB: CocoonFsTestEnumerateInodesFutureCa
 enum CocoonFsTestEnumerateInodesFutureState {
     StartReadSequence {
         start_read_sequence_fut: <TestCocoonFs as fs::NvFs>::StartReadSequenceFut,
-        inodes_enumerate_range: ops::RangeInclusive<u32>,
+        inodes_enumerate_range: ops::RangeInclusive<u64>,
     },
     CreateEnumerateCursor {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
         // Self.
         read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
-        inodes_enumerate_range: ops::RangeInclusive<u32>,
+        inodes_enumerate_range: ops::RangeInclusive<u64>,
     },
     Next {
         next_fut: <<TestCocoonFs as fs::NvFs>::EnumerateCursor as fs::NvFsEnumerateCursor<TestCocoonFs>>::NextFut,
     },
     ReadCurrentInodeData {
-        inode: u32,
+        inode: u64,
         read_fut:
             <<TestCocoonFs as fs::NvFs>::EnumerateCursor as fs::NvFsEnumerateCursor<TestCocoonFs>>::ReadInodeDataFut,
     },
@@ -489,7 +537,7 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> CocoonFsTestEnumerateInodesF
     fn new(
         fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
         read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
-        inodes_enumerate_range: ops::RangeInclusive<u32>,
+        inodes_enumerate_range: ops::RangeInclusive<u64>,
         callback: CB,
     ) -> Result<Self, fs::NvFsError> {
         let fut_state = match read_context {
@@ -593,7 +641,10 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
                         };
 
                     match inode {
-                        Some(inode) => {
+                        Some((inode, inode_flags)) => {
+                            // Verify that the inode flags match the least significant bits of the inode number,
+                            // c.f. cocoonfs_test_write_inode_op_helper().
+                            assert_eq!(inode as u8, inode_flags);
                             let read_fut = fs::NvFsEnumerateCursor::read_current_inode_data(enumerate_cursor);
                             this.fut_state =
                                 CocoonFsTestEnumerateInodesFutureState::ReadCurrentInodeData { inode, read_fut };
@@ -660,7 +711,7 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
 fn cocoonfs_test_unlink_inodes_op_uncond(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     transaction: <TestCocoonFs as fs::NvFs>::Transaction,
-    inodes_unlink_range: ops::RangeInclusive<u32>,
+    inodes_unlink_range: ops::RangeInclusive<u64>,
 ) -> Result<<TestCocoonFs as fs::NvFs>::Transaction, fs::NvFsError> {
     cocoonfs_test_unlink_inodes_op_fnmut_cb(fs_instance, transaction, inodes_unlink_range, |_inode, _inode_data| {
         Ok(true)
@@ -669,23 +720,23 @@ fn cocoonfs_test_unlink_inodes_op_uncond(
 }
 
 fn cocoonfs_test_unlink_inodes_op_fnmut_cb<
-    CB: 'static + FnMut(u32, &[u8]) -> Result<bool, fs::NvFsError> + marker::Send + marker::Unpin,
+    CB: 'static + FnMut(u64, &[u8]) -> Result<bool, fs::NvFsError> + marker::Send + marker::Unpin,
 >(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     transaction: <TestCocoonFs as fs::NvFs>::Transaction,
-    inodes_unlink_range: ops::RangeInclusive<u32>,
+    inodes_unlink_range: ops::RangeInclusive<u64>,
     callback: CB,
 ) -> Result<(<TestCocoonFs as fs::NvFs>::Transaction, CB), fs::NvFsError> {
     struct UnlinkInodesCallback<
-        CB: 'static + FnMut(u32, &[u8]) -> Result<bool, fs::NvFsError> + marker::Send + marker::Unpin,
+        CB: 'static + FnMut(u64, &[u8]) -> Result<bool, fs::NvFsError> + marker::Send + marker::Unpin,
     > {
         callback: CB,
     }
 
-    impl<CB: 'static + FnMut(u32, &[u8]) -> Result<bool, fs::NvFsError> + marker::Send + marker::Unpin>
+    impl<CB: 'static + FnMut(u64, &[u8]) -> Result<bool, fs::NvFsError> + marker::Send + marker::Unpin>
         CocoonFsTestUnlinkInodesFutureCallback for UnlinkInodesCallback<CB>
     {
-        fn call(&mut self, inode: u32, inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<bool, fs::NvFsError> {
+        fn call(&mut self, inode: u64, inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<bool, fs::NvFsError> {
             (self.callback)(inode, inode_data.as_slice())
         }
     }
@@ -703,7 +754,7 @@ fn cocoonfs_test_unlink_inodes_op_fnmut_cb<
 fn cocoonfs_test_unlink_inodes_op_cb<CB: CocoonFsTestUnlinkInodesFutureCallback>(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     transaction: <TestCocoonFs as fs::NvFs>::Transaction,
-    inodes_unlink_range: ops::RangeInclusive<u32>,
+    inodes_unlink_range: ops::RangeInclusive<u64>,
     callback: CB,
 ) -> Result<(<TestCocoonFs as fs::NvFs>::Transaction, CB), fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
@@ -724,7 +775,7 @@ fn cocoonfs_test_unlink_inodes_op_cb<CB: CocoonFsTestUnlinkInodesFutureCallback>
 }
 
 trait CocoonFsTestUnlinkInodesFutureCallback: 'static + marker::Unpin + marker::Send {
-    fn call(&mut self, inode: u32, inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<bool, fs::NvFsError>;
+    fn call(&mut self, inode: u64, inode_data: zeroize::Zeroizing<Vec<u8>>) -> Result<bool, fs::NvFsError>;
 }
 
 struct CocoonFsTestUnlinkInodesFuture<CB: CocoonFsTestUnlinkInodesFutureCallback> {
@@ -739,7 +790,7 @@ enum CocoonFsTestUnlinkInodesFutureState {
         next_fut: <<TestCocoonFs as fs::NvFs>::UnlinkCursor as fs::NvFsUnlinkCursor<TestCocoonFs>>::NextFut,
     },
     ReadCurrentInodeData {
-        inode: u32,
+        inode: u64,
         read_fut: <<TestCocoonFs as fs::NvFs>::UnlinkCursor as fs::NvFsUnlinkCursor<TestCocoonFs>>::ReadInodeDataFut,
     },
     UnlinkCurrentInode {
@@ -752,7 +803,7 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> CocoonFsTestUnlinkInodesFuture<
     fn new(
         fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
         transaction: <TestCocoonFs as fs::NvFs>::Transaction,
-        inodes_unlink_range: ops::RangeInclusive<u32>,
+        inodes_unlink_range: ops::RangeInclusive<u64>,
         callback: CB,
     ) -> Result<Self, fs::NvFsError> {
         let unlink_cursor = <TestCocoonFs as fs::NvFs>::unlink_cursor(
@@ -800,7 +851,10 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
                         };
 
                     match inode {
-                        Some(inode) => {
+                        Some((inode, inode_flags)) => {
+                            // Verify that the inode flags match the least significant bits of the inode number,
+                            // c.f. cocoonfs_test_write_inode_op_helper().
+                            assert_eq!(inode as u8, inode_flags);
                             let read_fut = fs::NvFsUnlinkCursor::read_current_inode_data(unlink_cursor);
                             this.fut_state =
                                 CocoonFsTestUnlinkInodesFutureState::ReadCurrentInodeData { inode, read_fut };
