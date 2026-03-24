@@ -3086,5 +3086,112 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn singleton_io_slice() {
+            let buf = [1u8, 2, 3, 4, 5];
+            {
+                // next_slice
+                let mut iter = SingletonIoSlice::new(&buf);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &buf);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len smaller than slice
+                let mut iter = SingletonIoSlice::new(&buf);
+                assert_eq!(iter.next_slice(Some(3)).unwrap().unwrap(), &buf[..3]);
+                assert_eq!(iter.next_slice(Some(10)).unwrap().unwrap(), &buf[3..]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len larger than slice
+                let mut iter = SingletonIoSlice::new(&buf);
+                assert_eq!(iter.next_slice(Some(10)).unwrap().unwrap(), &buf);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice on empty slice
+                // Empty slices are omitted
+                let mut iter = SingletonIoSlice::new(&[]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip all
+                let mut iter = SingletonIoSlice::new(&buf);
+                iter.skip(buf.len()).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip to middle
+                let mut iter = SingletonIoSlice::new(&buf);
+                iter.skip(2).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &buf[2..]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip past end
+                assert!(matches!(
+                    SingletonIoSlice::new(&buf).skip(buf.len() + 1),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+            }
+            {
+                // skip(0)
+                let mut iter = SingletonIoSlice::new(&buf);
+                iter.skip(0).unwrap();
+            }
+            {
+                // ct_eq_with_iter
+                // equal slices are equal
+                assert_ne!(
+                    SingletonIoSlice::new(&buf)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // different content is not equal
+                let buf2 = [1u8, 2, 3, 4, 6];
+                assert_eq!(
+                    SingletonIoSlice::new(&buf)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf2))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // different lengths are not equal
+                assert_eq!(
+                    SingletonIoSlice::new(&buf)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf[..3]))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // singleton vs empty
+                assert_eq!(
+                    SingletonIoSlice::new(&buf)
+                        .ct_eq_with_iter(EmptyIoSlices::default())
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // empty vs singleton
+                assert_eq!(
+                    EmptyIoSlices::default()
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // both empty slices
+                assert_ne!(
+                    SingletonIoSlice::new(&[])
+                        .ct_eq_with_iter(SingletonIoSlice::new(&[]))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+        }
     }
 }
