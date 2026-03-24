@@ -53,16 +53,29 @@ pub fn xor_bytes(dst: &mut [u8], mask: &[u8]) {
 fn test_xor_bytes() {
     use core::mem;
 
-    let mut dst = [0u8; 32 + mem::size_of::<cmpa::LimbType>() - 1];
-    let mask = [0x77u8; 32 + mem::size_of::<cmpa::LimbType>() - 1];
-    let expected = [0xbbu8; 32];
-    for i in 0..mem::size_of::<cmpa::LimbType>() - 1 {
-        for j in 0..mem::size_of::<cmpa::LimbType>() - 1 {
-            let dst = &mut dst[i..i + 32];
-            dst.fill(0xccu8);
-            let mask = &mask[j..j + 32];
-            xor_bytes(dst, mask);
-            assert_eq!(dst, expected);
+    const LEN: usize = 32;
+    const EXTRA: usize = mem::size_of::<cmpa::LimbType>() - 1;
+    let mut dst = [0u8; LEN + EXTRA];
+    let mut mask = [0u8; LEN + EXTRA];
+    let mut expected = [0u8; LEN];
+
+    let mut rng = fastrand::Rng::with_seed(0xdeadbeef);
+
+    for i in 0..EXTRA {
+        for j in 0..EXTRA {
+            dst.fill_with(|| rng.u8(..));
+            mask.fill_with(|| rng.u8(..));
+
+            let dst_slice = &mut dst[i..i + LEN];
+            let mask_slice = &mask[j..j + LEN];
+
+            // Compute expected result byte-by-byte.
+            for k in 0..LEN {
+                expected[k] = dst_slice[k] ^ mask_slice[k];
+            }
+
+            xor_bytes(dst_slice, mask_slice);
+            assert_eq!(dst_slice, expected);
         }
     }
 }
