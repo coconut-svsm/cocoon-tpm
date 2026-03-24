@@ -3604,5 +3604,109 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn covariant_io_slices_iter_ref() {
+            let buf = [1u8, 2, 3, 4, 5, 6, 7, 8];
+            {
+                // next_slice
+                let mut inner = SingletonIoSlice::new(&buf);
+                let mut covariant = inner.as_ref();
+                assert_eq!(covariant.next_slice(None).unwrap().unwrap(), &buf);
+                assert_eq!(covariant.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len smaller than slice
+                let mut inner = SingletonIoSlice::new(&buf);
+                let mut covariant = inner.as_ref();
+                assert_eq!(covariant.next_slice(Some(3)).unwrap().unwrap(), &buf[..3]);
+                assert_eq!(covariant.next_slice(Some(100)).unwrap().unwrap(), &buf[3..]);
+                assert_eq!(covariant.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len larger than slice
+                let mut inner = SingletonIoSlice::new(&buf);
+                let mut covariant = inner.as_ref();
+                assert_eq!(covariant.next_slice(Some(100)).unwrap().unwrap(), &buf);
+                assert_eq!(covariant.next_slice(None).unwrap(), None);
+            }
+            {
+                // advancing covariant ref advances the original
+                let mut inner = SingletonIoSlice::new(&buf);
+                {
+                    let mut covariant = inner.as_ref();
+                    assert_eq!(covariant.next_slice(Some(3)).unwrap().unwrap(), &buf[..3]);
+                }
+                // inner should now be advanced past the first 3 bytes
+                assert_eq!(inner.next_slice(None).unwrap().unwrap(), &buf[3..]);
+                assert_eq!(inner.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice on empty
+                let mut inner = SingletonIoSlice::new(&[]);
+                let mut covariant = inner.as_ref();
+                assert_eq!(covariant.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip all
+                let mut inner = SingletonIoSlice::new(&buf);
+                let mut covariant = inner.as_ref();
+                covariant.skip(buf.len()).unwrap();
+                assert_eq!(covariant.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip to middle
+                let mut inner = SingletonIoSlice::new(&buf);
+                let mut covariant = inner.as_ref();
+                covariant.skip(3).unwrap();
+                assert_eq!(covariant.next_slice(None).unwrap().unwrap(), &buf[3..]);
+                assert_eq!(covariant.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip past end
+                let mut inner = SingletonIoSlice::new(&buf);
+                let mut covariant = inner.as_ref();
+                assert!(matches!(
+                    covariant.skip(buf.len() + 1),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+            }
+            {
+                // skip(0)
+                let mut inner = SingletonIoSlice::new(&buf);
+                let mut covariant = inner.as_ref();
+                covariant.skip(0).unwrap();
+            }
+            {
+                // ct_eq_with_iter
+                // equal refs are equal
+                let mut inner1 = SingletonIoSlice::new(&buf);
+                let mut inner2 = SingletonIoSlice::new(&buf);
+                assert_ne!(inner1.as_ref().ct_eq_with_iter(inner2.as_ref()).unwrap().unwrap(), 0);
+                // different content
+                let buf2 = [1u8, 2, 3, 4, 5, 6, 7, 9];
+                let mut inner1 = SingletonIoSlice::new(&buf);
+                let mut inner2 = SingletonIoSlice::new(&buf2);
+                assert_eq!(inner1.as_ref().ct_eq_with_iter(inner2.as_ref()).unwrap().unwrap(), 0);
+                // different lengths
+                let mut inner1 = SingletonIoSlice::new(&buf);
+                let mut inner2 = SingletonIoSlice::new(&buf[..3]);
+                assert_eq!(inner1.as_ref().ct_eq_with_iter(inner2.as_ref()).unwrap().unwrap(), 0);
+                // vs empty
+                let mut inner1 = SingletonIoSlice::new(&buf);
+                assert_eq!(
+                    inner1
+                        .as_ref()
+                        .ct_eq_with_iter(EmptyIoSlices::default())
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // both empty
+                let mut inner1 = SingletonIoSlice::new(&[]);
+                let mut inner2 = SingletonIoSlice::new(&[]);
+                assert_ne!(inner1.as_ref().ct_eq_with_iter(inner2.as_ref()).unwrap().unwrap(), 0);
+            }
+        }
     }
 }
