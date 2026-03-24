@@ -3494,5 +3494,115 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn io_slices_iter_take_exact() {
+            let buf = [1u8, 2, 3, 4, 5, 6, 7, 8];
+            {
+                // next_slice
+                let mut take = SingletonIoSlice::new(&buf).take_exact(5);
+                assert_eq!(take.next_slice(None).unwrap().unwrap(), &buf[..5]);
+                assert_eq!(take.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len smaller than remaining
+                let mut take = SingletonIoSlice::new(&buf).take_exact(5);
+                assert_eq!(take.next_slice(Some(3)).unwrap().unwrap(), &buf[..3]);
+                assert_eq!(take.next_slice(Some(10)).unwrap().unwrap(), &buf[3..5]);
+                assert_eq!(take.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len larger than remaining
+                let mut take = SingletonIoSlice::new(&buf).take_exact(5);
+                assert_eq!(take.next_slice(Some(100)).unwrap().unwrap(), &buf[..5]);
+                assert_eq!(take.next_slice(None).unwrap(), None);
+            }
+            {
+                // take_exact(0)
+                let mut take = SingletonIoSlice::new(&buf).take_exact(0);
+                assert_eq!(take.next_slice(None).unwrap(), None);
+            }
+            {
+                // take_exact larger than underlying iterator errors
+                let mut take = SingletonIoSlice::new(&buf[..3]).take_exact(5);
+                assert_eq!(take.next_slice(None).unwrap().unwrap(), &buf[..3]);
+                assert!(take.next_slice(None).is_err());
+            }
+            {
+                // take_exact over multiple buffers
+                let buf1 = [1u8, 2];
+                let buf2 = [3u8, 4, 5, 6, 7];
+                let slices = [buf1.as_slice(), buf2.as_slice()];
+                let mut take = BuffersSliceIoSlicesIter::new(&slices).take_exact(4);
+                assert_eq!(take.next_slice(None).unwrap().unwrap(), &buf1);
+                assert_eq!(take.next_slice(None).unwrap().unwrap(), &buf2[..2]);
+                assert_eq!(take.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip all
+                let mut take = SingletonIoSlice::new(&buf).take_exact(5);
+                take.skip(5).unwrap();
+                assert_eq!(take.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip to middle
+                let mut take = SingletonIoSlice::new(&buf).take_exact(5);
+                take.skip(2).unwrap();
+                assert_eq!(take.next_slice(None).unwrap().unwrap(), &buf[2..5]);
+                assert_eq!(take.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip past take_exact limit
+                let mut take = SingletonIoSlice::new(&buf).take_exact(5);
+                assert!(matches!(
+                    take.skip(6),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+            }
+            {
+                // skip(0)
+                let mut take = SingletonIoSlice::new(&buf).take_exact(5);
+                take.skip(0).unwrap();
+            }
+            {
+                // ct_eq_with_iter
+                // equal take_exacts are equal
+                assert_ne!(
+                    SingletonIoSlice::new(&buf)
+                        .take_exact(5)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf).take_exact(5))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // equal content from different sources
+                assert_ne!(
+                    SingletonIoSlice::new(&buf)
+                        .take_exact(5)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf[..5]).take_exact(5))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // different lengths are not equal
+                assert_eq!(
+                    SingletonIoSlice::new(&buf)
+                        .take_exact(5)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf).take_exact(3))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // take_exact(0) vs take_exact(0)
+                assert_ne!(
+                    SingletonIoSlice::new(&buf)
+                        .take_exact(0)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf).take_exact(0))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+        }
     }
 }
