@@ -2933,4 +2933,53 @@ mod tests {
             assert!(i.next().is_none());
         }
     }
+
+    mod io_slices_iter {
+        use super::*;
+        #[test]
+        fn empty_io_slices() {
+            {
+                // next_slice
+                assert_eq!(EmptyIoSlices::default().next_slice(None).unwrap(), None);
+                assert_eq!(EmptyIoSlices::default().next_slice(Some(1)).unwrap(), None);
+            }
+            {
+                // skip
+                assert!(matches!(
+                    EmptyIoSlices::default().skip(1),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+                EmptyIoSlices::default().skip(0).unwrap();
+            }
+            {
+                // ct_eq_with_iter
+                // two empty iterators are equal
+                assert_ne!(
+                    EmptyIoSlices::default()
+                        .ct_eq_with_iter(EmptyIoSlices::default())
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // empty vs non-empty should not be equal
+                let buf = [1u8, 2, 3];
+                assert_eq!(
+                    EmptyIoSlices::default()
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // non-empty vs empty should not be equal
+                assert_eq!(
+                    SingletonIoSlice::new(&buf)
+                        .ct_eq_with_iter(EmptyIoSlices::default())
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+
+    }
 }
