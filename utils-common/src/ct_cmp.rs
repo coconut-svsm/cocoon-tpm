@@ -93,25 +93,30 @@ pub fn ct_bytes_eq(bytes0: &[u8], bytes1: &[u8]) -> cmpa::LimbChoice {
 fn test_ct_bytes_eq() {
     use core::mem;
 
-    let mut bytes0 = [0u8; 32 + mem::size_of::<cmpa::LimbType>() - 1];
-    let mut bytes1 = [0u8; 32 + mem::size_of::<cmpa::LimbType>() - 1];
-    for i in 0..mem::size_of::<cmpa::LimbType>() - 1 {
-        for j in 0..mem::size_of::<cmpa::LimbType>() - 1 {
-            let bytes0 = &mut bytes0[i..i + 32];
-            let bytes1 = &mut bytes1[j..j + 32];
-            bytes0.fill(0xcc);
-            bytes1.fill(0xcc);
+    const LEN: usize = 32;
+    const EXTRA: usize = mem::size_of::<cmpa::LimbType>() - 1;
+    let mut bytes0 = [0u8; LEN + EXTRA];
+    let mut bytes1 = [0u8; LEN + EXTRA];
+
+    let mut rng = fastrand::Rng::with_seed(0xdeadbeef);
+
+    for i in 0..EXTRA {
+        for j in 0..EXTRA {
+            let bytes0 = &mut bytes0[i..i + LEN];
+            let bytes1 = &mut bytes1[j..j + LEN];
+            bytes0.fill_with(|| rng.u8(..));
+            bytes1.copy_from_slice(bytes0);
             assert_ne!(ct_bytes_eq(bytes0, bytes1).unwrap(), 0);
 
-            for k in 0..32 {
-                bytes0.fill(0xcc);
-                bytes1.fill(0xcc);
-                bytes0[k] = 0x77;
+            for k in 0..LEN {
+                bytes0.fill_with(|| rng.u8(..));
+                bytes1.copy_from_slice(bytes0);
+                bytes0[k] = bytes1[k].wrapping_add(1);
                 assert_eq!(ct_bytes_eq(bytes0, bytes1).unwrap(), 0);
 
-                bytes0.fill(0xcc);
-                bytes1.fill(0xcc);
-                bytes1[k] = 0x77;
+                bytes0.fill_with(|| rng.u8(..));
+                bytes1.copy_from_slice(bytes0);
+                bytes1[k] = bytes0[k].wrapping_add(1);
                 assert_eq!(ct_bytes_eq(bytes0, bytes1).unwrap(), 0);
             }
         }
