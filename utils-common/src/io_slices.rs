@@ -3341,5 +3341,158 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn io_slices_iter_chain() {
+            let buf1 = [1u8, 2, 3];
+            let buf2 = [4u8, 5, 6, 7, 8];
+            {
+                // next_slice
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf1);
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf2);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len within first iterator
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                assert_eq!(chain.next_slice(Some(2)).unwrap().unwrap(), &buf1[..2]);
+                assert_eq!(chain.next_slice(Some(10)).unwrap().unwrap(), &buf1[2..]);
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf2);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len spanning across iterators
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                assert_eq!(chain.next_slice(Some(5)).unwrap().unwrap(), &buf1);
+                assert_eq!(chain.next_slice(Some(5)).unwrap().unwrap(), &buf2);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len larger than both
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                assert_eq!(chain.next_slice(Some(100)).unwrap().unwrap(), &buf1);
+                assert_eq!(chain.next_slice(Some(100)).unwrap().unwrap(), &buf2);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // chain with empty first
+                let mut chain = EmptyIoSlices::default().chain(SingletonIoSlice::new(&buf1));
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf1);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // chain with empty second
+                let mut chain = SingletonIoSlice::new(&buf1).chain(EmptyIoSlices::default());
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf1);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // chain of two empties
+                let mut chain = EmptyIoSlices::default().chain(EmptyIoSlices::default());
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip all
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                chain.skip(buf1.len() + buf2.len()).unwrap();
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip within first iterator
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                chain.skip(1).unwrap();
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf1[1..]);
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf2);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip across iterator boundary
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                chain.skip(buf1.len() + 2).unwrap();
+                assert_eq!(chain.next_slice(None).unwrap().unwrap(), &buf2[2..]);
+                assert_eq!(chain.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip past end
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                assert!(matches!(
+                    chain.skip(buf1.len() + buf2.len() + 1),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+            }
+            {
+                // skip(0)
+                let mut chain = SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2));
+                chain.skip(0).unwrap();
+            }
+            {
+                // ct_eq_with_iter
+                // equal chains are equal
+                assert_ne!(
+                    SingletonIoSlice::new(&buf1)
+                        .chain(SingletonIoSlice::new(&buf2))
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2)))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // equal content in different layout
+                let combined = [1u8, 2, 3, 4, 5, 6, 7, 8];
+                assert_ne!(
+                    SingletonIoSlice::new(&buf1)
+                        .chain(SingletonIoSlice::new(&buf2))
+                        .ct_eq_with_iter(SingletonIoSlice::new(&combined))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // different content
+                let buf2_diff = [4u8, 5, 6, 7, 9];
+                assert_eq!(
+                    SingletonIoSlice::new(&buf1)
+                        .chain(SingletonIoSlice::new(&buf2))
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2_diff)))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // different lengths
+                assert_eq!(
+                    SingletonIoSlice::new(&buf1)
+                        .chain(SingletonIoSlice::new(&buf2))
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf1))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // vs empty
+                assert_eq!(
+                    SingletonIoSlice::new(&buf1)
+                        .chain(SingletonIoSlice::new(&buf2))
+                        .ct_eq_with_iter(EmptyIoSlices::default())
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // empty vs chain
+                assert_eq!(
+                    EmptyIoSlices::default()
+                        .ct_eq_with_iter(SingletonIoSlice::new(&buf1).chain(SingletonIoSlice::new(&buf2)))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // both empty chains
+                assert_ne!(
+                    EmptyIoSlices::default()
+                        .chain(EmptyIoSlices::default())
+                        .ct_eq_with_iter(EmptyIoSlices::default().chain(EmptyIoSlices::default()))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+        }
     }
 }
