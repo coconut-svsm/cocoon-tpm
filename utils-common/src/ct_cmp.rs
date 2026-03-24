@@ -21,6 +21,10 @@ fn _ct_bytes_all_zero(bytes: &[u8]) -> cmpa::LimbChoice {
 /// * `bytes` - The slice to examine.
 pub fn ct_bytes_all_zero(bytes: &[u8]) -> cmpa::LimbChoice {
     // Split bytes[] into regions of &[u8], &[LimbType], &[u8].
+    // SAFETY: `LimbType` is an integer type (`u64` or `u32`), so every possible
+    // bit pattern of the source `u8` bytes is a valid `LimbType` value. The
+    // `align_to` method handles alignment by only grouping properly-aligned
+    // interior bytes into the middle `&[LimbType]` slice.
     let (bytes_head, limbs, bytes_tail) = unsafe { bytes.align_to::<cmpa::LimbType>() };
     let mut all_zero = _ct_bytes_all_zero(bytes_head);
     let mut limbs_any_nonzero: cmpa::LimbType = 0;
