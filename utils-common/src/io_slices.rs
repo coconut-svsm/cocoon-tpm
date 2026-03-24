@@ -2981,5 +2981,110 @@ mod tests {
             }
         }
 
+        #[test]
+        fn zero_filled_io_slices() {
+            const LEN: usize = ZeroFilledIoSlices::CHUNK_SIZE * 2 + 3;
+            {
+                // next_slice
+                let mut iter = ZeroFilledIoSlices::new(LEN);
+                let expected = [0u8; ZeroFilledIoSlices::CHUNK_SIZE];
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &expected);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &expected);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &[0u8; 3]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len smaller than chunk
+                let mut iter = ZeroFilledIoSlices::new(5);
+                assert_eq!(iter.next_slice(Some(3)).unwrap().unwrap(), &[0u8; 3]);
+                assert_eq!(iter.next_slice(Some(10)).unwrap().unwrap(), &[0u8; 2]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len larger than chunk size
+                let mut iter = ZeroFilledIoSlices::new(LEN);
+                let expected = [0u8; ZeroFilledIoSlices::CHUNK_SIZE];
+                assert_eq!(iter.next_slice(Some(LEN + 3)).unwrap().unwrap(), &expected);
+                assert_eq!(iter.next_slice(Some(LEN)).unwrap().unwrap(), &expected);
+                assert_eq!(iter.next_slice(Some(LEN)).unwrap().unwrap(), &[0u8; 3]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice on empty
+                let mut iter = ZeroFilledIoSlices::new(0);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip all
+                let mut iter = ZeroFilledIoSlices::new(LEN);
+                iter.skip(LEN).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip to middle
+                let mut iter = ZeroFilledIoSlices::new(LEN);
+                iter.skip(ZeroFilledIoSlices::CHUNK_SIZE + 1).unwrap();
+                // remaining: CHUNK_SIZE + 2 bytes = one full chunk + 2
+                let expected_full = [0u8; ZeroFilledIoSlices::CHUNK_SIZE];
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &expected_full);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &[0u8; 2]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip past end
+                assert!(matches!(
+                    ZeroFilledIoSlices::new(LEN).skip(LEN + 1),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+            }
+            {
+                // skip(0)
+                let mut iter = ZeroFilledIoSlices::new(LEN);
+                iter.skip(0).unwrap();
+            }
+            {
+                // ct_eq_with_iter
+                // equal length zero-filled iterators are equal
+                assert_ne!(
+                    ZeroFilledIoSlices::new(LEN)
+                        .ct_eq_with_iter(ZeroFilledIoSlices::new(LEN))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // different lengths are not equal
+                assert_eq!(
+                    ZeroFilledIoSlices::new(LEN)
+                        .ct_eq_with_iter(ZeroFilledIoSlices::new(LEN + 1))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // zero-filled vs empty
+                assert_eq!(
+                    ZeroFilledIoSlices::new(LEN)
+                        .ct_eq_with_iter(EmptyIoSlices::default())
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // empty vs zero-filled
+                assert_eq!(
+                    EmptyIoSlices::default()
+                        .ct_eq_with_iter(ZeroFilledIoSlices::new(LEN))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // both zero-length
+                assert_ne!(
+                    ZeroFilledIoSlices::new(0)
+                        .ct_eq_with_iter(ZeroFilledIoSlices::new(0))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+        }
     }
 }
