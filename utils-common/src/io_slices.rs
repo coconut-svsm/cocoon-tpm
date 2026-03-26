@@ -3998,5 +3998,278 @@ mod tests {
                 );
             }
         }
+
+        /// Helper to test GenericIoSlicesMutIter with a given head configuration.
+        /// Uses const generics so that array copies work without alloc.
+        fn test_generic_io_slices_mut_iter_variant<const NH: usize, const N1: usize, const N2: usize>(
+            head_src: Option<[u8; NH]>,
+            src1: [u8; N1],
+            src2: [u8; N2],
+            expected_slices: &[&[u8]],
+            combined: &[u8],
+        ) {
+            fn ok_mut(s: &mut [u8]) -> Result<&mut [u8], convert::Infallible> {
+                Ok(s)
+            }
+
+            // Scratch buffer size for copy_from_iter and ct_eq tests.
+            // Must be >= total_len; assert below to catch mismatches.
+            const SCRATCH_LEN: usize = 16;
+
+            let total_len = combined.len();
+            assert!(total_len <= SCRATCH_LEN);
+            let first = expected_slices[0];
+
+            {
+                // next_slice (read path): iterate all slices
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                for expected in expected_slices {
+                    assert_eq!(iter.next_slice(None).unwrap().unwrap(), *expected);
+                }
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len smaller than first slice (=head if present)
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                assert_eq!(iter.next_slice(Some(1)).unwrap().unwrap(), &first[..1]);
+                assert_eq!(iter.next_slice(Some(first.len())).unwrap().unwrap(), &first[1..]);
+                for expected in &expected_slices[1..] {
+                    assert_eq!(iter.next_slice(None).unwrap().unwrap(), *expected);
+                }
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len larger than slices
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                for expected in expected_slices {
+                    assert_eq!(iter.next_slice(Some(100)).unwrap().unwrap(), *expected);
+                }
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip all
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                iter.skip(total_len).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip to middle of first slice
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                iter.skip(1).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &first[1..]);
+                for expected in &expected_slices[1..] {
+                    assert_eq!(iter.next_slice(None).unwrap().unwrap(), *expected);
+                }
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip across slice boundary
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                iter.skip(first.len() + 1).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &expected_slices[1][1..]);
+                for expected in &expected_slices[2..] {
+                    assert_eq!(iter.next_slice(None).unwrap().unwrap(), *expected);
+                }
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip past end
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                assert!(matches!(
+                    iter.skip(total_len + 1),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+            }
+            {
+                // skip(0)
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                iter.skip(0).unwrap();
+            }
+            {
+                // ct_eq_with_iter - equal content
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                assert_ne!(
+                    GenericIoSlicesMutIter::new(
+                        [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                        h.as_mut().map(|h| h.as_mut_slice()),
+                    )
+                    .ct_eq_with_iter(SingletonIoSlice::new(combined))
+                    .unwrap()
+                    .unwrap(),
+                    0
+                );
+            }
+            {
+                // ct_eq_with_iter - different content
+                let mut diff = [0u8; SCRATCH_LEN];
+                diff[..total_len].copy_from_slice(combined);
+                diff[total_len - 1] ^= 0xFF;
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                assert_eq!(
+                    GenericIoSlicesMutIter::new(
+                        [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                        h.as_mut().map(|h| h.as_mut_slice()),
+                    )
+                    .ct_eq_with_iter(SingletonIoSlice::new(&diff[..total_len]))
+                    .unwrap()
+                    .unwrap(),
+                    0
+                );
+            }
+            {
+                // ct_eq_with_iter - different lengths
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                assert_eq!(
+                    GenericIoSlicesMutIter::new(
+                        [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                        h.as_mut().map(|h| h.as_mut_slice()),
+                    )
+                    .ct_eq_with_iter(SingletonIoSlice::new(first))
+                    .unwrap()
+                    .unwrap(),
+                    0
+                );
+            }
+            {
+                // ct_eq_with_iter - vs empty
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                assert_eq!(
+                    GenericIoSlicesMutIter::new(
+                        [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                        h.as_mut().map(|h| h.as_mut_slice()),
+                    )
+                    .ct_eq_with_iter(EmptyIoSlices::default())
+                    .unwrap()
+                    .unwrap(),
+                    0
+                );
+            }
+            {
+                // ct_eq_with_iter - empty vs this
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                assert_eq!(
+                    EmptyIoSlices::default()
+                        .ct_eq_with_iter(GenericIoSlicesMutIter::new(
+                            [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                            h.as_mut().map(|h| h.as_mut_slice()),
+                        ))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+
+        #[test]
+        fn generic_io_slices_mut_iter() {
+            fn ok_mut(s: &mut [u8]) -> Result<&mut [u8], convert::Infallible> {
+                Ok(s)
+            }
+
+            let buf1 = [1u8, 2];
+            let buf2 = [3u8, 4, 5];
+            let head_buf = [98u8, 99];
+
+            // without head
+            test_generic_io_slices_mut_iter_variant(
+                None::<[u8; 0]>,
+                buf1,
+                buf2,
+                &[buf1.as_slice(), buf2.as_slice()],
+                &[1, 2, 3, 4, 5],
+            );
+
+            // with head
+            test_generic_io_slices_mut_iter_variant(
+                Some(head_buf),
+                buf1,
+                buf2,
+                &[head_buf.as_slice(), buf1.as_slice(), buf2.as_slice()],
+                &[98, 99, 1, 2, 3, 4, 5],
+            );
+
+            {
+                // next_slice on empty iterator
+                let empty: [Result<&mut [u8], convert::Infallible>; 0] = [];
+                let mut iter = GenericIoSlicesMutIter::new(empty.into_iter(), None);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // empty buffers are skipped
+                let mut b1 = [1u8, 2];
+                let mut empty = [0u8; 0];
+                let mut b2 = [3u8, 4, 5];
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [
+                        ok_mut(b1.as_mut_slice()),
+                        ok_mut(empty.as_mut_slice()),
+                        ok_mut(b2.as_mut_slice()),
+                    ]
+                    .into_iter(),
+                    None,
+                );
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &[1u8, 2]);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &[3u8, 4, 5]);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+        }
     }
 }
