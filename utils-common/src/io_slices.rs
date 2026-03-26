@@ -4271,5 +4271,89 @@ mod tests {
                 assert_eq!(iter.next_slice(None).unwrap(), None);
             }
         }
+
+        #[test]
+        fn io_slices_iter_map_err() {
+            let buf1 = [1u8, 2];
+            let buf2 = [3u8, 4, 5];
+            let slices = [buf1.as_slice(), buf2.as_slice()];
+            let combined = [1u8, 2, 3, 4, 5];
+            let total_len = combined.len();
+            let map_fn = |e: convert::Infallible| -> convert::Infallible { match e {} };
+            {
+                // next_slice passes through
+                let mut iter = BuffersSliceIoSlicesIter::new(&slices).map_err(map_fn);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &buf1);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &buf2);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // next_slice with max_len
+                let mut iter = BuffersSliceIoSlicesIter::new(&slices).map_err(map_fn);
+                assert_eq!(iter.next_slice(Some(1)).unwrap().unwrap(), &buf1[..1]);
+                assert_eq!(iter.next_slice(Some(10)).unwrap().unwrap(), &buf1[1..]);
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &buf2);
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip
+                let mut iter = BuffersSliceIoSlicesIter::new(&slices).map_err(map_fn);
+                iter.skip(total_len).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap(), None);
+            }
+            {
+                // skip to middle
+                let mut iter = BuffersSliceIoSlicesIter::new(&slices).map_err(map_fn);
+                iter.skip(1).unwrap();
+                assert_eq!(iter.next_slice(None).unwrap().unwrap(), &buf1[1..]);
+            }
+            {
+                // skip past end
+                let mut iter = BuffersSliceIoSlicesIter::new(&slices).map_err(map_fn);
+                assert!(matches!(
+                    iter.skip(total_len + 1),
+                    Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+                ));
+            }
+            {
+                // ct_eq_with_iter - equal
+                assert_ne!(
+                    BuffersSliceIoSlicesIter::new(&slices)
+                        .map_err(map_fn)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&combined))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // ct_eq_with_iter - different
+                let diff = [1u8, 2, 3, 4, 9];
+                assert_eq!(
+                    BuffersSliceIoSlicesIter::new(&slices)
+                        .map_err(map_fn)
+                        .ct_eq_with_iter(SingletonIoSlice::new(&diff))
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+                // ct_eq_with_iter - vs empty
+                assert_eq!(
+                    BuffersSliceIoSlicesIter::new(&slices)
+                        .map_err(map_fn)
+                        .ct_eq_with_iter(EmptyIoSlices::default())
+                        .unwrap()
+                        .unwrap(),
+                    0
+                );
+            }
+            {
+                // IoSlicesIterCommon: next_slice_len, is_empty
+                let mut iter = BuffersSliceIoSlicesIter::new(&slices).map_err(map_fn);
+                assert_eq!(iter.next_slice_len().unwrap(), buf1.len());
+                assert!(!iter.is_empty().unwrap());
+                iter.skip(total_len).unwrap();
+                assert_eq!(iter.next_slice_len().unwrap(), 0);
+                assert!(iter.is_empty().unwrap());
+            }
+        }
     }
 }
