@@ -173,8 +173,8 @@ impl<'a> Kdf for TcgTpm2KdfE<'a> {
         }
 
         // The block scratch buf will only be needed if any of the output slices'
-        // lengths doesn't align with the Hash block length.
-        let block_scratch_buf_len = if !output.all_aligned_to(self.block_len)? {
+        // lengths isn't a multiple of the Hash block length.
+        let block_scratch_buf_len = if !output.all_lengths_multiple_of(self.block_len)? {
             self.block_len
         } else {
             0
