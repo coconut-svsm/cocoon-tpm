@@ -4596,5 +4596,139 @@ mod tests {
                 );
             }
         }
+
+        /// Helper to test IoSlicesMutIter on GenericIoSlicesMutIter,
+        /// with and without a head slice.
+        fn test_generic_io_slices_mut_iter_variant<const NH: usize, const N1: usize, const N2: usize>(
+            head_src: Option<[u8; NH]>,
+            src1: [u8; N1],
+            src2: [u8; N2],
+            expected_slices: &[&[u8]],
+            combined: &[u8],
+        ) {
+            fn ok_mut(s: &mut [u8]) -> Result<&mut [u8], convert::Infallible> {
+                Ok(s)
+            }
+
+            let total_len = combined.len();
+            let first = expected_slices[0];
+
+            {
+                // next_slice_mut (write path): modify each slice and verify
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                for expected in expected_slices {
+                    let s = iter.next_slice_mut(None).unwrap().unwrap();
+                    assert_eq!(s, *expected);
+                    s[0] = 0xFF;
+                }
+                assert_eq!(iter.next_slice_mut(None).unwrap(), None);
+                drop(iter);
+                if let Some(h) = &h {
+                    assert_eq!(h[0], 0xFF);
+                }
+                assert_eq!(b1[0], 0xFF);
+                assert_eq!(b2[0], 0xFF);
+            }
+            {
+                // next_slice_mut with max_len
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut h = head_src;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                let s = iter.next_slice_mut(Some(1)).unwrap().unwrap();
+                assert_eq!(s, &first[..1]);
+                s[0] = 0xAA;
+                let s = iter.next_slice_mut(Some(first.len())).unwrap().unwrap();
+                assert_eq!(s, &first[1..]);
+                drop(iter);
+                if let Some(h) = &h {
+                    assert_eq!(h[0], 0xAA);
+                } else {
+                    assert_eq!(b1[0], 0xAA);
+                }
+            }
+            {
+                // copy_from_iter (full)
+                let mut b1 = [0u8; N1];
+                let mut b2 = [0u8; N2];
+                let mut h: Option<[u8; NH]> = head_src.map(|_| [0u8; NH]);
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                let copied = iter.copy_from_iter(&mut SingletonIoSlice::new(combined)).unwrap();
+                assert_eq!(copied, total_len);
+                drop(iter);
+                if let Some(h) = &h {
+                    assert_eq!(h.as_slice(), &combined[..NH]);
+                }
+                assert_eq!(&b1, &combined[NH..NH + N1]);
+                assert_eq!(&b2, &combined[NH + N1..]);
+            }
+            {
+                // copy_from_iter (source shorter)
+                let mut b1 = [0u8; N1];
+                let mut b2 = [0u8; N2];
+                let mut h: Option<[u8; NH]> = head_src.map(|_| [0u8; NH]);
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice()), ok_mut(b2.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                let short = &combined[..2];
+                let copied = iter.copy_from_iter(&mut SingletonIoSlice::new(short)).unwrap();
+                assert_eq!(copied, 2);
+            }
+            {
+                // copy_from_iter (dest shorter): only head + buf1, no buf2
+                let mut b1 = [0u8; N1];
+                let mut h: Option<[u8; NH]> = head_src.map(|_| [0u8; NH]);
+                let dest_len = NH + N1;
+                let mut iter = GenericIoSlicesMutIter::new(
+                    [ok_mut(b1.as_mut_slice())].into_iter(),
+                    h.as_mut().map(|h| h.as_mut_slice()),
+                );
+                let copied = iter.copy_from_iter(&mut SingletonIoSlice::new(combined)).unwrap();
+                assert_eq!(copied, dest_len);
+                drop(iter);
+                if let Some(h) = &h {
+                    assert_eq!(h.as_slice(), &combined[..NH]);
+                }
+                assert_eq!(&b1, &combined[NH..NH + N1]);
+            }
+        }
+
+        #[test]
+        fn generic_io_slices_mut_iter() {
+            let buf1 = [1u8, 2];
+            let buf2 = [3u8, 4, 5];
+            let head_buf = [98u8, 99];
+
+            // without head
+            test_generic_io_slices_mut_iter_variant(
+                None::<[u8; 0]>,
+                buf1,
+                buf2,
+                &[buf1.as_slice(), buf2.as_slice()],
+                &[1, 2, 3, 4, 5],
+            );
+
+            // with head
+            test_generic_io_slices_mut_iter_variant(
+                Some(head_buf),
+                buf1,
+                buf2,
+                &[head_buf.as_slice(), buf1.as_slice(), buf2.as_slice()],
+                &[98, 99, 1, 2, 3, 4, 5],
+            );
+        }
     }
 }
