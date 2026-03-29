@@ -4760,5 +4760,98 @@ mod tests {
                 &[98, 99, 1, 2, 3, 4, 5],
             );
         }
+
+        #[test]
+        fn buffers_slice_io_slices_mut_iter() {
+            let src1 = [1u8, 2];
+            let src2 = [3u8, 4, 5];
+            let combined = [1u8, 2, 3, 4, 5];
+            let total_len = combined.len();
+            {
+                // next_slice_mut (write path)
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut slices = [b1.as_mut_slice(), b2.as_mut_slice()];
+                let mut iter = BuffersSliceIoSlicesMutIter::new(&mut slices);
+                let s = iter.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src1);
+                s[0] = 0xFF;
+                let s = iter.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src2);
+                s[0] = 0xEE;
+                assert_eq!(iter.next_slice_mut(None).unwrap(), None);
+                drop(iter);
+                assert_eq!(b1[0], 0xFF);
+                assert_eq!(b2[0], 0xEE);
+            }
+            {
+                // next_slice_mut with max_len
+                let mut b1 = src1;
+                let mut slices = [b1.as_mut_slice()];
+                let mut iter = BuffersSliceIoSlicesMutIter::new(&mut slices);
+                let s = iter.next_slice_mut(Some(1)).unwrap().unwrap();
+                assert_eq!(s, &src1[..1]);
+                s[0] = 0xAA;
+                let s = iter.next_slice_mut(Some(10)).unwrap().unwrap();
+                assert_eq!(s, &src1[1..]);
+                assert_eq!(iter.next_slice_mut(None).unwrap(), None);
+                drop(iter);
+                assert_eq!(b1[0], 0xAA);
+            }
+            {
+                // copy_from_iter (full)
+                let mut b1 = [0u8; 2];
+                let mut b2 = [0u8; 3];
+                let mut slices = [b1.as_mut_slice(), b2.as_mut_slice()];
+                let mut iter = BuffersSliceIoSlicesMutIter::new(&mut slices);
+                let copied = iter.copy_from_iter(&mut SingletonIoSlice::new(&combined)).unwrap();
+                assert_eq!(copied, total_len);
+                drop(iter);
+                assert_eq!(b1, [1, 2]);
+                assert_eq!(b2, [3, 4, 5]);
+            }
+            {
+                // copy_from_iter (source shorter)
+                let mut b1 = [0u8; 2];
+                let mut b2 = [0u8; 3];
+                let mut slices = [b1.as_mut_slice(), b2.as_mut_slice()];
+                let mut iter = BuffersSliceIoSlicesMutIter::new(&mut slices);
+                let copied = iter.copy_from_iter(&mut SingletonIoSlice::new(&combined[..2])).unwrap();
+                assert_eq!(copied, 2);
+                drop(iter);
+                assert_eq!(b1, [1, 2]);
+            }
+            {
+                // copy_from_iter (dest shorter)
+                let mut b1 = [0u8; 2];
+                let mut slices = [b1.as_mut_slice()];
+                let mut iter = BuffersSliceIoSlicesMutIter::new(&mut slices);
+                let copied = iter.copy_from_iter(&mut SingletonIoSlice::new(&combined)).unwrap();
+                assert_eq!(copied, 2);
+                drop(iter);
+                assert_eq!(b1, [1, 2]);
+            }
+            {
+                // copy_from_iter_exhaustive
+                let mut b1 = [0u8; 2];
+                let mut b2 = [0u8; 3];
+                let mut slices = [b1.as_mut_slice(), b2.as_mut_slice()];
+                BuffersSliceIoSlicesMutIter::new(&mut slices)
+                    .copy_from_iter_exhaustive(SingletonIoSlice::new(&combined))
+                    .unwrap();
+                assert_eq!(b1, combined[..src1.len()]);
+                assert_eq!(b2, combined[src1.len()..]);
+            }
+            {
+                // copy_from_iter_exhaustive length mismatch
+                let mut b1 = [0u8; 2];
+                let mut slices = [b1.as_mut_slice()];
+                assert!(
+                    BuffersSliceIoSlicesMutIter::new(&mut slices)
+                        .copy_from_iter_exhaustive(SingletonIoSlice::new(&combined))
+                        .is_err()
+                );
+            }
+        }
     }
 }
