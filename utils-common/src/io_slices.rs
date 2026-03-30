@@ -5180,5 +5180,126 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn io_slices_iter_chain() {
+            let src1 = [1u8, 2, 3];
+            let src2 = [4u8, 5, 6, 7, 8];
+            let combined = [1u8, 2, 3, 4, 5, 6, 7, 8];
+            {
+                // next_slice_mut
+                let mut buf1 = src1;
+                let mut buf2 = src2;
+                let mut chain = SingletonIoSliceMut::new(&mut buf1).chain(SingletonIoSliceMut::new(&mut buf2));
+                let s = chain.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src1);
+                s[0] = 0xFF;
+                let s = chain.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src2);
+                s[0] = 0xEE;
+                assert_eq!(chain.next_slice_mut(None).unwrap(), None);
+                assert_eq!(buf1[0], 0xFF);
+                assert_eq!(buf2[0], 0xEE);
+            }
+            {
+                // next_slice_mut with max_len within first iterator
+                let mut buf1 = src1;
+                let mut buf2 = src2;
+                let mut chain = SingletonIoSliceMut::new(&mut buf1).chain(SingletonIoSliceMut::new(&mut buf2));
+                let s = chain.next_slice_mut(Some(2)).unwrap().unwrap();
+                assert_eq!(s, &src1[..2]);
+                s[0] = 0xAA;
+                let s = chain.next_slice_mut(Some(10)).unwrap().unwrap();
+                assert_eq!(s, &src1[2..]);
+                let s = chain.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src2);
+                assert_eq!(chain.next_slice_mut(None).unwrap(), None);
+                assert_eq!(buf1[0], 0xAA);
+            }
+            {
+                // next_slice_mut with max_len spanning across iterators
+                let mut buf1 = src1;
+                let mut buf2 = src2;
+                let mut chain = SingletonIoSliceMut::new(&mut buf1).chain(SingletonIoSliceMut::new(&mut buf2));
+                let s = chain.next_slice_mut(Some(5)).unwrap().unwrap();
+                assert_eq!(s, &src1);
+                let s = chain.next_slice_mut(Some(5)).unwrap().unwrap();
+                assert_eq!(s, &src2);
+                assert_eq!(chain.next_slice_mut(None).unwrap(), None);
+            }
+            {
+                // chain with empty first
+                let mut buf1 = src1;
+                let mut chain = EmptyIoSlices::default().chain(SingletonIoSliceMut::new(&mut buf1));
+                let s = chain.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src1);
+                s[0] = 0xBB;
+                assert_eq!(chain.next_slice_mut(None).unwrap(), None);
+                assert_eq!(buf1[0], 0xBB);
+            }
+            {
+                // chain with empty second
+                let mut buf1 = src1;
+                let mut chain = SingletonIoSliceMut::new(&mut buf1).chain(EmptyIoSlices::default());
+                let s = chain.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src1);
+                assert_eq!(chain.next_slice_mut(None).unwrap(), None);
+            }
+            {
+                // chain of two empties
+                let mut chain = EmptyIoSlices::default().chain(EmptyIoSlices::default());
+                assert_eq!(chain.next_slice_mut(None).unwrap(), None);
+            }
+            {
+                // copy_from_iter
+                let mut buf1 = [0u8; 3];
+                let mut buf2 = [0u8; 5];
+                let mut chain = SingletonIoSliceMut::new(&mut buf1).chain(SingletonIoSliceMut::new(&mut buf2));
+                let copied = chain.copy_from_iter(&mut SingletonIoSlice::new(&combined)).unwrap();
+                assert_eq!(copied, combined.len());
+                assert_eq!(buf1, combined[..src1.len()]);
+                assert_eq!(buf2, combined[src1.len()..]);
+            }
+            {
+                // copy_from_iter partial (source shorter)
+                let mut buf1 = [0u8; 3];
+                let mut buf2 = [0u8; 5];
+                let mut chain = SingletonIoSliceMut::new(&mut buf1).chain(SingletonIoSliceMut::new(&mut buf2));
+                let copied = chain
+                    .copy_from_iter(&mut SingletonIoSlice::new(&combined[..2]))
+                    .unwrap();
+                assert_eq!(copied, 2);
+                assert_eq!(&buf1[..2], &combined[..2]);
+            }
+            {
+                // copy_from_iter partial (dest shorter)
+                let mut buf1 = [0u8; 3];
+                let mut chain = SingletonIoSliceMut::new(&mut buf1).chain(EmptyIoSlices::default());
+                let copied = chain.copy_from_iter(&mut SingletonIoSlice::new(&combined)).unwrap();
+                assert_eq!(copied, src1.len());
+                assert_eq!(buf1, combined[..src1.len()]);
+            }
+            {
+                // copy_from_iter_exhaustive
+                let mut buf1 = [0u8; 3];
+                let mut buf2 = [0u8; 5];
+                SingletonIoSliceMut::new(&mut buf1)
+                    .chain(SingletonIoSliceMut::new(&mut buf2))
+                    .copy_from_iter_exhaustive(SingletonIoSlice::new(&combined))
+                    .unwrap();
+                assert_eq!(buf1, combined[..src1.len()]);
+                assert_eq!(buf2, combined[src1.len()..]);
+            }
+            {
+                // copy_from_iter_exhaustive length mismatch
+                let mut buf1 = [0u8; 3];
+                assert!(
+                    SingletonIoSliceMut::new(&mut buf1)
+                        .chain(EmptyIoSlices::default())
+                        .copy_from_iter_exhaustive(SingletonIoSlice::new(&combined))
+                        .is_err()
+                );
+            }
+        }
     }
 }
