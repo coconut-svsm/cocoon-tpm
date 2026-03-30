@@ -4529,6 +4529,45 @@ mod tests {
         use super::*;
 
         #[test]
+        fn empty_io_slices() {
+            {
+                // next_slice_mut
+                assert_eq!(EmptyIoSlices::default().next_slice_mut(None).unwrap(), None);
+                assert_eq!(EmptyIoSlices::default().next_slice_mut(Some(1)).unwrap(), None);
+            }
+            {
+                // copy_from_iter
+                let src = [1u8, 2, 3];
+                let copied = EmptyIoSlices::default()
+                    .copy_from_iter(&mut SingletonIoSlice::new(&src))
+                    .unwrap();
+                assert_eq!(copied, 0);
+            }
+            {
+                // copy_from_iter from empty source
+                let copied = EmptyIoSlices::default()
+                    .copy_from_iter(&mut EmptyIoSlices::default())
+                    .unwrap();
+                assert_eq!(copied, 0);
+            }
+            {
+                // copy_from_iter_exhaustive (both empty — should succeed)
+                EmptyIoSlices::default()
+                    .copy_from_iter_exhaustive(EmptyIoSlices::default())
+                    .unwrap();
+            }
+            {
+                // copy_from_iter_exhaustive (non-empty source — should fail)
+                let src = [1u8, 2, 3];
+                assert!(
+                    EmptyIoSlices::default()
+                        .copy_from_iter_exhaustive(SingletonIoSlice::new(&src))
+                        .is_err()
+                );
+            }
+        }
+
+        #[test]
         fn singleton_io_slice_mut() {
             let src = [1u8, 2, 3, 4, 5];
             {
