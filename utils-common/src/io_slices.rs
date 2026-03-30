@@ -5072,5 +5072,113 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn io_slices_iter_take_exact() {
+            let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
+            {
+                // next_slice_mut
+                let mut buf = src;
+                let mut take = SingletonIoSliceMut::new(&mut buf).take_exact(5);
+                let s = take.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src[..5]);
+                s[0] = 0xFF;
+                assert_eq!(take.next_slice_mut(None).unwrap(), None);
+                assert_eq!(buf[0], 0xFF);
+            }
+            {
+                // next_slice_mut with max_len smaller than remaining
+                let mut buf = src;
+                let mut take = SingletonIoSliceMut::new(&mut buf).take_exact(5);
+                let s = take.next_slice_mut(Some(3)).unwrap().unwrap();
+                assert_eq!(s, &src[..3]);
+                s[0] = 0xAA;
+                let s = take.next_slice_mut(Some(10)).unwrap().unwrap();
+                assert_eq!(s, &src[3..5]);
+                assert_eq!(take.next_slice_mut(None).unwrap(), None);
+                assert_eq!(buf[0], 0xAA);
+            }
+            {
+                // next_slice_mut with max_len larger than remaining
+                let mut buf = src;
+                let mut take = SingletonIoSliceMut::new(&mut buf).take_exact(5);
+                let s = take.next_slice_mut(Some(100)).unwrap().unwrap();
+                assert_eq!(s, &src[..5]);
+                assert_eq!(take.next_slice_mut(None).unwrap(), None);
+            }
+            {
+                // take_exact(0)
+                let mut buf = src;
+                let mut take = SingletonIoSliceMut::new(&mut buf).take_exact(0);
+                assert_eq!(take.next_slice_mut(None).unwrap(), None);
+            }
+            {
+                // take_exact larger than underlying iterator errors
+                let mut buf = src;
+                let short_len = 3;
+                let mut take = SingletonIoSliceMut::new(&mut buf[..short_len]).take_exact(5);
+                let s = take.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src[..short_len]);
+                assert!(take.next_slice_mut(None).is_err());
+            }
+            {
+                // take_exact over multiple buffers
+                let src1 = [1u8, 2];
+                let src2 = [3u8, 4, 5, 6, 7];
+                let mut b1 = src1;
+                let mut b2 = src2;
+                let mut slices = [b1.as_mut_slice(), b2.as_mut_slice()];
+                let mut take = BuffersSliceIoSlicesMutIter::new(&mut slices).take_exact(4);
+                let s = take.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src1);
+                s[0] = 0xFF;
+                let s = take.next_slice_mut(None).unwrap().unwrap();
+                assert_eq!(s, &src2[..2]);
+                assert_eq!(take.next_slice_mut(None).unwrap(), None);
+                drop(take);
+                assert_eq!(b1[0], 0xFF);
+            }
+            {
+                // copy_from_iter
+                let mut buf = [0u8; 8];
+                let mut take = SingletonIoSliceMut::new(&mut buf).take_exact(5);
+                let copied = take
+                    .copy_from_iter(&mut SingletonIoSlice::new(&src[..5]).take_exact(5))
+                    .unwrap();
+                assert_eq!(copied, 5);
+                drop(take);
+                assert_eq!(&buf[..5], &src[..5]);
+            }
+            {
+                // copy_from_iter partial (source shorter)
+                let mut buf = [0u8; 8];
+                let mut take = SingletonIoSliceMut::new(&mut buf).take_exact(5);
+                let copied = take
+                    .copy_from_iter(&mut SingletonIoSlice::new(&src[..2]).take_exact(2))
+                    .unwrap();
+                assert_eq!(copied, 2);
+                drop(take);
+                assert_eq!(&buf[..2], &src[..2]);
+            }
+            {
+                // copy_from_iter_exhaustive
+                let mut buf = [0u8; 8];
+                SingletonIoSliceMut::new(&mut buf)
+                    .take_exact(5)
+                    .copy_from_iter_exhaustive(SingletonIoSlice::new(&src[..5]).take_exact(5))
+                    .unwrap();
+                assert_eq!(&buf[..5], &src[..5]);
+            }
+            {
+                // copy_from_iter_exhaustive length mismatch
+                let mut buf = [0u8; 8];
+                assert!(
+                    SingletonIoSliceMut::new(&mut buf)
+                        .take_exact(5)
+                        .copy_from_iter_exhaustive(SingletonIoSlice::new(&src).take_exact(8))
+                        .is_err()
+                );
+            }
+        }
     }
 }
