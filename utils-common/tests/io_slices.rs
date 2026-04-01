@@ -3,6 +3,7 @@
 // Author: Oliver Steffen <osteffen@redhat.com>
 
 mod io_slices {
+    mod double_ended_io_slices_iter;
     mod double_ended_io_slices_mut_iter;
     mod io_slices_iter;
     mod io_slices_mut_iter;
