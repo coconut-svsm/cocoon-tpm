@@ -4574,28 +4574,28 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
         Ok(())
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        if alignment.is_pow2() && alignment <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        if divisor.is_pow2() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
                 .head
                 .as_ref()
-                .map(|slice| slice.len() & (alignment - 1) == 0)
+                .map(|slice| slice.len() & (divisor - 1) == 0)
                 .unwrap_or(true))
         } else {
-            let mut all_aligned = true;
-            if alignment.is_pow2() {
+            let mut all_multiple_of = true;
+            if divisor.is_pow2() {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() & (alignment - 1) == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() & (divisor - 1) == 0;
+                    all_multiple_of
                 })?;
             } else {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() % alignment == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() % divisor == 0;
+                    all_multiple_of
                 })?;
             }
-            Ok(all_aligned)
+            Ok(all_multiple_of)
         }
     }
 }
@@ -4728,28 +4728,28 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
         Ok(())
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        if alignment.is_pow2() && alignment <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        if divisor.is_pow2() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
                 .head
                 .as_ref()
-                .map(|slice| slice.len() & (alignment - 1) == 0)
+                .map(|slice| slice.len() & (divisor - 1) == 0)
                 .unwrap_or(true))
         } else {
-            let mut all_aligned = true;
-            if alignment.is_pow2() {
+            let mut all_multiple_of = true;
+            if divisor.is_pow2() {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() & (alignment - 1) == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() & (divisor - 1) == 0;
+                    all_multiple_of
                 })?;
             } else {
                 self.for_each(&mut |slice| {
-                    all_aligned &= slice.len() % alignment == 0;
-                    all_aligned
+                    all_multiple_of &= slice.len() % divisor == 0;
+                    all_multiple_of
                 })?;
             }
-            Ok(all_aligned)
+            Ok(all_multiple_of)
         }
     }
 }
