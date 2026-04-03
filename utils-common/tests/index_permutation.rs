@@ -92,6 +92,26 @@ mod index_permutation {
             assert_eq!(d, [1u8, 2, 3, 0, 5, 4, 6], "data array differs");
             assert_eq!(p, IDENTITY_7, "index array differs");
         }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic]
+        fn assert_invalid_permutation_in_debug_0() {
+            let mut d = DATA_7;
+            let mut p = [0usize, 1, 2, 3, 4, 5, 1];
+
+            apply_index_perm(&mut p, &mut d);
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic]
+        fn assert_invalid_permutation_in_debug_1() {
+            let mut d = DATA_7;
+            let mut p = [1usize, 1, 1, 1, 1, 1, 1];
+
+            apply_index_perm(&mut p, &mut d);
+        }
     }
 
     mod apply_and_invert_index_perm {
@@ -142,6 +162,26 @@ mod index_permutation {
             // Applying the inverse should restore the original data.
             apply_index_perm(&mut p, &mut d);
             assert_eq!(d, DATA_7, "roundtrip failed to restore data");
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic]
+        fn assert_invalid_permutation_in_debug_0() {
+            let mut d = DATA_7;
+            let mut p = [0usize, 1, 2, 3, 4, 5, 1];
+
+            apply_and_invert_index_perm(&mut p, &mut d);
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic]
+        fn assert_invalid_permutation_in_debug_1() {
+            let mut d = DATA_7;
+            let mut p = [1usize, 1, 1, 1, 1, 1, 1];
+
+            apply_and_invert_index_perm(&mut p, &mut d);
         }
     }
 }
