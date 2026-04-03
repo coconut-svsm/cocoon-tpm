@@ -62,6 +62,10 @@ pub fn apply_and_invert_index_perm<T>(index_perm: &mut [usize], apply_to: &mut [
         cycle_search_start = cycle_start + 1;
     }
 
+    // Verify that the permutation was valid: every entry must have been visited
+    // (handled) or be a genuine fixed point.
+    debug_assert!(index_perm.iter().enumerate().all(|(i, &v)| is_handled(v) || v == i));
+
     // Finally, clear the handle_offset markers
     for i in index_perm.iter_mut() {
         *i &= !handled_offset;
@@ -126,6 +130,10 @@ pub fn apply_index_perm<T>(index_perm: &mut [usize], apply_to: &mut [T]) {
         }
         cycle_search_start = cycle_start + 1;
     }
+
+    // Verify that the permutation was valid: every entry must have been visited
+    // (handled) or be a genuine fixed point.
+    debug_assert!(index_perm.iter().enumerate().all(|(i, &v)| is_handled(v) || v == i));
 
     // Finally, clear the handle_offset markers
     for i in index_perm.iter_mut() {
