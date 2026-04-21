@@ -26,13 +26,162 @@ use core::{future, marker, mem, pin, task};
 
 use super::mkfs::MkFsFuture;
 
+/// CocoonFs filesystem metadata.
+///
+/// Prior to [opening](OpenFsFuture) a CocoonFs instance, it may be required
+/// to [read some of its metadata](ReadFsMetadataFuture) first, e.g. when
+/// that information is needed to obtain the filesystem root key from a remote
+/// party. `FsMetadata` encapsulates that information.
+///
+/// It may get read in via [`ReadFsMetadataFuture`], and then optionally
+/// provided to a subsequent [`OpenFsFuture`] later on. If passed to an
+/// [`OpenFsFuture`], that will not re-read the information from storage, as is
+/// required to maintain the validity of a `FsMetadata` prior attestation by
+/// some external means.
+///
+/// # See also:
+///
+/// * [`ReadFsMetadataFuture`].
+/// * [`OpenFsFuture`].
+pub struct FsMetadata {
+    image_header: image_header::ReadCoreImageHeaderFutureResult,
+}
+
+impl FsMetadata {
+    /// Get the filesystem instance's salt.
+    pub fn get_salt(&self) -> &[u8] {
+        match &self.image_header {
+            image_header::ReadCoreImageHeaderFutureResult::StaticImageHeader(header) => &header.salt,
+            image_header::ReadCoreImageHeaderFutureResult::MkFsInfoHeader { header, from_backup: _ } => &header.salt,
+        }
+    }
+
+    /// Get the filesystem instance's configuration parameters.
+    ///
+    /// Note that the [`ImageLayout`](layout::ImageLayout) includes all of the
+    /// filesystem instance's cryptography related parameters, i.e. the
+    /// algorithms selection for the various purposes.
+    pub fn get_config(&self) -> &layout::ImageLayout {
+        match &self.image_header {
+            image_header::ReadCoreImageHeaderFutureResult::StaticImageHeader(header) => &header.image_layout,
+            image_header::ReadCoreImageHeaderFutureResult::MkFsInfoHeader { header, from_backup: _ } => {
+                &header.image_layout
+            }
+        }
+    }
+}
+
+/// Read a CocoonFs' instance's [`FsMetadata`] from a [block
+/// device](blkdev::NvBlkDev).
+///
+/// # See also:
+///
+/// * [`FsMetadata`].
+/// * [`OpenFsFuture`].
+pub struct ReadFsMetadataFuture<B: blkdev::NvBlkDev + marker::Unpin> {
+    // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+    // Self. Returned back upon Future completion.
+    blkdev: Option<B>,
+    fut_state: ReadFsMetadataFutureState<B>,
+}
+
+enum ReadFsMetadataFutureState<B: blkdev::NvBlkDev + marker::Unpin> {
+    Init,
+    ReadCoreImageHeader {
+        read_core_image_header_fut: image_header::ReadCoreImageHeaderFuture<B>,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev + marker::Unpin> ReadFsMetadataFuture<B> {
+    /// Instantiate a [`ReadFsMetadataFuture`].
+    ///
+    /// On error, the input `blkdev` is returned directly as part of the `Err`.
+    /// On success, the [`ReadFsMetadataFuture`] assumes its ownership for
+    /// the duration of the operation. It will get eventually returned back
+    /// from [`poll()`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `blkdev` - The filesystem image backing storage.
+    pub fn new(blkdev: B) -> Result<Self, (B, NvFsError)> {
+        Ok(Self {
+            blkdev: Some(blkdev),
+            fut_state: ReadFsMetadataFutureState::Init,
+        })
+    }
+}
+
+impl<B: blkdev::NvBlkDev + marker::Unpin> future::Future for ReadFsMetadataFuture<B> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned from the
+    /// [`Future::poll()`](future::Future::poll):
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input
+    ///   [`NvBlkDev`](blkdev::NvBlkDev) is lost.
+    /// * `Ok((blkdev, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the input `blkdev` and the operation result will
+    ///   get returned within:
+    ///   * `Ok((blkdev, Err(e)))` - In case of an error, the error reason `e`
+    ///     is returned in an [`Err`].
+    ///   * `Ok((blkdev, Ok(metadata)))` - Otherwise the filesystem metadata
+    ///     read from the `blkdev` is returned.
+    type Output = Result<(B, Result<FsMetadata, NvFsError>), NvFsError>;
+
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        let result = loop {
+            match &mut this.fut_state {
+                ReadFsMetadataFutureState::Init => {
+                    this.fut_state = ReadFsMetadataFutureState::ReadCoreImageHeader {
+                        read_core_image_header_fut: image_header::ReadCoreImageHeaderFuture::new(),
+                    };
+                }
+                ReadFsMetadataFutureState::ReadCoreImageHeader {
+                    read_core_image_header_fut,
+                } => {
+                    let blkdev = match this.blkdev.as_mut() {
+                        Some(blkdev) => blkdev,
+                        None => {
+                            this.fut_state = ReadFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_core_image_header_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(image_header)) => break Ok(FsMetadata { image_header }),
+                        task::Poll::Ready(Err(e)) => break Err(e),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+                }
+                ReadFsMetadataFutureState::Done => unreachable!(),
+            }
+        };
+
+        this.fut_state = ReadFsMetadataFutureState::Done;
+        let blkdev = match this.blkdev.take() {
+            Some(blkdev) => blkdev,
+            None => return task::Poll::Ready(Err(nvfs_err_internal!())),
+        };
+
+        task::Poll::Ready(Ok((blkdev, result)))
+    }
+}
+
 /// Open a CocoonFs instance.
+///
+/// Prior to opening a CocoonFs filesystem, its [metadata](FsMetadata) may get
+/// [read in separately](ReadFsMetadataFuture) first if required e.g. as input
+/// to some external process for obtaining the filesystem root key.
 ///
 /// If a filesystem creation info header is found on the storage, the filesystem
 /// will get created ("mkfs") first.
 ///
 /// # See also:
 ///
+/// * [`ReadFsMetadataFuture`].
 /// * [`WriteMkFsInfoHeaderFuture`](super::WriteMkFsInfoHeaderFuture).
 pub struct OpenFsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev + marker::Unpin>
 where
@@ -102,6 +251,12 @@ where
         enable_trimming: bool,
         read_core_image_header_fut: image_header::ReadCoreImageHeaderFuture<B>,
     },
+    HaveCoreImageHeader {
+        enable_trimming: bool,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        image_header: Option<image_header::ReadCoreImageHeaderFutureResult>,
+    },
     MkFs {
         mkfs_fut: mkfs::MkFsFuture<ST, B>,
     },
@@ -170,6 +325,11 @@ where
     /// # Arguments:
     ///
     /// * `blkdev` - The filesystem image backing storage.
+    /// * `metadata` - Optional [`FsMetadata`] previously read from `blkdev` via
+    ///   a [`ReadFsMetadataFuture`]. If provided, it is assumed that the
+    ///   `metadata` has been validated through some external means and the
+    ///   information will not get read in again from storage as part of the
+    ///   filesystem opening process.
     /// * `raw_root_key` - The filesystem's raw root key material supplied from
     ///   extern.
     /// * `enable_trimming` - Whether to enable the submission of [trim
@@ -183,6 +343,7 @@ where
     #[allow(clippy::type_complexity)]
     pub fn new(
         blkdev: B,
+        metadata: Option<FsMetadata>,
         raw_root_key: zeroize::Zeroizing<Vec<u8>>,
         enable_trimming: bool,
         rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
@@ -217,7 +378,13 @@ where
             keys_cache: Some(keys_cache),
             #[cfg(test)]
             test_fail_apply_mkfsinfo_header: false,
-            fut_state: OpenFsFutureState::Init { enable_trimming },
+            fut_state: match metadata {
+                Some(metadata) => OpenFsFutureState::HaveCoreImageHeader {
+                    enable_trimming,
+                    image_header: Some(metadata.image_header),
+                },
+                None => OpenFsFutureState::Init { enable_trimming },
+            },
         })
     }
 }
@@ -277,10 +444,24 @@ where
                     };
                     let image_header =
                         match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_core_image_header_fut), blkdev, cx) {
-                            task::Poll::Ready(Ok(static_image_header)) => static_image_header,
+                            task::Poll::Ready(Ok(image_header)) => image_header,
                             task::Poll::Ready(Err(e)) => break e,
                             task::Poll::Pending => return task::Poll::Pending,
                         };
+
+                    this.fut_state = OpenFsFutureState::HaveCoreImageHeader {
+                        enable_trimming: *enable_trimming,
+                        image_header: Some(image_header),
+                    };
+                }
+                OpenFsFutureState::HaveCoreImageHeader {
+                    enable_trimming,
+                    image_header,
+                } => {
+                    let image_header = match image_header.take() {
+                        Some(image_header) => image_header,
+                        None => break nvfs_err_internal!(),
+                    };
 
                     let raw_root_key = match this.raw_root_key.as_ref() {
                         Some(raw_root_key) => raw_root_key,

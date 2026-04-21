@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! [`CocoonFs`] -- a secure [`NvFs`](crate::fs::NvFs) implementation.
@@ -113,4 +113,4 @@ impl convert::From<FormatError> for NvFsError {
 pub use fs::CocoonFs;
 pub use layout::ImageLayout;
 pub use mkfs::{MkFsFuture, WriteMkFsInfoHeaderFuture};
-pub use openfs::OpenFsFuture;
+pub use openfs::{FsMetadata, OpenFsFuture, ReadFsMetadataFuture};

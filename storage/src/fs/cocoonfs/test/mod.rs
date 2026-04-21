@@ -294,7 +294,7 @@ fn cocoonfs_test_openfs_op_helper(
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].to_vec());
-    let openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+    let openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, None, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     let executor = TestAsyncExecutor::new();
@@ -310,7 +310,7 @@ fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
 ) -> Result<TestNvBlkDev, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].to_vec());
-    let mut openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+    let mut openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, None, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     // Simulate IO failure when writing the regular static image header.
@@ -439,8 +439,8 @@ fn cocoonfs_test_read_inode_op_helper(
             (
                 read_context,
                 read_inode_result.map(|(inode_flags, data)| {
-                    // Verify that the inode flags match the least significant bits of the inode number,
-                    // c.f. cocoonfs_test_write_inode_op_helper().
+                    // Verify that the inode flags match the least significant bits of the inode
+                    // number, c.f. cocoonfs_test_write_inode_op_helper().
                     assert_eq!(inode as u8, inode_flags);
                     data
                 }),
@@ -642,7 +642,8 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
 
                     match inode {
                         Some((inode, inode_flags)) => {
-                            // Verify that the inode flags match the least significant bits of the inode number,
+                            // Verify that the inode flags match the least significant bits of the inode
+                            // number,
                             // c.f. cocoonfs_test_write_inode_op_helper().
                             assert_eq!(inode as u8, inode_flags);
                             let read_fut = fs::NvFsEnumerateCursor::read_current_inode_data(enumerate_cursor);
@@ -852,7 +853,8 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
 
                     match inode {
                         Some((inode, inode_flags)) => {
-                            // Verify that the inode flags match the least significant bits of the inode number,
+                            // Verify that the inode flags match the least significant bits of the inode
+                            // number,
                             // c.f. cocoonfs_test_write_inode_op_helper().
                             assert_eq!(inode as u8, inode_flags);
                             let read_fut = fs::NvFsUnlinkCursor::read_current_inode_data(unlink_cursor);

@@ -785,7 +785,7 @@ fn open_filesystem(
     };
     let rng = instantiate_rng();
     let key = zeroize::Zeroizing::new(key.to_vec());
-    let openfs_fut = match OpenFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(blkdev, key, enable_trimming, rng) {
+    let openfs_fut = match OpenFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(blkdev, None, key, enable_trimming, rng) {
         Ok(openfs_fut) => openfs_fut,
         Err((_blkdev, _key, _rng, e)) => {
             eprintln!("error: failed to initiate CocoonFS filesystem opening operation: error={e:?}");
