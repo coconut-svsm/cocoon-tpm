@@ -501,9 +501,7 @@ The static image header starts at offset zero, its format is:
 +----------------+----------------------------------------------------------------------------------+
 |variable        |The salt.                                                                         |
 +----------------+----------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header.                                       |
-+----------------+----------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header with any two neighboring bits swapped. |
+|8               |[Checksum](#sec-crc) over the header.                                             |
 +----------------+----------------------------------------------------------------------------------+
 
 After the static image header, some padding is inserted up to the next [IO Block](#def-io-block) alignment
@@ -584,48 +582,8 @@ follows:
 |       |                                                     |big-endian format each.                                 |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 
-###### [Cyclic redundancy checksum (CRC) computation]{#sec-crc}
-The static image header is integrity protected by a pair two CRC-32s: one over the plain header data from the magic to
-the salt, both inclusive, and another one over the same data but with any two neighboring bits swapped.
-
-The CRC polynomial used in either case is the standard CRC-32 one, with a corresponding 32 bit integer representation of
-`0x04c11db71`, where the arithmetically most significant bit specifies the coefficient to the term of degree $31$, and
-the least signigicant bit the constant term. A string of $32$ $1$-bits is prepended to the data before the CRC
-computation starts. Successive bytes in the data correspond to terms of decreasing degree in the to be reduced data
-polynomial, and within each byte, bits of decreasing arithmetic significance correspond to terms of increasing
-polynomial degree. The final residual polynomial's coefficient are inverted and serialized with the same association
-between polynomial terms and bits on storage as just described for the data.
-
-The distribution of the CRC algorithm output over uniformly distributed data is again uniform, so in this idealized case
-the probability of not detecting random errors with a single CRC-32 is $1:2^{32}$. One of the checksum's primary
-purposes is to detect incomplete writes issued from an interrupted filesystem creation operation -- the only point in
-time the static image header is getting actively written to. A chance of $1:2^{32}$ for missing header corruptions may
-well be considered too unreliable, and a 64 bit checksum should be used instead. The most straightforward solution would
-be to use a CRC-64 variant. However, in practice, this would double the size of a CRC implementation's internal lookup
-tables, which is undesirable. So a different approach is taken instead: a 64 bit checksum is formed by combining one
-CRC-32 over the header's data with another over the same data, but with any two neighboring bits swapped. Because the
-CRC-32 polynomial is irreducible -- hence the ring of its residue classes is a field, this is equivalent to computing
-two independent CRC-32 values over the bits at odd and even positions in the input data each. Therefore, the probability
-of missing uniformly random corruptions is $1:2^{64}$.
-
-The well-known feature of CRC-64 that burst errors of length up to 64 bits are detected reliably also applies to this
-method of combining the two CRC-32 checksums. To see this, consider the polynomial ring $\mathbb{F}_2[X]$ with
-coefficients in the binary field $\mathbb{F}_2$. Denote the CRC polynomial in this ring by $\mathcal{c}$. The ability to
-detect burst errors up to a length of 64 bits translates to requiring that the only polynomial of degree less than 64
-with its terms of odd degree all zero and a residue $\mathrm{mod}\mathcal{c}$ of zero is the zero polynomial. Note that
-$\mathrm{char}(\mathbb{F}_2)=2$, and $\phi: p\mapsto p^2$ is a ring endomorphism on $\mathbb{F}_2[X]$. In particular
-$\phi(X)=X^2$. The image of $\phi$ is exactly the set of polynomials with their terms of odd degree all zero. Observe
-that $\phi(\mathcal{c})=\mathcal{c}^2$ yields such a polynomial with a residue $\mathrm{mod}\mathcal{c}$ of $0$. It has
-degree $64$ though, and it remains to be shown that this is the polynomial of least degree with these
-properties. Consider the composition of maps $\psi\circ\phi$, where $\psi$ denotes the canonical map
-$\mathbb{F}_2[X]\rightarrow \mathbb{F}_2[X]/(\mathcal{c})$ into the residue class ring.  The
-$\mathrm{kern}(\psi\circ\phi)$ is an ideal in $\mathbb{F}_2[X]$, and is prinicipal, because $\mathbb{F}_2[X]$ is a
-principal ideal ring. That is, $\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$ for some
-$\bar{\mathcal{c}}\in\mathbb{F}_2[X]$, and $\phi(\bar{\mathcal{c}})$ is a polynomial of minimum degree in
-$\mathrm{kern}(\psi)$ with its terms of odd degree all zero. By what has been said above, it is already known that
-$\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$. Finally, because $\mathcal{c}$ is irreducible (and
-$\mathbb{F}_2$'s only unit is $1$), it follows that $\mathcal{\bar{c}}=\mathcal{c}$.
-
+The static image header is protected by a [checksum](#sec-crc)  over the plain header data from the magic
+to the salt, both inclusive.
 
 ##### [Mutable image header]{#sec-mutable-image-header}
 The mutable image header is located at the first [IO Block](#def-io-block) aligned boundary following the static image
@@ -678,17 +636,13 @@ required for the actual filesystem creation and is of the following format:
 +----------------+------------------------------------------------------------------------------------+
 |variable        |The salt.                                                                           |
 +----------------+------------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header.                                         |
-+----------------+------------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header with any two neighboring bits swapped.   |
+|8               |[Checksum](#sec-crc) over the header.                                                |
 +----------------+------------------------------------------------------------------------------------+
 
-The filesystem creation info header is protected by a pair of two CRC-32s: one over the plain header data from the magic
-to the salt, both inclusive, and another one over the same data but with any two neighboring bits swapped, just in line
-with the regular filesystem header's [checksum computation](#sec-crc).
-
-Upon encountering such a filesystem creation header passing the checksum verification at the storage volume's beginning
-when attempting to open a filesystem, implementations are supposed to conduct the filesystem creation.
+The filesystem creation info header is protected by a [checksum](#sec-crc) over the plain header data from the magic to
+the salt, both inclusive. Upon encountering such a filesystem creation header passing the checksum verification at the
+storage volume's beginning when attempting to open a filesystem, implementations are supposed to conduct the filesystem
+creation.
 
 The filesystem creation process inevitably involves a replacement of the filesystem creation info header at the
 storage's beginning with the [regular CocoonFs image header](#sec-filesystem-header) at some point. For robustness
@@ -710,6 +664,78 @@ expected to check for the presence of a filesystem creation info header backup c
 found, and it passes its checksum verification, then the online filesystem creation procedure is supposed to get
 restarted from scratch.
 
+### Integrity protection checksum scheme{#sec-crc}
+Once the CocoonFs image has been opened and the [authentication](#sec-auth_tree) is fully operational, integrity
+protection is provided implicitly through the (keyed) authentication. However, some core filesystem entities like the
+[image header](#sec-static-image-header) must get examined in the course of the bootstrapping procedure itself, and
+therefore have dedicated integrity protections in place.
+
+The checksum is formed by concatenating a pair of two CRC-32 values: one over the plain data, and another one over the
+same data but with the bits at odd and even positions swapped. The rationale follows below.
+
+The CRC polynomial used in either case is the standard CRC-32 one, with a corresponding 32 bit integer representation of
+`0x04c11db71`, where the arithmetically most significant bit specifies the coefficient to the term of degree $31$, and
+the least signigicant bit the constant term. A string of $32$ $1$-bits is prepended to the data before the CRC
+computation starts. Successive bytes in the data correspond to terms of decreasing degree in the to be reduced data
+polynomial, and within each byte, bits of decreasing arithmetic significance correspond to terms of increasing
+polynomial degree. The final residual polynomial's coefficient are inverted and serialized with the same association
+between polynomial terms and bits on storage as just described for the data.
+
+#### Rationale
+In principle, it would have been possible to (re)use some cryptographic hash function needed for the authentication
+anyway to also provide integrity protection in these contexts. However, there might be use-cases where an implementation
+would examine (and possibly even alter) only the filesystem metadata, but not attempt to run a full filesystem opening
+procedure. If cryptographic hashes were used for the integrity protections, such implementations would have to implement
+support for any such algorithm possibly to be encountered -- something which external policies and regulations might
+prohibit. For this reason, a dedicated checksumming scheme is used instead, which should be unproblematic and
+universally available. The checksum scheme used to provide integrity protections for CocoonFs is based on the well-known
+Cyclic Redundancy Checksum (CRC) class of checksums.
+
+The features of a particular CRC instance, most notably the checksum length, are determined exclusively by the chosen
+CRC polynomial. The most commonly used ones are either $32$ or $64$ bits in length. In general, longer
+polynomials/checksums provide better protection, obviously. More specifically, CRCs computed over uniformly distributed
+data are again uniform and in this idealized case, the probability of not detecting random errors is either $1:2^{32}$
+or $1:2^{64}$, depending on whether the chosen CRC polynomial is of degree $32$ or $64$.  One of the checksums'
+primary purposes in the context of CocoonFs is to detect incomplete writes issued from an interrupted filesystem
+creation operation -- the only point in time the [static image header](#sec-static-image-header) is getting actively
+written to. A chance of $1:2^{32}$ for missing header corruptions may well be considered too unreliable, and a $64$ bit
+checksum should be used instead.
+
+However, CRC polynomials of larger degree tend to be more demanding in terms of runtime resources, e.g. of internal
+lookup tables' sizes. Moreover, implementations for the widely adopted standard CRC-32 polynomial are more generally
+available, both for hard- and software. Therefore, a hybrid approach yielding a $64$ bit checksum of the desired
+properties exclusively from the CRC-32 primitive has been chosen for CocoonFs. The checksum is formed from a pair of two
+CRC-32 values: one over the protected data, and another one over that same data, but with the bits at odd and even
+positions swapped each.
+
+##### Checksum properties
+The CRC-32 polynomial is irreducible, hence the ring of its residue classes forms a field. Therefore,
+the following two are equivalent in the sense that one uniquely determines the other:
+
+* the pair of CRC-32 values computed as described above to form the checksum, i.e. one over the plain data and another
+  one over the data with the bits at odd and even positions swapped,
+* a pair of CRC-32 values, one computed exclusively from the bits at odd positions, and the other one exclusively from
+  the bits at even positions.
+
+In particular, the chance of missing a random data corruption is $1:2^{64}$.
+
+The well-known feature of CRC-64 that burst errors of length up to 64 bits are detected reliably also applies to this
+method of combining the two CRC-32 checksums. To see this, consider the polynomial ring $\mathbb{F}_2[X]$ with
+coefficients in the binary field $\mathbb{F}_2$. Denote the CRC polynomial in this ring by $\mathcal{c}$. The ability to
+detect burst errors up to a length of 64 bits translates to requiring that the only polynomial of degree less than 64
+with its terms of odd degree all zero and a residue $\mathrm{mod}\mathcal{c}$ of zero is the zero polynomial. Note that
+$\mathrm{char}(\mathbb{F}_2)=2$, and $\phi: p\mapsto p^2$ is a ring endomorphism on $\mathbb{F}_2[X]$. In particular
+$\phi(X)=X^2$. The image of $\phi$ is exactly the set of polynomials with their terms of odd degree all zero. Observe
+that $\phi(\mathcal{c})=\mathcal{c}^2$ yields such a polynomial with a residue $\mathrm{mod}\mathcal{c}$ of $0$. It has
+degree $64$ though, and it remains to be shown that this is the polynomial of least degree with these
+properties. Consider the composition of maps $\psi\circ\phi$, where $\psi$ denotes the canonical map
+$\mathbb{F}_2[X]\rightarrow \mathbb{F}_2[X]/(\mathcal{c})$ into the residue class ring.  The
+$\mathrm{kern}(\psi\circ\phi)$ is an ideal in $\mathbb{F}_2[X]$, and is prinicipal, because $\mathbb{F}_2[X]$ is a
+principal ideal ring. That is, $\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$ for some
+$\bar{\mathcal{c}}\in\mathbb{F}_2[X]$, and $\phi(\bar{\mathcal{c}})$ is a polynomial of minimum degree in
+$\mathrm{kern}(\psi)$ with its terms of odd degree all zero. By what has been said above, it is already known that
+$\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$. Finally, because $\mathcal{c}$ is irreducible (and
+$\mathbb{F}_2$'s only unit is $1$), it follows that $\mathcal{\bar{c}}=\mathcal{c}$.
 
 ### [Key derivation]{#sec-key-derivation}
 As outlined in the [introduction](#sec-introduction), the root key gets processed once through the TCG
