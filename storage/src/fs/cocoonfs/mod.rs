@@ -19,6 +19,7 @@
 mod alloc_bitmap;
 mod auth_subject_ids;
 mod auth_tree;
+mod checksum;
 mod crc32;
 mod encryption_entities;
 mod extent_ptr;

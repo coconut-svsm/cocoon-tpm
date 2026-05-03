@@ -9,7 +9,7 @@ use crate::{
     crypto::hash,
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{FormatError, crc32, extent_ptr, layout},
+        cocoonfs::{FormatError, checksum, extent_ptr, layout},
     },
     nvfs_err_internal,
     utils_common::{
@@ -124,9 +124,8 @@ impl StaticImageHeader {
         // And the image salt.
         encoded_len += salt_len as u32;
 
-        // The length of two CRCs -- one on the plain image header data, one with all
-        // neighboring bits swapped each.
-        encoded_len += 2 * (mem::size_of::<u32>() as u32);
+        // The checksum.
+        encoded_len += checksum::CHECKSUM_LEN;
 
         encoded_len
     }
@@ -184,14 +183,10 @@ impl StaticImageHeader {
         image_layout: &layout::ImageLayout,
         salt: &[u8],
     ) -> Result<(), NvFsError> {
-        // CRC of the header data.
-        let mut crc = crc32::crc32le_init();
-        // CRC of the header data with all neighboring bits swapped each.
-        let mut crc_snb = crc32::crc32le_init();
+        let mut checksum = checksum::ChecksumInstance::new();
 
         let magic = b"COCOONFS";
-        crc = crc32::crc32le_update_data(crc, magic.as_slice());
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, magic.as_slice());
+        checksum.update(magic.as_slice());
         let mut magic = io_slices::SingletonIoSlice::new(magic.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut magic)?;
         if !magic.is_empty()? {
@@ -199,8 +194,7 @@ impl StaticImageHeader {
         }
 
         let version = 0u8.to_le_bytes();
-        crc = crc32::crc32le_update_data(crc, &version);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &version);
+        checksum.update(&version);
         let mut version = io_slices::SingletonIoSlice::new(version.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut version)?;
         if !version.is_empty()? {
@@ -208,8 +202,7 @@ impl StaticImageHeader {
         }
 
         let encoded_image_layout = image_layout.encode()?;
-        crc = crc32::crc32le_update_data(crc, &encoded_image_layout);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &encoded_image_layout);
+        checksum.update(&encoded_image_layout);
         let mut encoded_image_layout =
             io_slices::SingletonIoSlice::new(encoded_image_layout.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut encoded_image_layout)?;
@@ -220,32 +213,23 @@ impl StaticImageHeader {
         let salt_len = u8::try_from(salt.len())
             .map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?
             .to_le_bytes();
-        crc = crc32::crc32le_update_data(crc, &salt_len);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &salt_len);
+        checksum.update(&salt_len);
         let mut salt_len = io_slices::SingletonIoSlice::new(salt_len.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut salt_len)?;
         if !salt_len.is_empty()? {
             return Err(nvfs_err_internal!());
         }
-        crc = crc32::crc32le_update_data(crc, salt);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, salt);
+        checksum.update(salt);
         let mut salt = io_slices::SingletonIoSlice::new(salt).map_infallible_err();
         dst.copy_from_iter(&mut salt)?;
         if !salt.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
-        let crc = crc32::crc32le_finish_send(crc).to_le_bytes();
-        let mut crc = io_slices::SingletonIoSlice::new(&crc).map_infallible_err();
-        dst.copy_from_iter(&mut crc)?;
-        if !crc.is_empty()? {
-            return Err(nvfs_err_internal!());
-        }
-
-        let crc_snb = crc32::crc32le_finish_send(crc_snb).to_le_bytes();
-        let mut crc_snb = io_slices::SingletonIoSlice::new(&crc_snb).map_infallible_err();
-        dst.copy_from_iter(&mut crc_snb)?;
-        if !crc_snb.is_empty()? {
+        let checksum = checksum.finish_send();
+        let mut checksum = io_slices::SingletonIoSlice::new(&checksum).map_infallible_err();
+        dst.copy_from_iter(&mut checksum)?;
+        if !checksum.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
@@ -867,11 +851,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     // Verify the checksums.
                     let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
                         .chain(io_slices::SingletonIoSlice::new(second_header_part));
-                    // CRC of the header data.
-                    let mut crc = crc32::crc32le_init();
-                    // CRC of the header data with all neighboring bits swapped each.
-                    let mut crc_snb = crc32::crc32le_init();
-
+                    let mut checksum = checksum::ChecksumInstance::new();
                     let mut checksummed_header_io_slice = header_io_slice.as_ref().take_exact(*static_header_len - 8);
                     while let Some(checksummed_header_part) = match checksummed_header_io_slice.next_slice(None) {
                         Ok(checksummed_header_part) => checksummed_header_part,
@@ -891,17 +871,16 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                             }
                         }
                     } {
-                        crc = crc32::crc32le_update_data(crc, checksummed_header_part);
-                        crc_snb = crc32::crc32le_update_data_snb(crc_snb, checksummed_header_part);
+                        checksum.update(checksummed_header_part);
                     }
 
-                    let mut expected_crc = [0u8; mem::size_of::<u32>()];
-                    let mut expected_crc_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_crc);
-                    if let Err(e) = expected_crc_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
+                    let mut expected_checksum = [0u8; checksum::CHECKSUM_LEN as usize];
+                    let mut expected_checksum_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_checksum);
+                    if let Err(e) = expected_checksum_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
                         // Infallible.
                         match e {}
                     }
-                    if !match expected_crc_io_slice.is_empty() {
+                    if !match expected_checksum_io_slice.is_empty() {
                         Ok(is_empty) => is_empty,
                         Err(e) => {
                             // Infallible.
@@ -911,29 +890,8 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
                         return task::Poll::Ready(Err(nvfs_err_internal!()));
                     }
-                    let expected_crc = u32::from_le_bytes(expected_crc);
 
-                    let mut expected_crc_snb = [0u8; mem::size_of::<u32>()];
-                    let mut expected_crc_snb_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_crc_snb);
-                    if let Err(e) = expected_crc_snb_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
-                        // Infallible.
-                        match e {}
-                    }
-                    if !match expected_crc_snb_io_slice.is_empty() {
-                        Ok(is_empty) => is_empty,
-                        Err(e) => {
-                            // Infallible.
-                            match e {}
-                        }
-                    } {
-                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(nvfs_err_internal!()));
-                    }
-                    let expected_crc_snb = u32::from_le_bytes(expected_crc_snb);
-
-                    if !crc32::crc32le_finish_receive(crc, expected_crc)
-                        || !crc32::crc32le_finish_receive(crc_snb, expected_crc_snb)
-                    {
+                    if !checksum.finish_receive(&expected_checksum) {
                         // Checksum mismatch. Proceed with attempting to read the backup MkFsInfoHeader,
                         // if any.
                         this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
@@ -1078,11 +1036,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     // Verify the checksums.
                     let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
                         .chain(io_slices::SingletonIoSlice::new(second_header_part));
-                    // CRC of the header data.
-                    let mut crc = crc32::crc32le_init();
-                    // CRC of the header data with all neighboring bits swapped each.
-                    let mut crc_snb = crc32::crc32le_init();
-
+                    let mut checksum = checksum::ChecksumInstance::new();
                     let mut checksummed_header_io_slice = header_io_slice.as_ref().take_exact(*mkfsinfo_header_len - 8);
                     while let Some(checksummed_header_part) = match checksummed_header_io_slice.next_slice(None) {
                         Ok(checksummed_header_part) => checksummed_header_part,
@@ -1102,17 +1056,16 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                             }
                         }
                     } {
-                        crc = crc32::crc32le_update_data(crc, checksummed_header_part);
-                        crc_snb = crc32::crc32le_update_data_snb(crc_snb, checksummed_header_part);
+                        checksum.update(checksummed_header_part);
                     }
 
-                    let mut expected_crc = [0u8; mem::size_of::<u32>()];
-                    let mut expected_crc_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_crc);
-                    if let Err(e) = expected_crc_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
+                    let mut expected_checksum = [0u8; checksum::CHECKSUM_LEN as usize];
+                    let mut expected_checksum_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_checksum);
+                    if let Err(e) = expected_checksum_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
                         // Infallible.
                         match e {}
                     }
-                    if !match expected_crc_io_slice.is_empty() {
+                    if !match expected_checksum_io_slice.is_empty() {
                         Ok(is_empty) => is_empty,
                         Err(e) => {
                             // Infallible.
@@ -1122,29 +1075,8 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
                         return task::Poll::Ready(Err(nvfs_err_internal!()));
                     }
-                    let expected_crc = u32::from_le_bytes(expected_crc);
 
-                    let mut expected_crc_snb = [0u8; mem::size_of::<u32>()];
-                    let mut expected_crc_snb_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_crc_snb);
-                    if let Err(e) = expected_crc_snb_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
-                        // Infallible.
-                        match e {}
-                    }
-                    if !match expected_crc_snb_io_slice.is_empty() {
-                        Ok(is_empty) => is_empty,
-                        Err(e) => {
-                            // Infallible.
-                            match e {}
-                        }
-                    } {
-                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(nvfs_err_internal!()));
-                    }
-                    let expected_crc_snb = u32::from_le_bytes(expected_crc_snb);
-
-                    if !crc32::crc32le_finish_receive(crc, expected_crc)
-                        || !crc32::crc32le_finish_receive(crc_snb, expected_crc_snb)
-                    {
+                    if !checksum.finish_receive(&expected_checksum) {
                         // Checksum mismatch. Proceed with attempting to read the backup MkFsInfoHeader,
                         // if not currently there yet.
                         match *first_error {
@@ -1662,9 +1594,8 @@ impl MkFsInfoHeader {
         // And the image salt.
         encoded_len += salt_len as u32;
 
-        // The length of two CRCs -- one on the plain mkfs header data, one with all
-        // neighboring bits swapped each.
-        encoded_len += 2 * (mem::size_of::<u32>() as u32);
+        // The checksum.
+        encoded_len += checksum::CHECKSUM_LEN;
 
         encoded_len
     }
@@ -1829,14 +1760,10 @@ impl MkFsInfoHeader {
         image_size: layout::AllocBlockCount,
         salt: &[u8],
     ) -> Result<(), NvFsError> {
-        // CRC of the header data.
-        let mut crc = crc32::crc32le_init();
-        // CRC of the header data with all neighboring bits swapped each.
-        let mut crc_snb = crc32::crc32le_init();
+        let mut checksum = checksum::ChecksumInstance::new();
 
         let magic = b"CCFSMKFS";
-        crc = crc32::crc32le_update_data(crc, magic.as_slice());
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, magic.as_slice());
+        checksum.update(magic.as_slice());
         let mut magic = io_slices::SingletonIoSlice::new(magic.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut magic)?;
         if !magic.is_empty()? {
@@ -1844,8 +1771,7 @@ impl MkFsInfoHeader {
         }
 
         let version = 0u8.to_le_bytes();
-        crc = crc32::crc32le_update_data(crc, &version);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &version);
+        checksum.update(&version);
         let mut version = io_slices::SingletonIoSlice::new(version.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut version)?;
         if !version.is_empty()? {
@@ -1853,8 +1779,7 @@ impl MkFsInfoHeader {
         }
 
         let encoded_image_layout = image_layout.encode()?;
-        crc = crc32::crc32le_update_data(crc, &encoded_image_layout);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &encoded_image_layout);
+        checksum.update(&encoded_image_layout);
         let mut encoded_image_layout =
             io_slices::SingletonIoSlice::new(encoded_image_layout.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut encoded_image_layout)?;
@@ -1863,8 +1788,7 @@ impl MkFsInfoHeader {
         }
 
         let image_size = u64::from(image_size).to_le_bytes();
-        crc = crc32::crc32le_update_data(crc, &image_size);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &image_size);
+        checksum.update(&image_size);
         let mut image_size = io_slices::SingletonIoSlice::new(image_size.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut image_size)?;
         if !image_size.is_empty()? {
@@ -1874,32 +1798,23 @@ impl MkFsInfoHeader {
         let salt_len = u8::try_from(salt.len())
             .map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?
             .to_le_bytes();
-        crc = crc32::crc32le_update_data(crc, &salt_len);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, &salt_len);
+        checksum.update(&salt_len);
         let mut salt_len = io_slices::SingletonIoSlice::new(salt_len.as_slice()).map_infallible_err();
         dst.copy_from_iter(&mut salt_len)?;
         if !salt_len.is_empty()? {
             return Err(nvfs_err_internal!());
         }
-        crc = crc32::crc32le_update_data(crc, salt);
-        crc_snb = crc32::crc32le_update_data_snb(crc_snb, salt);
+        checksum.update(salt);
         let mut salt = io_slices::SingletonIoSlice::new(salt).map_infallible_err();
         dst.copy_from_iter(&mut salt)?;
         if !salt.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
-        let crc = crc32::crc32le_finish_send(crc).to_le_bytes();
-        let mut crc = io_slices::SingletonIoSlice::new(&crc).map_infallible_err();
-        dst.copy_from_iter(&mut crc)?;
-        if !crc.is_empty()? {
-            return Err(nvfs_err_internal!());
-        }
-
-        let crc_snb = crc32::crc32le_finish_send(crc_snb).to_le_bytes();
-        let mut crc_snb = io_slices::SingletonIoSlice::new(&crc_snb).map_infallible_err();
-        dst.copy_from_iter(&mut crc_snb)?;
-        if !crc_snb.is_empty()? {
+        let checksum = checksum.finish_send();
+        let mut checksum = io_slices::SingletonIoSlice::new(&checksum).map_infallible_err();
+        dst.copy_from_iter(&mut checksum)?;
+        if !checksum.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
