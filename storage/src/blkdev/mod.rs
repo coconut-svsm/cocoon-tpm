@@ -15,6 +15,7 @@ pub use chunked_io_region::{
     ChunkedIoRegion, ChunkedIoRegionAlignedBlockChunksRangesIterator, ChunkedIoRegionAlignedBlocksIterator,
     ChunkedIoRegionChunkIndex, ChunkedIoRegionChunkRange, ChunkedIoRegionError,
 };
+pub mod helpers;
 
 pub mod test;
 
@@ -207,31 +208,31 @@ pub trait NvBlkDevFuture<B: ?Sized + NvBlkDev>: marker::Send {
 /// It is assumed that the minimum unit of IO, i.e. a ["Device IO
 /// Block"](Self::io_block_size_128b_log2), has the following semantics:
 /// * [Writes](Self::write) to or [trims](Self::trim) of one ["Device IO
-///   Block"](Self::io_block_size_128b_log2) do not affect any other [Device
-///   IO Blocks](Self::io_block_size_128b_log2).
+///   Block"](Self::io_block_size_128b_log2) do not affect any other [Device IO
+///   Blocks](Self::io_block_size_128b_log2).
 /// * [Writes](Self::write) to a single [Device IO
-///   Block](Self::io_block_size_128b_log2) are not necessarily atomic, but
-///   -- assuming the absence of any power cycling events -- there is a point in
+///   Block](Self::io_block_size_128b_log2) are not necessarily atomic, but --
+///   assuming the absence of any power cycling events -- there is a point in
 ///   time when its physical state fully reflects the to be written state. It is
 ///   said that "a write becomes effective on physical storage" at that point in
 ///   time. Starting from when a write was initiatied up to when it possibly
 ///   becomes effective on physical storage, the [Device IO
-///   Block](Self::io_block_size_128b_log2) "is under write". In
-///   particular, if a [Device IO Block](Self::io_block_size_128b_log2) is
-///   under write at the time a power cycle event happens, it remains so until
-///   eventually overwritten again (or trimmed) in a later power cycle.
+///   Block](Self::io_block_size_128b_log2) "is under write". In particular, if
+///   a [Device IO Block](Self::io_block_size_128b_log2) is under write at the
+///   time a power cycle event happens, it remains so until eventually
+///   overwritten again (or trimmed) in a later power cycle.
 /// * [Trim](Self::trim) requests are at some point getting transmitted to the
 ///   physical storage backend, from when on they're said to have "commenced".
-/// * For a single given [Device IO Block](Self::io_block_size_128b_log2),
-///   there is a total order on the writes and trims. That is a given [Device IO
-///   Block](Self::io_block_size_128b_log2) can be either under write, a
-///   write to it may have become effective on physical storage or a trim may
-///   have commenced.
+/// * For a single given [Device IO Block](Self::io_block_size_128b_log2), there
+///   is a total order on the writes and trims. That is a given [Device IO
+///   Block](Self::io_block_size_128b_log2) can be either under write, a write
+///   to it may have become effective on physical storage or a trim may have
+///   commenced.
 /// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) under
 ///   write results in arbitrary data to be returned.
-/// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) for
-///   which a trim has commenced results in implementation defined behavior.
-///   That is, it's an `unreachable()` condition.
+/// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) for which
+///   a trim has commenced results in implementation defined behavior. That is,
+///   it's an `unreachable()` condition.
 /// * Power cycle events behave as if a virtual [write
 ///   barrier](Self::write_barrier) had been issued and polled to completion at
 ///   that point.
@@ -241,8 +242,8 @@ pub trait NvBlkDevFuture<B: ?Sized + NvBlkDev>: marker::Send {
 ///   completion, it is guaranteed that any writes initiated prior to it have
 ///   become effective on physical storage.
 /// * In the absence of any [write barrier](Self::write_barrier), writes to and
-///   trims of *different* [Device IO Block](Self::io_block_size_128b_log2)
-///   may become effective on physical storage or commence respectively in any
+///   trims of *different* [Device IO Block](Self::io_block_size_128b_log2) may
+///   become effective on physical storage or commence respectively in any
 ///   order.
 ///   - [Writes](Self::write) issued after a [write
 ///     barrier](Self::WriteBarrierFuture) has been polled to completion must

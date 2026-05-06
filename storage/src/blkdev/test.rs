@@ -469,14 +469,14 @@ type TestSyncRcPtrFactory = <TestNopSyncTypes as sync_types::SyncTypes>::SyncRcP
 type TestNvBlkDevSyncRcPtr = <TestSyncRcPtrFactory as sync_types::SyncRcPtrFactory>::SyncRcPtr<TestNvBlkDev>;
 
 #[cfg(test)]
-struct TestNvBlkDevFuture<F: blkdev::NvBlkDevFuture<TestNvBlkDev>> {
+pub(super) struct TestNvBlkDevFuture<F: blkdev::NvBlkDevFuture<TestNvBlkDev>> {
     dev: TestNvBlkDevSyncRcPtr,
     dev_fut: F,
 }
 
 #[cfg(test)]
 impl<F: blkdev::NvBlkDevFuture<TestNvBlkDev>> TestNvBlkDevFuture<F> {
-    fn new(dev: TestNvBlkDevSyncRcPtr, dev_fut: F) -> Self {
+    pub fn new(dev: TestNvBlkDevSyncRcPtr, dev_fut: F) -> Self {
         Self { dev, dev_fut }
     }
 }
