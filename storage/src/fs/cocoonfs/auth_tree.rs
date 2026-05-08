@@ -1875,7 +1875,7 @@ impl AuthTreeConfig {
     ///
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node whose storage
     ///   location to determine.
-    fn node_io_region(&self, node_id: &AuthTreeNodeId) -> Result<blkdev::ChunkedIoRegion, NvFsError> {
+    fn node_physical_location(&self, node_id: &AuthTreeNodeId) -> Result<layout::PhysicalAllocBlockRange, NvFsError> {
         debug_assert!(node_id.level < self.auth_tree_levels);
         if u64::from(node_id.covered_data_blocks_begin) >= self.max_covered_data_block_count {
             return Err(FormatError::BlockOutOfRange.into());
@@ -1901,13 +1901,7 @@ impl AuthTreeConfig {
         if extents_range_iter.next().is_some() {
             return Err(nvfs_err_internal!());
         }
-        let physical_range = extent.physical_range();
-        blkdev::ChunkedIoRegion::new(
-            u64::from(physical_range.begin()) << self.allocation_block_size_128b_log2,
-            u64::from(physical_range.end()) << self.allocation_block_size_128b_log2,
-            (self.node_allocation_blocks_log2 + self.allocation_block_size_128b_log2) as u32,
-        )
-        .map_err(|_| nvfs_err_internal!())
+        Ok(extent.physical_range())
     }
 
     /// Get the size of an authentication tree node in units of bytes.
@@ -2744,7 +2738,7 @@ impl<'a> Iterator for AuthTreePathNodesIterator<'a> {
 
 /// Read an authentication tree node from storage.
 struct AuthTreeNodeReadFuture<B: blkdev::NvBlkDev> {
-    read_fut: B::ReadFuture<AuthTreeNodeReadNvBlkDevRequest>,
+    read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
 }
 
 impl<B: blkdev::NvBlkDev> AuthTreeNodeReadFuture<B> {
@@ -2752,11 +2746,10 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeReadFuture<B> {
     ///
     /// # Arguments:
     ///
-    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to read.
-    fn new(blkdev: &B, tree_config: &AuthTreeConfig, node_id: &AuthTreeNodeId) -> Result<Self, NvFsError> {
-        Self::new_with_buf(blkdev, tree_config, node_id, FixedVec::new_empty())
+    fn new(tree_config: &AuthTreeConfig, node_id: &AuthTreeNodeId) -> Result<Self, NvFsError> {
+        Self::new_with_buf(tree_config, node_id, FixedVec::new_empty())
     }
 
     /// Instantiate an [`AuthTreeNodeReadFuture`] with destination buffer
@@ -2767,12 +2760,10 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeReadFuture<B> {
     ///
     /// # Arguments:
     ///
-    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to read.
     /// * `dst_buf` - The node data destination buffer to get repurposed.
     fn new_with_buf(
-        blkdev: &B,
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
         mut dst_buf: FixedVec<u8, 7>,
@@ -2782,12 +2773,15 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeReadFuture<B> {
             dst_buf = FixedVec::new_with_default(node_size)?;
         }
 
-        let io_region = tree_config.node_io_region(node_id)?;
-        let request = AuthTreeNodeReadNvBlkDevRequest { dst_buf, io_region };
-        let read_fut = blkdev
-            .read(request)
-            .and_then(|r| r.map_err(|(_, e)| e))
-            .map_err(NvFsError::from)?;
+        let node_location = tree_config.node_physical_location(node_id)?;
+        let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+            u64::from(node_location.begin()),
+            u64::from(node_location.block_count()),
+            tree_config.allocation_block_size_128b_log2,
+            dst_buf,
+            0,
+            tree_config.node_allocation_blocks_log2 + tree_config.allocation_block_size_128b_log2,
+        );
         Ok(Self { read_fut })
     }
 }
@@ -2798,40 +2792,16 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for AuthTreeNodeReadFuture<B
     fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
         match blkdev::NvBlkDevFuture::poll(pin::Pin::new(&mut this.read_fut), blkdev, cx) {
-            task::Poll::Ready(Ok((request, Ok(())))) => {
-                let AuthTreeNodeReadNvBlkDevRequest { dst_buf, .. } = request;
-                task::Poll::Ready(Ok(dst_buf))
-            }
+            task::Poll::Ready(Ok((dst_buf, Ok(())))) => task::Poll::Ready(Ok(dst_buf)),
             task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => task::Poll::Ready(Err(NvFsError::from(e))),
             task::Poll::Pending => task::Poll::Pending,
         }
     }
 }
 
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`AuthTreeNodeReadFuture`].
-struct AuthTreeNodeReadNvBlkDevRequest {
-    dst_buf: FixedVec<u8, 7>,
-    io_region: blkdev::ChunkedIoRegion,
-}
-
-impl blkdev::NvBlkDevReadRequest for AuthTreeNodeReadNvBlkDevRequest {
-    fn region(&self) -> &blkdev::ChunkedIoRegion {
-        &self.io_region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &blkdev::ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        debug_assert_eq!(range.chunk().decompose_to_hierarchic_indices::<0>([]).0, 0);
-        Ok(Some(&mut self.dst_buf[range.range_in_chunk().clone()]))
-    }
-}
-
 /// Write an authentication tree node to storage.
 struct AuthTreeNodeWriteFuture<B: blkdev::NvBlkDev> {
-    write_fut: B::WriteFuture<AuthTreeNodeWriteNvBlkDevRequest>,
+    write_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
 }
 
 impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
@@ -2843,14 +2813,12 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
     ///
     /// # Arguments:
     ///
-    /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTreeConfig`].
     /// * `node_id` - The [`AuthTreeNodeId`] identifying the node to write.
     /// * `src_buf` - The node data to get written. Its length must match the
     ///   [`node size`](AuthTreeConfig::node_size) exactly. Returned back from
     ///   [`poll()`](Self::poll) upon future completion.
     fn new(
-        blkdev: &B,
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
         src_buf: FixedVec<u8, 7>,
@@ -2859,12 +2827,15 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
             return Err(nvfs_err_internal!());
         }
 
-        let io_region = tree_config.node_io_region(node_id)?;
-        let request = AuthTreeNodeWriteNvBlkDevRequest { src_buf, io_region };
-        let write_fut = match blkdev.write(request).map_err(NvFsError::from)? {
-            Ok(write_fut) => write_fut,
-            Err((request, e)) => return Ok(Err((request.src_buf, NvFsError::from(e)))),
-        };
+        let node_location = tree_config.node_physical_location(node_id)?;
+        let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+            u64::from(node_location.begin()),
+            u64::from(node_location.block_count()),
+            tree_config.allocation_block_size_128b_log2,
+            src_buf,
+            0,
+            tree_config.node_allocation_blocks_log2 + tree_config.allocation_block_size_128b_log2,
+        );
         Ok(Ok(Self { write_fut }))
     }
 }
@@ -2887,32 +2858,11 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for AuthTreeNodeWriteFuture<
 
     fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
-        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(&mut this.write_fut), blkdev, cx) {
-            task::Poll::Ready(Ok((request, result))) => {
-                let AuthTreeNodeWriteNvBlkDevRequest { src_buf, .. } = request;
-                task::Poll::Ready(Ok((src_buf, result.map_err(NvFsError::from))))
-            }
-            task::Poll::Ready(Err(e)) => task::Poll::Ready(Err(NvFsError::from(e))),
-            task::Poll::Pending => task::Poll::Pending,
-        }
-    }
-}
-
-/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
-/// internally by [`AuthTreeNodeWriteFuture`].
-struct AuthTreeNodeWriteNvBlkDevRequest {
-    src_buf: FixedVec<u8, 7>,
-    io_region: blkdev::ChunkedIoRegion,
-}
-
-impl blkdev::NvBlkDevWriteRequest for AuthTreeNodeWriteNvBlkDevRequest {
-    fn region(&self) -> &blkdev::ChunkedIoRegion {
-        &self.io_region
-    }
-
-    fn get_source_buffer(&self, range: &blkdev::ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
-        debug_assert_eq!(range.chunk().decompose_to_hierarchic_indices::<0>([]).0, 0);
-        Ok(&self.src_buf[range.range_in_chunk().clone()])
+        blkdev::NvBlkDevFuture::poll(pin::Pin::new(&mut this.write_fut), blkdev, cx).map(|result| {
+            result
+                .map(|(src_buf, result)| (src_buf, result.map_err(NvFsError::from)))
+                .map_err(NvFsError::from)
+        })
     }
 }
 
@@ -3054,7 +3004,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeLoadFuture<B> {
                     cur_node_id,
                     cur_node_expected_digest,
                 } => {
-                    let node_read_fut = match AuthTreeNodeReadFuture::new(blkdev, tree_config, cur_node_id) {
+                    let node_read_fut = match AuthTreeNodeReadFuture::new(tree_config, cur_node_id) {
                         Ok(node_read_fut) => node_read_fut,
                         Err(e) => {
                             this.fut_state = AuthTreeNodeLoadFutureState::Done;
@@ -4245,7 +4195,6 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                         // Some of the nodes' entries are retained unmodified. Read the original
                         // node data to fill in the pending updates into.
                         let read_node_fut = match AuthTreeNodeReadFuture::new_with_buf(
-                            blkdev,
                             &tree.config,
                             &cur_pending_node_updates.node_id,
                             mem::take(node_data_buf),
@@ -4275,7 +4224,6 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                     let cur_pending_node_updates =
                         &this.pending_nodes_updates.nodes_updates[this.cur_pending_nodes_updates_index];
                     let write_node_fut = match AuthTreeNodeWriteFuture::new(
-                        blkdev,
                         &tree.config,
                         &cur_pending_node_updates.node_id,
                         mem::take(updated_node_data),
@@ -6027,8 +5975,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeInitializationCursorWritePartFuture<B> {
                     };
 
                     // And write it out.
-                    let write_fut = match AuthTreeNodeWriteFuture::new(blkdev, tree_config, &cur_node_id, cur_node_data)
-                    {
+                    let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &cur_node_id, cur_node_data) {
                         Ok(Ok(write_fut)) => write_fut,
                         Ok(Err((_, e))) | Err(e) => {
                             this.fut_state = AuthTreeInitializationCursorWritePartFutureState::Done;
@@ -6548,7 +6495,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                             },
                         );
                         cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
-                        let write_fut = match AuthTreeNodeWriteFuture::new(blkdev, tree_config, &node_id, node) {
+                        let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &node_id, node) {
                             Ok(Ok(write_fut)) => write_fut,
                             Err(e) | Ok(Err((_, e))) => break Err(e),
                         };
@@ -7105,7 +7052,7 @@ struct AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture<B: bl
 enum AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState<B: blkdev::NvBlkDev> {
     PrepareReadData,
     ReadData {
-        read_fut: B::ReadFuture<AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
         read_region_physical_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
     },
     Done,
@@ -7454,38 +7401,16 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorReconstructLeaf
                             layout::AllocBlockCount::from(1u64 << blkdev_io_block_allocations_blocks_log2);
                     }
 
-                    let read_request_region = match blkdev::ChunkedIoRegion::new(
-                        u64::from(read_region_physical_allocation_blocks_begin) << allocation_block_size_128b_log2,
-                        u64::from(read_region_physical_allocation_blocks_end) << allocation_block_size_128b_log2,
-                        blkdev_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2,
-                    ) {
-                        Ok(read_request_region) => read_request_region,
-                        Err(e) => {
-                            break Err(match e {
-                                blkdev::ChunkedIoRegionError::ChunkSizeOverflow => {
-                                    // The Device IO block size fits an usize.
-                                    nvfs_err_internal!()
-                                }
-                                blkdev::ChunkedIoRegionError::InvalidBounds => {
-                                    nvfs_err_internal!()
-                                }
-                                blkdev::ChunkedIoRegionError::ChunkIndexOverflow => {
-                                    // No more that the preferred Device IO block size is ever read at once and
-                                    // that in units of Device IO Blocks has been capped to fit an usize.
-                                    nvfs_err_internal!()
-                                }
-                                blkdev::ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
-                            });
-                        }
-                    };
-                    let read_request = AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
-                        region: read_request_region,
-                        read_buffers: mem::take(&mut this.read_buffers),
-                    };
-                    let read_fut = match blkdev.read(read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => break Err(NvFsError::from(e)),
-                    };
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture::new(
+                        u64::from(read_region_physical_allocation_blocks_begin),
+                        u64::from(
+                            read_region_physical_allocation_blocks_end - read_region_physical_allocation_blocks_begin,
+                        ),
+                        tree_config.allocation_block_size_128b_log2,
+                        mem::take(&mut this.read_buffers),
+                        0,
+                        (blkdev_io_block_allocations_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                    );
                     this.fut_state =
                         AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState::ReadData {
                             read_fut,
@@ -7502,16 +7427,11 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorReconstructLeaf
                         .io_block_size_128b_log2()
                         .saturating_sub(allocation_block_size_128b_log2);
 
-                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
+                    this.read_buffers = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((read_buffers, Ok(())))) => read_buffers,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => break Err(NvFsError::from(e)),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
-                        read_buffers,
-                        ..
-                    } = read_request;
-                    this.read_buffers = read_buffers;
 
                     let empty_pending_allocs = SparseAllocBitmapUnion::new(&[]);
                     let empty_pending_frees = SparseAllocBitmapUnion::new(&[]);
@@ -7610,29 +7530,6 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorReconstructLeaf
 
         this.fut_state = AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFutureState::Done;
         task::Poll::Ready(result.and_then(|_| this.cursor.take().ok_or_else(|| nvfs_err_internal!())))
-    }
-}
-
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by
-/// [`AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsFuture`].
-struct AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
-    region: blkdev::ChunkedIoRegion,
-    read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
-}
-
-impl blkdev::NvBlkDevReadRequest for AuthTreeReplayJournalUpdateScriptCursorReconstructLeafDigestsReadDataRequest {
-    fn region(&self) -> &blkdev::ChunkedIoRegion {
-        &self.region
-    }
-    fn get_destination_buffer(
-        &mut self,
-        range: &blkdev::ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let (read_buffer_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
-        Ok(Some(
-            &mut self.read_buffers[read_buffer_index][range.range_in_chunk().clone()],
-        ))
     }
 }
 
@@ -7795,7 +7692,6 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorReconstructInte
                         tree_config.data_digests_per_node_log2,
                     );
                     let read_fut = match AuthTreeNodeReadFuture::new_with_buf(
-                        blkdev,
                         tree_config,
                         &cur_child_node_id,
                         mem::take(&mut this.node_read_buf),
@@ -8018,7 +7914,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture
                         },
                     );
                     cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
-                    let write_fut = match AuthTreeNodeWriteFuture::new(blkdev, tree_config, &node_id, node) {
+                    let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &node_id, node) {
                         Ok(Ok(write_fut)) => write_fut,
                         Err(e) | Ok(Err((_, e))) => {
                             this.fut_state = AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState::Done;
