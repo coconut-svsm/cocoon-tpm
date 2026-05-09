@@ -12,10 +12,10 @@ use super::{
     bitmap_word::{BITMAP_WORD_BITS_LOG2, BitmapWord},
 };
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev,
     crypto::{rng, symcipher},
     fs::{
-        NvFsError, NvFsIoError,
+        NvFsError,
         cocoonfs::{
             FormatError, auth_tree, encryption_entities, extents, inode_index,
             journal::{self, extents_covering_auth_digests::ExtentsCoveringAuthDigests},
@@ -1421,7 +1421,11 @@ enum AllocBitmapFileReadJournalFragmentsFutureState<B: blkdev::NvBlkDev> {
         offset_allocation_blocks_in_fragment_auth_tree_data_block: layout::AllocBlockCount,
     },
     ReadRegion {
-        read_fut: B::ReadFuture<AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture<
+            B,
+            blkdev::helpers::SplitBlocksBuffers<FixedVec<FixedVec<u8, 7>, 0>>,
+        >,
+        read_region_target_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         read_region_src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         read_region_first_fragments_auth_digests_index: usize,
         fragments_auth_digests_index: usize,
@@ -1596,27 +1600,40 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
             fragment_allocation_blocks_log2,
             file_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2)
         );
+        // As per ImageLayout::new(), an Allocation Bitmap File Block's as well as an
+        // Authentication Tree Data Block's size fits an usize, so the same
+        // applies to a fragment's size.
+        debug_assert!(allocation_block_size_128b_log2 + 7 < usize::BITS);
+        debug_assert!(auth_tree_data_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7 < usize::BITS);
+        debug_assert!(file_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7 < usize::BITS);
+        debug_assert!(fragment_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7 < usize::BITS);
 
         let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
         // Preferred Device IO read size. Ramp it up to a reasonable value still
         // compatible with the Allocation Bitmap File's extents' guaranteed
-        // alignment, i.e. to an Authentication Tree Data Block.
+        // alignment, i.e. to an Authentication Tree Data Block. Make sure the total
+        // size can still get represented as an usize.
         let preferred_blkdev_io_bulk_allocation_blocks_log2 =
             (blkdev.preferred_io_blocks_bulk_log2() + blkdev_io_block_size_128b_log2)
+                .min(usize::BITS - 7 - 1)
                 .saturating_sub(allocation_block_size_128b_log2)
-                .min(usize::BITS - 1)
                 .max(auth_tree_data_block_allocation_blocks_log2) as u8;
+        debug_assert!(
+            preferred_blkdev_io_bulk_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 + 7 < usize::BITS
+        );
         // The read buffers should be able to hold the larger of the preferred Device IO
         // block size and the fragment size.
-        let read_buffers_total_allocation_blocks_log2 = (preferred_blkdev_io_bulk_allocation_blocks_log2 as u32)
-            .max(fragment_allocation_blocks_log2)
-            .min(usize::BITS - 1) as u8;
+        let read_buffers_total_allocation_blocks_log2 =
+            (preferred_blkdev_io_bulk_allocation_blocks_log2 as u32).max(fragment_allocation_blocks_log2) as u8;
+        // Total buffer length must be representable as an usize.
+        debug_assert!(
+            read_buffers_total_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 + 7 < usize::BITS
+        );
 
         let mut read_buffers = FixedVec::new_with_default(
             1usize << (read_buffers_total_allocation_blocks_log2 as u32 - fragment_allocation_blocks_log2),
         )?;
         for read_buffer in read_buffers.iter_mut() {
-            // Does not overflow the usize, c.f. AllocBitmapFile::new().
             *read_buffer = FixedVec::new_with_default(
                 1usize << (fragment_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7),
             )?;
@@ -1816,10 +1833,10 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                     );
 
                     let mut cur_read_region_allocation_blocks_end = cur_read_region_allocation_blocks_begin;
-                    // Attempt to complete the larger of the current fragment in a single loop
-                    // iteration. The authentication digests for that range are all guaranteed to
-                    // exist, c.f. Self::new(). Inititalize for the first iteration.
-                    let mut max_cur_read_region_end_step_allocation_blocks = (1u64 << fragment_allocation_blocks_log2)
+                    // Attempt to complete the current fragment in a single loop iteration. The
+                    // authentication digests for that range are all guaranteed to exist,
+                    // c.f. Self::new(). Inititalize for the first iteration.
+                    let mut cur_fragment_remaining_allocation_blocks = (1u64 << fragment_allocation_blocks_log2)
                         - (u64::from(cur_read_region_allocation_blocks_end - cur_file_extent.begin())
                             & u64::trailing_bits_mask(fragment_allocation_blocks_log2));
                     // Distance to the next preferred Device IO boundary or Journal Apply script
@@ -1869,8 +1886,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                                 >= blkdev_io_block_allocation_blocks_log2
                                     .max(auth_tree_data_block_allocation_blocks_log2)
                         );
-                        if cur_read_region_max_end_distance_allocation_blocks
-                            < max_cur_read_region_end_step_allocation_blocks
+                        if cur_read_region_max_end_distance_allocation_blocks < cur_fragment_remaining_allocation_blocks
                         {
                             let cur_auth_tree_data_block_remaining_unread_allocation_blocks = (1u64
                                 << auth_tree_data_block_allocation_blocks_log2)
@@ -1917,16 +1933,14 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                         }
 
                         // Advancing to the end of the current fragment is possible.
-                        // max_cur_read_region_end_step_allocation_blocks equals exactly that
-                        // distance.
+                        // cur_fragment_remaining_allocation_blocks equals exactly that distance.
                         cur_read_region_allocation_blocks_end +=
-                            layout::AllocBlockCount::from(max_cur_read_region_end_step_allocation_blocks);
+                            layout::AllocBlockCount::from(cur_fragment_remaining_allocation_blocks);
                         let cur_read_region_end_step_auth_tree_data_blocks =
-                            max_cur_read_region_end_step_allocation_blocks
-                                >> auth_tree_data_block_allocation_blocks_log2;
+                            cur_fragment_remaining_allocation_blocks >> auth_tree_data_block_allocation_blocks_log2;
                         *fragments_auth_digests_index += cur_read_region_end_step_auth_tree_data_blocks as usize;
                         if cur_read_region_end_step_auth_tree_data_blocks << auth_tree_data_block_allocation_blocks_log2
-                            != max_cur_read_region_end_step_allocation_blocks
+                            != cur_fragment_remaining_allocation_blocks
                         {
                             // The current read region's first overlapping Authentication Tree Data
                             // Block had been filled partially by a previous read and its remainder
@@ -1936,9 +1950,8 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                         }
                         *offset_allocation_blocks_in_fragment_auth_tree_data_block = layout::AllocBlockCount::from(0);
 
-                        cur_read_region_max_end_distance_allocation_blocks -=
-                            max_cur_read_region_end_step_allocation_blocks;
-                        max_cur_read_region_end_step_allocation_blocks = 1u64 << fragment_allocation_blocks_log2;
+                        cur_read_region_max_end_distance_allocation_blocks -= cur_fragment_remaining_allocation_blocks;
+                        cur_fragment_remaining_allocation_blocks = 1u64 << fragment_allocation_blocks_log2;
 
                         if *fragments_auth_digests_index >= this.fragments_auth_digests.len() {
                             break;
@@ -2008,11 +2021,8 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
 
                     // Read the found region.
                     // First translate to the journal staging copy area, if any.
-                    let (
-                        cur_read_region_src_allocation_blocks_begin,
-                        cur_read_region_src_allocation_blocks_end,
-                        from_journal,
-                    ) = if this.apply_writes_script_index < apply_writes_script.len()
+                    let (cur_read_region_src_allocation_blocks_begin, from_journal) = if this.apply_writes_script_index
+                        < apply_writes_script.len()
                         && apply_writes_script[this.apply_writes_script_index]
                             .get_target_range()
                             .begin()
@@ -2023,93 +2033,53 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                             .get_journal_staging_copy_allocation_blocks_begin()
                             + (cur_read_region_allocation_blocks_begin
                                 - apply_writes_script_entry.get_target_range().begin());
-                        let cur_read_region_src_allocation_blocks_end = apply_writes_script_entry
-                            .get_journal_staging_copy_allocation_blocks_begin()
-                            + (cur_read_region_allocation_blocks_end
-                                - apply_writes_script_entry.get_target_range().begin());
-                        (
-                            cur_read_region_src_allocation_blocks_begin,
-                            cur_read_region_src_allocation_blocks_end,
-                            true,
-                        )
+                        (cur_read_region_src_allocation_blocks_begin, true)
                     } else {
-                        (
-                            cur_read_region_allocation_blocks_begin,
-                            cur_read_region_allocation_blocks_end,
-                            false,
-                        )
+                        (cur_read_region_allocation_blocks_begin, false)
                     };
 
-                    let aligned_cur_read_region_src = match layout::PhysicalAllocBlockRange::new(
-                        cur_read_region_src_allocation_blocks_begin,
-                        cur_read_region_src_allocation_blocks_end,
-                    )
-                    .align(blkdev_io_block_allocation_blocks_log2)
-                    {
-                        Some(aligned_cur_read_region_src) => aligned_cur_read_region_src,
-                        None => {
-                            this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
-                        }
-                    };
+                    // A fragment's bounds on storage are always aligned to the Authentication Tree
+                    // Data Block, and we only stop at device IO Block boundaries. It follows that
+                    // the current read region's boundaries are aligned to the smaller of the
+                    // Authentication Tree Data Block and the device IO Block size. Virtually split
+                    // the read_buffers[]' blocks into blocks of the smaller size, so that the
+                    // offset for skipping over already read data can get defined relative to that
+                    // unit.
+                    let read_buffers_split_block_allocation_blocks_log2 =
+                        auth_tree_data_block_allocation_blocks_log2.min(blkdev_io_block_allocation_blocks_log2);
+                    debug_assert!(
+                        (u64::from(cur_read_region_allocation_blocks_begin)
+                            | u64::from(cur_read_region_allocation_blocks_end))
+                        .is_aligned_pow2(read_buffers_split_block_allocation_blocks_log2)
+                    );
+                    debug_assert!(
+                        u64::from(this.fragments_auth_digests[this.fragments_auth_digests_index].0)
+                            .is_aligned_pow2(auth_tree_data_block_allocation_blocks_log2)
+                    );
+                    let read_buffers = blkdev::helpers::SplitBlocksBuffers::new(
+                        mem::take(&mut this.read_buffers),
+                        (fragment_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                        (read_buffers_split_block_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                    );
+                    // The cast to usize doesn't overflow, as the total read_buffers[] collective
+                    // length fits an usize, c.f. Self::new().
+                    let read_buffers_index_offset = ((u64::from(cur_read_region_allocation_blocks_begin)
+                        - u64::from(this.fragments_auth_digests[this.fragments_auth_digests_index].0))
+                        >> read_buffers_split_block_allocation_blocks_log2)
+                        as usize;
 
-                    let aligned_cur_read_region_src_begin_128b =
-                        u64::from(aligned_cur_read_region_src.begin()) << allocation_block_size_128b_log2;
-                    let aligned_cur_read_region_src_end_128b =
-                        u64::from(aligned_cur_read_region_src.end()) << allocation_block_size_128b_log2;
-                    if aligned_cur_read_region_src_end_128b >> allocation_block_size_128b_log2
-                        != u64::from(aligned_cur_read_region_src.end())
-                        || aligned_cur_read_region_src_end_128b > (u64::MAX >> 7)
-                    {
-                        this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
-                    }
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture::new(
+                        u64::from(cur_read_region_src_allocation_blocks_begin),
+                        u64::from(cur_read_region_allocation_blocks_end - cur_read_region_allocation_blocks_begin),
+                        allocation_block_size_128b_log2 as u8,
+                        read_buffers,
+                        read_buffers_index_offset,
+                        (read_buffers_split_block_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                    );
 
-                    let read_request_region = match ChunkedIoRegion::new(
-                        aligned_cur_read_region_src_begin_128b,
-                        aligned_cur_read_region_src_end_128b,
-                        allocation_block_size_128b_log2,
-                    ) {
-                        Ok(read_request_region) => read_request_region,
-                        Err(e) => {
-                            this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Done;
-                            return task::Poll::Ready(Err(match e {
-                                ChunkedIoRegionError::ChunkSizeOverflow => {
-                                    // The Allocation Block size always fits an usize.
-                                    nvfs_err_internal!()
-                                }
-                                ChunkedIoRegionError::InvalidBounds => {
-                                    nvfs_err_internal!()
-                                }
-                                ChunkedIoRegionError::ChunkIndexOverflow => {
-                                    // No more that the preferred Device IO block size is ever read at once and
-                                    // that in units of Allocation Blocks has been capped to fit an usize.
-                                    nvfs_err_internal!()
-                                }
-                                ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
-                            }));
-                        }
-                    };
-                    let read_request = AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
-                        region: read_request_region,
-                        read_buffers_base_target_allocation_block_index: this.fragments_auth_digests
-                            [this.fragments_auth_digests_index]
-                            .0,
-                        read_region_target_allocation_blocks_begin: cur_read_region_allocation_blocks_begin,
-                        read_buffers: mem::take(&mut this.read_buffers),
-                        read_buffer_allocation_blocks_log2: fragment_allocation_blocks_log2 as u8,
-                        allocation_block_size_128b_log2: image_layout.allocation_block_size_128b_log2,
-                        blkdev_io_block_allocation_blocks_log2: blkdev_io_block_allocation_blocks_log2 as u8,
-                    };
-                    let read_fut = match blkdev.read(read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
                     this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::ReadRegion {
                         read_fut,
+                        read_region_target_allocation_blocks_begin: cur_read_region_allocation_blocks_begin,
                         read_region_src_allocation_blocks_begin: cur_read_region_src_allocation_blocks_begin,
                         read_region_first_fragments_auth_digests_index,
                         fragments_auth_digests_index: *fragments_auth_digests_index,
@@ -2120,14 +2090,15 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                 }
                 AllocBitmapFileReadJournalFragmentsFutureState::ReadRegion {
                     read_fut,
+                    read_region_target_allocation_blocks_begin,
                     read_region_src_allocation_blocks_begin,
                     read_region_first_fragments_auth_digests_index,
                     fragments_auth_digests_index,
                     offset_allocation_blocks_in_fragment_auth_tree_data_block,
                     from_journal,
                 } => {
-                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
+                    this.read_buffers = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((read_buffers, Ok(())))) => read_buffers.into_buffers(),
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
@@ -2135,13 +2106,11 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
-                        read_region_target_allocation_blocks_begin,
-                        read_buffers,
-                        ..
-                    } = read_request;
-                    this.read_buffers = read_buffers;
-
+                    debug_assert!(
+                        *from_journal
+                            == (*read_region_target_allocation_blocks_begin
+                                != *read_region_src_allocation_blocks_begin)
+                    );
                     if let Some(journal_staging_copy_undisguise) =
                         (*from_journal).then_some(()).and(journal_staging_copy_undisguise)
                     {
@@ -2166,10 +2135,10 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                         let mut cur_fragments_auth_digests_index = *read_region_first_fragments_auth_digests_index;
                         debug_assert!(
                             this.fragments_auth_digests[cur_fragments_auth_digests_index].0
-                                <= read_region_target_allocation_blocks_begin
+                                <= *read_region_target_allocation_blocks_begin
                         );
                         let mut cur_offset_allocation_blocks_in_fragment_auth_tree_data_block =
-                            read_region_target_allocation_blocks_begin
+                            *read_region_target_allocation_blocks_begin
                                 - this.fragments_auth_digests[cur_fragments_auth_digests_index].0;
                         debug_assert_eq!(
                             u64::from(cur_offset_allocation_blocks_in_fragment_auth_tree_data_block)
@@ -2188,7 +2157,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                                     + cur_offset_allocation_blocks_in_fragment_auth_tree_data_block;
                             let cur_journal_staging_copy_allocation_block_index =
                                 *read_region_src_allocation_blocks_begin
-                                    + (cur_target_allocation_block_index - read_region_target_allocation_blocks_begin);
+                                    + (cur_target_allocation_block_index - *read_region_target_allocation_blocks_begin);
 
                             // Does not overflow an usize: the total read_buffers size in units of
                             // Allocation Blocks fits an usize.
@@ -2388,69 +2357,5 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                 AllocBitmapFileReadJournalFragmentsFutureState::Done => unreachable!(),
             }
         }
-    }
-}
-
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by  [`AllocBitmapFileReadJournalFragmentsFuture`].
-struct AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
-    region: ChunkedIoRegion,
-    read_buffers_base_target_allocation_block_index: layout::PhysicalAllocBlockIndex,
-    read_region_target_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
-    read_buffers: FixedVec<FixedVec<u8, 7>, 0>,
-    read_buffer_allocation_blocks_log2: u8,
-    allocation_block_size_128b_log2: u8,
-    blkdev_io_block_allocation_blocks_log2: u8,
-}
-
-impl blkdev::NvBlkDevReadRequest for AllocBitmapFileReadJournalFragmentsNvBlkDevReadRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let (allocation_block_index_in_aligned_region, _) = range.chunk().decompose_to_hierarchic_indices([]);
-        let read_region_head_alignment_allocation_blocks = (u64::from(self.read_region_target_allocation_blocks_begin)
-            & u64::trailing_bits_mask(self.blkdev_io_block_allocation_blocks_log2 as u32))
-            as usize;
-        if allocation_block_index_in_aligned_region < read_region_head_alignment_allocation_blocks {
-            return Ok(None);
-        }
-
-        let allocation_block_index_in_region =
-            allocation_block_index_in_aligned_region - read_region_head_alignment_allocation_blocks;
-
-        // Does not overflow an usize: the total read_buffers size in units of
-        // Allocation Blocks fits an usize.
-        let region_allocation_blocks_offset_in_read_buffers = u64::from(
-            self.read_region_target_allocation_blocks_begin - self.read_buffers_base_target_allocation_block_index,
-        ) as usize;
-        // Likewise, the shift does not overflow for the same reason.
-        if (self.read_buffers.len() << (self.read_buffer_allocation_blocks_log2 as u32))
-            - region_allocation_blocks_offset_in_read_buffers
-            <= allocation_block_index_in_region
-        {
-            // Padding for Device IO block alignment at the tail. Note that the condition
-            // does not catch all padding reads, only those beyond the
-            // read_buffers, but that's Ok.
-            return Ok(None);
-        }
-
-        let allocation_block_index_in_read_buffers =
-            region_allocation_blocks_offset_in_read_buffers + allocation_block_index_in_region;
-        let read_buffer_index =
-            allocation_block_index_in_read_buffers >> (self.read_buffer_allocation_blocks_log2 as u32);
-        let allocation_block_in_read_buffer_index = allocation_block_index_in_read_buffers
-            - (read_buffer_index << (self.read_buffer_allocation_blocks_log2 as u32));
-
-        Ok(Some(
-            &mut self.read_buffers[read_buffer_index][allocation_block_in_read_buffer_index
-                << (self.allocation_block_size_128b_log2 as u32 + 7)
-                ..(allocation_block_in_read_buffer_index + 1) << (self.allocation_block_size_128b_log2 as u32 + 7)]
-                [range.range_in_chunk().clone()],
-        ))
     }
 }
