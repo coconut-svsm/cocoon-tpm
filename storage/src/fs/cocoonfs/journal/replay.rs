@@ -14,13 +14,10 @@ use super::{
     staging_copy_disguise::JournalStagingCopyUndisguise,
 };
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError, NvBlkDevIoError},
+    blkdev::{self, NvBlkDevIoError},
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{
-            FormatError, alloc_bitmap, auth_tree, extents, image_header, keys,
-            layout::{self, BlockIndex as _},
-        },
+        cocoonfs::{FormatError, alloc_bitmap, auth_tree, extents, image_header, keys, layout},
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -480,7 +477,7 @@ enum JournalReadMutableImageHeaderFutureState<B: blkdev::NvBlkDev> {
     PrepareReadPart,
     ReadPart {
         cur_read_range_allocation_blocks: layout::AllocBlockCount,
-        read_fut: B::ReadFuture<JournalReadMutableImageHeaderPartNvBlkDevRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
     },
     Done,
 }
@@ -510,20 +507,12 @@ impl<B: blkdev::NvBlkDev> JournalReadMutableImageHeaderFuture<B> {
                 .align_down(blkdev_io_block_allocation_blocks_log2),
             mutable_image_header_allocation_blocks_range.begin()
         );
-        let aligned_mutable_image_header_allocation_blocks_end = mutable_image_header_allocation_blocks_range
-            .end()
-            .align_up(blkdev_io_block_allocation_blocks_log2)
-            .ok_or(NvFsError::IoError(NvFsIoError::RegionOutOfRange))?;
-        if u64::from(aligned_mutable_image_header_allocation_blocks_end)
+
+        if u64::from(mutable_image_header_allocation_blocks_range.block_count())
             > u64::MAX >> (allocation_block_size_128b_log2 + 7)
         {
             return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
         }
-        let mutable_image_header_allocation_blocks_range = layout::PhysicalAllocBlockRange::new(
-            mutable_image_header_allocation_blocks_range.begin(),
-            aligned_mutable_image_header_allocation_blocks_end,
-        );
-
         let buffer_len = usize::try_from(
             u64::from(mutable_image_header_allocation_blocks_range.block_count())
                 << (allocation_block_size_128b_log2 + 7),
@@ -615,53 +604,18 @@ impl<B: blkdev::NvBlkDev> JournalReadMutableImageHeaderFuture<B> {
                         }
                     };
 
-                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    let request_region = match ChunkedIoRegion::new(
-                        u64::from(read_range.begin()) << allocation_block_size_128b_log2,
-                        u64::from(read_range.end()) << allocation_block_size_128b_log2,
-                        blkdev_io_block_size_128b_log2,
-                    )
-                    .map_err(|e| match e {
-                        ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
-                        ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
-                        ChunkedIoRegionError::ChunkIndexOverflow => {
-                            // Even the total region's length in units of Bytes fits an usize.
-                            nvfs_err_internal!()
-                        }
-                        ChunkedIoRegionError::RegionUnaligned => {
-                            // All read requests are aligned to the Device IO block size.
-                            nvfs_err_internal!()
-                        }
-                    }) {
-                        Ok(request_region) => request_region,
-                        Err(e) => {
-                            this.fut_state = JournalReadMutableImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let blkdev_io_block_allocation_blocks_log2 =
-                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-                    let allocation_bock_blkdev_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
-                    let blkdev_io_block_index_offset = (u64::from(
-                        this.cur_target_allocation_block_index
-                            - this.mutable_image_header_allocation_blocks_range.begin(),
-                    ) >> blkdev_io_block_allocation_blocks_log2
-                        << allocation_bock_blkdev_io_blocks_log2)
-                        as usize;
-                    let read_request = JournalReadMutableImageHeaderPartNvBlkDevRequest {
-                        region: request_region,
-                        buffer: mem::take(&mut this.buffer),
-                        blkdev_io_block_index_offset,
-                    };
-                    let read_fut = match blkdev.read(read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalReadMutableImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(read_range.begin()),
+                        u64::from(read_range.block_count()),
+                        image_layout.allocation_block_size_128b_log2,
+                        mem::take(&mut this.buffer),
+                        u64::from(
+                            this.cur_target_allocation_block_index
+                                - this.mutable_image_header_allocation_blocks_range.begin(),
+                        ) as usize,
+                        image_layout.allocation_block_size_128b_log2,
+                    );
+
                     this.fut_state = JournalReadMutableImageHeaderFutureState::ReadPart {
                         cur_read_range_allocation_blocks: read_range.block_count(),
                         read_fut,
@@ -671,20 +625,14 @@ impl<B: blkdev::NvBlkDev> JournalReadMutableImageHeaderFuture<B> {
                     cur_read_range_allocation_blocks,
                     read_fut,
                 } => {
-                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
+                    this.buffer = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((buffer, Ok(())))) => buffer,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = JournalReadMutableImageHeaderFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let JournalReadMutableImageHeaderPartNvBlkDevRequest {
-                        region: _,
-                        buffer,
-                        blkdev_io_block_index_offset: _,
-                    } = read_request;
-                    this.buffer = buffer;
 
                     // If the part had been read from the Journal Staging Copy and disguising is
                     // enabled, undisguise.
@@ -748,33 +696,6 @@ impl<B: blkdev::NvBlkDev> JournalReadMutableImageHeaderFuture<B> {
     }
 }
 
-/// [`NvBlKDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`JournalReadMutableImageHeaderFuture`].
-struct JournalReadMutableImageHeaderPartNvBlkDevRequest {
-    region: ChunkedIoRegion,
-    buffer: FixedVec<u8, 7>,
-    blkdev_io_block_index_offset: usize,
-}
-
-impl blkdev::NvBlkDevReadRequest for JournalReadMutableImageHeaderPartNvBlkDevRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let blkdev_io_block_index =
-            self.blkdev_io_block_index_offset + range.chunk().decompose_to_hierarchic_indices([]).0;
-        let blkdev_io_block_size_128b_log2 = self.region.chunk_size_128b_log2();
-        Ok(Some(
-            &mut self.buffer[blkdev_io_block_index << (blkdev_io_block_size_128b_log2 + 7)
-                ..(blkdev_io_block_index + 1) << (blkdev_io_block_size_128b_log2 + 7)][range.range_in_chunk().clone()],
-        ))
-    }
-}
-
 /// Replay the data writes recorded in [`JournalLog::apply_writes_script`] and
 /// update the authentication tree in the course.
 struct JournalReplayWritesFuture<B: blkdev::NvBlkDev> {
@@ -800,11 +721,11 @@ enum JournalReplayWritesFutureState<B: blkdev::NvBlkDev> {
     PrepareReadStagingCopy,
     ReadStagingCopy {
         cur_target_range: layout::PhysicalAllocBlockRange,
-        read_fut: B::ReadFuture<ReadJournalStagingCopyNvBlkDevRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     WriteToTarget {
         cur_target_range_allocation_blocks: layout::AllocBlockCount,
-        write_fut: B::WriteFuture<WriteTargetNvBlkDevRequest>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     UpdateAuthTree {
         next_allocation_block_index_in_cur_target_range: layout::AllocBlockCount,
@@ -870,8 +791,8 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
         // reasonable value.
         let preferred_blkdev_io_bulk_allocation_blocks_log2 = (blkdev.preferred_io_blocks_bulk_log2()
             + blkdev_io_block_size_128b_log2)
+            .min(usize::BITS - 1 - 7)
             .saturating_sub(allocation_block_size_128b_log2)
-            .min(usize::BITS - 1 + blkdev_io_block_allocation_blocks_log2)
             .max(io_block_allocation_blocks_log2)
             .max(auth_tree_data_block_allocation_blocks_log2);
 
@@ -1086,44 +1007,15 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                         cur_target_range.block_count(),
                     ));
 
-                    let request_region = match ChunkedIoRegion::new(
-                        u64::from(cur_journal_staging_copy_range.begin()) << allocation_block_size_128b_log2,
-                        u64::from(cur_journal_staging_copy_range.end()) << allocation_block_size_128b_log2,
-                        blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2,
-                    )
-                    .map_err(|e| {
-                        match e {
-                            ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
-                            ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
-                            ChunkedIoRegionError::ChunkIndexOverflow => {
-                                // The preferred_blkdev_io_bulk_allocation_blocks_log2
-                                // had been chosen such that it would not overflow an usize in
-                                // units of Allocation Blocks.
-                                nvfs_err_internal!()
-                            }
-                            ChunkedIoRegionError::RegionUnaligned => {
-                                // All read requests are aligned to the Device IO block size.
-                                nvfs_err_internal!()
-                            }
-                        }
-                    }) {
-                        Ok(request_region) => request_region,
-                        Err(e) => {
-                            this.fut_state = JournalReplayWritesFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let read_request = ReadJournalStagingCopyNvBlkDevRequest {
-                        region: request_region,
-                        buffers: mem::take(&mut this.buffers),
-                    };
-                    let read_fut = match blkdev.read(read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalReplayWritesFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture::new(
+                        u64::from(cur_journal_staging_copy_range.begin()),
+                        u64::from(cur_journal_staging_copy_range.block_count()),
+                        allocation_block_size_128b_log2 as u8,
+                        mem::take(&mut this.buffers),
+                        0,
+                        (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                    );
+
                     this.fut_state = JournalReplayWritesFutureState::ReadStagingCopy {
                         cur_target_range,
                         read_fut,
@@ -1133,15 +1025,14 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                     cur_target_range,
                     read_fut,
                 } => {
-                    let read_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => read_request,
+                    let mut buffers = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((buffers, Ok(())))) => buffers,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = JournalReplayWritesFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let ReadJournalStagingCopyNvBlkDevRequest { region: _, mut buffers } = read_request;
 
                     // Undisguise the Journal Staging Copy in case it's been disguised.
                     let allocation_block_size_128b_log2 = this.allocation_block_size_128b_log2 as u32;
@@ -1170,10 +1061,14 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                             for allocation_block_in_blkdev_io_block_index in
                                 0..1usize << blkdev_io_block_allocation_blocks_log2
                             {
+                                let allocation_block_begin_in_blkdev_io_block =
+                                    allocation_block_in_blkdev_io_block_index << (allocation_block_size_128b_log2 + 7);
+                                let allocation_block_end_in_blkdev_io_block = (allocation_block_in_blkdev_io_block_index
+                                    + 1)
+                                    << (allocation_block_size_128b_log2 + 7);
                                 let allocation_block_buf = &mut blkdev_io_block_buf
-                                    [allocation_block_in_blkdev_io_block_index << (allocation_block_size_128b_log2 + 7)
-                                        ..(allocation_block_in_blkdev_io_block_index + 1)
-                                            << (allocation_block_size_128b_log2 + 7)];
+                                    [allocation_block_begin_in_blkdev_io_block
+                                        ..allocation_block_end_in_blkdev_io_block];
                                 if let Err(e) = undisguise_processor.undisguise_journal_staging_copy_allocation_block(
                                     cur_journal_staging_copy_allocation_block_index,
                                     cur_target_allocation_block_index,
@@ -1188,44 +1083,15 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                         }
                     }
 
-                    let request_region = match ChunkedIoRegion::new(
-                        u64::from(cur_target_range.begin()) << allocation_block_size_128b_log2,
-                        u64::from(cur_target_range.end()) << allocation_block_size_128b_log2,
-                        blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2,
-                    )
-                    .map_err(|e| {
-                        match e {
-                            ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
-                            ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
-                            ChunkedIoRegionError::ChunkIndexOverflow => {
-                                // The preferred_blkdev_io_bulk_allocation_blocks_log2
-                                // had been chosen such that it would not overflow an usize in
-                                // units of Allocation Blocks.
-                                nvfs_err_internal!()
-                            }
-                            ChunkedIoRegionError::RegionUnaligned => {
-                                // All read requests are aligned to the Device IO block size.
-                                nvfs_err_internal!()
-                            }
-                        }
-                    }) {
-                        Ok(request_region) => request_region,
-                        Err(e) => {
-                            this.fut_state = JournalReplayWritesFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let write_request = WriteTargetNvBlkDevRequest {
-                        region: request_region,
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(cur_target_range.begin()),
+                        u64::from(cur_target_range.block_count()),
+                        allocation_block_size_128b_log2 as u8,
                         buffers,
-                    };
-                    let write_fut = match blkdev.write(write_request) {
-                        Ok(Ok(write_fut)) => write_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalReplayWritesFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                        0,
+                        (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                    );
+
                     this.fut_state = JournalReplayWritesFutureState::WriteToTarget {
                         cur_target_range_allocation_blocks: cur_target_range.block_count(),
                         write_fut,
@@ -1235,16 +1101,14 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                     cur_target_range_allocation_blocks,
                     write_fut,
                 } => {
-                    let write_request = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((write_request, Ok(())))) => write_request,
+                    this.buffers = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((buffers, Ok(())))) => buffers,
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = JournalReplayWritesFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let WriteTargetNvBlkDevRequest { region: _, buffers } = write_request;
-                    this.buffers = buffers;
 
                     this.fut_state = JournalReplayWritesFutureState::UpdateAuthTree {
                         next_allocation_block_index_in_cur_target_range: layout::AllocBlockCount::from(0u64),
@@ -1348,47 +1212,6 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                 JournalReplayWritesFutureState::Done => unreachable!(),
             }
         }
-    }
-}
-
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`JournalReplayWritesFuture`].
-struct ReadJournalStagingCopyNvBlkDevRequest {
-    region: ChunkedIoRegion,
-    buffers: FixedVec<FixedVec<u8, 7>, 0>,
-}
-
-impl blkdev::NvBlkDevReadRequest for ReadJournalStagingCopyNvBlkDevRequest {
-    fn region(&self) -> &blkdev::ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let blkdev_io_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
-        Ok(Some(
-            &mut self.buffers[blkdev_io_block_index][range.range_in_chunk().clone()],
-        ))
-    }
-}
-
-/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
-/// internally by [`JournalReplayWritesFuture`].
-struct WriteTargetNvBlkDevRequest {
-    region: blkdev::ChunkedIoRegion,
-    buffers: FixedVec<FixedVec<u8, 7>, 0>,
-}
-
-impl blkdev::NvBlkDevWriteRequest for WriteTargetNvBlkDevRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
-        let blkdev_io_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
-        Ok(&self.buffers[blkdev_io_block_index][range.range_in_chunk().clone()])
     }
 }
 
