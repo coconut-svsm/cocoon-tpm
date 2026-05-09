@@ -5,7 +5,7 @@
 //! Functionality related to the filesystem image header.
 
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError, NvBlkDevIoError},
+    blkdev::{self, NvBlkDevIoError},
     crypto::hash,
     fs::{
         NvFsError, NvFsIoError,
@@ -435,78 +435,6 @@ impl MutableImageHeader {
     }
 }
 
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`ReadCoreImageHeaderFuture`] and
-/// [`ReadMutableImageHeaderFuture`] for reading parts of the image header.
-struct ReadImageHeaderPartNvBlkDevRequest {
-    region: ChunkedIoRegion,
-    dst: FixedVec<u8, 7>,
-}
-
-impl ReadImageHeaderPartNvBlkDevRequest {
-    pub fn new(
-        read_region_begin_blkdev_io_blocks: u64,
-        read_region_blkdev_io_blocks: u64,
-        blkdev_io_block_size_128b_log2: u32,
-    ) -> Result<Self, NvFsError> {
-        if blkdev_io_block_size_128b_log2 >= u64::BITS - 7 {
-            return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
-        }
-
-        let read_region_begin_128b = read_region_begin_blkdev_io_blocks << blkdev_io_block_size_128b_log2;
-        if read_region_begin_128b >> blkdev_io_block_size_128b_log2 != read_region_begin_blkdev_io_blocks {
-            return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
-        }
-        let read_region_len_128b = read_region_blkdev_io_blocks << blkdev_io_block_size_128b_log2;
-        if read_region_len_128b >> blkdev_io_block_size_128b_log2 != read_region_blkdev_io_blocks {
-            return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
-        }
-        let read_region_end_128b = read_region_begin_128b
-            .checked_add(read_region_len_128b)
-            .ok_or(NvFsError::IoError(NvFsIoError::RegionOutOfRange))?;
-
-        let read_region = ChunkedIoRegion::new(
-            read_region_begin_128b,
-            read_region_end_128b,
-            blkdev_io_block_size_128b_log2,
-        )
-        .map_err(|e| match e {
-            ChunkedIoRegionError::ChunkSizeOverflow | ChunkedIoRegionError::ChunkIndexOverflow => {
-                NvFsError::DimensionsNotSupported
-            }
-            ChunkedIoRegionError::InvalidBounds | ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
-        })?;
-
-        let read_region_len = read_region_len_128b << 7;
-        if read_region_len >> 7 != read_region_len_128b {
-            return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
-        }
-        let read_region_len = usize::try_from(read_region_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let dst = FixedVec::new_with_default(read_region_len)?;
-
-        Ok(Self {
-            region: read_region,
-            dst,
-        })
-    }
-}
-
-impl blkdev::NvBlkDevReadRequest for ReadImageHeaderPartNvBlkDevRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let request_blkdev_io_block_index = range.chunk().decompose_to_hierarchic_indices::<0>([]).0;
-        let blkdev_io_block_size_log2 = self.region.chunk_size_128b_log2();
-        let dst_begin = request_blkdev_io_block_index << (blkdev_io_block_size_log2 + 7);
-        Ok(Some(&mut self.dst[dst_begin..][range.range_in_chunk().clone()]))
-    }
-}
-
 /// Result returned by [`ReadCoreImageHeaderFuture`].
 ///
 /// A valid filesystem header is either a regular [`StaticImageHeader`] in case
@@ -532,10 +460,10 @@ enum ReadCoreImageHeaderFutureState<B: blkdev::NvBlkDev> {
         _phantom: marker::PhantomData<fn() -> *const B>,
     },
     ReadMinHeader {
-        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
     },
     ReadStaticImageHeaderRemainder {
-        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         min_header: MinStaticImageHeader,
         static_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
@@ -547,7 +475,7 @@ enum ReadCoreImageHeaderFutureState<B: blkdev::NvBlkDev> {
         second_header_part: FixedVec<u8, 7>,
     },
     ReadMkFsInfoHeaderRemainder {
-        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         min_header: MinMkFsInfoHeader,
         mkfsinfo_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
@@ -564,7 +492,7 @@ enum ReadCoreImageHeaderFutureState<B: blkdev::NvBlkDev> {
         first_error: NvFsError,
     },
     ReadBackupMinMkFsInfoHeader {
-        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         backup_location_blkdev_io_blocks_begin: u64,
         first_error: NvFsError,
     },
@@ -598,30 +526,34 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     // deduce the full header size.
                     const _: () = assert!(MinStaticImageHeader::encoded_len() <= 128);
                     const _: () = assert!(MinMkFsInfoHeader::encoded_len() <= 128);
-                    let read_request =
-                        match ReadImageHeaderPartNvBlkDevRequest::new(0, 1, blkdev_io_block_size_128b_log2) {
-                            Ok(read_request) => read_request,
+                    if blkdev_io_block_size_128b_log2 >= u64::BITS - 7 {
+                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                    } else if blkdev_io_block_size_128b_log2 >= usize::BITS - 7 {
+                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
+                    }
+                    let first_header_part =
+                        match FixedVec::new_with_default(1usize << (blkdev_io_block_size_128b_log2 + 7)) {
+                            Ok(first_header_part) => first_header_part,
                             Err(e) => {
                                 this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                return task::Poll::Ready(Err(e));
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
                             }
                         };
-                    let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
-                    let read_fut = match read_fut {
-                        Ok(read_fut) => read_fut,
-                        Err(e) => {
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        0,
+                        1,
+                        blkdev_io_block_size_128b_log2 as u8,
+                        first_header_part,
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
                     this.fut_state = ReadCoreImageHeaderFutureState::ReadMinHeader { read_fut };
                 }
                 ReadCoreImageHeaderFutureState::ReadMinHeader { read_fut } => {
                     let first_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
-                            dst
-                        }
+                        task::Poll::Ready(Ok((first_header_part, Ok(())))) => first_header_part,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             this.fut_state = ReadCoreImageHeaderFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
@@ -653,43 +585,35 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                                 continue;
                             }
 
-                            let mut remaining_header_blkdev_io_blocks =
-                                remaining_static_header_len >> (blkdev_io_block_size_128b_log2 + 7);
-                            if remaining_header_blkdev_io_blocks << (blkdev_io_block_size_128b_log2 + 7)
-                                != remaining_static_header_len
-                            {
-                                remaining_header_blkdev_io_blocks += 1;
-                            };
-                            let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
-                                1,
-                                remaining_header_blkdev_io_blocks,
-                                blkdev_io_block_size_128b_log2,
-                            ) {
-                                Ok(read_request) => read_request,
-                                Err(e) => {
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(e));
-                                }
-                            };
-                            let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
-                            let read_fut = match read_fut {
-                                Ok(read_fut) => read_fut,
-                                Err(NvBlkDevIoError::IoBlockNotMapped) => {
-                                    // There is a static image header magic, but the IO request
-                                    // setup failed. This can only happen if the encoded salt length
-                                    // determining the total header size is invalid. Try to read the
-                                    // backup MkFsInfoHeader, if any, instead.
-                                    this.fut_state =
-                                        ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                            first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
-                                        };
-                                    continue;
-                                }
+                            let aligned_remaining_header_len_128b = ((remaining_static_header_len - 1) >> 7) + 1;
+                            if aligned_remaining_header_len_128b > u64::MAX >> 7 {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                            }
+                            let aligned_remaining_header_len =
+                                match usize::try_from(aligned_remaining_header_len_128b << 7) {
+                                    Ok(aligned_remaining_header_len) => aligned_remaining_header_len,
+                                    Err(_) => {
+                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                        return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
+                                    }
+                                };
+                            let second_header_part = match FixedVec::new_with_default(aligned_remaining_header_len) {
+                                Ok(second_header_part) => second_header_part,
                                 Err(e) => {
                                     this.fut_state = ReadCoreImageHeaderFutureState::Done;
                                     return task::Poll::Ready(Err(NvFsError::from(e)));
                                 }
                             };
+                            let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                                1 << blkdev_io_block_size_128b_log2,
+                                aligned_remaining_header_len_128b,
+                                0u8,
+                                second_header_part,
+                                0,
+                                0u8,
+                            );
+
                             this.fut_state = ReadCoreImageHeaderFutureState::ReadStaticImageHeaderRemainder {
                                 read_fut,
                                 min_header: min_static_image_header,
@@ -729,44 +653,39 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                                         continue;
                                     }
 
-                                    let mut remaining_header_blkdev_io_blocks =
-                                        remaining_mkfsinfo_header_len >> (blkdev_io_block_size_128b_log2 + 7);
-                                    if remaining_header_blkdev_io_blocks << (blkdev_io_block_size_128b_log2 + 7)
-                                        != remaining_mkfsinfo_header_len
-                                    {
-                                        remaining_header_blkdev_io_blocks += 1;
-                                    };
-                                    let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
-                                        1,
-                                        remaining_header_blkdev_io_blocks,
-                                        blkdev_io_block_size_128b_log2,
-                                    ) {
-                                        Ok(read_request) => read_request,
-                                        Err(e) => {
-                                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                            return task::Poll::Ready(Err(e));
-                                        }
-                                    };
-                                    let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
-                                    let read_fut = match read_fut {
-                                        Ok(read_fut) => read_fut,
-                                        Err(NvBlkDevIoError::IoBlockNotMapped) => {
-                                            // There is a MkFsInfoHeader magic, but the IO request setup
-                                            // failed.  This can only happen if the
-                                            // encoded salt length determining the total header size is invalid. Try to
-                                            // read the backup MkFsInfoHeader, if any,
-                                            // instead.
-                                            this.fut_state =
-                                                ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                                    first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
-                                                };
-                                            continue;
-                                        }
-                                        Err(e) => {
-                                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                                        }
-                                    };
+                                    let aligned_remaining_header_len_128b =
+                                        ((remaining_mkfsinfo_header_len - 1) >> 7) + 1;
+                                    if aligned_remaining_header_len_128b > u64::MAX >> 7 {
+                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                        return task::Poll::Ready(Err(NvFsError::IoError(
+                                            NvFsIoError::RegionOutOfRange,
+                                        )));
+                                    }
+                                    let aligned_remaining_header_len =
+                                        match usize::try_from(aligned_remaining_header_len_128b << 7) {
+                                            Ok(aligned_remaining_header_len) => aligned_remaining_header_len,
+                                            Err(_) => {
+                                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                                return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
+                                            }
+                                        };
+                                    let second_header_part =
+                                        match FixedVec::new_with_default(aligned_remaining_header_len) {
+                                            Ok(second_header_part) => second_header_part,
+                                            Err(e) => {
+                                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                                            }
+                                        };
+                                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                                        1 << blkdev_io_block_size_128b_log2,
+                                        aligned_remaining_header_len_128b,
+                                        0u8,
+                                        second_header_part,
+                                        0,
+                                        0u8,
+                                    );
+
                                     this.fut_state = ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
                                         read_fut,
                                         min_header: min_mkfsinfo_header,
@@ -807,10 +726,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     first_header_part,
                 } => {
                     let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
-                            dst
-                        }
+                        task::Poll::Ready(Ok((second_header_part, Ok(())))) => second_header_part,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             match e {
                                 NvBlkDevIoError::IoBlockNotMapped => {
@@ -979,10 +895,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     first_error,
                 } => {
                     let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
-                            dst
-                        }
+                        task::Poll::Ready(Ok((second_header_part, Ok(())))) => second_header_part,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             match e {
                                 NvBlkDevIoError::IoBlockNotMapped => {
@@ -1196,31 +1109,23 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     // store the MinMkFsInfoHeader, which in turn contain all
                     // information to subsequently deduce the full header size.
                     const _: () = assert!(MinMkFsInfoHeader::encoded_len() <= 128);
-                    let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
+                    let first_header_part =
+                        match FixedVec::new_with_default(1usize << (blkdev_io_block_size_128b_log2 + 7)) {
+                            Ok(first_header_part) => first_header_part,
+                            Err(e) => {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
                         backup_location_blkdev_io_blocks_begin,
                         1,
-                        blkdev_io_block_size_128b_log2,
-                    ) {
-                        Ok(read_request) => read_request,
-                        Err(e) => {
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
-                    let read_fut = match read_fut {
-                        Ok(read_fut) => read_fut,
-                        Err(NvBlkDevIoError::IoBlockNotMapped) => {
-                            // There doesn't seem to be a backup.
-                            let first_error = *first_error;
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(first_error));
-                        }
-                        Err(e) => {
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                        blkdev_io_block_size_128b_log2 as u8,
+                        first_header_part,
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
+
                     this.fut_state = ReadCoreImageHeaderFutureState::ReadBackupMinMkFsInfoHeader {
                         read_fut,
                         backup_location_blkdev_io_blocks_begin,
@@ -1233,10 +1138,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     first_error,
                 } => {
                     let first_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
-                            dst
-                        }
+                        task::Poll::Ready(Ok((first_header_part, Ok(())))) => first_header_part,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             match e {
                                 NvBlkDevIoError::IoBlockNotMapped => {
@@ -1278,40 +1180,42 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                                 continue;
                             }
 
-                            let mut remaining_header_blkdev_io_blocks =
-                                remaining_mkfsinfo_header_len >> (blkdev_io_block_size_128b_log2 + 7);
-                            if remaining_header_blkdev_io_blocks << (blkdev_io_block_size_128b_log2 + 7)
-                                != remaining_mkfsinfo_header_len
-                            {
-                                remaining_header_blkdev_io_blocks += 1;
-                            };
-                            let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
-                                *backup_location_blkdev_io_blocks_begin + 1,
-                                remaining_header_blkdev_io_blocks,
-                                blkdev_io_block_size_128b_log2,
-                            ) {
-                                Ok(read_request) => read_request,
-                                Err(e) => {
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(e));
-                                }
-                            };
-                            let read_fut = blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e));
-                            let read_fut = match read_fut {
-                                Ok(read_fut) => read_fut,
-                                Err(NvBlkDevIoError::IoBlockNotMapped) => {
-                                    // There is a MkFsInfoHeader magic, but the IO request setup
-                                    // failed.  This can only happen if the encoded salt length
-                                    // determining the total header size is invalid.
-                                    let first_error = *first_error;
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(first_error));
-                                }
+                            // This cannot happen, as we've just read a device IO Block from that location,
+                            // but make it explicit.
+                            if *backup_location_blkdev_io_blocks_begin >= u64::MAX >> blkdev_io_block_size_128b_log2 {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                            }
+
+                            let aligned_remaining_header_len_128b = ((remaining_mkfsinfo_header_len - 1) >> 7) + 1;
+                            if aligned_remaining_header_len_128b > u64::MAX >> 7 {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                            }
+                            let aligned_remaining_header_len =
+                                match usize::try_from(aligned_remaining_header_len_128b << 7) {
+                                    Ok(aligned_remaining_header_len) => aligned_remaining_header_len,
+                                    Err(_) => {
+                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                        return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
+                                    }
+                                };
+                            let second_header_part = match FixedVec::new_with_default(aligned_remaining_header_len) {
+                                Ok(second_header_part) => second_header_part,
                                 Err(e) => {
                                     this.fut_state = ReadCoreImageHeaderFutureState::Done;
                                     return task::Poll::Ready(Err(NvFsError::from(e)));
                                 }
                             };
+                            let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                                (*backup_location_blkdev_io_blocks_begin + 1) << blkdev_io_block_size_128b_log2,
+                                aligned_remaining_header_len_128b,
+                                0u8,
+                                second_header_part,
+                                0,
+                                0u8,
+                            );
+
                             this.fut_state = ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
                                 read_fut,
                                 min_header: min_mkfsinfo_header,
@@ -1351,7 +1255,7 @@ enum ReadMutableImageHeaderFutureState<B: blkdev::NvBlkDev> {
         _phantom: marker::PhantomData<fn() -> *const B>,
     },
     ReadHeader {
-        read_fut: B::ReadFuture<ReadImageHeaderPartNvBlkDevRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
     },
     Done,
 }
@@ -1392,55 +1296,46 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadMutableImageHeaderFu
                         mutable_header_allocation_blocks_range.begin()
                     );
 
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    let blkdev_io_block_allocation_blocks_log2 = blkdev_io_block_size_128b_log2
-                        .saturating_sub(image_layout.allocation_block_size_128b_log2 as u32);
-                    let allocation_block_blkdev_io_blocks_log2 = (image_layout.allocation_block_size_128b_log2 as u32)
-                        .saturating_sub(blkdev_io_block_allocation_blocks_log2);
-                    let mutable_header_blkdev_io_blocks_begin =
-                        u64::from(mutable_header_allocation_blocks_range.begin())
-                            >> blkdev_io_block_allocation_blocks_log2
-                            << allocation_block_blkdev_io_blocks_log2;
-                    let mutable_header_blkdev_io_blocks_count =
-                        ((u64::from(mutable_header_allocation_blocks_range.block_count()) - 1)
-                            >> blkdev_io_block_allocation_blocks_log2)
-                            + 1;
-                    if mutable_header_blkdev_io_blocks_count << allocation_block_blkdev_io_blocks_log2
-                        >> allocation_block_blkdev_io_blocks_log2
-                        != mutable_header_blkdev_io_blocks_count
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    if u64::from(mutable_header_allocation_blocks_range.block_count())
+                        > u64::MAX >> (allocation_block_size_128b_log2 + 7)
                     {
                         this.fut_state = ReadMutableImageHeaderFutureState::Done;
                         return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
                     }
-                    let mutable_header_blkdev_io_blocks_count =
-                        mutable_header_blkdev_io_blocks_count << allocation_block_blkdev_io_blocks_log2;
-
-                    let read_request = match ReadImageHeaderPartNvBlkDevRequest::new(
-                        mutable_header_blkdev_io_blocks_begin,
-                        mutable_header_blkdev_io_blocks_count,
-                        blkdev_io_block_size_128b_log2,
+                    let encoded_mutable_header_len = match usize::try_from(
+                        u64::from(mutable_header_allocation_blocks_range.block_count())
+                            << (allocation_block_size_128b_log2 + 7),
                     ) {
-                        Ok(read_request) => read_request,
-                        Err(e) => {
+                        Ok(mutable_header_len) => mutable_header_len,
+                        Err(_) => {
                             this.fut_state = ReadMutableImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                         }
                     };
-                    let read_fut = match blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
-                        Ok(read_fut) => read_fut,
+                    let encoded_mutable_header = match FixedVec::new_with_default(encoded_mutable_header_len) {
+                        Ok(encoded_mutable_header) => encoded_mutable_header,
                         Err(e) => {
                             this.fut_state = ReadMutableImageHeaderFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                     };
+
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(mutable_header_allocation_blocks_range.begin()),
+                        u64::from(mutable_header_allocation_blocks_range.block_count()),
+                        allocation_block_size_128b_log2 as u8,
+                        encoded_mutable_header,
+                        0,
+                        allocation_block_size_128b_log2 as u8,
+                    );
+
                     this.fut_state = ReadMutableImageHeaderFutureState::ReadHeader { read_fut };
                 }
                 ReadMutableImageHeaderFutureState::ReadHeader { read_fut } => {
-                    let encoded_header = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_request, Ok(())))) => {
-                            let ReadImageHeaderPartNvBlkDevRequest { region: _, dst } = read_request;
-                            dst
-                        }
+                    let encoded_mutable_header = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx)
+                    {
+                        task::Poll::Ready(Ok((encoded_mutable_header, Ok(())))) => encoded_mutable_header,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             this.fut_state = ReadMutableImageHeaderFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
@@ -1450,7 +1345,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadMutableImageHeaderFu
 
                     this.fut_state = ReadMutableImageHeaderFutureState::Done;
                     return task::Poll::Ready(MutableImageHeader::decode(
-                        io_slices::SingletonIoSlice::new(&encoded_header).map_infallible_err(),
+                        io_slices::SingletonIoSlice::new(&encoded_mutable_header).map_infallible_err(),
                         &this.image_layout,
                     ));
                 }
