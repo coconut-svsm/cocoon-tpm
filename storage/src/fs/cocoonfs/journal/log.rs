@@ -13,7 +13,7 @@ use super::{
     staging_copy_disguise::JournalStagingCopyUndisguise,
 };
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev,
     crypto::{CryptoError, hash, symcipher},
     fs::{
         NvFsError, NvFsIoError,
@@ -586,6 +586,9 @@ impl JournalLog {
     /// Determine the (fixed) location of the journal log's chained encrypted
     /// extents' head extent.
     ///
+    /// The returned range's end in units of Bytes is guaranteed to be
+    /// representable in an `u64`.
+    ///
     /// # Arguments:
     ///
     /// * `image_layout` - The filesystem's
@@ -630,10 +633,10 @@ impl JournalLog {
         // the addition would not overflow either.
         let head_extent_allocation_blocks_end =
             head_extent_allocation_blocks_begin + head_extent_allocation_blocks_count;
-        // But check that the end in units of Bytes is still <= 2^64.
+        // But check that the end in units of Bytes is still < 2^64.
         if u64::from(head_extent_allocation_blocks_end)
             >> (u64::BITS - 7 - image_layout.allocation_block_size_128b_log2 as u32)
-            > 1
+            >= 1
         {
             return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
@@ -1222,7 +1225,7 @@ enum JournalLogInvalidateFutureState<B: blkdev::NvBlkDev> {
         write_barrier_fut: B::WriteBarrierFuture,
     },
     InvalidateJournalLogHead {
-        overwrite_journal_log_head_fut: B::WriteFuture<JournalLogInvalidateNvBlkDevWriteRequest>,
+        clear_fut: blkdev::helpers::NvBlkDevClearRegionFuture<B>,
     },
     WriteSyncAfterInvalidate {
         write_sync_fut: B::WriteSyncFuture,
@@ -1288,6 +1291,7 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    // Clear out the extent's first device IO Block.
                     let journal_log_head_extent =
                         match JournalLog::head_extent_physical_location(image_layout, image_header_end) {
                             Ok((journal_log_head_extent, _)) => journal_log_head_extent,
@@ -1296,51 +1300,34 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                                 return task::Poll::Ready(Err(e));
                             }
                         };
-                    let overwrite_journal_log_head_request = match JournalLogInvalidateNvBlkDevWriteRequest::new(
-                        &journal_log_head_extent,
-                        image_layout.allocation_block_size_128b_log2 as u32,
-                        blkdev,
-                    ) {
-                        Ok(overwrite_journal_log_head_request) => overwrite_journal_log_head_request,
-                        Err(e) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let overwrite_journal_log_head_fut = match blkdev
-                        .write(overwrite_journal_log_head_request)
-                        .and_then(|r| r.map_err(|(_, e)| e))
-                    {
-                        Ok(overwrite_journal_log_head_fut) => overwrite_journal_log_head_fut,
-                        Err(e) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
-                    this.fut_state = JournalLogInvalidateFutureState::InvalidateJournalLogHead {
-                        overwrite_journal_log_head_fut,
-                    };
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 = blkdev_io_block_size_128b_log2
+                        .saturating_sub(image_layout.allocation_block_size_128b_log2 as u32);
+                    let clear_fut = blkdev::helpers::NvBlkDevClearRegionFuture::new(
+                        u64::from(journal_log_head_extent.begin()),
+                        1u64 << blkdev_io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                    );
+                    this.fut_state = JournalLogInvalidateFutureState::InvalidateJournalLogHead { clear_fut };
                 }
-                JournalLogInvalidateFutureState::InvalidateJournalLogHead {
-                    overwrite_journal_log_head_fut,
-                } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(overwrite_journal_log_head_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((_, Ok(())))) => (),
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                JournalLogInvalidateFutureState::InvalidateJournalLogHead { clear_fut } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(clear_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let write_sync_fut = match blkdev.write_sync() {
-                        Ok(write_sync_fut) => write_sync_fut,
-                        Err(e) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
                     if this.issue_sync {
+                        let write_sync_fut = match blkdev.write_sync() {
+                            Ok(write_sync_fut) => write_sync_fut,
+                            Err(e) => {
+                                this.fut_state = JournalLogInvalidateFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
                         this.fut_state = JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut };
                     } else {
                         this.fut_state = JournalLogInvalidateFutureState::Done;
@@ -1365,54 +1352,6 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
     }
 }
 
-/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
-/// internally by [`JournalLogInvalidateFuture`].
-struct JournalLogInvalidateNvBlkDevWriteRequest {
-    region: ChunkedIoRegion,
-    overwrite_buf: FixedVec<u8, 7>,
-}
-
-impl JournalLogInvalidateNvBlkDevWriteRequest {
-    fn new<B: blkdev::NvBlkDev>(
-        journal_log_head_extent: &layout::PhysicalAllocBlockRange,
-        allocation_block_size_128b_log2: u32,
-        blkdev: &B,
-    ) -> Result<Self, NvFsError> {
-        // Allocate a buffer of the minimum length filled with zeroes. 128 Bytes is the
-        // minimum chunk size.
-        let overwrite_buf = FixedVec::new_with_value(128, 0u8)?;
-
-        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-        let journal_log_head_extent_begin_128b =
-            u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
-        // Only the magic needs to get invalidated. Overwrite the minimum possible IO
-        // unit at the beginning of the journal log.
-        let journal_log_head_extent_overwrite_end_128b = journal_log_head_extent_begin_128b
-            .checked_add(1u64 << blkdev_io_block_size_128b_log2)
-            .ok_or(NvFsError::from(blkdev::NvBlkDevIoError::IoBlockOutOfRange))?;
-        let region = ChunkedIoRegion::new(
-            journal_log_head_extent_begin_128b,
-            journal_log_head_extent_overwrite_end_128b,
-            0,
-        )
-        .map_err(|_| nvfs_err_internal!())?;
-        Ok(Self { region, overwrite_buf })
-    }
-}
-
-impl blkdev::NvBlkDevWriteRequest for JournalLogInvalidateNvBlkDevWriteRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
-        // The chunk size is 128 Bytes, i.e. the size of overwrite_buf. Ignore the chunk
-        // index and provide the corresponding region from zero-filled
-        // overwrite_buf.
-        Ok(&self.overwrite_buf[range.range_in_chunk().clone()])
-    }
-}
-
 /// Read the journal log at filesystem opening time.
 pub struct JournalLogReadFuture<B: blkdev::NvBlkDev> {
     fut_state: JournalLogReadFutureState<B>,
@@ -1425,12 +1364,12 @@ pub struct JournalLogReadFuture<B: blkdev::NvBlkDev> {
 enum JournalLogReadFutureState<B: blkdev::NvBlkDev> {
     Init,
     ReadJournalLogHeadExtentHead {
-        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
         journal_log_head_extent_effective_payload_len: usize,
     },
     ReadJournalLogHeadExtentTail {
-        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         journal_log_head_extent_head: FixedVec<u8, 7>,
         journal_log_head_extent_allocation_blocks: layout::AllocBlockCount,
         journal_log_head_extent_effective_payload_len: usize,
@@ -1445,7 +1384,7 @@ enum JournalLogReadFutureState<B: blkdev::NvBlkDev> {
         next_journal_log_tail_extent: layout::PhysicalAllocBlockRange,
     },
     ReadNextJournalLogTailExtent {
-        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         next_journal_log_tail_extent_allocation_blocks: layout::AllocBlockCount,
     },
     DecodeJournalLog,
@@ -1527,26 +1466,36 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     // magic is there, otherwise the Journal is not active.
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let journal_log_head_extent_begin_128b =
-                        u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
-                    let journal_log_head_extent_head_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
-                        journal_log_head_extent_begin_128b,
-                        journal_log_head_extent_begin_128b + (1 << blkdev_io_block_size_128b_log2),
-                        blkdev_io_block_size_128b_log2,
-                    ) {
-                        Ok(journal_log_head_extent_head_read_request) => journal_log_head_extent_head_read_request,
-                        Err(e) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let read_fut = match blkdev.read(journal_log_head_extent_head_read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                    if u64::from(journal_log_head_extent.end()) > u64::MAX >> allocation_block_blkdev_io_blocks_log2 {
+                        this.fut_state = JournalLogReadFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                    }
+
+                    // ImageLayout::new() verified that one IO Block, hence a device IO Block, fits
+                    // an usize.
+                    let journal_log_head_extent_head =
+                        match FixedVec::new_with_default(1usize << (blkdev_io_block_size_128b_log2 + 7)) {
+                            Ok(journal_log_head_extent_head) => journal_log_head_extent_head,
+                            Err(e) => {
+                                this.fut_state = JournalLogReadFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(journal_log_head_extent.begin()) << allocation_block_blkdev_io_blocks_log2
+                            >> blkdev_io_block_allocation_blocks_log2,
+                        1,
+                        blkdev_io_block_size_128b_log2 as u8,
+                        journal_log_head_extent_head,
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
+
                     this.fut_state = JournalLogReadFutureState::ReadJournalLogHeadExtentHead {
                         read_fut,
                         journal_log_head_extent,
@@ -1558,10 +1507,10 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     journal_log_head_extent,
                     journal_log_head_extent_effective_payload_len,
                 } => {
-                    let journal_log_head_extent_head_read_request =
+                    let journal_log_head_extent_head =
                         match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                            task::Poll::Ready(Ok((journal_log_head_extent_head_read_request, Ok(())))) => {
-                                journal_log_head_extent_head_read_request
+                            task::Poll::Ready(Ok((journal_log_head_extent_head, Ok(())))) => {
+                                journal_log_head_extent_head
                             }
                             task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                                 this.fut_state = JournalLogReadFutureState::Done;
@@ -1569,7 +1518,6 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
-                    let journal_log_head_extent_head = journal_log_head_extent_head_read_request.into_dst_buf();
                     if &journal_log_head_extent_head[..8] != b"CCFSJRNL".as_slice() {
                         // Magic not found, journal is not active, all done.
                         this.fut_state = JournalLogReadFutureState::Done;
@@ -1579,40 +1527,52 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     // Read the remainder from the log's head extent.
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let journal_log_head_extent_begin_128b =
-                        u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
-                    let journal_log_head_extent_tail_begin_128b =
-                        journal_log_head_extent_begin_128b + (1 << blkdev_io_block_size_128b_log2);
-                    let journal_log_head_extent_end_128b =
-                        u64::from(journal_log_head_extent.end()) << allocation_block_size_128b_log2;
-                    if journal_log_head_extent_tail_begin_128b == journal_log_head_extent_end_128b {
-                        this.fut_state = JournalLogReadFutureState::DecryptJournalLogHeadExtent {
-                            journal_log_head_extent_head,
-                            journal_log_head_extent_tail: FixedVec::new_empty(),
-                            journal_log_head_extent_allocation_blocks: journal_log_head_extent.block_count(),
-                            journal_log_head_extent_effective_payload_len:
-                                *journal_log_head_extent_effective_payload_len,
-                        };
-                        continue;
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+
+                    // It's been checked in the previous step that the extent's end in units of
+                    // device IO Blocks does not exceed u64::MAX, hence the same
+                    // applies to the extent's length.
+                    let journal_log_head_extent_blkdev_io_blocks = u64::from(journal_log_head_extent.block_count())
+                        << allocation_block_blkdev_io_blocks_log2
+                        >> blkdev_io_block_allocation_blocks_log2;
+                    if (journal_log_head_extent_blkdev_io_blocks - 1)
+                        > u64::MAX >> (blkdev_io_block_allocation_blocks_log2 + 7)
+                    {
+                        this.fut_state = JournalLogReadFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
                     }
-                    let journal_log_head_extent_tail_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
-                        journal_log_head_extent_tail_begin_128b,
-                        journal_log_head_extent_end_128b,
-                        blkdev_io_block_size_128b_log2,
+                    let journal_log_head_extent_tail_len = match usize::try_from(
+                        (journal_log_head_extent_blkdev_io_blocks - 1) << (blkdev_io_block_allocation_blocks_log2 + 7),
                     ) {
-                        Ok(journal_log_head_extent_tail_read_request) => journal_log_head_extent_tail_read_request,
-                        Err(e) => {
+                        Ok(journal_log_head_extent_tail_len) => journal_log_head_extent_tail_len,
+                        Err(_) => {
                             this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                         }
                     };
-                    let read_fut = match blkdev.read(journal_log_head_extent_tail_read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let journal_log_head_extent_tail =
+                        match FixedVec::new_with_default(journal_log_head_extent_tail_len) {
+                            Ok(journal_log_head_extent_tail) => journal_log_head_extent_tail,
+                            Err(e) => {
+                                this.fut_state = JournalLogReadFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        (u64::from(journal_log_head_extent.begin()) << allocation_block_blkdev_io_blocks_log2
+                            >> blkdev_io_block_allocation_blocks_log2)
+                            + 1,
+                        journal_log_head_extent_blkdev_io_blocks - 1,
+                        blkdev_io_block_size_128b_log2 as u8,
+                        journal_log_head_extent_tail,
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
+
                     this.fut_state = JournalLogReadFutureState::ReadJournalLogHeadExtentTail {
                         read_fut,
                         journal_log_head_extent_head,
@@ -1626,10 +1586,10 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     journal_log_head_extent_allocation_blocks,
                     journal_log_head_extent_effective_payload_len,
                 } => {
-                    let journal_log_head_extent_tail_read_request =
+                    let journal_log_head_extent_tail =
                         match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                            task::Poll::Ready(Ok((journal_log_head_extent_tail_read_request, Ok(())))) => {
-                                journal_log_head_extent_tail_read_request
+                            task::Poll::Ready(Ok((journal_log_head_extent_tail, Ok(())))) => {
+                                journal_log_head_extent_tail
                             }
                             task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                                 this.fut_state = JournalLogReadFutureState::Done;
@@ -1637,7 +1597,6 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
-                    let journal_log_head_extent_tail = journal_log_head_extent_tail_read_request.into_dst_buf();
                     this.fut_state = JournalLogReadFutureState::DecryptJournalLogHeadExtent {
                         journal_log_head_extent_head: mem::take(journal_log_head_extent_head),
                         journal_log_head_extent_tail,
@@ -1738,32 +1697,48 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
 
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
-                    let auth_tree_data_block_allocation_blocks_log2 =
-                        image_layout.auth_tree_data_block_allocation_blocks_log2 as u32;
-                    let journal_block_allocation_blocks_log2 =
-                        io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2);
-                    let next_journal_log_tail_extent_begin_128b =
-                        u64::from(next_journal_log_tail_extent.begin()) << allocation_block_size_128b_log2;
-                    let next_journal_log_tail_extent_end_128b =
-                        u64::from(next_journal_log_tail_extent.end()) << allocation_block_size_128b_log2;
-                    let next_journal_log_tail_extent_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
-                        next_journal_log_tail_extent_begin_128b,
-                        next_journal_log_tail_extent_end_128b,
-                        journal_block_allocation_blocks_log2,
+                    if !(u64::from(next_journal_log_tail_extent.begin())
+                        | u64::from(next_journal_log_tail_extent.end()))
+                    .is_aligned_pow2(io_block_allocation_blocks_log2)
+                    {
+                        this.fut_state = JournalLogReadFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::FsFormatError(
+                            FormatError::UnalignedJournalExtents as isize,
+                        )));
+                    }
+
+                    if u64::from(next_journal_log_tail_extent.block_count())
+                        > (u64::MAX >> (allocation_block_size_128b_log2 + 7))
+                    {
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                    }
+                    let next_journal_log_tail_extent_len = match usize::try_from(
+                        u64::from(next_journal_log_tail_extent.block_count()) << (allocation_block_size_128b_log2 + 7),
                     ) {
-                        Ok(next_journal_log_tail_extent_read_request) => next_journal_log_tail_extent_read_request,
-                        Err(e) => {
+                        Ok(next_journal_log_tail_extent_len) => next_journal_log_tail_extent_len,
+                        Err(_) => {
                             this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                         }
                     };
-                    let read_fut = match blkdev.read(next_journal_log_tail_extent_read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let next_journal_log_tail_extent_buf =
+                        match FixedVec::new_with_default(next_journal_log_tail_extent_len) {
+                            Ok(next_journal_log_tail_extent_buf) => next_journal_log_tail_extent_buf,
+                            Err(e) => {
+                                this.fut_state = JournalLogReadFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(next_journal_log_tail_extent.begin()),
+                        u64::from(next_journal_log_tail_extent.block_count()),
+                        allocation_block_size_128b_log2 as u8,
+                        next_journal_log_tail_extent_buf,
+                        0,
+                        (io_block_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                    );
+
                     this.fut_state = JournalLogReadFutureState::ReadNextJournalLogTailExtent {
                         read_fut,
                         next_journal_log_tail_extent_allocation_blocks: next_journal_log_tail_extent.block_count(),
@@ -1773,10 +1748,10 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     read_fut,
                     next_journal_log_tail_extent_allocation_blocks,
                 } => {
-                    let next_journal_log_tail_extent_read_request =
+                    let next_journal_log_tail_extent =
                         match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                            task::Poll::Ready(Ok((journal_log_read_next_tail_extent_request, Ok(())))) => {
-                                journal_log_read_next_tail_extent_request
+                            task::Poll::Ready(Ok((next_journal_log_tail_extent, Ok(())))) => {
+                                next_journal_log_tail_extent
                             }
                             task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                                 this.fut_state = JournalLogReadFutureState::Done;
@@ -1784,7 +1759,6 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
-                    let next_journal_log_tail_extent = next_journal_log_tail_extent_read_request.into_dst_buf();
 
                     let extents_decryption_instance = match this.extents_decryption_instance.as_mut() {
                         Some(extents_decryption_instance) => extents_decryption_instance,
@@ -1920,57 +1894,5 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                 JournalLogReadFutureState::Done => unreachable!(),
             }
         }
-    }
-}
-
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`JournalLogReadFuture`].
-struct JournalLogReadExtentNvBlkDevReadRequest {
-    region: ChunkedIoRegion,
-    dst: FixedVec<u8, 7>,
-}
-
-impl JournalLogReadExtentNvBlkDevReadRequest {
-    fn new(physical_begin_128b: u64, physical_end_128b: u64, chunk_size_128b_log2: u32) -> Result<Self, NvFsError> {
-        debug_assert!(chunk_size_128b_log2 < u64::BITS - 7);
-        let region_len_128b = physical_end_128b - physical_begin_128b;
-        let region_len = region_len_128b << 7;
-        if region_len >> 7 != region_len_128b {
-            return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
-        }
-        let region_len = usize::try_from(region_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let dst = FixedVec::new_with_default(region_len)?;
-        let region = blkdev::ChunkedIoRegion::new(physical_begin_128b, physical_end_128b, chunk_size_128b_log2)
-            .map_err(|e| match e {
-                ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
-                ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
-                ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
-                ChunkedIoRegionError::RegionUnaligned => {
-                    NvFsError::FsFormatError(FormatError::UnalignedJournalExtents as isize)
-                }
-            })?;
-        Ok(Self { region, dst })
-    }
-
-    pub fn into_dst_buf(self) -> FixedVec<u8, 7> {
-        let Self { region: _, dst } = self;
-        dst
-    }
-}
-
-impl blkdev::NvBlkDevReadRequest for JournalLogReadExtentNvBlkDevReadRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let chunk_size_128b_log2 = self.region.chunk_size_128b_log2();
-        let (chunk_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
-        let dst_chunk =
-            &mut self.dst[chunk_index << (chunk_size_128b_log2 + 7)..(chunk_index + 1) << (chunk_size_128b_log2 + 7)];
-        Ok(Some(&mut dst_chunk[range.range_in_chunk().clone()]))
     }
 }
