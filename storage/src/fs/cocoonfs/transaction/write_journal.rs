@@ -19,7 +19,7 @@ use super::{
     write_dirty_data::TransactionWriteDirtyDataFuture,
 };
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
+    blkdev,
     crypto::{hash, rng},
     fs::{
         NvFsError,
@@ -122,7 +122,7 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, B: blkdev::Nv
         journal_log_head_extent_buf: FixedVec<u8, 7>,
         journal_log_tail_extents_bufs: FixedVec<FixedVec<u8, 7>, 0>,
         cur_tail_extent_index: usize,
-        write_extent_fut: B::WriteFuture<WriteJournalLogExtentNvBlkDevRequest>,
+        write_extent_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
     },
     WriteBarrierBeforeJournalLogHeadWrite {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -136,7 +136,7 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, B: blkdev::Nv
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        write_extent_fut: B::WriteFuture<WriteJournalLogExtentNvBlkDevRequest>,
+        write_extent_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
     },
     WriteSyncAfterJournalLogHeadWrite {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -1088,22 +1088,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                             write_barrier_fut,
                         };
                     } else {
-                        let write_extent_request = match WriteJournalLogExtentNvBlkDevRequest::new(
-                            &journal_log_tail_extents.get_extent_range(*next_tail_extent_index),
+                        let image_layout = &fs_instance.fs_config.image_layout;
+                        let next_tail_extent = journal_log_tail_extents.get_extent_range(*next_tail_extent_index);
+                        let write_extent_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+                            u64::from(next_tail_extent.begin()),
+                            u64::from(next_tail_extent.block_count()),
+                            image_layout.allocation_block_size_128b_log2,
                             mem::take(&mut journal_log_tail_extents_bufs[*next_tail_extent_index]),
-                            fs_instance.fs_config.image_layout.allocation_block_size_128b_log2,
-                        ) {
-                            Ok(write_extent_request) => write_extent_request,
-                            Err(e) => break (false, Some(transaction), e),
-                        };
-                        let write_extent_fut = match fs_instance
-                            .blkdev
-                            .write(write_extent_request)
-                            .and_then(|r| r.map_err(|(_, e)| e))
-                        {
-                            Ok(write_extent_fut) => write_extent_fut,
-                            Err(e) => break (false, Some(transaction), NvFsError::from(e)),
-                        };
+                            0,
+                            image_layout.io_block_allocation_blocks_log2 + image_layout.allocation_block_size_128b_log2,
+                        );
                         this.fut_state = TransactionWriteJournalFutureState::WriteJournalLogTailExtent {
                             transaction: Some(transaction),
                             journal_log_head_extent: *journal_log_head_extent,
@@ -1151,22 +1145,19 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let write_extent_request = match WriteJournalLogExtentNvBlkDevRequest::new(
-                        journal_log_head_extent,
+                    let image_layout = &fs_instance.fs_config.image_layout;
+                    let write_extent_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+                        u64::from(journal_log_head_extent.begin()),
+                        u64::from(journal_log_head_extent.block_count()),
+                        image_layout.allocation_block_size_128b_log2,
                         mem::take(journal_log_head_extent_buf),
-                        fs_instance.fs_config.image_layout.allocation_block_size_128b_log2,
-                    ) {
-                        Ok(write_extent_request) => write_extent_request,
-                        Err(e) => break (false, transaction.take(), e),
-                    };
-                    let write_extent_fut = match fs_instance
-                        .blkdev
-                        .write(write_extent_request)
-                        .and_then(|r| r.map_err(|(_, e)| e))
-                    {
-                        Ok(write_extent_fut) => write_extent_fut,
-                        Err(e) => break (true, transaction.take(), NvFsError::from(e)),
-                    };
+                        0,
+                        image_layout
+                            .io_block_allocation_blocks_log2
+                            .max(image_layout.auth_tree_data_block_allocation_blocks_log2)
+                            + image_layout.allocation_block_size_128b_log2,
+                    );
+
                     this.fut_state = TransactionWriteJournalFutureState::WriteJournalLogHeadExtent {
                         transaction: transaction.take(),
                         write_extent_fut,
@@ -1836,61 +1827,5 @@ impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> 
                 TransactionCollectExtentsCoveringAuthDigestsFutureState::Done => unreachable!(),
             }
         }
-    }
-}
-
-/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
-/// internally by [`TransactionWriteJournalFuture`].
-struct WriteJournalLogExtentNvBlkDevRequest {
-    region: ChunkedIoRegion,
-    src: FixedVec<u8, 7>,
-    allocation_block_size_128b_log2: u8,
-}
-
-impl WriteJournalLogExtentNvBlkDevRequest {
-    pub fn new(
-        extent: &layout::PhysicalAllocBlockRange,
-        src: FixedVec<u8, 7>,
-        allocation_block_size_128b_log2: u8,
-    ) -> Result<Self, NvFsError> {
-        let physical_begin_128b = u64::from(extent.begin()) << (allocation_block_size_128b_log2 as u32);
-        if physical_begin_128b >> (allocation_block_size_128b_log2 as u32) != u64::from(extent.begin()) {
-            return Err(nvfs_err_internal!());
-        }
-        let physical_end_128b = u64::from(extent.end()) << (allocation_block_size_128b_log2 as u32);
-        if physical_end_128b >> (allocation_block_size_128b_log2 as u32) != u64::from(extent.end()) {
-            return Err(nvfs_err_internal!());
-        }
-        // The buffer is not chunked, simply use the maximum possible safe value of an
-        // Allocation Block size.
-        let region = ChunkedIoRegion::new(
-            physical_begin_128b,
-            physical_end_128b,
-            allocation_block_size_128b_log2 as u32,
-        )
-        .map_err(|_| nvfs_err_internal!())?;
-
-        Ok(Self {
-            region,
-            src,
-            allocation_block_size_128b_log2,
-        })
-    }
-}
-
-impl blkdev::NvBlkDevWriteRequest for WriteJournalLogExtentNvBlkDevRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
-        let allocation_block_index = range.chunk().decompose_to_hierarchic_indices([]).0;
-        let allocation_block_offset_in_src =
-            allocation_block_index << (self.allocation_block_size_128b_log2 as u32 + 7);
-        let range_in_allocation_block = range.range_in_chunk();
-        Ok(
-            &self.src[allocation_block_offset_in_src + range_in_allocation_block.start
-                ..allocation_block_offset_in_src + range_in_allocation_block.end],
-        )
     }
 }
