@@ -122,6 +122,7 @@ impl ExtentsLayout {
             return Err(nvfs_err_internal!());
         }
 
+        // Tentative upper bound possibly constrained further below.
         let max_extent_allocation_blocks_upper_bound = u64::MAX >> (allocation_block_size_128b_log2 + 7);
         let max_extent_allocation_blocks = max_extent_allocation_blocks
             .map(|max_extent_allocation_blocks| {
@@ -133,7 +134,7 @@ impl ExtentsLayout {
             return Err(nvfs_err_internal!());
         }
 
-        let extents_layout = Self {
+        let mut extents_layout = Self {
             max_extent_allocation_blocks: layout::AllocBlockCount::from(max_extent_allocation_blocks),
             extent_alignment_allocation_blocks_log2,
             extents_hdr_len,
@@ -142,6 +143,12 @@ impl ExtentsLayout {
             extent_payload_len_alignment,
             allocation_block_size_128b_log2,
         };
+
+        // For the purpose of the implementation, each extent's length in units of Bytes
+        // must fit an usize.
+        let max_extent_allocation_blocks_upper_bound = layout::AllocBlockCount::from(
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX) >> (allocation_block_size_128b_log2 + 7),
+        );
 
         // Verify that a minimum length extent does not exceed
         // max_extent_allocation_blocks. For the first extent, which stores the
@@ -154,6 +161,9 @@ impl ExtentsLayout {
                 // Saturated.
                 return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
             }
+            if head_extent_min_allocation_blocks.0 > max_extent_allocation_blocks_upper_bound {
+                return Err(NvFsError::from(FormatError::UnsupportedImageLayoutConfig));
+            }
         }
         // If extents_hdr_len >= the payload alignment, then removing the extents
         // headers automatically yields at least that amount of payload for the
@@ -164,7 +174,14 @@ impl ExtentsLayout {
                 // Saturated.
                 return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
             }
+            if tail_extent_min_allocation_blocks.0 > max_extent_allocation_blocks_upper_bound {
+                return Err(NvFsError::from(FormatError::UnsupportedImageLayoutConfig));
+            }
         }
+
+        extents_layout.max_extent_allocation_blocks = extents_layout
+            .max_extent_allocation_blocks
+            .min(max_extent_allocation_blocks_upper_bound);
 
         Ok(extents_layout)
     }
