@@ -9,11 +9,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev,
     crypto::{hash, symcipher},
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{FormatError, encryption_entities, keys, layout},
+        cocoonfs::{encryption_entities, keys, layout},
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
@@ -41,7 +41,7 @@ enum ReadExtentUnauthenticatedFutureState<B: blkdev::NvBlkDev> {
         allocation_block_size_128b_log2: u8,
     },
     Read {
-        read_fut: B::ReadFuture<ReadExtentUnauthenticatedNvBlkDevReadRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
     },
     Done,
 }
@@ -79,32 +79,43 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadExtentUnauthenticate
                     extent_range,
                     allocation_block_size_128b_log2,
                 } => {
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    let read_req = match ReadExtentUnauthenticatedNvBlkDevReadRequest::new(
-                        extent_range,
-                        blkdev_io_block_size_128b_log2,
-                        *allocation_block_size_128b_log2,
+                    let allocation_block_size_128b_log2 = *allocation_block_size_128b_log2 as u32;
+                    if u64::from(extent_range.block_count()) > u64::MAX >> (allocation_block_size_128b_log2 + 7) {
+                        this.fut_state = ReadExtentUnauthenticatedFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                    }
+                    let extent_len = match usize::try_from(
+                        u64::from(extent_range.block_count()) << (allocation_block_size_128b_log2 + 7),
                     ) {
-                        Ok(read_req) => read_req,
-                        Err(e) => {
+                        Ok(extent_len) => extent_len,
+                        Err(_) => {
                             this.fut_state = ReadExtentUnauthenticatedFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                         }
                     };
-                    let read_fut = match blkdev.read(read_req) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Ok(Err((_, e))) | Err(e) => {
+                    let dst_buf = match FixedVec::new_with_default(extent_len) {
+                        Ok(dst_buf) => dst_buf,
+                        Err(e) => {
                             this.fut_state = ReadExtentUnauthenticatedFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                     };
+
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(extent_range.begin()),
+                        u64::from(extent_range.block_count()),
+                        allocation_block_size_128b_log2 as u8,
+                        dst_buf,
+                        0,
+                        allocation_block_size_128b_log2 as u8,
+                    );
+
                     this.fut_state = ReadExtentUnauthenticatedFutureState::Read { read_fut };
                 }
                 ReadExtentUnauthenticatedFutureState::Read { read_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((read_req, Ok(())))) => {
+                        task::Poll::Ready(Ok((dst_buf, Ok(())))) => {
                             this.fut_state = ReadExtentUnauthenticatedFutureState::Done;
-                            let ReadExtentUnauthenticatedNvBlkDevReadRequest { dst_buf, .. } = read_req;
                             return task::Poll::Ready(Ok(dst_buf));
                         }
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
@@ -117,109 +128,6 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadExtentUnauthenticate
                 ReadExtentUnauthenticatedFutureState::Done => unreachable!(),
             }
         }
-    }
-}
-
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`ReadExtentUnauthenticatedFuture`].
-struct ReadExtentUnauthenticatedNvBlkDevReadRequest {
-    dst_buf: FixedVec<u8, 7>,
-    extent_range: layout::PhysicalAllocBlockRange,
-    read_request_io_region: ChunkedIoRegion,
-    blkdev_io_block_size_128b_log2: u32,
-    allocation_block_size_128b_log2: u8,
-}
-
-impl ReadExtentUnauthenticatedNvBlkDevReadRequest {
-    fn new(
-        extent_range: &layout::PhysicalAllocBlockRange,
-        blkdev_io_block_size_128b_log2: u32,
-        allocation_block_size_128b_log2: u8,
-    ) -> Result<Self, NvFsError> {
-        // The extent's end in units of Bytes shall not exceed the maximum allowed image
-        // size, which is u64::MAX.
-        if u64::from(extent_range.end()) << (allocation_block_size_128b_log2 as u32 + 7)
-            >> (allocation_block_size_128b_log2 as u32 + 7)
-            != u64::from(extent_range.end())
-        {
-            return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
-        }
-
-        let extent_allocation_blocks = extent_range.block_count();
-        let extent_size =
-            usize::try_from(u64::from(extent_allocation_blocks) << (allocation_block_size_128b_log2 as u32 + 7))
-                .map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let dst_buf = FixedVec::new_with_default(extent_size)?;
-
-        let blkdev_io_block_allocation_blocks_log2 =
-            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2 as u32);
-        let aligned_extent_range = extent_range
-            .align(blkdev_io_block_allocation_blocks_log2)
-            .ok_or(NvFsError::IoError(NvFsIoError::RegionOutOfRange))?;
-
-        let read_request_io_region = ChunkedIoRegion::new(
-            u64::from(aligned_extent_range.begin()) << (allocation_block_size_128b_log2 as u32),
-            u64::from(aligned_extent_range.end()) << (allocation_block_size_128b_log2 as u32),
-            allocation_block_size_128b_log2 as u32,
-        )
-        .map_err(|e| match e {
-            ChunkedIoRegionError::ChunkSizeOverflow => NvFsError::from(FormatError::InvalidImageLayoutConfig),
-            ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
-            ChunkedIoRegionError::InvalidBounds | ChunkedIoRegionError::RegionUnaligned => nvfs_err_internal!(),
-        })?;
-
-        Ok(Self {
-            dst_buf,
-            extent_range: *extent_range,
-            read_request_io_region,
-            blkdev_io_block_size_128b_log2,
-            allocation_block_size_128b_log2,
-        })
-    }
-}
-
-impl blkdev::NvBlkDevReadRequest for ReadExtentUnauthenticatedNvBlkDevReadRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.read_request_io_region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        // The index is relative to the aligned region.
-        let (allocation_block_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
-
-        let allocation_block_size_128b_log2 = self.allocation_block_size_128b_log2 as u32;
-        let blkdev_io_block_allocation_blocks_log2 = self
-            .blkdev_io_block_size_128b_log2
-            .saturating_sub(allocation_block_size_128b_log2);
-
-        // It is known as per the successful instantiation of the read_request_io_region
-        // that the total number of Allocation Blocks in the Device IO Block
-        // aligned range fits an usize.
-        let head_padding_allocation_blocks = u64::from(
-            self.extent_range.begin()
-                - self
-                    .extent_range
-                    .begin()
-                    .align_down(blkdev_io_block_allocation_blocks_log2),
-        ) as usize;
-        if allocation_block_index < head_padding_allocation_blocks {
-            return Ok(None);
-        }
-        let allocation_block_index = allocation_block_index - head_padding_allocation_blocks;
-        // Likewise here: the number of Allocation Blocks fits an usize.
-        if allocation_block_index >= u64::from(self.extent_range.block_count()) as usize {
-            // Is in tail alignment padding.
-            return Ok(None);
-        }
-
-        Ok(Some(
-            &mut self.dst_buf[allocation_block_index << (allocation_block_size_128b_log2 + 7)
-                ..(allocation_block_index + 1) << (allocation_block_size_128b_log2 + 7)]
-                [range.range_in_chunk().clone()],
-        ))
     }
 }
 
