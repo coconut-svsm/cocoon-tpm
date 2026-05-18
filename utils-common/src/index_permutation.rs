@@ -96,7 +96,7 @@ pub fn apply_index_perm<T>(index_perm: &mut [usize], apply_to: &mut [T]) {
         loop {
             debug_assert!(!is_handled(index_perm[to]));
             let next_to = index_perm[to];
-            index_perm[to] = to | handled_offset;
+            index_perm[to] = next_to | handled_offset;
 
             if to != cycle_start {
                 // After the swap,

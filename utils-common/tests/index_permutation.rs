@@ -22,41 +22,45 @@ mod index_permutation {
         #[test]
         fn shift() {
             let mut d = DATA_7;
-            let mut p = [1usize, 2, 3, 4, 5, 6, 0];
+            let p_orig = [1usize, 2, 3, 4, 5, 6, 0];
+            let mut p = p_orig;
 
             apply_index_perm(&mut p, &mut d);
             assert_eq!(d, [1u8, 2, 3, 4, 5, 6, 0], "data array differs");
-            assert_eq!(p, IDENTITY_7, "index array differs");
+            assert_eq!(p, p_orig, "index array differs");
         }
 
         #[test]
         fn swap() {
             let mut d = DATA_7;
-            let mut p = [0usize, 1, 3, 2, 4, 6, 5];
+            let p_orig = [0usize, 1, 3, 2, 4, 6, 5];
+            let mut p = p_orig;
 
             apply_index_perm(&mut p, &mut d);
             assert_eq!(d, [0u8, 1, 3, 2, 4, 6, 5], "data array differs");
-            assert_eq!(p, IDENTITY_7, "index array differs");
+            assert_eq!(p, p_orig, "index array differs");
         }
 
         #[test]
         fn swap_2() {
             let mut d = DATA_7;
-            let mut p = [1usize, 0, 2, 3, 4, 6, 5];
+            let p_orig = [1usize, 0, 2, 3, 4, 6, 5];
+            let mut p = p_orig;
 
             apply_index_perm(&mut p, &mut d);
             assert_eq!(d, [1u8, 0, 2, 3, 4, 6, 5], "data array differs");
-            assert_eq!(p, IDENTITY_7, "index array differs");
+            assert_eq!(p, p_orig, "index array differs");
         }
 
         #[test]
         fn reverse() {
             let mut d = DATA_7;
-            let mut p = [6usize, 5, 4, 3, 2, 1, 0];
+            let p_orig = [6usize, 5, 4, 3, 2, 1, 0];
+            let mut p = p_orig;
 
             apply_index_perm(&mut p, &mut d);
             assert_eq!(d, [6u8, 5, 4, 3, 2, 1, 0], "data array differs");
-            assert_eq!(p, IDENTITY_7, "index array differs");
+            assert_eq!(p, p_orig, "index array differs");
         }
 
         #[test]
@@ -79,22 +83,24 @@ mod index_permutation {
         fn two_disjoint_cycles() {
             // 3-cycle (0->1->2->0) and 2-cycle (3<->4), plus fixed points 5,6.
             let mut d = DATA_7;
-            let mut p = [1usize, 2, 0, 4, 3, 5, 6];
+            let p_orig = [1usize, 2, 0, 4, 3, 5, 6];
+            let mut p = p_orig;
 
             apply_index_perm(&mut p, &mut d);
             assert_eq!(d, [1u8, 2, 0, 4, 3, 5, 6], "data array differs");
-            assert_eq!(p, IDENTITY_7, "index array differs");
+            assert_eq!(p, p_orig, "index array differs");
         }
 
         #[test]
         fn large_and_small_cycle() {
             // 4-cycle (0->1->2->3->0) and 2-cycle (4<->5).
             let mut d = DATA_7;
-            let mut p = [1usize, 2, 3, 0, 5, 4, 6];
+            let p_orig = [1usize, 2, 3, 0, 5, 4, 6];
+            let mut p = p_orig;
 
             apply_index_perm(&mut p, &mut d);
             assert_eq!(d, [1u8, 2, 3, 0, 5, 4, 6], "data array differs");
-            assert_eq!(p, IDENTITY_7, "index array differs");
+            assert_eq!(p, p_orig, "index array differs");
         }
     }
 
