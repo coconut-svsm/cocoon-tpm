@@ -15,7 +15,7 @@
 // - no new_cyclic(), hence no uninitialized memory at birth, which allows for
 //   weaker memory ordering Weak::upgrade().
 
-//! Implementaion of [`GenericArc`].
+//! Implementation of [`GenericArc`].
 //!
 //! Based heavily on a trimmed version of Rust's core [`Arc`](alloc::sync::Arc).
 
@@ -60,7 +60,7 @@ impl<T: Sized> Arc<T> {
     }
 }
 
-/// Trimmed reimplementation of Rust's core [`Weak`](alloc::sync::Weak
+/// Trimmed reimplementation of Rust's core [`Weak`](alloc::sync::Weak).
 struct Weak<T> {
     ptr: NonNull<ArcInner<T>>,
 }
@@ -357,8 +357,7 @@ impl<T> Weak<T> {
         }
     }
 
-    /// Returns `None` when the pointer is dangling and there is no allocated
-    /// `ArcInner`, (i.e., when this `Weak` was created by `Weak::new`).
+    /// Gets the [`WeakInner`] pointer to access the reference counts.
     #[inline]
     fn inner(&self) -> WeakInner<'_> {
         let ptr = self.ptr.as_ptr();
