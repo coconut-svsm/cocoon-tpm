@@ -13,3 +13,6 @@ pub mod io_slices;
 pub mod murmurhash3;
 pub mod xor;
 pub mod zeroize;
+
+#[cfg(test)]
+mod test_utils;
