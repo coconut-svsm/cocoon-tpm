@@ -94,9 +94,7 @@ impl<T> Arc<T> {
         x.data.write(data);
         unsafe { Ok(Self::from_inner(Box::leak(x).into())) }
     }
-}
 
-impl<T> Arc<T> {
     /// Constructs an `Arc<T>` from a raw pointer.
     #[inline]
     pub unsafe fn from_raw(ptr: *const T) -> Self {
@@ -109,9 +107,7 @@ impl<T> Arc<T> {
             Self::from_ptr(arc_ptr)
         }
     }
-}
 
-impl<T> Arc<T> {
     /// Consumes the `Arc`, returning the wrapped pointer.
     #[inline]
     pub fn into_raw(this: Self) -> *const T {
