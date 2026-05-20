@@ -354,6 +354,7 @@ pub enum SyncRcPtrTryNewError {
 
 /// Error type returned by
 /// [`SyncRcPtrFactory::try_new_with()`](SyncRcPtrFactory::try_new_with).
+#[derive(Debug)]
 pub enum SyncRcPtrTryNewWithError<E> {
     /// Failure to allocate a new [`SyncRcPtr`].
     TryNewError(SyncRcPtrTryNewError),

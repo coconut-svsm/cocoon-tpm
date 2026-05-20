@@ -122,11 +122,7 @@ fn try_new_recoverable_success() {
 #[test]
 fn try_new_with_success() {
     let result = GenericArcFactory::try_new_with::<u32, &str, (), _>(|| Ok((42, "side-result")));
-    // SyncRcPtrTryNewWithError<E> does not derive Debug, so .unwrap() is unavailable.
-    let (arc, side) = match result {
-        Ok(v) => v,
-        Err(_) => panic!("expected Ok"),
-    };
+    let (arc, side) = result.unwrap();
     assert_eq!(*arc, 42);
     assert_eq!(side, "side-result");
 }
