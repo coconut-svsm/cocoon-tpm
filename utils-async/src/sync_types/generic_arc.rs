@@ -127,6 +127,10 @@ impl<T> Arc<T> {
 
     /// Creates a new [`Weak`] pointer to this allocation.
     pub fn downgrade(this: &Self) -> Weak<T> {
+        // Relaxed is sufficient here because this Arc exposes no `get_mut`,
+        // `is_unique`, or `new_cyclic` — there is no operation that needs to
+        // synchronize with weak-count changes. std::sync::Arc uses
+        // Acquire/Release in its downgrade to support those APIs.
         let mut cur = this.inner().weak.load(atomic::Ordering::Relaxed);
 
         loop {
@@ -344,6 +348,11 @@ impl<T> Weak<T> {
         // We use a CAS loop to increment the strong count instead of a
         // fetch_add as this function should never take the reference count
         // from zero to one.
+        //
+        // Relaxed is sufficient: the only transition that must synchronize
+        // with a strong-count change is the Release/Acquire pair in
+        // Arc::drop, which guards destruction. std::sync::Arc::upgrade uses
+        // Acquire to support get_mut/is_unique; we expose neither.
         if self
             .inner()
             .strong
