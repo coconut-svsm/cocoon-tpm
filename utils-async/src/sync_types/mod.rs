@@ -694,7 +694,7 @@ pub trait DerefInnerByTag<TAG> {
 /// Helper macro for implementing the [`DerefInnerByTag`] trait.
 #[macro_export]
 macro_rules! impl_deref_inner_by_tag {
-    ($field:ident, $field_type:path) => {
+    ($field:ident, $field_type:ty) => {
         type Output = $field_type;
 
         fn deref_inner(&self) -> &Self::Output {

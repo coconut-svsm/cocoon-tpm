@@ -10,12 +10,9 @@ use cocoon_tpm_utils_async::sync_types::{
 use core::ops::Deref;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-// Note: field types are limited to path types (u32, u64, etc.) because
-// impl_deref_inner_by_tag! uses $field_type:path. Reference types like
-// &'static str are rejected with "no rules expected this token in macro call".
 struct Outer {
     value: AtomicU32,
-    extra: u64,
+    extra: [u64; 1],
 }
 
 struct ValueTag;
@@ -26,13 +23,13 @@ impl DerefInnerByTag<ValueTag> for Outer {
 }
 
 impl DerefInnerByTag<ExtraTag> for Outer {
-    impl_deref_inner_by_tag!(extra, u64);
+    impl_deref_inner_by_tag!(extra, [u64; 1]);
 }
 
 fn make_outer_arc() -> GenericArc<Outer> {
     GenericArcFactory::try_new(Outer {
         value: AtomicU32::new(42),
-        extra: 100,
+        extra: [100],
     })
     .unwrap()
 }
@@ -53,11 +50,11 @@ fn deref_different_tags() {
     let value_ptr: InnerValuePtr = SyncRcPtrForInner::new(arc.clone());
     let extra_ptr: InnerExtraPtr = SyncRcPtrForInner::new(arc);
     assert_eq!(value_ptr.load(Ordering::Relaxed), 42);
-    assert_eq!(*extra_ptr, 100);
+    assert_eq!(*extra_ptr, [100]);
 
     value_ptr.store(99, Ordering::Relaxed);
     assert_eq!(value_ptr.load(Ordering::Relaxed), 99);
-    assert_eq!(*extra_ptr, 100);
+    assert_eq!(*extra_ptr, [100]);
 }
 
 #[test]
@@ -89,7 +86,7 @@ fn get_container() {
 
     let container_ref = inner.get_container();
     assert_eq!(container_ref.deref().value.load(Ordering::Relaxed), 99);
-    assert_eq!(container_ref.deref().extra, 100);
+    assert_eq!(container_ref.deref().extra, [100]);
 }
 
 #[test]
@@ -101,7 +98,7 @@ fn into_container() {
 
     let recovered_arc = inner.into_container();
     assert_eq!(recovered_arc.value.load(Ordering::Relaxed), 99);
-    assert_eq!(recovered_arc.extra, 100);
+    assert_eq!(recovered_arc.extra, [100]);
 }
 
 #[test]
@@ -255,5 +252,5 @@ fn sync_rc_ptr_ref_for_inner_get_container() {
     let inner_ref = <InnerValuePtr as SyncRcPtr<AtomicU32>>::as_ref(&inner);
     let container = inner_ref.get_container();
     assert_eq!(container.deref().value.load(Ordering::Relaxed), 99);
-    assert_eq!(container.deref().extra, 100);
+    assert_eq!(container.deref().extra, [100]);
 }
