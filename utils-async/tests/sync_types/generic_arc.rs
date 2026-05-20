@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright The Rust Project Developers (see https://thanks.rust-lang.org)
 // Copyright 2026 Red Hat, LLC
 // Author: Oliver Steffen <osteffen@redhat.com>
 
@@ -6,7 +7,19 @@ use cocoon_tpm_utils_async::sync_types::{
     GenericArc, GenericArcFactory, GenericWeak, SyncRcPtr, SyncRcPtrFactory, SyncRcPtrTryNewWithError, WeakSyncRcPtr,
 };
 use core::ops::Deref;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+struct DropCanary(*mut AtomicUsize);
+
+// SAFETY: only used in single-threaded tests.
+unsafe impl Send for DropCanary {}
+unsafe impl Sync for DropCanary {}
+
+impl Drop for DropCanary {
+    fn drop(&mut self) {
+        unsafe { (*self.0).fetch_add(1, Ordering::SeqCst) };
+    }
+}
 
 #[test]
 fn try_new() {
@@ -170,4 +183,23 @@ fn drop_order_strong_then_weak() {
 
     drop(arc2);
     assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn drop_arc() {
+    let mut canary = AtomicUsize::new(0);
+    let arc = GenericArcFactory::try_new(DropCanary(&mut canary as *mut AtomicUsize)).unwrap();
+    drop(arc);
+    assert_eq!(canary.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn drop_arc_weak() {
+    let mut canary = AtomicUsize::new(0);
+    let arc = GenericArcFactory::try_new(DropCanary(&mut canary as *mut AtomicUsize)).unwrap();
+    let weak = arc.downgrade();
+    assert_eq!(canary.load(Ordering::Acquire), 0);
+    drop(arc);
+    assert_eq!(canary.load(Ordering::Acquire), 1);
+    drop(weak);
 }
