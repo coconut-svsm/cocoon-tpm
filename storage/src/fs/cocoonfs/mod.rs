@@ -41,7 +41,6 @@ mod read_inode_data;
 mod read_preauth;
 mod set_assoc_cache;
 mod transaction;
-mod write_blocks;
 mod write_inode_data;
 
 #[cfg(test)]
