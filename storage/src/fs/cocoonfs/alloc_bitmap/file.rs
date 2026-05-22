@@ -21,7 +21,7 @@ use crate::{
             journal::{self, extents_covering_auth_digests::ExtentsCoveringAuthDigests},
             keys,
             layout::{self, BlockIndex as _},
-            read_buffer, transaction, write_blocks,
+            read_buffer, transaction,
         },
     },
     nvfs_err_internal, tpm2_interface,
@@ -816,7 +816,7 @@ enum AllocBitmapFileInitializeFutureState<B: blkdev::NvBlkDev> {
         cur_file_extent_range_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         cur_file_extent_range_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
         cur_file_extent_range_write_allocation_blocks_end: layout::PhysicalAllocBlockIndex,
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     Done,
 }
@@ -935,16 +935,16 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
         let file_block_allocation_blocks_log2 = image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32;
         let blkdev_io_block_allocation_blocks_log2 =
             blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2) as u8;
+        #[allow(clippy::unnecessary_min_or_max)]
         let preferred_blkdev_io_blocks_bulk_log2 = blkdev
             .preferred_io_blocks_bulk_log2()
-            .min(u64::BITS - 1 - blkdev_io_block_size_128b_log2 - 7)
+            .min(u64::BITS.min(usize::BITS) - 1 - blkdev_io_block_size_128b_log2 - 7)
             as u8;
-        let preferred_bulk_allocation_blocks_log2 =
-            (preferred_blkdev_io_blocks_bulk_log2 as u32 + blkdev_io_block_size_128b_log2)
-                .saturating_sub(allocation_block_size_128b_log2)
-                .max(image_layout.io_block_allocation_blocks_log2 as u32)
-                .max(file_block_allocation_blocks_log2)
-                .min(usize::BITS - 1 + file_block_allocation_blocks_log2) as u8;
+        let preferred_bulk_allocation_blocks_log2 = (preferred_blkdev_io_blocks_bulk_log2 as u32
+            + blkdev_io_block_size_128b_log2)
+            .saturating_sub(allocation_block_size_128b_log2)
+            .max(image_layout.io_block_allocation_blocks_log2 as u32)
+            .max(file_block_allocation_blocks_log2) as u8;
         debug_assert!(preferred_bulk_allocation_blocks_log2 >= blkdev_io_block_allocation_blocks_log2);
 
         let preferred_bulk_file_blocks_log2 =
@@ -1102,7 +1102,8 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
                     );
                     debug_assert_ne!(u64::from(cur_file_extent_range_allocation_blocks), 0);
                     // preferred_bulk_allocation_blocks_log2 as been capped in Self::new() so that
-                    // the number of File Blocks in a bulk would always fit an usize.
+                    // the total size in Bytes, hence the number of File Blocks in a bulk would
+                    // always fit an usize.
                     let cur_file_extent_range_file_blocks = (u64::from(cur_file_extent_range_allocation_blocks)
                         >> file_block_allocation_blocks_log2)
                         as usize;
@@ -1281,15 +1282,17 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
                         break;
                     }
 
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        &layout::PhysicalAllocBlockRange::new(
-                            *cur_file_extent_range_allocation_blocks_begin,
-                            *cur_file_extent_range_write_allocation_blocks_end,
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(*cur_file_extent_range_allocation_blocks_begin),
+                        u64::from(
+                            *cur_file_extent_range_write_allocation_blocks_end
+                                - *cur_file_extent_range_allocation_blocks_begin,
                         ),
-                        mem::take(&mut this.encrypted_file_blocks),
-                        image_layout.allocation_bitmap_file_block_allocation_blocks_log2,
-                        this.blkdev_io_block_allocation_blocks_log2,
                         image_layout.allocation_block_size_128b_log2,
+                        mem::take(&mut this.encrypted_file_blocks),
+                        0,
+                        image_layout.allocation_bitmap_file_block_allocation_blocks_log2
+                            + image_layout.allocation_block_size_128b_log2,
                     );
                     this.fut_state = AllocBitmapFileInitializeFutureState::WriteFileBlocksBatch {
                         cur_file_extent_range_allocation_blocks_begin: *cur_file_extent_range_allocation_blocks_begin,
@@ -1310,7 +1313,7 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
                             task::Poll::Ready(Ok((encrypted_file_blocks, Ok(())))) => encrypted_file_blocks,
                             task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                                 this.fut_state = AllocBitmapFileInitializeFutureState::Done;
-                                return task::Poll::Ready(Err(e));
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
