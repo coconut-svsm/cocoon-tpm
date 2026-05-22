@@ -17,7 +17,7 @@ use crate::{
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
             image_header, inode_extents_list, inode_index, journal, keys,
             layout::{self, BlockCount as _, BlockIndex as _},
-            read_buffer, write_blocks,
+            read_buffer,
         },
     },
     nvfs_err_internal,
@@ -309,7 +309,7 @@ pub struct MkFsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     auth_tree_node_cache: Option<auth_tree::AuthTreeNodeCache>,
 
     // Initialized after the header data to write out has been setup.
-    first_static_image_header_blkdev_io_block: FixedVec<FixedVec<u8, 7>, 0>,
+    first_static_image_header_blkdev_io_block: FixedVec<u8, 7>,
 
     #[cfg(test)]
     pub(super) test_fail_write_static_image_header: bool,
@@ -371,17 +371,17 @@ enum MkFsFutureState<B: blkdev::NvBlkDev> {
         auth_tree_write_part_fut: Option<auth_tree::AuthTreeInitializationCursorWritePartFuture<B>>,
     },
     WriteTailData {
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     AdvanceAuthTreeCursorToImageEndPrepare,
     AdvanceAuthTreeCursorToImageEnd {
         advance_fut: auth_tree::AuthTreeInitializationCursorAdvanceFuture<B>,
     },
     WriteHeadData {
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     ClearJournalLogHead {
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     RandomizeHeadDataPadding {
         write_fut: WriteRandomDataFuture<B>,
@@ -396,7 +396,7 @@ enum MkFsFutureState<B: blkdev::NvBlkDev> {
         write_barrier_fut: B::WriteBarrierFuture,
     },
     WriteStaticImageHeader {
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
     },
     WriteSyncAfterStaticImageHeaderWrite {
         write_sync_fut: B::WriteSyncFuture,
@@ -559,6 +559,83 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
             Ok(mkfs_layout) => mkfs_layout,
             Err(e) => return Err((blkdev, rng, e)),
         };
+
+        // Verify that the contiguously written regions' length can be represented in an
+        // usize each.
+        // First check the head data.
+        // If there's enough space, then the inode index entry node will get placed
+        // right after the mutable image header and get written as part of the
+        // header data.
+        let head_data_allocation_blocks_end = if mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin
+            < mkfs_layout.journal_log_head_extent.begin()
+        {
+            mkfs_layout.inode_index_entry_leaf_node_allocation_blocks_begin
+                + layout::AllocBlockCount::from(
+                    1u64 << (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32),
+                )
+        } else {
+            mkfs_layout.image_header_end
+        };
+        let aligned_head_data_allocation_blocks_end =
+            match head_data_allocation_blocks_end.align_up(image_layout.io_block_allocation_blocks_log2 as u32) {
+                Some(aligned_head_data_allocation_blocks_end) => aligned_head_data_allocation_blocks_end,
+                None => {
+                    // Impossible, it's already known that the Journal Log Head etc. are located
+                    // after.
+                    return Err((blkdev, rng, nvfs_err_internal!()));
+                }
+            };
+        // The first device IO Block gets written separately.
+        if usize::try_from(
+            (u64::from(aligned_head_data_allocation_blocks_end) << (allocation_block_size_128b_log2 + 7))
+                - (1u64 << (blkdev_io_block_size_128b_log2 + 7)),
+        )
+        .is_err()
+        {
+            return Err((blkdev, rng, NvFsError::DimensionsNotSupported));
+        }
+
+        // Verify the tail data write request's length.
+        // The tail data region spans from the beginning of the unaligned Allocation
+        // Bitmap tail, if any, up to the end of the initialized data
+        // structures.
+        let tail_data_allocation_blocks_begin = mkfs_layout
+            .alloc_bitmap_file_extent
+            .end()
+            .align_down(blkdev_io_block_allocation_blocks_log2);
+        let tail_data_allocation_blocks_end = mkfs_layout.allocated_image_allocation_blocks_end;
+        let aligned_tail_data_allocation_blocks_end =
+            match tail_data_allocation_blocks_end.align_up(image_layout.io_block_allocation_blocks_log2 as u32) {
+                Some(aligned_tail_data_allocation_blocks_end) => aligned_tail_data_allocation_blocks_end,
+                None => {
+                    // The image_size is aligned downwards to the IO Block size and
+                    // tail_data_allocation_blocks_end doesn't exceed that.
+                    return Err((blkdev, rng, nvfs_err_internal!()));
+                }
+            };
+        debug_assert!(
+            aligned_tail_data_allocation_blocks_end
+                <= layout::PhysicalAllocBlockIndex::from(0u64) + mkfs_layout.image_size
+        );
+        if usize::try_from(
+            u64::from(tail_data_allocation_blocks_end - tail_data_allocation_blocks_begin)
+                << (allocation_block_size_128b_log2 + 7),
+        )
+        .is_err()
+        {
+            return Err((blkdev, rng, NvFsError::DimensionsNotSupported));
+        }
+
+        // Verify the journal head extent's length.
+        // The shift does not overflow, the total image_size in units of Bytes has been
+        // capped to u64::MAX.
+        if usize::try_from(
+            u64::from(mkfs_layout.journal_log_head_extent.block_count()) << (allocation_block_size_128b_log2 + 7),
+        )
+        .is_err()
+        {
+            return Err((blkdev, rng, NvFsError::DimensionsNotSupported));
+        }
 
         if let Some(backup_mkfsinfo_header_write_control) = backup_mkfsinfo_header_write_control {
             if backup_mkfsinfo_header_write_control == MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting
@@ -1152,13 +1229,16 @@ where
                         .align_up(image_layout.io_block_allocation_blocks_log2 as u32)
                     {
                         Some(aligned_tail_data_allocation_blocks_end) => aligned_tail_data_allocation_blocks_end,
-                        None => break NvFsError::NoSpace,
+                        None => {
+                            // The image_size is aligned downwards to the IO Block size and
+                            // tail_data_allocation_blocks_end doesn't exceed that.
+                            break nvfs_err_internal!();
+                        }
                     };
-                    if aligned_tail_data_allocation_blocks_end
-                        > layout::PhysicalAllocBlockIndex::from(0u64) + mkfs_layout.image_size
-                    {
-                        break NvFsError::NoSpace;
-                    }
+                    debug_assert!(
+                        aligned_tail_data_allocation_blocks_end
+                            <= layout::PhysicalAllocBlockIndex::from(0u64) + mkfs_layout.image_size
+                    );
                     if aligned_tail_data_allocation_blocks_end == tail_data_allocation_blocks_begin {
                         // No tail data to write, skip this part.
                         this.fut_state = MkFsFutureState::AdvanceAuthTreeCursorToImageEndPrepare;
@@ -1375,22 +1455,12 @@ where
                     this.auth_tree_initialization_cursor = Some(auth_tree_initialization_cursor);
 
                     let image_layout = &fs_init_data.mkfs_layout.image_layout;
-                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    // A Device IO block is <= the FS IO Block in size, as has been verified
-                    // Self::new(), hence the cast to u8 can't overflow.
-                    let blkdev_io_block_allocation_blocks_log2 = fs_init_data
-                        .blkdev
-                        .io_block_size_128b_log2()
-                        .saturating_sub(allocation_block_size_128b_log2)
-                        as u8;
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        &layout::PhysicalAllocBlockRange::new(
-                            *tail_data_allocation_blocks_begin,
-                            *aligned_tail_data_allocation_blocks_end,
-                        ),
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(*tail_data_allocation_blocks_begin),
+                        u64::from(*aligned_tail_data_allocation_blocks_end - *tail_data_allocation_blocks_begin),
+                        image_layout.allocation_block_size_128b_log2,
                         mem::take(tail_data_allocation_blocks),
                         0,
-                        blkdev_io_block_allocation_blocks_log2,
                         image_layout.allocation_block_size_128b_log2,
                     );
                     this.fut_state = MkFsFutureState::WriteTailData { write_fut };
@@ -1398,7 +1468,7 @@ where
                 MkFsFutureState::WriteTailData { write_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), &fs_init_data.blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break NvFsError::from(e),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
@@ -1513,14 +1583,8 @@ where
                         1usize << (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7);
 
                     // The first Device IO BLock of the image header will get written separately at
-                    // the very end, after a write barrier.  Make the first Device IO Block buffer a
-                    // trivial FixedVec of a an u8 FixedVec, so that WriteBlocksFuture can be used
-                    // to write that out as well.
-                    let mut first_static_image_header_blkdev_io_block = match FixedVec::new_with_default(1) {
-                        Ok(first_static_image_header_blkdev_io_block) => first_static_image_header_blkdev_io_block,
-                        Err(e) => break NvFsError::from(e),
-                    };
-                    first_static_image_header_blkdev_io_block[0] =
+                    // the very end, after a write barrier.
+                    let mut first_static_image_header_blkdev_io_block =
                         match FixedVec::new_with_default(blkdev_io_block_size) {
                             Ok(first_static_image_header_blkdev_io_block) => first_static_image_header_blkdev_io_block,
                             Err(e) => break NvFsError::from(e),
@@ -1549,7 +1613,7 @@ where
                     }
                     // Encode the static image header.
                     if let Err(e) = image_header::StaticImageHeader::encode(
-                        io_slices::SingletonIoSliceMut::new(&mut first_static_image_header_blkdev_io_block[0])
+                        io_slices::SingletonIoSliceMut::new(&mut first_static_image_header_blkdev_io_block)
                             .chain(io_slices::BuffersSliceIoSlicesMutIter::new(
                                 &mut head_tail_data_blkdev_io_blocks[..(u64::from(
                                     padded_static_image_header_end
@@ -1656,29 +1720,29 @@ where
                     // A Device IO block is <= the FS IO Block in size, as has been verified
                     // Self::new(), hence the cast to u8 can't overflow.
                     let blkdev_io_block_allocation_blocks_log2 = blkdev_io_block_allocation_blocks_log2 as u8;
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        &layout::PhysicalAllocBlockRange::new(
-                            first_static_image_header_blkdev_io_block_allocation_blocks_end,
-                            aligned_head_data_allocation_blocks_end,
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(first_static_image_header_blkdev_io_block_allocation_blocks_end),
+                        u64::from(
+                            aligned_head_data_allocation_blocks_end
+                                - first_static_image_header_blkdev_io_block_allocation_blocks_end,
                         ),
-                        head_tail_data_blkdev_io_blocks,
-                        blkdev_io_block_allocation_blocks_log2,
-                        blkdev_io_block_allocation_blocks_log2,
                         image_layout.allocation_block_size_128b_log2,
+                        head_tail_data_blkdev_io_blocks,
+                        0,
+                        blkdev_io_block_allocation_blocks_log2 + image_layout.allocation_block_size_128b_log2,
                     );
                     this.fut_state = MkFsFutureState::WriteHeadData { write_fut };
                 }
                 MkFsFutureState::WriteHeadData { write_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), &fs_init_data.blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break NvFsError::from(e),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
                     // Clear the Journal Log head extent.
                     let mkfs_layout = &fs_init_data.mkfs_layout;
                     let image_layout = &mkfs_layout.image_layout;
-                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
                     let journal_log_head_io_blocks_count = match usize::try_from(
                         u64::from(mkfs_layout.journal_log_head_extent.block_count()) >> io_block_allocation_blocks_log2,
@@ -1691,34 +1755,28 @@ where
                             Ok(journal_log_head_io_blocks) => journal_log_head_io_blocks,
                             Err(e) => break NvFsError::from(e),
                         };
-                    let io_block_size =
-                        1usize << (io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7);
+                    let io_block_size = 1usize
+                        << (io_block_allocation_blocks_log2 + image_layout.allocation_block_size_128b_log2 as u32 + 7);
                     for journal_log_head_io_block in journal_log_head_io_blocks.iter_mut() {
                         *journal_log_head_io_block = match FixedVec::new_with_default(io_block_size) {
                             Ok(journal_log_head_io_block) => journal_log_head_io_block,
                             Err(e) => break 'outer NvFsError::from(e),
                         };
                     }
-                    // A Device IO block is <= the FS IO Block in size, as has been verified
-                    // Self::new(), hence the cast to u8 can't overflow.
-                    let blkdev_io_block_allocation_blocks_log2 = fs_init_data
-                        .blkdev
-                        .io_block_size_128b_log2()
-                        .saturating_sub(allocation_block_size_128b_log2)
-                        as u8;
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        &mkfs_layout.journal_log_head_extent,
-                        journal_log_head_io_blocks,
-                        image_layout.io_block_allocation_blocks_log2,
-                        blkdev_io_block_allocation_blocks_log2,
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(mkfs_layout.journal_log_head_extent.begin()),
+                        u64::from(mkfs_layout.journal_log_head_extent.block_count()),
                         image_layout.allocation_block_size_128b_log2,
+                        journal_log_head_io_blocks,
+                        0,
+                        image_layout.io_block_allocation_blocks_log2 + image_layout.allocation_block_size_128b_log2,
                     );
                     this.fut_state = MkFsFutureState::ClearJournalLogHead { write_fut };
                 }
                 MkFsFutureState::ClearJournalLogHead { write_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), &fs_init_data.blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break NvFsError::from(e),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
@@ -1978,13 +2036,12 @@ where
 
                     let mkfs_layout = &fs_init_data.mkfs_layout;
                     let image_layout = &mkfs_layout.image_layout;
-                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
                     // A Device IO block is <= the FS IO Block in size, as has been verified
                     // Self::new(), hence the cast to u8 can't overflow.
                     let blkdev_io_block_allocation_blocks_log2 = fs_init_data
                         .blkdev
                         .io_block_size_128b_log2()
-                        .saturating_sub(allocation_block_size_128b_log2 as u32)
+                        .saturating_sub(image_layout.allocation_block_size_128b_log2 as u32)
                         as u8;
 
                     // If the static image header write is supposed to fail for testing,
@@ -1992,27 +2049,25 @@ where
                     #[cfg(test)]
                     if this.test_fail_write_static_image_header {
                         // The byte right after the version field.
-                        this.first_static_image_header_blkdev_io_block[0][10] ^= 0xffu8;
+                        this.first_static_image_header_blkdev_io_block[10] ^= 0xffu8;
                     }
 
                     let first_static_image_header_blkdev_io_block_allocation_blocks_end =
                         layout::PhysicalAllocBlockIndex::from(1u64 << (blkdev_io_block_allocation_blocks_log2 as u32));
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        &layout::PhysicalAllocBlockRange::new(
-                            layout::PhysicalAllocBlockIndex::from(0u64),
-                            first_static_image_header_blkdev_io_block_allocation_blocks_end,
-                        ),
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+                        0,
+                        u64::from(first_static_image_header_blkdev_io_block_allocation_blocks_end),
+                        image_layout.allocation_block_size_128b_log2,
                         mem::take(&mut this.first_static_image_header_blkdev_io_block),
-                        blkdev_io_block_allocation_blocks_log2,
-                        blkdev_io_block_allocation_blocks_log2,
-                        allocation_block_size_128b_log2,
+                        0,
+                        blkdev_io_block_allocation_blocks_log2 + image_layout.allocation_block_size_128b_log2,
                     );
                     this.fut_state = MkFsFutureState::WriteStaticImageHeader { write_fut };
                 }
                 MkFsFutureState::WriteStaticImageHeader { write_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), &fs_init_data.blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break e,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => break NvFsError::from(e),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
@@ -2210,7 +2265,7 @@ enum WriteRandomDataFutureState<B: blkdev::NvBlkDev> {
         bulk_io_blocks: FixedVec<FixedVec<u8, 7>, 0>,
     },
     WriteRandomDataBulk {
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     Done,
 }
@@ -2239,13 +2294,13 @@ impl<B: blkdev::NvBlkDev> WriteRandomDataFuture<B> {
         let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
         // Make sure the preferred bulk size is at least an IO Block in size
         // and fits an usize in units of IO Blocks.
-        let preferred_bulk_io_blocks_log2 = ((blkdev
+        #[allow(clippy::unnecessary_min_or_max)]
+        let preferred_bulk_io_blocks_log2 = (blkdev
             .preferred_io_blocks_bulk_log2()
             .saturating_add(blkdev_io_block_size_128b_log2)
+            .min(u64::BITS.min(usize::BITS) - 1)
             .saturating_sub(allocation_block_size_128b_log2)
-            .min(u64::BITS - 1)
             .max(io_block_allocation_blocks_log2)
-            .min(usize::BITS - 1 + io_block_allocation_blocks_log2))
             - io_block_allocation_blocks_log2) as u8;
         Ok(Self {
             extent: *extent,
@@ -2277,7 +2332,7 @@ impl<B: blkdev::NvBlkDev> WriteRandomDataFuture<B> {
         loop {
             match &mut this.fut_state {
                 WriteRandomDataFutureState::Init => {
-                    // The preferred bulk size in units of IO blocks fits an usize,
+                    // The preferred bulk size in units of Bytes, hence of IO blocks fits an usize,
                     // c.f. Self::new(). Also, don't bother allocating more IO blocks than the
                     // extent size, if that's smaller.
                     let bulk_io_blocks_count = (1u64 << this.preferred_bulk_io_blocks_log2)
@@ -2333,22 +2388,13 @@ impl<B: blkdev::NvBlkDev> WriteRandomDataFuture<B> {
                         return task::Poll::Ready(Err(NvFsError::from(e)));
                     }
 
-                    // It's been checked in MkFsFuture::new() that the Device IO block size <= the
-                    // FS' IO block size, in particular the cast to u8 won't
-                    // overflow.
-                    let blkdev_io_block_allocation_blocks_log2 = blkdev
-                        .io_block_size_128b_log2()
-                        .saturating_sub(this.allocation_block_size_128b_log2 as u32)
-                        as u8;
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        &layout::PhysicalAllocBlockRange::new(
-                            cur_bulk_allocation_blocks_begin,
-                            cur_bulk_allocation_blocks_end,
-                        ),
-                        mem::take(bulk_io_blocks),
-                        this.io_block_allocation_blocks_log2,
-                        blkdev_io_block_allocation_blocks_log2,
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(cur_bulk_allocation_blocks_begin),
+                        u64::from(cur_bulk_allocation_blocks_end - cur_bulk_allocation_blocks_begin),
                         this.allocation_block_size_128b_log2,
+                        mem::take(bulk_io_blocks),
+                        0,
+                        this.io_block_allocation_blocks_log2 + this.allocation_block_size_128b_log2,
                     );
                     this.fut_state = WriteRandomDataFutureState::WriteRandomDataBulk { write_fut };
                 }
@@ -2357,7 +2403,7 @@ impl<B: blkdev::NvBlkDev> WriteRandomDataFuture<B> {
                         task::Poll::Ready(Ok((bulk_io_blocks, Ok(())))) => bulk_io_blocks,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             this.fut_state = WriteRandomDataFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
@@ -2388,7 +2434,7 @@ enum InvalidateBackupMkFsInfoHeaderFutureState<B: blkdev::NvBlkDev> {
         extent: layout::PhysicalAllocBlockRange,
     },
     WriteZeroes {
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
         extent: layout::PhysicalAllocBlockRange,
     },
     Trim {
@@ -2434,6 +2480,17 @@ impl<B: blkdev::NvBlkDev> InvalidateBackupMkFsInfoHeaderFuture<B> {
             image_layout.io_block_allocation_blocks_log2 as u32,
             image_layout.allocation_block_size_128b_log2 as u32,
         )?;
+
+        // The end in units of Bytes is within the storage volume's limits, hence
+        // representable by an u64. Verify the length fits an usize.
+        if usize::try_from(
+            u64::from(backup_mkfsinfo_header_location.block_count())
+                << (image_layout.allocation_block_size_128b_log2 as u32 + 7),
+        )
+        .is_err()
+        {
+            return Err(NvFsError::DimensionsNotSupported);
+        }
 
         Ok(Self {
             fut_state: InvalidateBackupMkFsInfoHeaderFutureState::Init,
@@ -2567,12 +2624,13 @@ impl<B: blkdev::NvBlkDev> InvalidateBackupMkFsInfoHeaderFuture<B> {
                         };
                     }
 
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        extent,
-                        blkdev_io_block_buffers,
-                        blkdev_io_block_allocation_blocks_log2 as u8,
-                        blkdev_io_block_allocation_blocks_log2 as u8,
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(extent.begin()),
+                        u64::from(extent.block_count()),
                         image_layout.allocation_block_size_128b_log2,
+                        blkdev_io_block_buffers,
+                        0,
+                        blkdev_io_block_allocation_blocks_log2 as u8 + image_layout.allocation_block_size_128b_log2,
                     );
                     this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::WriteZeroes {
                         write_fut,
@@ -2584,7 +2642,7 @@ impl<B: blkdev::NvBlkDev> InvalidateBackupMkFsInfoHeaderFuture<B> {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = InvalidateBackupMkFsInfoHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
@@ -2664,7 +2722,7 @@ enum WriteMkFsInfoHeaderDataFutureState<B: blkdev::NvBlkDev> {
         to_backup_location: bool,
     },
     Write {
-        write_fut: write_blocks::WriteBlocksFuture<B>,
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     Done,
 }
@@ -2731,9 +2789,9 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let blkdev_io_block_allocation_blocks_log2 =
                         blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let blkdev_io_blocks = blkdev.io_blocks();
+                    let blkdev_io_blocks = blkdev_io_blocks.min(u64::MAX >> (blkdev_io_block_size_128b_log2 + 7));
                     let mkfsinfo_header_location = if *to_backup_location {
-                        let blkdev_io_blocks = blkdev.io_blocks();
-                        let blkdev_io_blocks = blkdev_io_blocks.min(u64::MAX >> (blkdev_io_block_size_128b_log2 + 7));
                         match image_header::MkFsInfoHeader::physical_backup_location(
                             salt_len,
                             blkdev_io_blocks,
@@ -2752,6 +2810,10 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         let header_blkdev_io_blocks = ((encoded_header_len - 1)
                             >> (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7))
                             + 1;
+                        if header_blkdev_io_blocks as u64 > blkdev_io_blocks {
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                        }
                         let header_allocation_blocks = layout::AllocBlockCount::from(
                             (header_blkdev_io_blocks as u64) << blkdev_io_block_allocation_blocks_log2,
                         );
@@ -2765,6 +2827,19 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         (u64::from(mkfsinfo_header_location.begin()) | u64::from(mkfsinfo_header_location.end()))
                             .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
                     );
+
+                    // Verify that the mkfsinfo header's length on storage fits an usize.
+                    // The end in units of Bytes is known to be within the image size, hence is
+                    // representable as an u64.
+                    if usize::try_from(
+                        u64::from(mkfsinfo_header_location.block_count()) << (allocation_block_size_128b_log2 + 7),
+                    )
+                    .is_err()
+                    {
+                        this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
+                    }
+
                     let header_blkdev_io_blocks =
                         u64::from(mkfsinfo_header_location.block_count()) >> blkdev_io_block_allocation_blocks_log2;
                     // Does not overflow: the total encoded mkfsinfo header length never
@@ -2801,12 +2876,13 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         return task::Poll::Ready(Err(e));
                     }
 
-                    let write_fut = write_blocks::WriteBlocksFuture::new(
-                        &mkfsinfo_header_location,
-                        blkdev_io_block_buffers,
-                        blkdev_io_block_allocation_blocks_log2 as u8,
-                        blkdev_io_block_allocation_blocks_log2 as u8,
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture::new(
+                        u64::from(mkfsinfo_header_location.begin()),
+                        u64::from(mkfsinfo_header_location.block_count()),
                         image_layout.allocation_block_size_128b_log2,
+                        blkdev_io_block_buffers,
+                        0,
+                        (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
                     );
                     this.fut_state = WriteMkFsInfoHeaderDataFutureState::Write { write_fut };
                 }
@@ -2818,7 +2894,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         }
                         task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                             this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
