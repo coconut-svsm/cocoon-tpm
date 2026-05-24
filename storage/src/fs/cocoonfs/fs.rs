@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    blkdev,
+    blkdev::{self, NvBlkDevFuture},
     crypto::rng,
     fs::{
         self, NvFsError,
@@ -2227,6 +2227,18 @@ enum ProgressCommittingTransactionFuture<ST: sync_types::SyncTypes, B: blkdev::N
         issue_sync: bool,
         sync_state_write_fut: CocoonFsSyncStateMemberWriteFuture<ST, B>,
     },
+    FlushPendingBlkDevWrites {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        sync_state_write_guard: Option<CocoonFsSyncStateMemberWriteWeakGuard<ST, B>>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<transaction::Transaction>>,
+        pre_commit_validate_cb: Option<fs::PreCommitValidateCallbackType>,
+        post_commit_cb: Option<fs::PostCommitCallbackType>,
+        issue_sync: bool,
+        flush_queued_writes_fut: B::FlushQueuedWritesFuture,
+    },
     GrabPendingTransactionsSyncStateForCommit {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -2325,29 +2337,48 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                 sync_state_write_fut,
             } => match future::Future::poll(pin::Pin::new(sync_state_write_fut), cx) {
                 task::Poll::Ready(Ok(sync_state_write_guard)) => {
-                    let fs_instance = sync_state_write_guard.get_rwlock().get_container().clone();
-                    let pending_transactions_sync_state =
-                        CocoonFs::get_pending_transactions_sync_state_ref(&fs_instance).make_clone();
-                    let grab_pending_transactions_sync_state_fut = match asynchronous::FutureQueue::enqueue(
-                        pending_transactions_sync_state,
-                        PendingTransactionsSyncFuture::GrabTransactionsSyncStateForCommit,
-                    ) {
-                        Ok(grab_pending_transactions_sync_state_fut) => grab_pending_transactions_sync_state_fut,
-                        Err((_, asynchronous::FutureQueueError::MemoryAllocationFailure)) => {
+                    // Alright, we're executing exlusively, no other filesystem operation is
+                    // actively executing in poll(). However, there might be
+                    // *pending* transactions, and therefore IO ops pending on their behalf.
+                    // The first step is to tear those down:
+                    // - Increment the transaction_commit_gen to prevent any further poll() from
+                    //   executing. This is required for well-definiteness -- pending IO ops
+                    //   completed implicitly through a write barrier in the next step must not get
+                    //   polled on any further.
+                    // - Flush the NvBlkDev write queue in order to complete any pending write op
+                    //   (with unspecified results. This is required for establishing
+                    //   well-definiteness regarding pending and subsequent writes to the same
+                    //   locations.
+                    // - If successful, assume ownership of the shared
+                    //   CocoonFsPendingTransactionsSyncState. This allows for repurposing the
+                    //   storage locations previously allocated by concurrently executing
+                    //   transactions, if any.
+                    let fs_sync_state_rwlock = sync_state_write_guard.get_rwlock();
+                    let fs_instance = fs_sync_state_rwlock.get_container();
+                    fs_instance
+                        .transaction_commit_gen
+                        .fetch_add(1, atomic::Ordering::Relaxed);
+
+                    let flush_queued_writes_fut = match fs_instance.blkdev.flush_queued_writes() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
                             // Drop the sync_state write guard _before_ clearing out
-                            // committing_transaction.  Threads seeing committing_transaction ==
-                            // None expect to be able to grab the sync_state for read.
-                            drop(fs_instance);
+                            // committing_transaction. Threads seeing committing_transaction
+                            // == None expect to be able to grab the sync_state for read.
+                            drop(fs_sync_state_rwlock);
                             let fs_instance = sync_state_write_guard.into_rwlock().into_container();
                             *fs_instance.committing_transaction.lock() = CommittingTransactionState::None;
                             *this = Self::Done;
-                            let r = ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
-                                commit_error: NvFsError::MemoryAllocationFailure,
-                            };
-                            return task::Poll::Ready(r);
+                            return task::Poll::Ready(
+                                ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
+                                    commit_error: NvFsError::from(e),
+                                },
+                            );
                         }
                     };
-                    *this = Self::GrabPendingTransactionsSyncStateForCommit {
+                    drop(fs_sync_state_rwlock);
+
+                    *this = Self::FlushPendingBlkDevWrites {
                         // Will receive the CocoonFsSyncStateMemberWriteGuard::into_weak() upon
                         // return from this poll() function.
                         sync_state_write_guard: None,
@@ -2355,9 +2386,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                         pre_commit_validate_cb: pre_commit_validate_cb.take(),
                         post_commit_cb: post_commit_cb.take(),
                         issue_sync: *issue_sync,
-                        grab_pending_transactions_sync_state_fut,
+                        flush_queued_writes_fut,
                     };
-                    drop(fs_instance);
+
                     sync_state_write_guard
                 }
                 task::Poll::Ready(Err(e)) => {
@@ -2394,7 +2425,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                 }
             },
 
-            Self::GrabPendingTransactionsSyncStateForCommit {
+            Self::FlushPendingBlkDevWrites {
+                sync_state_write_guard, ..
+            }
+            | Self::GrabPendingTransactionsSyncStateForCommit {
                 sync_state_write_guard, ..
             }
             | Self::CleanupOnPreCommitError {
@@ -2429,6 +2463,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                         let r = match this {
                             Self::AcquireCocoonFsSyncStateMemberWriteLock { .. } => {
                                 // Would have been handled above though.
+                                ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk { commit_error: e }
+                            }
+                            Self::FlushPendingBlkDevWrites { .. } => {
                                 ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk { commit_error: e }
                             }
                             Self::GrabPendingTransactionsSyncStateForCommit { .. } => {
@@ -2492,6 +2529,83 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                 Self::AcquireCocoonFsSyncStateMemberWriteLock { .. } => {
                     // Handled above.
                     unreachable!();
+                }
+
+                Self::FlushPendingBlkDevWrites {
+                    sync_state_write_guard: fut_sync_state_write_guard,
+                    transaction,
+                    pre_commit_validate_cb,
+                    post_commit_cb,
+                    issue_sync,
+                    flush_queued_writes_fut,
+                } => {
+                    let fs_sync_state_rwlock = sync_state_write_guard.get_rwlock();
+                    let fs_instance = fs_sync_state_rwlock.get_container();
+                    match NvBlkDevFuture::poll(pin::Pin::new(flush_queued_writes_fut), &fs_instance.blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            // Drop the sync_state write guard _before_ clearing out
+                            // committing_transaction. Threads seeing committing_transaction
+                            // == None expect to be able to grab the sync_state for read.
+                            drop(fs_sync_state_rwlock);
+                            let fs_instance = sync_state_write_guard.into_rwlock().into_container();
+                            *fs_instance.committing_transaction.lock() = CommittingTransactionState::None;
+                            *this = Self::Done;
+                            return task::Poll::Ready(
+                                ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
+                                    commit_error: NvFsError::from(e),
+                                },
+                            );
+                        }
+                        task::Poll::Pending => {
+                            drop(fs_sync_state_rwlock);
+                            *fut_sync_state_write_guard = Some(sync_state_write_guard.into_weak());
+                            return task::Poll::Pending;
+                        }
+                    }
+
+                    // Now that all pending writes issued on behalf of concurrent transactions have
+                    // been completed (with unspecified result), clear the any_transaction_pending.
+                    // This allows for any subsequently started one to become
+                    // the primary transaction and enables it to issue certain
+                    // pre-commit writes.
+                    fs_instance.any_transaction_pending.store(0, atomic::Ordering::Relaxed);
+
+                    // Any pending write operations issued on behalf of concurrent transactions, if
+                    // any, have been completed with unspecified result, as is required for starting
+                    // any new write operations on those locations. Only now it's possible to assume
+                    // ownership of the pending_transactions_sync_state.
+                    let pending_transactions_sync_state =
+                        CocoonFs::get_pending_transactions_sync_state_ref(fs_instance).make_clone();
+                    let grab_pending_transactions_sync_state_fut = match asynchronous::FutureQueue::enqueue(
+                        pending_transactions_sync_state,
+                        PendingTransactionsSyncFuture::GrabTransactionsSyncStateForCommit,
+                    ) {
+                        Ok(grab_pending_transactions_sync_state_fut) => grab_pending_transactions_sync_state_fut,
+                        Err((_, asynchronous::FutureQueueError::MemoryAllocationFailure)) => {
+                            // Drop the sync_state write guard _before_ clearing out
+                            // committing_transaction.  Threads seeing committing_transaction ==
+                            // None expect to be able to grab the sync_state for read.
+                            drop(fs_sync_state_rwlock);
+                            let fs_instance = sync_state_write_guard.into_rwlock().into_container();
+                            *fs_instance.committing_transaction.lock() = CommittingTransactionState::None;
+                            *this = Self::Done;
+                            let r = ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
+                                commit_error: NvFsError::MemoryAllocationFailure,
+                            };
+                            return task::Poll::Ready(r);
+                        }
+                    };
+                    *this = Self::GrabPendingTransactionsSyncStateForCommit {
+                        // Will receive the CocoonFsSyncStateMemberWriteGuard::into_weak() upon
+                        // return from this poll() function.
+                        sync_state_write_guard: None,
+                        transaction: transaction.take(),
+                        pre_commit_validate_cb: pre_commit_validate_cb.take(),
+                        post_commit_cb: post_commit_cb.take(),
+                        issue_sync: *issue_sync,
+                        grab_pending_transactions_sync_state_fut,
+                    };
                 }
 
                 Self::GrabPendingTransactionsSyncStateForCommit {
