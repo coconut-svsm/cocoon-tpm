@@ -245,6 +245,11 @@ impl blkdev::NvBlkDev for TestNvBlkDev {
         Ok(Ok(TestNvBlkDevWriteFuture::Init { request }))
     }
 
+    type FlushQueuedWritesFuture = TestNvBlkDevWriteSyncFuture;
+    fn flush_queued_writes(&self) -> Result<Self::FlushQueuedWritesFuture, NvBlkDevIoError> {
+        Ok(TestNvBlkDevWriteSyncFuture::Init)
+    }
+
     type WriteBarrierFuture = TestNvBlkDevWriteSyncFuture;
     fn write_barrier(&self) -> Result<Self::WriteBarrierFuture, NvBlkDevIoError> {
         Ok(TestNvBlkDevWriteSyncFuture::Init)

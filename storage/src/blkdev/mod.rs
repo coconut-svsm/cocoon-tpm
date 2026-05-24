@@ -160,22 +160,22 @@ pub trait NvBlkDevFuture<B: ?Sized + NvBlkDev>: marker::Send {
 /// The following coherence rules apply for any sequence of operations initiated
 /// from the same power cycle, in order of their priority:
 ///
-/// * *Superseding pending writes* - Polling a [write
-///   barrier](Self::WriteBarrierFuture) to completion implicitly completes all
-///   pending [write](Self::WriteBarrierFuture) or [trim](Self::TrimFuture)
-///   operations initiated prior to it with unspecified result. Note that this
-///   only affects the aforementioned total order within a power-cycle for the
-///   rules that follow, no promises are being made regarding the state of the
-///   physical backing storage. Polling further on a [write](Self::WriteFuture)
-///   or [trim](Self::TrimFuture) future implicitly completed this way results
-///   in implementation defined behavior -- that is, it's an `unreachable()`
-///   condition.
-/// * *Conflicting writes* - In the absence of any [write
-///   barriers](Self::write_barrier), [initiating a write](Self::write) to a
-///   region overlapping with an already pending
-///   [write](Self::WriteBarrierFuture) or [trim](Self::TrimFuture) not yet
-///   polled to completion results in implementation defined behavior. That is,
+/// * *Superseding pending writes* - Polling a [write queue flushing
+///   operation](Self::FlushQueuedWritesFuture) to completion implicitly
+///   completes all pending [write](Self::WriteFuture) or
+///   [trim](Self::TrimFuture) operations initiated prior to it with unspecified
+///   result. Note that this only affects the aforementioned total order within
+///   a power-cycle for the rules that follow, no promises are being made
+///   regarding the state of the physical backing storage. Polling further on a
+///   [write](Self::WriteFuture) or [trim](Self::TrimFuture) future implicitly
+///   completed this way results in implementation defined behavior -- that is,
 ///   it's an `unreachable()` condition.
+/// * *Conflicting writes* - In the absence of any [write queue
+///   flushes](Self::flush_queued_writes), [initiating a write](Self::write) to
+///   a region overlapping with an already pending [write](Self::WriteFuture) or
+///   [trim](Self::TrimFuture) not yet polled to completion results in
+///   implementation defined behavior. That is, it's an `unreachable()`
+///   condition.
 /// * *Read-write conflicts* - Further polling on a [read
 ///   future](Self::ReadFuture) after a [write](Self::write) or
 ///   [trim](Self::trim) to some region overlapping with it has been initiated
@@ -390,6 +390,18 @@ pub trait NvBlkDev: marker::Unpin + marker::Send + marker::Sync + 'static {
         &self,
         request: R,
     ) -> Result<Result<Self::WriteFuture<R>, (R, NvBlkDevIoError)>, NvBlkDevIoError>;
+
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
+    /// instantiated through
+    /// [`flush_queued_writes()`](Self::flush_queued_writes).
+    type FlushQueuedWritesFuture: NvBlkDevFuture<Self, Output = Result<(), NvBlkDevIoError>> + marker::Unpin;
+
+    /// Flush any pending write operations.
+    ///
+    /// Complete any pending [write](Self::WriteFuture) or
+    /// [trim](Self::TrimFuture) operations not yet polled to completion
+    /// with unspecified result.
+    fn flush_queued_writes(&self) -> Result<Self::FlushQueuedWritesFuture, NvBlkDevIoError>;
 
     /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`write_barrier()`](Self::write_barrier).
