@@ -89,12 +89,6 @@ enum TransactionApplyJournalFutureState<B: blkdev::NvBlkDev> {
         transaction: Option<Box<Transaction>>,
         invalidate_journal_log_fut: journal::log::JournalLogInvalidateFuture<B>,
     },
-    WriteBarrierBeforeTrim {
-        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
-        // reference on Self.
-        transaction: Option<Box<Transaction>>,
-        write_barrier_fut: B::WriteBarrierFuture,
-    },
     TrimDeallocatedIoBlocks {
         trim_deallocated_io_blocks_fut: TransactionTrimDeallocatedIoBlocksFuture<B>,
     },
@@ -420,49 +414,19 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                     // If everything needed for trimming had been flushed due to a low memory
                     // condition, then don't even bother.
                     if fs_instance.fs_config.enable_trimming && this.low_memory < 2 {
-                        let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
-                            Ok(write_barrier_fut) => write_barrier_fut,
-                            Err(_) => {
-                                // A write barrier is needed before trimming, but
-                                // failure to trim is non-fatal. Simply return.
-                                this.fut_state = TransactionApplyJournalFutureState::Done;
-                                return task::Poll::Ready(Ok(()));
-                            }
+                        // The remaining work to be done is trimming. Any failure is non-fatal.
+                        let transaction = match transaction.take() {
+                            Some(transaction) => transaction,
+                            None => return task::Poll::Ready(Ok(())),
                         };
-                        this.fut_state = TransactionApplyJournalFutureState::WriteBarrierBeforeTrim {
-                            transaction: transaction.take(),
-                            write_barrier_fut,
+                        let trim_deallocated_io_blocks_fut = TransactionTrimDeallocatedIoBlocksFuture::new(transaction);
+                        this.fut_state = TransactionApplyJournalFutureState::TrimDeallocatedIoBlocks {
+                            trim_deallocated_io_blocks_fut,
                         };
                     } else {
                         this.fut_state = TransactionApplyJournalFutureState::Done;
                         return task::Poll::Ready(Ok(()));
                     }
-                }
-                TransactionApplyJournalFutureState::WriteBarrierBeforeTrim {
-                    transaction,
-                    write_barrier_fut,
-                } => {
-                    let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.blkdev, cx) {
-                        task::Poll::Ready(Ok(())) => (),
-                        task::Poll::Ready(Err(_)) => {
-                            // A write barrier is needed before trimming, but
-                            // failure to trim is non-fatal. Simply return.
-                            this.fut_state = TransactionApplyJournalFutureState::Done;
-                            return task::Poll::Ready(Ok(()));
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
-
-                    // The remaining work to be done is trimming. Any failure is non-fatal.
-                    let transaction = match transaction.take() {
-                        Some(transaction) => transaction,
-                        None => return task::Poll::Ready(Ok(())),
-                    };
-                    let trim_deallocated_io_blocks_fut = TransactionTrimDeallocatedIoBlocksFuture::new(transaction);
-                    this.fut_state = TransactionApplyJournalFutureState::TrimDeallocatedIoBlocks {
-                        trim_deallocated_io_blocks_fut,
-                    };
                 }
                 TransactionApplyJournalFutureState::TrimDeallocatedIoBlocks {
                     trim_deallocated_io_blocks_fut,
@@ -563,7 +527,6 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                 | TransactionApplyJournalFutureState::WriteDataUpdates { .. } => false,
                 TransactionApplyJournalFutureState::InvalidateJournalLogPrepare { .. }
                 | TransactionApplyJournalFutureState::InvalidateJournalLog { .. }
-                | TransactionApplyJournalFutureState::WriteBarrierBeforeTrim { .. }
                 | TransactionApplyJournalFutureState::TrimDeallocatedIoBlocks { .. }
                 | TransactionApplyJournalFutureState::TrimJournal { .. }
                 | TransactionApplyJournalFutureState::Done => true,

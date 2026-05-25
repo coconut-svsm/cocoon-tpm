@@ -1227,6 +1227,9 @@ enum JournalLogInvalidateFutureState<B: blkdev::NvBlkDev> {
     InvalidateJournalLogHead {
         clear_fut: blkdev::helpers::NvBlkDevClearRegionFuture<B>,
     },
+    WriteBarrierAfterInvalidate {
+        write_barrier_fut: B::WriteBarrierFuture,
+    },
     WriteSyncAfterInvalidate {
         write_sync_fut: B::WriteSyncFuture,
     },
@@ -1320,7 +1323,17 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    if this.issue_sync {
+                    if !this.issue_sync {
+                        let write_barrier_fut = match blkdev.write_barrier() {
+                            Ok(write_barrier_fut) => write_barrier_fut,
+                            Err(e) => {
+                                this.fut_state = JournalLogInvalidateFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+                        this.fut_state =
+                            JournalLogInvalidateFutureState::WriteBarrierAfterInvalidate { write_barrier_fut };
+                    } else {
                         let write_sync_fut = match blkdev.write_sync() {
                             Ok(write_sync_fut) => write_sync_fut,
                             Err(e) => {
@@ -1329,10 +1342,19 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                             }
                         };
                         this.fut_state = JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut };
-                    } else {
-                        this.fut_state = JournalLogInvalidateFutureState::Done;
-                        return task::Poll::Ready(Ok(()));
                     }
+                }
+                JournalLogInvalidateFutureState::WriteBarrierAfterInvalidate { write_barrier_fut } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = JournalLogInvalidateFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+                    this.fut_state = JournalLogInvalidateFutureState::Done;
+                    return task::Poll::Ready(Ok(()));
                 }
                 JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_sync_fut), blkdev, cx) {

@@ -43,9 +43,6 @@ pub(super) struct TransactionTrimJournalFuture<B: blkdev::NvBlkDev> {
 /// [`TransactionTrimJournalFuture`] state-machine state.
 enum TransactionTrimJournalFutureState<B: blkdev::NvBlkDev> {
     Init,
-    WriteBarrier {
-        write_barrier_fut: B::WriteBarrierFuture,
-    },
     TrimJournalStagingCopyRegionPrepare {
         next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
     },
@@ -208,34 +205,11 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                         return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
                     }
 
-                    let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
-                        Ok(write_barrier_fut) => write_barrier_fut,
-                        Err(_) => {
-                            // Can't trim without a write barrier, but failure to trim is considered
-                            // non-fatal. Simply return.
-                            this.fut_state = TransactionTrimJournalFutureState::Done;
-                            return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
-                        }
+                    this.fut_state = TransactionTrimJournalFutureState::TrimJournalStagingCopyRegionPrepare {
+                        next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex::from(0usize),
                     };
+                }
 
-                    this.fut_state = TransactionTrimJournalFutureState::WriteBarrier { write_barrier_fut };
-                }
-                TransactionTrimJournalFutureState::WriteBarrier { write_barrier_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.blkdev, cx) {
-                        task::Poll::Pending => return task::Poll::Pending,
-                        task::Poll::Ready(Ok(_)) => {
-                            this.fut_state = TransactionTrimJournalFutureState::TrimJournalStagingCopyRegionPrepare {
-                                next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex::from(0usize),
-                            };
-                        }
-                        task::Poll::Ready(Err(_)) => {
-                            // Can't trim without a write barrier, but failure to trim is considered
-                            // non-fatal, so simply return.
-                            this.fut_state = TransactionTrimJournalFutureState::Done;
-                            return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
-                        }
-                    }
-                }
                 TransactionTrimJournalFutureState::TrimJournalStagingCopyRegionPrepare {
                     next_update_states_index,
                 } => {

@@ -1228,9 +1228,6 @@ enum JournalCleanupFutureState<B: blkdev::NvBlkDev> {
         image_header_end: layout::PhysicalAllocBlockIndex,
         invalidate_journal_log_fut: JournalLogInvalidateFuture<B>,
     },
-    WriteBarrierBeforeTrim {
-        write_barrier_fut: B::WriteBarrierFuture,
-    },
     TrimJournalLogExtentPrepare {
         journal_log_extents_index: usize,
     },
@@ -1331,29 +1328,6 @@ impl<B: blkdev::NvBlkDev> JournalCleanupFuture<B> {
                         this.fut_state = JournalCleanupFutureState::Done;
                         return task::Poll::Ready(Ok(()));
                     }
-
-                    let write_barrier_fut = match blkdev.write_barrier() {
-                        Ok(write_barrier_fut) => write_barrier_fut,
-                        Err(_) => {
-                            // A write barrier is needed before trimming, but failure to trim is considered
-                            // non-fatal. Simply return.
-                            this.fut_state = JournalCleanupFutureState::Done;
-                            return task::Poll::Ready(Ok(()));
-                        }
-                    };
-                    this.fut_state = JournalCleanupFutureState::WriteBarrierBeforeTrim { write_barrier_fut };
-                }
-                JournalCleanupFutureState::WriteBarrierBeforeTrim { write_barrier_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok(())) => (),
-                        task::Poll::Ready(Err(_)) => {
-                            // A write barrier is needed before trimming, but failure to trim is considered
-                            // non-fatal, return with success.
-                            this.fut_state = JournalCleanupFutureState::Done;
-                            return task::Poll::Ready(Ok(()));
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
 
                     // Don't trim the Journal Log head extent, so start at index 1.
                     this.fut_state = JournalCleanupFutureState::TrimJournalLogExtentPrepare {
