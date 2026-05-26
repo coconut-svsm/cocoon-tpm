@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Red Hat, LLC
+// Author: Oliver Steffen <osteffen@redhat.com>
+
+mod sync_types {
+    mod deref_inner_by_tag;
+}
