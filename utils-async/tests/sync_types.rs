@@ -7,4 +7,5 @@ mod sync_types {
     mod generic_arc;
     mod generic_sync_rc_ptr_ref;
     mod lock_for_inner;
+    mod pinned_sync_rc_ptr;
 }
