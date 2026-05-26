@@ -5,4 +5,5 @@
 mod sync_types {
     mod deref_inner_by_tag;
     mod generic_arc;
+    mod generic_sync_rc_ptr_ref;
 }
