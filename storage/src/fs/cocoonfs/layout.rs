@@ -465,6 +465,12 @@ impl ImageLayout {
         if io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
         }
+        // The Journal log extents are chained and must be aligned to the IO Block size
+        // each.
+        if 1u64 << (io_block_allocation_blocks_log2 as u32) > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
+        {
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
+        }
 
         if auth_tree_node_io_blocks_log2 as u32
             + io_block_allocation_blocks_log2 as u32

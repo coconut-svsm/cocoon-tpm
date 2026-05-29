@@ -522,7 +522,8 @@ follows:
 |       |                                                     |of 128B.                                                |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 | 1     |`io_block_allocation_blocks_log2`                    |Size of an [IO Block](#def-io-block), specified as the  |
-|       |                                                     |base-2 logarithm in units of Allocation Blocks.         |
+|       |                                                     |base-2 logarithm in units of Allocation Blocks. Must be |
+|       |                                                     |<= 6.                                                   |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 | 1     |`auth_tree_node_io_blocks_log2`                      |Size of an [authentication tree node](#sec-auth-tree),  |
 |       |                                                     |specified as the base-2 logarithm in units of IO Blocks.|
