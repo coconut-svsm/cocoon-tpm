@@ -327,21 +327,22 @@ pub struct ImageLayout {
     /// overhead.
     pub allocation_bitmap_file_block_allocation_blocks_log2: u8,
 
-    /// Base-2 logarithm of the Index B-Tree leaf node size as specified in units of
-    /// [Allocation Blocks](Self::allocation_block_size_128b_log2).
+    /// Base-2 logarithm of the Index B-Tree leaf node size as specified in
+    /// units of [Allocation Blocks](Self::allocation_block_size_128b_log2).
     ///
-    /// Must be >= the IV size + 4 + 8 + 5 * 12 so that the first node (in symmetric
-    /// order) is guaranteed to always store the first three special file entries needed
-    /// for bootstrapping, as per the minimum B-Tree node fill level. Note that this is
-    /// trivially satisfied for all known possible values of the IV size.
+    /// Must be >= the IV size + 4 + 8 + 5 * 12 so that the first node (in
+    /// symmetric order) is guaranteed to always store the first three
+    /// special file entries needed for bootstrapping, as per the minimum
+    /// B-Tree node fill level. Note that this is trivially satisfied for all
+    /// known possible values of the IV size.
     pub index_tree_leaf_node_allocation_blocks_log2: u8,
 
-    /// Base-2 logarithm of the Index B-Tree internal node size as specified in units
-    /// of [Allocation Blocks](Self::allocation_block_size_128b_log2).
+    /// Base-2 logarithm of the Index B-Tree internal node size as specified in
+    /// units of [Allocation Blocks](Self::allocation_block_size_128b_log2).
     ///
-    /// Must be >= the IV size + 4 + 8 + 3 * 12 so that the the minimum B-Tree node
-    /// fill level is non-zero. Note that this is trivially satisfied for all known
-    /// possible values of the IV size.
+    /// Must be >= the IV size + 4 + 8 + 3 * 12 so that the the minimum B-Tree
+    /// node fill level is non-zero. Note that this is trivially satisfied
+    /// for all known possible values of the IV size.
     pub index_tree_internal_node_allocation_blocks_log2: u8,
 
     /// The Hash algorithm to use for non-root authentication tree node
