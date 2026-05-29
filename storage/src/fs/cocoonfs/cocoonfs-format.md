@@ -649,14 +649,15 @@ The filesystem creation process inevitably involves a replacement of the filesys
 storage's beginning with the [regular CocoonFs image header](#sec-filesystem-header) at some point. For robustness
 against service interruptions encountered during that write, a [backup copy]{#def-mkfsinfo-backup-header} of the former
 is made at a specific location on storage beforehand. The location is determined exlusively from the storage volume's
-dimensions as follows: find the largest possible power of two not less than $4\cdot 128\textrm{B}$ such that the storage
-volume accomodates at least $16$ units of that size and place the backup filesystem creation info header copy at the
-beginning of the last such. For clarity, the minimum storage volume size required for supporting online filesystem
-creation by means of a filesystem creation info header is $16\cdot 4\cdot 128\textrm{B} = 8192\textrm{B}$. Note that
-this scheme has been chosen such that the backup copy will get placed towards the storage volume's end, while still
-preserving a relatively large alignment at the same time: having it stored near the end prevents it from intefering with
-any of the filesystem's initial metadata structures' placement and the large alignment will enable meaningful error
-reporting in case the underlying hardware is not compatible with the selected [IO Block](#def-io-block) size.
+dimensions as follows: find the largest possible power of two not less than the larger of $4\cdot 128\textrm{B}$ and the
+[IO Block](#def-io-block) size such that the storage volume accomodates at least $16$ units of that size and place the
+backup filesystem creation info header copy at the beginning of the last such. For clarity, the minimum storage volume
+size required for supporting online filesystem creation by means of a filesystem creation info header is the larger of
+$16\cdot 4\cdot 128\textrm{B} = 8192\textrm{B}$ and $16$ [IO Blocks](#def-io-block). Note that this scheme has been
+chosen such that the backup copy will get placed towards the storage volume's end, while still preserving a relatively
+large alignment at the same time: having it stored near the end prevents it from intefering with any of the filesystem's
+initial metadata structures' placement and the large alignment will enable meaningful error reporting in case the
+underlying hardware is not compatible with the selected [IO Block](#def-io-block) size.
 
 In either case, if no valid [image header](#sec-image-header) of either type passing the respective checksum
 verification is found at the storage volume's beginning when attempting to open a filesystem, neither a [regular
