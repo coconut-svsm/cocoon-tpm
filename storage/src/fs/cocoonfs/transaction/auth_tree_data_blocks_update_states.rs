@@ -696,8 +696,8 @@ impl<'a> Iterator for AuthTreeDataBlockUpdateStateAuthDigestAllocationBlocksIter
 /// - possibly unmodified [Authentication Tree Data
 ///   Blocks](ImageLayout::auth_tree_data_block_allocation_blocks_log2) part of
 ///   a larger modified [IO Block](ImageLayout::io_block_allocation_blocks_log2)
-///   or [Device IO Block](crate::blkdev::NvBlkDev::io_block_size_128b_log2) have
-///   associated entries.
+///   or [Device IO Block](crate::blkdev::NvBlkDev::io_block_size_128b_log2)
+///   have associated entries.
 ///
 /// For each [Allocation Block level entry](AllocationBlockUpdateState), the
 /// current [state as already written or to be written to
@@ -2780,12 +2780,15 @@ impl AuthTreeDataBlocksUpdateStates {
                     >> io_block_allocation_blocks_log2
                     != 0
                 {
-                    debug_assert_eq!(
-                        cur_target_allocation_block - cur_io_block_target_allocation_blocks_begin,
-                        layout::AllocBlockCount::from(1u64 << io_block_allocation_blocks_log2)
-                    );
                     cur_io_block_alloc_bitmap = io_block_chunked_alloc_bitmap_iter.next().unwrap_or(0);
-                    cur_io_block_target_allocation_blocks_begin = cur_target_allocation_block;
+                    cur_io_block_target_allocation_blocks_begin +=
+                        layout::AllocBlockCount::from(1u64 << io_block_allocation_blocks_log2);
+                    debug_assert_eq!(
+                        (u64::from(cur_target_allocation_block)
+                            ^ u64::from(cur_io_block_target_allocation_blocks_begin))
+                            >> io_block_allocation_blocks_log2,
+                        0
+                    );
                 }
 
                 match &mut cur_allocation_block_state.staged_update {
