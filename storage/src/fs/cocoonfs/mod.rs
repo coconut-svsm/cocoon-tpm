@@ -29,6 +29,7 @@ mod fs;
 mod image_header;
 mod inode_extents_list;
 mod inode_index;
+mod integrity;
 mod journal;
 mod keys;
 mod layout;

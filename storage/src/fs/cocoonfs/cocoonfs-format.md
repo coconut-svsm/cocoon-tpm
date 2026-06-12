@@ -664,12 +664,17 @@ expected to check for the presence of a filesystem creation info header backup c
 found, and it passes its checksum verification, then the online filesystem creation procedure is supposed to get
 restarted from scratch.
 
-### Integrity protection checksum scheme{#sec-crc}
-Once the CocoonFs image has been opened and the [authentication](#sec-auth_tree) is fully operational, integrity
+### Integrity protections
+Once the CocoonFs image has been opened and the [authentication](#sec-auth-tree) is fully operational, integrity
 protection is provided implicitly through the (keyed) authentication. However, some core filesystem entities like the
 [image header](#sec-static-image-header) must get examined in the course of the bootstrapping procedure itself, and
 therefore have dedicated integrity protections in place.
 
+The CocoonFs format defines two mechanisms for integrity protections: a bare [checksum scheme](#sec-crc) and, as
+checksums are inherently prone to collisions, a common [extent protection scheme](#sec-extent-integrity) designed to
+provide additional robustness against torn writes for certain extent types subject to this protection.
+
+#### Checksum scheme{#sec-crc}
 The checksum is formed by concatenating a pair of two CRC-32 values: one over the plain data, and another one over the
 same data but with the bits at odd and even positions swapped. The rationale follows below.
 
@@ -681,7 +686,7 @@ polynomial, and within each byte, bits of decreasing arithmetic significance cor
 polynomial degree. The final residual polynomial's coefficient are inverted and serialized with the same association
 between polynomial terms and bits on storage as just described for the data.
 
-#### Rationale
+##### Rationale
 In principle, it would have been possible to (re)use some cryptographic hash function needed for the authentication
 anyway to also provide integrity protection in these contexts. However, there might be use-cases where an implementation
 would examine (and possibly even alter) only the filesystem metadata, but not attempt to run a full filesystem opening
@@ -736,6 +741,128 @@ $\bar{\mathcal{c}}\in\mathbb{F}_2[X]$, and $\phi(\bar{\mathcal{c}})$ is a polyno
 $\mathrm{kern}(\psi)$ with its terms of odd degree all zero. By what has been said above, it is already known that
 $\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$. Finally, because $\mathcal{c}$ is irreducible (and
 $\mathbb{F}_2$'s only unit is $1$), it follows that $\mathcal{\bar{c}}=\mathcal{c}$.
+
+#### [Common extent integrity protection scheme]{#sec-extent-integrity}
+The common extent integrity protection scheme only applies to certain [extent](#def-extent) types whose boundaries are
+aligned to multiples of a [filesystem IO Block](#def-io-block) on storage. It transforms the protected extent's contents
+-- conceptually the integrity protections are applied last after encoding any of the higher-level data structures and
+right before writing the extent to storage. Conversely, the integrity protections are removed again and the contents
+restored to their original state right after reading the protected extent from storage and before decoding any of the
+higher-level data structures.
+
+For what follows, the backing hardware device's minimum IO granularity is referred to a a [*device IO
+Block*]{#def-dev-io-block}. A [device IO Block](#def-dev-io-block) is never larger than the [filesystem's IO
+Block](#def-io-block) size attribute, as per the definition of the latter. In particular, a write to one [device IO
+Block](#def-dev-io-block) is assumed to never affect the contents of any other [device IO Block](#def-dev-io-block), at
+any stage of the write.
+
+For the purpose of the discussion that follows, the [extent](#def-extent) is split into two logical parts:
+
+- its first [device IO Block](#def-dev-io-block)
+- and its tail remainder.
+
+Implementations are expected to proceed according to the following [*fail-safe extent write
+protocol*]{#def-extent-integrity-fail-safe-write} when updating an integrity protected extent on storage, semantically
+equivalent behavior is permitted.
+
+1. Invalidate the extent's first [device IO Block](#def-dev-io-block) on storage by writing all-zeros to it.
+2. Issue a write barrier.
+3. Update the extent's tail on storage, if any.
+4. If the tail is non-trivial, issue a write barrier.
+5. Update the extent's first [device IO Block](#def-dev-io-block) on storage.
+
+The semantics of the write barrier must be such that any writes issued after it must not become effective on storage,
+not even partially, before any writes prior to it have become fully effective.
+
+To handle service interruptions encountered during the final write of the extent's first [device IO
+Block](#def-dev-io-block), integrity protections are applied to the first [filesystem IO Block](#def-io-block) (which
+always contains the first [device IO Block](#def-dev-io-block)). In general, the contents of a
+[device IO Block](#def-dev-io-block) following a service interruption encountered during a write, aka a "torn write",
+can be in any state. Note that in practice however, hardware typically exhibits either of two behaviors, sometimes
+implemented only as a "best-effort" guarantee: the data is either all-old or all-new, or alternatively, there's a pivot
+point somewhere within the [device IO Block](#def-dev-io-block) partitioning it into an all-old and an all-new region
+each. Observe that the former behavior is a special case of the latter.
+
+Two complementary integrity protection mechanisms are applied to the first [filesystem IO Block](#def-io-block):
+
+* common [checksum](#sec-crc) protection and,
+* to improve reliability on devices implementing the typical "old-new" [device IO Block](#def-dev-io-block) partitioning
+  behavior on torn writes as described above, special write completion marker values are written to certain checkpoint
+  locations within the extent's first [filesystem IO Block](#def-io-block).
+
+Due do the possibility of collisions, the checksum based protection scheme might fail to detect corruptions, even though
+the probability of $1:2^{64}$ of that happening is generally considered to be negligible in practice. The write
+completion marker based mechanism is guaranteed to always detect partial writes reliably on hardware implementing the
+common "old-new" partitioning behavior on torn writes.
+
+An extent's integrity protection data section format is an invariant of the filesystem, the [filesystem IO
+Block](#def-io-block) size to be more specific, and organized as follows:
+
++-------------------------------------------------------+---------------------------------------+
+|Length                                                 |Description                            |
++-------------------------------------------------------+---------------------------------------+
+|8                                                      |Commit ID, derived from the checksum.  |
++-------------------------------------------------------+---------------------------------------+
+|1                                                      |XOR mask.                              |
++-------------------------------------------------------+---------------------------------------+
+|$8\cdot(\texttt{io\_block\_allocation\_blocks\_log2} + |Checkpoint locations data save area.   |
+|\texttt{allocation\_block\_size\_128b\_log2})$         |                                       |
++-------------------------------------------------------+---------------------------------------+
+
+Observe that the checkpoint locations data save area's length is given by the base-2 logarithm of the [filesystem IO
+Block](#def-io-block) size in units of $128\textrm{B}$, mutiplied by the [checksum](#sec-crc) length.
+
+The offset at which integrity protection data section is stored within an extent depends on the extent type, with the
+constraint that its first $(8 + 1)\textrm{B}$ always are located within the extent's first $128\textrm{B}$. That is the
+offset is always $\leq $128\textrm{B} - (8 + 1)\textrm{B}$.
+
+The [checksum](#sec-crc) is computed over all of the extent's original data, before any of the write completion markers
+have been written to it. For the purpose of the checksum computation, all of the extent's integrity protection data
+section is set to zero.
+
+The write completion marker based mechanism is divided into two tiers: tier 0 protects the first $128\textrm{B}$, tier 1
+the first [filesystem IO Block's](#def-io-block) remainder. Tier 1 may reach into the tier 0 region and is described
+first.
+
+The *commit ID* value is derived from the [checksum](#sec-crc) as described further below and gets written as a write
+completion marker to certain checkpoint locations withing the first [filesystem IO Block](#def-io-block):
+
+* once to its designated slot within the extent's integrity protection data section,
+* to every possible [device IO Block](#def-dev-io-block) end for any [device IO Block](#def-dev-io-block) larger than
+  $128\textrm{B}$. That is, right before any power-of-two boundary within the containing [filesystem IO
+  Block](#def-io-block), starting at $256\textrm{B}$.
+
+The data originally found at the respective checkpoint locations $>128\textrm{B}$ gets copied back-to-back to a
+*checkpoint locations data save area* within the extent's integrity protection data section before overwriting it with
+the write completion marker value respectively. For definiteness in case the checkpoint locations data save area
+contains a checkpoint location itself (which is possible only for an unreasonably large [filesystem IO
+Block](#def-io-block) size): the copying is supposed to be done in order from the highest checkpoint location to lowest.
+
+If at filesystem opening time the values found at these checkpoint locations are not all equal, then the extent is
+considered to have been written only partially and is dismissed. Observe that, under the assumed torn write hardware
+behavior, the write completion markers protect any of of the data region spanning from the beginning of the extent's
+integrity protection data section all the way to the end of the first [filesystem IO Block](#def-io-block), i.e. any
+data at offset $\geq 128\textrm{B}$ in particular.
+
+To cover the range $\lt 128\textrm{B}$, the extent's first $128\textrm{B}$ are XOR-masked with a byte value chosen such
+that the results are all non-zero, possibly skipping over some of its leading bytes storing an extent type dependent
+magic. If any of the bytes in this $128\textrm{B}$ range are found to equal zero at verification time, then the extent
+is considered to have been written only partially and is dismissed.
+
+For clarity, the XOR-mask is chosen and applied
+
+- after the original data from the checkpoint locations at offsets $>128\textrm{B}$ has been opied over to the
+  checkpoint locations data save area and
+- before the commit ID and the XOR-mask value get stored at their respective locations within the extent's integrity
+  protection data section. For the purpose of selecting the XOR-mask value, these locations may be assumed to be
+  identical to zero.
+
+The commit ID is defined to equal the [checksum](#sec-crc) with the XOR-mask applied and stored as such at offset $0$
+within the extent's integrity protection data section, and is therefore contained within the extent's first
+$128\textrm{B}$. The XOR-mask byte value itself is stored at offset $8$ within the extent's integrity protection data
+section, therefore is contained within the first $128\textrm{B}$ as well. As both are contained within the first
+$128\textrm{B}$, they must not contain any zero bytes. That is, the XOR-mask byte value must be chosen under the
+additional constraint that it's non-zero and different from any of the bytes in the [checksum](#sec-crc).
 
 ### [Key derivation]{#sec-key-derivation}
 As outlined in the [introduction](#sec-introduction), the root key gets processed once through the TCG
