@@ -468,11 +468,11 @@ beginning:
   filesystem creation upon encountering such one, eventually replacing the header with a [regular CocoonFs
   filesystem header](#sec-filesystem-header) in the course.
 
-Both header types are protected by a checksum each. If no valid header of either type passing checksum verification is
-found at the storage's beginning when attempting to open a filesystem, implementations are expected to check for the
-presence of a filesystem creation info header [backup copy](#def-mkfsinfo-backup-header) at a specific location
-determined exclusively from the backing storage volume's dimensions, and proceed with the online filesystem creation if
-one is found.
+Both header types are protected by the [common integrity protection scheme](#sec-extent-integrity). If no valid header
+of either type passing integrity verification is found at the storage's beginning when attempting to open a filesystem,
+implementations are expected to check for the presence of a filesystem creation info header [backup
+copy](#def-mkfsinfo-backup-header) at a specific location determined exclusively from the backing storage volume's
+dimensions, and proceed with the online filesystem creation if one is found.
 
 #### [Regular CocoonFs filesystem header]{#sec-filesystem-header}
 The regular CocoonFs filesystem image header is split into two parts: a [static](#sec-static-image-header) and a
@@ -488,25 +488,35 @@ tree root hash.
 ##### [Static image header]{#sec-static-image-header}
 The static image header starts at offset zero, its format is:
 
-+----------------+----------------------------------------------------------------------------------+
-|Length in bytes |Description                                                                       |
-+================+==================================================================================+
-|8               |Magic string `'COCOONFS'` (without a terminating zero byte).                      |
-+----------------+----------------------------------------------------------------------------------+
-|1               |The filesystem format version. Fixed to 0.                                        |
-+----------------+----------------------------------------------------------------------------------+
-|21              |The set of filesystem image layout parameters, c.f. further below.                |
-+----------------+----------------------------------------------------------------------------------+
-|1               |The salt length.                                                                  |
-+----------------+----------------------------------------------------------------------------------+
-|variable        |The salt.                                                                         |
-+----------------+----------------------------------------------------------------------------------+
-|8               |[Checksum](#sec-crc) over the header.                                             |
-+----------------+----------------------------------------------------------------------------------+
++------------------------------------------------+------------------------------------------------------------------+
+|Length in bytes                                 |Description                                                       |
++================================================+==================================================================+
+|8                                               |Magic string `'COCOONFS'` (without a terminating zero byte).      |
++------------------------------------------------+------------------------------------------------------------------+
+|1                                               |The filesystem format version. Fixed to 0.                        |
++------------------------------------------------+------------------------------------------------------------------+
+|21                                              |The set of filesystem image layout parameters, c.f. further below.|
++------------------------------------------------+------------------------------------------------------------------+
+|1                                               |The salt length.                                                  |
++------------------------------------------------+------------------------------------------------------------------+
+|Length of a [common extent integrity protection |The [integrity protection section](#sec-extent-integrity).        |
+|section](#sec-extent-integrity).                |                                                                  |
++------------------------------------------------+------------------------------------------------------------------+
+|variable                                        |The salt.                                                         |
++------------------------------------------------+------------------------------------------------------------------+
+|variable                                        |Alignment padding.                                                |
++------------------------------------------------+------------------------------------------------------------------+
 
-After the static image header, some padding is inserted up to the next [IO Block](#def-io-block) alignment
-boundary. None of the IO Blocks overlapping with the static image header, including that padding, may ever get written
-to.
+Some alignment padding up to the next [IO Block](#def-io-block) boundary is inserted at the end of the static image
+header. None of the IO Blocks overlapping with the static image header, including that padding, may ever get written to
+after the filesystem has been created on storage.
+
+The static image header, including its alignment padding, is subject to the [common extent integrity
+protection](#sec-extent-integrity). It is expected that writes to the static image header storage location follow the
+[fail-safe extent write protocol](#def-extent-integrity-fail-safe-write). Note that the length of the integrity
+protection section is a function of the filesystem image layout parameters. These are located within the [tier 0
+integrity protection realm](#sec-extent-integrity-tiers) though, so that their integrity can get verified independently
+prior to determine the integrity protection section's total length.
 
 The set of filesystem configuration parameters, referred to as the [*image layout*]{#def-image-layout}, is encoded as
 follows:
@@ -583,9 +593,6 @@ follows:
 |       |                                                     |big-endian format each.                                 |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 
-The static image header is protected by a [checksum](#sec-crc)  over the plain header data from the magic
-to the salt, both inclusive.
-
 ##### [Mutable image header]{#sec-mutable-image-header}
 The mutable image header is located at the first [IO Block](#def-io-block) aligned boundary following the static image
 header. It gets updated through the general journalling mechanics, hence it may be in an inconsistent state at
@@ -620,30 +627,42 @@ parties not in possession of the root key may mark a storage volume for formatti
 use by writing a special filesystem creation info header to its beginning. This header provides all the information
 required for the actual filesystem creation and is of the following format:
 
-+----------------+------------------------------------------------------------------------------------+
-|Length in bytes |Description                                                                         |
-+================+====================================================================================+
-|8               |Magic string `'CCFSMKFS'` (without a terminating zero byte).                        |
-+----------------+------------------------------------------------------------------------------------+
-|1               |The filesystem creation info header format version. Fixed to 0.                     |
-+----------------+------------------------------------------------------------------------------------+
-|21              |The set of filesystem image layout parameters, encoded in the same                  |
-|                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
-+----------------+------------------------------------------------------------------------------------+
-|8               |The desired filesystem image size in units of [Allocation                           |
-|                |Blocks](#def-allocation-block), encoded as a 64 bit integer in little-endian format.|
-+----------------+------------------------------------------------------------------------------------+
-|1               |The salt length.                                                                    |
-+----------------+------------------------------------------------------------------------------------+
-|variable        |The salt.                                                                           |
-+----------------+------------------------------------------------------------------------------------+
-|8               |[Checksum](#sec-crc) over the header.                                                |
-+----------------+------------------------------------------------------------------------------------+
++--------------------------------+------------------------------------------------------------------------------------+
+|Length in bytes                 |Description                                                                         |
++================================+====================================================================================+
+|8                               |Magic string `'CCFSMKFS'` (without a terminating zero byte).                        |
++--------------------------------+------------------------------------------------------------------------------------+
+|1                               |The filesystem creation info header format version. Fixed to 0.                     |
++--------------------------------+------------------------------------------------------------------------------------+
+|21                              |The set of filesystem image layout parameters, encoded in the same                  |
+|                                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
++--------------------------------+------------------------------------------------------------------------------------+
+|8                               |The desired filesystem image size in units of [Allocation                           |
+|                                |Blocks](#def-allocation-block), encoded as a 64 bit integer in little-endian format.|
++--------------------------------+------------------------------------------------------------------------------------+
+|1                               |The salt length.                                                                    |
++--------------------------------+------------------------------------------------------------------------------------+
+|Length of a [common extent      |The [integrity protection section](#sec-extent-integrity).                          |
+|integrity protection            |                                                                                    |
+|section](#sec-extent-integrity).|                                                                                    |
++--------------------------------+------------------------------------------------------------------------------------+
+|variable                        |The salt.                                                                           |
++--------------------------------+------------------------------------------------------------------------------------+
+|variable                        |Alignment padding.                                                                  |
++--------------------------------+------------------------------------------------------------------------------------+
 
-The filesystem creation info header is protected by a [checksum](#sec-crc) over the plain header data from the magic to
-the salt, both inclusive. Upon encountering such a filesystem creation header passing the checksum verification at the
-storage volume's beginning when attempting to open a filesystem, implementations are supposed to conduct the filesystem
-creation.
+Some alignment padding up to the next [IO Block](#def-io-block) boundary is inserted at the end of the filesystem
+creation info header.
+
+The filesystem creation info header, including its alignment padding, is subject to the [common extent integrity
+protection](#sec-extent-integrity). It is expected that writes to a fileystem creation info header storage location
+follow the [fail-safe extent write protocol](#def-extent-integrity-fail-safe-write). Note that the length of the
+integrity protection section is a function of the filesystem image layout parameters. These are located within the [tier
+0 integrity protection realm](#sec-extent-integrity-tiers) though, so that their integrity can get verified
+independently prior to determine the integrity protection section's total length.
+
+Upon encountering such a filesystem creation header passing the integrity verification at the storage volume's beginning
+when attempting to open a filesystem, implementations are supposed to conduct the filesystem creation.
 
 The filesystem creation process inevitably involves a replacement of the filesystem creation info header at the
 storage's beginning with the [regular CocoonFs image header](#sec-filesystem-header) at some point. For robustness
@@ -659,11 +678,11 @@ large alignment at the same time: having it stored near the end prevents it from
 initial metadata structures' placement and the large alignment will enable meaningful error reporting in case the
 underlying hardware is not compatible with the selected [IO Block](#def-io-block) size.
 
-In either case, if no valid [image header](#sec-image-header) of either type passing the respective checksum
+In either case, if no valid [image header](#sec-image-header) of either type passing the respective integrity protection
 verification is found at the storage volume's beginning when attempting to open a filesystem, neither a [regular
 CocoonFs static image header](#sec-static-image-header) nor a filesystem creation info header, then implementations are
 expected to check for the presence of a filesystem creation info header backup copy at the specified location. If one is
-found, and it passes its checksum verification, then the online filesystem creation procedure is supposed to get
+found, and it passes its integrity verification, then the online filesystem creation procedure is supposed to get
 restarted from scratch.
 
 ### Integrity protections
@@ -822,9 +841,9 @@ The [checksum](#sec-crc) is computed over all of the extent's original data, bef
 have been written to it. For the purpose of the checksum computation, all of the extent's integrity protection data
 section is set to zero.
 
-The write completion marker based mechanism is divided into two tiers: tier 0 protects the first $128\textrm{B}$, tier 1
-the first [filesystem IO Block's](#def-io-block) remainder. Tier 1 may reach into the tier 0 region and is described
-first.
+The write completion marker based mechanism is divided into two [tiers]{#sec-extent-integrity-tiers}: tier 0 protects
+the first $128\textrm{B}$, tier 1 the first [filesystem IO Block's](#def-io-block) remainder. Tier 1 may reach into the
+tier 0 region and is described first.
 
 The *commit ID* value is derived from the [checksum](#sec-crc) as described further below and gets written as a write
 completion marker to certain checkpoint locations withing the first [filesystem IO Block](#def-io-block):

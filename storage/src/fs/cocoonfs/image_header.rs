@@ -9,7 +9,15 @@ use crate::{
     crypto::hash,
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{FormatError, checksum, extent_ptr, layout},
+        cocoonfs::{
+            FormatError, ImageLayout, extent_ptr,
+            integrity::{
+                ExtentIntegrityState, ExtentTier0IntegrityState, extent_integrity_protections_apply,
+                extent_integrity_protections_len, extent_integrity_protections_verify_and_remove,
+                extent_tier0_integrity_protection_verify_and_remove,
+            },
+            layout,
+        },
     },
     nvfs_err_internal,
     utils_common::{
@@ -20,8 +28,8 @@ use crate::{
 };
 use core::{marker, mem, ops::Deref as _, pin, task};
 
-#[cfg(doc)]
-use layout::ImageLayout;
+const MAGIC_COCOONFS: &[u8; 8] = b"COCOONFS";
+const MAGIC_MKFS: &[u8; 8] = b"CCFSMKFS";
 
 /// Static image header prefix of minimum possible length.
 ///
@@ -29,7 +37,7 @@ use layout::ImageLayout;
 /// header size.
 #[derive(Clone)]
 struct MinStaticImageHeader {
-    encoded_image_layout: [u8; layout::ImageLayout::encoded_len() as usize],
+    image_layout: layout::ImageLayout,
     salt_len: u8,
 }
 
@@ -38,7 +46,7 @@ impl MinStaticImageHeader {
     const fn encoded_len() -> u8 {
         const ENCODED_LEN: u32 = {
             // Magic 'COCOONFS'.
-            let mut encoded_len = 8u32;
+            let mut encoded_len = MAGIC_COCOONFS.len() as u32;
             // The u8 image format version.
             encoded_len += mem::size_of::<u8>() as u32;
             // The encoded ImageLayout.
@@ -49,8 +57,12 @@ impl MinStaticImageHeader {
             encoded_len
         };
 
+        // The integrity protection section's offset, which follows the
+        // MinStaticImageHeader, must be small enough that the minimum possible
+        // integrity protection section is located within the first 128B, as per
+        // the requirements of the integrity protection scheme.
         #[allow(clippy::assertions_on_constants)]
-        let _: () = assert!(ENCODED_LEN <= 128);
+        let _: () = assert!(ENCODED_LEN <= 128 - extent_integrity_protections_len(0, 0));
 
         ENCODED_LEN as u8
     }
@@ -66,10 +78,9 @@ impl MinStaticImageHeader {
             return Err(nvfs_err_internal!());
         }
 
-        let expected_magic = b"COCOONFS";
-        let (magic, buf) = buf.split_at(expected_magic.len());
-        if magic != expected_magic {
-            return Err(NvFsError::from(FormatError::InvalidImageHeaderMagic));
+        let (magic, buf) = buf.split_at(MAGIC_COCOONFS.len());
+        if magic != MAGIC_COCOONFS {
+            return Err(NvFsError::from(FormatError::InvalidImageHeader));
         }
 
         let (version, buf) = buf.split_at(mem::size_of::<u8>());
@@ -81,19 +92,14 @@ impl MinStaticImageHeader {
         }
 
         let (encoded_image_layout, buf) = buf.split_at(layout::ImageLayout::encoded_len() as usize);
-        let encoded_image_layout = <&[u8; layout::ImageLayout::encoded_len() as usize]>::try_from(encoded_image_layout)
-            .map_err(|_| nvfs_err_internal!())?;
-
+        let image_layout = ImageLayout::decode(encoded_image_layout)?;
         let (salt_len, _) = buf.split_at(mem::size_of::<u8>());
         // The from_le_bytes() is a nop for an u8, as is the usize::try_from()
         // conversion, but this mirrors the encoding part.
         let salt_len =
             u8::from_le_bytes(*<&[u8; mem::size_of::<u8>()]>::try_from(salt_len).map_err(|_| nvfs_err_internal!())?);
 
-        Ok(Self {
-            encoded_image_layout: *encoded_image_layout,
-            salt_len,
-        })
+        Ok(Self { image_layout, salt_len })
     }
 }
 
@@ -108,24 +114,53 @@ pub struct StaticImageHeader {
 impl StaticImageHeader {
     /// Encoded length of a static image header.
     ///
-    /// Returns the encoded length of a static image header with a salt length
-    /// of `salt_len` without any of the padding to align to the next [IO
+    /// Returns the encoded length of a static image header with
+    /// an [IO Block size](ImageLayout::io_block_allocation_blocks_log2) as
+    /// specified by `io_block_allocation_blocks_log2`, an [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) as specified by
+    /// `allocation_block_size_128b_log2` and with a salt length
+    /// of `salt_len`, without any of the padding to align to the next [IO
     /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary
     /// included.
     ///
+    /// The encoded length is guaranteed to not exceed the larger of `3 * 128`
+    /// and the size of one
+    /// [IO Block](ImageLayout::io_block_allocation_blocks_log2).
+    ///
     /// # Arguments:
     ///
+    /// * `io_block_allocation_blocks_log2` - Verbatim copy of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim copy of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     /// * `salt_len` - Length of the salt stored in the static image header.
-    fn encoded_len(salt_len: u8) -> u32 {
+    ///
+    /// # See also:
+    ///
+    /// * [`io_block_aligned_encoded_len_allocation_blocks()`](Self::io_block_aligned_encoded_len_allocation_blocks)
+    fn encoded_len(io_block_allocation_blocks_log2: u8, allocation_block_size_128b_log2: u8, salt_len: u8) -> u32 {
+        // The encoded length always is <= the larger of 3 * 128 and the IO Block size.
+        // Verify case that the IO Block size <= 2 * 128:
+        const _: () = assert!(
+            3u64 * 128 - extent_integrity_protections_len(1, 0) as u64
+                >= MinStaticImageHeader::encoded_len() as u64 + u8::MAX as u64
+        );
+        // Verify case that the IO Block size >= 4 * 128:
+        const _: () = assert!(
+            (1u64 << (2 + 7)) - extent_integrity_protections_len(2, 0) as u64
+                >= MinStaticImageHeader::encoded_len() as u64 + u8::MAX as u64
+        );
+
         // The minimal common header containing everything needed to deduce the full
         // header's length.
         let mut encoded_len = MinStaticImageHeader::encoded_len() as u32;
 
+        // The integrity protection section.
+        encoded_len +=
+            extent_integrity_protections_len(io_block_allocation_blocks_log2, allocation_block_size_128b_log2);
+
         // And the image salt.
         encoded_len += salt_len as u32;
-
-        // The checksum.
-        encoded_len += checksum::CHECKSUM_LEN;
 
         encoded_len
     }
@@ -134,37 +169,54 @@ impl StaticImageHeader {
     /// length of a static image header.
     ///
     /// The static image header gets padded to the next [IO
-    /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary so
+    /// Block](ImageLayout::io_block_allocation_blocks_log2) boundary so
     /// that no writes to the filesystem image will ever affect its
     /// contents.
     ///
-    /// Return the length of a static image header with a salt length
-    /// of `salt_len` aligned to the next [IO
+    /// Return the length of a static image header with
+    /// an [IO Block size](ImageLayout::io_block_allocation_blocks_log2) as
+    /// specified by `io_block_allocation_blocks_log2`, an [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) as specified by
+    /// `allocation_block_size_128b_log2` and a salt length
+    /// of `salt_len`, aligned to the next [IO
     /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary in
     /// units of [Allocation
     /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
     ///
+    /// The aligned length in units of Bytes is guaranteed to never exceed the
+    /// larger of `4 * 128` and one IO Block size.
+    ///
     /// # Arguments:
     ///
-    /// * `salt_len` - Length of the salt stored in the static image header.
     /// * `io_block_allocation_blocks_log2` - Verbatim copy of
     ///   [`ImageLayout::io_block_allocation_blocks_log2`].
     /// * `allocation_block_size_128b_log2` - Verbatim copy of
     ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    /// * `salt_len` - Length of the salt stored in the static image header.
+    ///
+    /// # See also:
+    ///
+    /// * [`encoded_len()`](Self::encoded_len).
     pub fn io_block_aligned_encoded_len_allocation_blocks(
+        io_block_allocation_blocks_log2: u8,
+        allocation_block_size_128b_log2: u8,
         salt_len: u8,
-        io_block_allocation_blocks_log2: u32,
-        allocation_block_size_128b_log2: u32,
     ) -> layout::AllocBlockCount {
-        let encoded_len = Self::encoded_len(salt_len) as u64;
+        let encoded_len = Self::encoded_len(
+            io_block_allocation_blocks_log2,
+            allocation_block_size_128b_log2,
+            salt_len,
+        ) as u64;
 
-        // The length always fits a few multiples (<= 3) of 128 Bytes, hence is
-        // definitely <= than 2^63. The size of an IO Block in units of Bytes is
-        // a power of two and <= 1^63 also. Hence the aligned result (in units
-        // of Bytes) will be <= that uppber bound as well.
+        // The length always fits the larger of a few multiples (<= 3) of 128 Bytes and
+        // the IO Block size, as per the documented guarantees of encoded_len(),
+        // hence is definitely <= than 2^63. The size of an IO Block in units of
+        // Bytes is a power of two and <= 1^63 also. Hence the aligned result
+        // (in units of Bytes) will be <= that uppber bound as well.
         layout::AllocBlockCount::from(
-            encoded_len.round_up_pow2_unchecked(io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7)
-                >> (allocation_block_size_128b_log2 + 7),
+            encoded_len.round_up_pow2_unchecked(
+                io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7,
+            ) >> (allocation_block_size_128b_log2 + 7),
         )
     }
 
@@ -172,40 +224,36 @@ impl StaticImageHeader {
     ///
     /// # Arguments:
     ///
-    /// * `dst` - The destination buffers. Their total length must be at least
-    ///   that returned by [`encoded_len()`](Self::encoded_len).
+    /// * `dst` - The destination buffers. Their total length must be exactly
+    ///   that returned by
+    ///   [`io_block_aligned_encoded_len_allocation_blocks()`](Self::io_block_aligned_encoded_len_allocation_blocks).
     /// * `image_layout` - The filesystem image's [`ImageLayout`] to be stored
     ///   in the static image header.
     /// * `salt` - The salt to be stored in the image header. It's length must
     ///   not exceed `u8::MAX`.
-    pub fn encode<'a, DI: io_slices::IoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
+    pub fn encode<'a, DI: io_slices::MutPeekableIoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
         mut dst: DI,
         image_layout: &layout::ImageLayout,
         salt: &[u8],
     ) -> Result<(), NvFsError> {
-        let mut checksum = checksum::ChecksumInstance::new();
-
-        let magic = b"COCOONFS";
-        checksum.update(magic.as_slice());
-        let mut magic = io_slices::SingletonIoSlice::new(magic.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut magic)?;
+        let mut encoding_dst = dst.decoupled_borrow_mut();
+        let mut magic = io_slices::SingletonIoSlice::new(MAGIC_COCOONFS.as_slice()).map_infallible_err();
+        encoding_dst.copy_from_iter(&mut magic)?;
         if !magic.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
         let version = 0u8.to_le_bytes();
-        checksum.update(&version);
         let mut version = io_slices::SingletonIoSlice::new(version.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut version)?;
+        encoding_dst.copy_from_iter(&mut version)?;
         if !version.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
         let encoded_image_layout = image_layout.encode()?;
-        checksum.update(&encoded_image_layout);
         let mut encoded_image_layout =
             io_slices::SingletonIoSlice::new(encoded_image_layout.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut encoded_image_layout)?;
+        encoding_dst.copy_from_iter(&mut encoded_image_layout)?;
         if !encoded_image_layout.is_empty()? {
             return Err(nvfs_err_internal!());
         }
@@ -213,25 +261,41 @@ impl StaticImageHeader {
         let salt_len = u8::try_from(salt.len())
             .map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?
             .to_le_bytes();
-        checksum.update(&salt_len);
         let mut salt_len = io_slices::SingletonIoSlice::new(salt_len.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut salt_len)?;
+        encoding_dst.copy_from_iter(&mut salt_len)?;
         if !salt_len.is_empty()? {
             return Err(nvfs_err_internal!());
         }
-        checksum.update(salt);
+
+        let integrity_protections_len = usize::try_from(extent_integrity_protections_len(
+            image_layout.io_block_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        ))
+        .map_err(|_| NvFsError::DimensionsNotSupported)?;
+        encoding_dst.skip(integrity_protections_len).map_err(|e| match e {
+            io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+            },
+            io_slices::IoSlicesIterError::BackendIteratorError(e) => e,
+        })?;
+
         let mut salt = io_slices::SingletonIoSlice::new(salt).map_infallible_err();
-        dst.copy_from_iter(&mut salt)?;
+        encoding_dst.copy_from_iter(&mut salt)?;
         if !salt.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
-        let checksum = checksum.finish_send();
-        let mut checksum = io_slices::SingletonIoSlice::new(&checksum).map_infallible_err();
-        dst.copy_from_iter(&mut checksum)?;
-        if !checksum.is_empty()? {
-            return Err(nvfs_err_internal!());
-        }
+        drop(encoding_dst);
+
+        extent_integrity_protections_apply(
+            dst,
+            MAGIC_COCOONFS.len(),
+            MinStaticImageHeader::encoded_len() as usize - MAGIC_COCOONFS.len(),
+            &ExtentIntegrityState::new_clean(),
+            image_layout.io_block_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+            1, // Only used for debug assertions.
+        )?;
 
         Ok(())
     }
@@ -279,21 +343,18 @@ impl MutableImageHeader {
     /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt_len` - Length of the salt stored in the static image header.
     pub fn physical_location(image_layout: &layout::ImageLayout, salt_len: u8) -> layout::PhysicalAllocBlockRange {
-        let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-        let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
-
         // The mutable header is located at the first IO block boundary following the
         // static header.
         // The beginning in units of Bytes is <= 2^63.
         let mutable_header_allocation_blocks_begin = layout::PhysicalAllocBlockIndex::from(0u64)
             + StaticImageHeader::io_block_aligned_encoded_len_allocation_blocks(
+                image_layout.io_block_allocation_blocks_log2,
+                image_layout.allocation_block_size_128b_log2,
                 salt_len,
-                io_block_allocation_blocks_log2,
-                allocation_block_size_128b_log2,
             );
         let mutable_header_encoded_len: u32 = MutableImageHeader::encoded_len(image_layout);
         let mutable_header_allocation_blocks_count = layout::AllocBlockCount::from(
-            ((mutable_header_encoded_len as u64 - 1) >> (allocation_block_size_128b_log2 + 7)) + 1,
+            ((mutable_header_encoded_len as u64 - 1) >> (image_layout.allocation_block_size_128b_log2 as u32 + 7)) + 1,
         );
         // The addition of the length to the beginning, even in units of Bytes, i.e. the
         // addition of an u32 to a value <= 2^63, does not overflow either.
@@ -465,36 +526,37 @@ enum ReadCoreImageHeaderFutureState<B: blkdev::NvBlkDev> {
     ReadStaticImageHeaderRemainder {
         read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         min_header: MinStaticImageHeader,
-        static_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
+        tier0_integrity_state: ExtentTier0IntegrityState,
     },
     DecodeStaticImageHeader {
         min_header: MinStaticImageHeader,
-        static_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
         second_header_part: FixedVec<u8, 7>,
+        tier0_integrity_state: ExtentTier0IntegrityState,
+    },
+    TryDecodeMinMkFsInfoHeader {
+        mkfsinfo_header_blkdev_io_blocks_begin: u64,
+        first_header_part: FixedVec<u8, 7>,
     },
     ReadMkFsInfoHeaderRemainder {
         read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         min_header: MinMkFsInfoHeader,
-        mkfsinfo_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
-        first_error: Option<NvFsError>,
+        tier0_integrity_state: ExtentTier0IntegrityState,
+        from_backup: bool,
     },
     DecodeMkFsInfoHeader {
         min_header: MinMkFsInfoHeader,
-        mkfsinfo_header_len: usize,
         first_header_part: FixedVec<u8, 7>,
         second_header_part: FixedVec<u8, 7>,
-        first_error: Option<NvFsError>,
+        tier0_integrity_state: ExtentTier0IntegrityState,
+        from_backup: bool,
     },
-    PrepareReadBackupMinMkFsInfoHeader {
-        first_error: NvFsError,
-    },
+    PrepareReadBackupMinMkFsInfoHeader,
     ReadBackupMinMkFsInfoHeader {
         read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         backup_location_blkdev_io_blocks_begin: u64,
-        first_error: NvFsError,
     },
     Done,
 }
@@ -552,8 +614,149 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     this.fut_state = ReadCoreImageHeaderFutureState::ReadMinHeader { read_fut };
                 }
                 ReadCoreImageHeaderFutureState::ReadMinHeader { read_fut } => {
-                    let first_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                    let mut first_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx)
+                    {
                         task::Poll::Ready(Ok((first_header_part, Ok(())))) => first_header_part,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                            match e {
+                                NvBlkDevIoError::IoBlockOutOfRange => {
+                                    // If reading the first device IO Block is out of range already,
+                                    // then so would be the backup MkFsInfoHeader. Give up.
+                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                    return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidImageHeader)));
+                                }
+                                NvBlkDevIoError::IoBlockNotMapped => {
+                                    // There's still some hope.
+                                    this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader;
+                                    continue;
+                                }
+                                _ => {
+                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                    return task::Poll::Ready(Err(NvFsError::from(e)));
+                                }
+                            }
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    if &first_header_part[..MAGIC_COCOONFS.len()] == MAGIC_COCOONFS {
+                        let (is_valid, tier0_integrity_state) =
+                            match extent_tier0_integrity_protection_verify_and_remove(
+                                io_slices::SingletonIoSliceMut::new(first_header_part.as_mut_slice()),
+                                MAGIC_COCOONFS.len(),
+                                MinStaticImageHeader::encoded_len() as usize - MAGIC_COCOONFS.len(),
+                            ) {
+                                Ok((is_valid, tier0_integrity_state)) => (is_valid, tier0_integrity_state),
+                                Err(e) => {
+                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                    return task::Poll::Ready(Err(e));
+                                }
+                            };
+
+                        if is_valid {
+                            // Tier 0 integrity protection verification has passed, and the encoded
+                            // MinStaticImageHeader is within the tier 0 protection domain. It is
+                            // now expected that there's a valid MinStaticImageHeader, otherwise
+                            // error out.
+                            // This decodes the ImageLayout and validates the configuration.
+                            let min_static_image_header = match MinStaticImageHeader::decode(&first_header_part) {
+                                Ok(min_static_image_header) => min_static_image_header,
+                                Err(e) => {
+                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                    return task::Poll::Ready(Err(e));
+                                }
+                            };
+
+                            // Verify at this point that the backend storage's minimum IO size is <= the one
+                            // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
+                            // an usize as well), this will henceforth apply to the Device IO Block size as
+                            // well then.
+                            let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                            let image_layout = &min_static_image_header.image_layout;
+                            if (image_layout.io_block_allocation_blocks_log2 as u32
+                                + image_layout.allocation_block_size_128b_log2 as u32)
+                                < blkdev_io_block_size_128b_log2
+                            {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(
+                                    FormatError::IoBlockSizeNotSupportedByDevice,
+                                )));
+                            }
+
+                            // Now that the MinStaticImageHeader has been read and decoded, deduce the total
+                            // header length from it, read the remainder, if any, and continue with the
+                            // decoding.
+                            // The IO Block aligned length in units of Bytes never exceeds the larger of
+                            // 4 * 128B and the IO Block size, c.f. the documentation of
+                            // StaticImageHeader::io_block_aligned_encoded_len_allocation_blocks(). Either
+                            // way, both can be represented as an u64 and the
+                            // shift will not overflow.
+                            let static_header_len =
+                                u64::from(StaticImageHeader::io_block_aligned_encoded_len_allocation_blocks(
+                                    image_layout.io_block_allocation_blocks_log2,
+                                    image_layout.allocation_block_size_128b_log2,
+                                    min_static_image_header.salt_len,
+                                )) << (image_layout.allocation_block_size_128b_log2 as u32 + 7);
+
+                            // Remember from above: it is known by now that the Device IO Block size fits an
+                            // u64.
+                            debug_assert_eq!(first_header_part.len(), 1usize << (blkdev_io_block_size_128b_log2 + 7));
+                            let remaining_static_header_len = static_header_len - first_header_part.len() as u64;
+                            if remaining_static_header_len == 0 {
+                                this.fut_state = ReadCoreImageHeaderFutureState::DecodeStaticImageHeader {
+                                    min_header: min_static_image_header,
+                                    first_header_part,
+                                    second_header_part: FixedVec::new_empty(),
+                                    tier0_integrity_state,
+                                };
+                            } else {
+                                let second_header_part = match usize::try_from(remaining_static_header_len)
+                                    .map_err(|_| NvFsError::DimensionsNotSupported)
+                                    .and_then(|remaining_static_header_len| {
+                                        FixedVec::new_with_default(remaining_static_header_len).map_err(NvFsError::from)
+                                    }) {
+                                    Ok(second_header_part) => second_header_part,
+                                    Err(e) => {
+                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                        return task::Poll::Ready(Err(e));
+                                    }
+                                };
+                                let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                                    1,
+                                    remaining_static_header_len >> (blkdev_io_block_size_128b_log2 + 7),
+                                    blkdev_io_block_size_128b_log2 as u8,
+                                    second_header_part,
+                                    0,
+                                    blkdev_io_block_size_128b_log2 as u8,
+                                );
+                                this.fut_state = ReadCoreImageHeaderFutureState::ReadStaticImageHeaderRemainder {
+                                    read_fut,
+                                    min_header: min_static_image_header,
+                                    first_header_part,
+                                    tier0_integrity_state,
+                                };
+                            }
+                        } else {
+                            // Magic is "COCOONFS", but tier 0 integrity protection failed.
+                            // Proceed to reading the backup MkFsInfoHeader.
+                            this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader;
+                        }
+                    } else {
+                        // Magic is not "COCOONFS". Attempt to decode a MkFsInfoHeader.
+                        this.fut_state = ReadCoreImageHeaderFutureState::TryDecodeMinMkFsInfoHeader {
+                            mkfsinfo_header_blkdev_io_blocks_begin: 0,
+                            first_header_part,
+                        };
+                    }
+                }
+                ReadCoreImageHeaderFutureState::ReadStaticImageHeaderRemainder {
+                    read_fut,
+                    min_header,
+                    first_header_part,
+                    tier0_integrity_state,
+                } => {
+                    let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((second_header_part, Ok(())))) => second_header_part,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             this.fut_state = ReadCoreImageHeaderFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(e)));
@@ -561,258 +764,42 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    // See whether there's a static image header or a MkFsInfoHeader and proceed
-                    // accordingly.
-                    match MinStaticImageHeader::decode(&first_header_part) {
-                        Ok(min_static_image_header) => {
-                            // Now that the MinStaticImageHeader has been read and decoded, deduce the total
-                            // header length from it, read the remainder, if any, and continue with the
-                            // decoding.
-                            let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                            debug_assert_eq!(first_header_part.len(), 1usize << (blkdev_io_block_size_128b_log2 + 7));
-                            let static_header_len = StaticImageHeader::encoded_len(min_static_image_header.salt_len);
-                            // Remember from above: it is known by now that the Device IO Block size fits an
-                            // u64.
-                            let remaining_static_header_len =
-                                (static_header_len as u64).saturating_sub(first_header_part.len() as u64);
-                            if remaining_static_header_len == 0 {
-                                this.fut_state = ReadCoreImageHeaderFutureState::DecodeStaticImageHeader {
-                                    min_header: min_static_image_header,
-                                    static_header_len: static_header_len as usize,
-                                    first_header_part,
-                                    second_header_part: FixedVec::new_empty(),
-                                };
-                                continue;
-                            }
-
-                            let aligned_remaining_header_len_128b = ((remaining_static_header_len - 1) >> 7) + 1;
-                            if aligned_remaining_header_len_128b > u64::MAX >> 7 {
-                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
-                            }
-                            let aligned_remaining_header_len =
-                                match usize::try_from(aligned_remaining_header_len_128b << 7) {
-                                    Ok(aligned_remaining_header_len) => aligned_remaining_header_len,
-                                    Err(_) => {
-                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                        return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
-                                    }
-                                };
-                            let second_header_part = match FixedVec::new_with_default(aligned_remaining_header_len) {
-                                Ok(second_header_part) => second_header_part,
-                                Err(e) => {
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(NvFsError::from(e)));
-                                }
-                            };
-                            let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
-                                1 << blkdev_io_block_size_128b_log2,
-                                aligned_remaining_header_len_128b,
-                                0u8,
-                                second_header_part,
-                                0,
-                                0u8,
-                            );
-
-                            this.fut_state = ReadCoreImageHeaderFutureState::ReadStaticImageHeaderRemainder {
-                                read_fut,
-                                min_header: min_static_image_header,
-                                static_header_len: static_header_len as usize,
-                                first_header_part,
-                            };
-                        }
-                        Err(NvFsError::Internal) => {
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::Internal));
-                        }
-                        Err(static_image_header_read_error) => {
-                            // Try to decode a MinMkFsInfoHeader instead.
-                            match MinMkFsInfoHeader::decode(&first_header_part) {
-                                Ok(min_mkfsinfo_header) => {
-                                    // Ok, there is something which seems to be a
-                                    // MkFsInfoHeader. Try to read its remainder, if any.
-                                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                                    debug_assert_eq!(
-                                        first_header_part.len(),
-                                        1usize << (blkdev_io_block_size_128b_log2 + 7)
-                                    );
-                                    let mkfsinfo_header_len = MkFsInfoHeader::encoded_len(min_mkfsinfo_header.salt_len);
-                                    // Remember from above: it is known by now that the Device IO Block size fits an
-                                    // u64.
-                                    let remaining_mkfsinfo_header_len =
-                                        (mkfsinfo_header_len as u64).saturating_sub(first_header_part.len() as u64);
-                                    if remaining_mkfsinfo_header_len == 0 {
-                                        this.fut_state = ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
-                                            min_header: min_mkfsinfo_header,
-                                            mkfsinfo_header_len: mkfsinfo_header_len as usize,
-                                            first_header_part,
-                                            second_header_part: FixedVec::new_empty(),
-                                            first_error: None,
-                                        };
-
-                                        continue;
-                                    }
-
-                                    let aligned_remaining_header_len_128b =
-                                        ((remaining_mkfsinfo_header_len - 1) >> 7) + 1;
-                                    if aligned_remaining_header_len_128b > u64::MAX >> 7 {
-                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                        return task::Poll::Ready(Err(NvFsError::IoError(
-                                            NvFsIoError::RegionOutOfRange,
-                                        )));
-                                    }
-                                    let aligned_remaining_header_len =
-                                        match usize::try_from(aligned_remaining_header_len_128b << 7) {
-                                            Ok(aligned_remaining_header_len) => aligned_remaining_header_len,
-                                            Err(_) => {
-                                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                                return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
-                                            }
-                                        };
-                                    let second_header_part =
-                                        match FixedVec::new_with_default(aligned_remaining_header_len) {
-                                            Ok(second_header_part) => second_header_part,
-                                            Err(e) => {
-                                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                                return task::Poll::Ready(Err(NvFsError::from(e)));
-                                            }
-                                        };
-                                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
-                                        1 << blkdev_io_block_size_128b_log2,
-                                        aligned_remaining_header_len_128b,
-                                        0u8,
-                                        second_header_part,
-                                        0,
-                                        0u8,
-                                    );
-
-                                    this.fut_state = ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
-                                        read_fut,
-                                        min_header: min_mkfsinfo_header,
-                                        mkfsinfo_header_len: mkfsinfo_header_len as usize,
-                                        first_header_part,
-                                        first_error: None,
-                                    };
-                                }
-                                Err(NvFsError::Internal) => {
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(NvFsError::Internal));
-                                }
-                                Err(e) => {
-                                    // No MinMkFsInfoHeader found, try the backup.
-                                    this.fut_state =
-                                        ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                            first_error: if static_image_header_read_error
-                                                != NvFsError::from(FormatError::InvalidImageHeaderMagic)
-                                            {
-                                                debug_assert_eq!(
-                                                    e,
-                                                    NvFsError::from(FormatError::InvalidImageHeaderMagic,)
-                                                );
-                                                static_image_header_read_error
-                                            } else {
-                                                e
-                                            },
-                                        };
-                                }
-                            };
-                        }
-                    };
-                }
-                ReadCoreImageHeaderFutureState::ReadStaticImageHeaderRemainder {
-                    read_fut,
-                    min_header,
-                    static_header_len,
-                    first_header_part,
-                } => {
-                    let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((second_header_part, Ok(())))) => second_header_part,
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
-                            match e {
-                                NvBlkDevIoError::IoBlockNotMapped => {
-                                    // There is a static image header magic, but the IO request to
-                                    // read the remainder failed. This can only happen if the
-                                    // encoded salt length determining the total header size is
-                                    // invalid. Try to read the backup MkFsInfoHeader, if any,
-                                    // instead.
-                                    this.fut_state =
-                                        ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                            first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
-                                        };
-                                    continue;
-                                }
-                                _ => {
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(NvFsError::from(e)));
-                                }
-                            };
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
-
-                    let first_header_part = mem::take(first_header_part);
                     this.fut_state = ReadCoreImageHeaderFutureState::DecodeStaticImageHeader {
                         min_header: min_header.clone(),
-                        static_header_len: *static_header_len,
-                        first_header_part,
+                        first_header_part: mem::take(first_header_part),
                         second_header_part,
+                        tier0_integrity_state: *tier0_integrity_state,
                     };
                 }
                 ReadCoreImageHeaderFutureState::DecodeStaticImageHeader {
                     min_header,
-                    static_header_len,
                     first_header_part,
                     second_header_part,
+                    tier0_integrity_state,
                 } => {
-                    // Verify the checksums.
-                    let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
-                        .chain(io_slices::SingletonIoSlice::new(second_header_part));
-                    let mut checksum = checksum::ChecksumInstance::new();
-                    let mut checksummed_header_io_slice = header_io_slice.as_ref().take_exact(*static_header_len - 8);
-                    while let Some(checksummed_header_part) = match checksummed_header_io_slice.next_slice(None) {
-                        Ok(checksummed_header_part) => checksummed_header_part,
+                    // Complete the integrity protection verification.
+                    let image_layout = &min_header.image_layout;
+                    let is_valid = match extent_integrity_protections_verify_and_remove(
+                        io_slices::BuffersSliceIoSlicesMutIter::new(&mut [
+                            first_header_part.as_mut_slice(),
+                            second_header_part.as_mut_slice(),
+                        ]),
+                        MAGIC_COCOONFS.len(),
+                        MinStaticImageHeader::encoded_len() as usize - MAGIC_COCOONFS.len(),
+                        Some(tier0_integrity_state),
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                        blkdev.io_block_size_128b_log2(),
+                    ) {
+                        Ok((is_valid, _)) => is_valid,
                         Err(e) => {
-                            // Infallible.
-                            match e {
-                                io_slices::IoSlicesIterError::BackendIteratorError(e) => {
-                                    // Infallible.
-                                    match e {}
-                                }
-                                io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
-                                    io_slices::IoSlicesError::BuffersExhausted => {
-                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                        return task::Poll::Ready(Err(nvfs_err_internal!()));
-                                    }
-                                },
-                            }
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
                         }
-                    } {
-                        checksum.update(checksummed_header_part);
-                    }
+                    };
 
-                    let mut expected_checksum = [0u8; checksum::CHECKSUM_LEN as usize];
-                    let mut expected_checksum_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_checksum);
-                    if let Err(e) = expected_checksum_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
-                        // Infallible.
-                        match e {}
-                    }
-                    if !match expected_checksum_io_slice.is_empty() {
-                        Ok(is_empty) => is_empty,
-                        Err(e) => {
-                            // Infallible.
-                            match e {}
-                        }
-                    } {
-                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(nvfs_err_internal!()));
-                    }
-
-                    if !checksum.finish_receive(&expected_checksum) {
-                        // Checksum mismatch. Proceed with attempting to read the backup MkFsInfoHeader,
-                        // if any.
-                        this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                            first_error: NvFsError::from(FormatError::InvalidImageHeaderChecksum),
-                        };
+                    if !is_valid {
+                        this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader;
                         continue;
                     }
 
@@ -820,6 +807,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
                         .chain(io_slices::SingletonIoSlice::new(second_header_part));
 
+                    // Skip over the already decoded MinStaticImageHeader.
                     if let Err(e) = header_io_slice.skip(MinStaticImageHeader::encoded_len() as usize) {
                         let e = match e {
                             io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
@@ -834,26 +822,29 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         return task::Poll::Ready(Err(e));
                     }
 
-                    // Decode the ImageLayout. This validates the configuration.
-                    let image_layout = match layout::ImageLayout::decode(&min_header.encoded_image_layout) {
-                        Ok(image_layout) => image_layout,
-                        Err(e) => {
+                    // Skip over the integrity protections section.
+                    let integrity_protections_len = match usize::try_from(extent_integrity_protections_len(
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                    )) {
+                        Ok(integrity_protections_len) => integrity_protections_len,
+                        Err(_) => {
                             this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                         }
                     };
-
-                    // Verify at this point that the backend storage's minimum IO size is <= the one
-                    // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
-                    // an usize as well), this will henceforth apply to the Device IO Block size as
-                    // well then.
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    if (image_layout.io_block_allocation_blocks_log2 as u32
-                        + image_layout.allocation_block_size_128b_log2 as u32)
-                        < blkdev_io_block_size_128b_log2
-                    {
+                    if let Err(e) = header_io_slice.skip(integrity_protections_len) {
+                        let e = match e {
+                            io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                                io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+                            },
+                            io_slices::IoSlicesIterError::BackendIteratorError(e) => {
+                                // Infallible.
+                                match e {}
+                            }
+                        };
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
+                        return task::Poll::Ready(Err(e));
                     }
 
                     // Decode the remainder of the image header.
@@ -882,135 +873,202 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         }
                     }
 
+                    let image_layout = image_layout.clone();
                     this.fut_state = ReadCoreImageHeaderFutureState::Done;
                     return task::Poll::Ready(Ok(ReadCoreImageHeaderFutureResult::StaticImageHeader(
-                        StaticImageHeader { image_layout, salt },
+                        StaticImageHeader {
+                            image_layout: image_layout.clone(),
+                            salt,
+                        },
                     )));
+                }
+                ReadCoreImageHeaderFutureState::TryDecodeMinMkFsInfoHeader {
+                    mkfsinfo_header_blkdev_io_blocks_begin,
+                    first_header_part,
+                } => {
+                    let from_backup = *mkfsinfo_header_blkdev_io_blocks_begin != 0;
+                    if &first_header_part[..MAGIC_MKFS.len()] != MAGIC_MKFS {
+                        if !from_backup {
+                            this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader;
+                            continue;
+                        } else {
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidImageHeader)));
+                        }
+                    }
+
+                    let (is_valid, tier0_integrity_state) = match extent_tier0_integrity_protection_verify_and_remove(
+                        io_slices::SingletonIoSliceMut::new(first_header_part.as_mut_slice()),
+                        MAGIC_MKFS.len(),
+                        MinMkFsInfoHeader::encoded_len() as usize - MAGIC_MKFS.len(),
+                    ) {
+                        Ok((is_valid, tier0_integrity_state)) => (is_valid, tier0_integrity_state),
+                        Err(e) => {
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+
+                    if !is_valid {
+                        if !from_backup {
+                            this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader;
+                            continue;
+                        } else {
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidImageHeader)));
+                        }
+                    }
+
+                    // Tier 0 integrity protection verification has passed, and the encoded
+                    // MinMkFsInfoHeader is within the tier 0 protection domain. It is
+                    // now expected that there's a valid MinMkFsInfoHeader, otherwise
+                    // error out.
+                    // This decodes the ImageLayout and validates the configuration.
+                    let min_mkfsinfo_header = match MinMkFsInfoHeader::decode(first_header_part) {
+                        Ok(min_mkfsinfo_header) => min_mkfsinfo_header,
+                        Err(e) => {
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+
+                    // Verify at this point that the backend storage's minimum IO size is <= the one
+                    // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
+                    // an usize as well), this will henceforth apply to the Device IO Block size as
+                    // well then.
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let image_layout = &min_mkfsinfo_header.image_layout;
+                    if (image_layout.io_block_allocation_blocks_log2 as u32
+                        + image_layout.allocation_block_size_128b_log2 as u32)
+                        < blkdev_io_block_size_128b_log2
+                    {
+                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
+                    }
+
+                    // Now that the MinMkFsInfoImageHeader has been read and decoded, deduce the
+                    // total header length from it, read the remainder, if any,
+                    // and continue with the decoding.
+                    // The IO Block aligned length in units of Bytes never exceeds the larger of
+                    // 4 * 128B and the IO Block size, c.f. the documentation of
+                    // MkFsInfoHeader::io_block_aligned_encoded_len_allocation_blocks(). Either
+                    // way, both can be represented as an u64 and the shift will not overflow.
+                    let mkfsinfo_header_len =
+                        u64::from(MkFsInfoHeader::io_block_aligned_encoded_len_allocation_blocks(
+                            image_layout.io_block_allocation_blocks_log2,
+                            image_layout.allocation_block_size_128b_log2,
+                            min_mkfsinfo_header.salt_len,
+                        )) << (image_layout.allocation_block_size_128b_log2 as u32 + 7);
+
+                    // Remember from above: it is known by now that the Device IO Block size fits an
+                    // u64.
+                    debug_assert_eq!(first_header_part.len(), 1usize << (blkdev_io_block_size_128b_log2 + 7));
+                    let remaining_mkfsinfo_header_len = mkfsinfo_header_len - first_header_part.len() as u64;
+                    if remaining_mkfsinfo_header_len == 0 {
+                        this.fut_state = ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
+                            min_header: min_mkfsinfo_header,
+                            first_header_part: mem::take(first_header_part),
+                            second_header_part: FixedVec::new_empty(),
+                            tier0_integrity_state,
+                            from_backup,
+                        };
+                    } else {
+                        let second_header_part = match usize::try_from(remaining_mkfsinfo_header_len)
+                            .map_err(|_| NvFsError::DimensionsNotSupported)
+                            .and_then(|remaining_mkfsinfo_header_len| {
+                                FixedVec::new_with_default(remaining_mkfsinfo_header_len).map_err(NvFsError::from)
+                            }) {
+                            Ok(second_header_part) => second_header_part,
+                            Err(e) => {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+                        let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                            *mkfsinfo_header_blkdev_io_blocks_begin + 1,
+                            remaining_mkfsinfo_header_len >> (blkdev_io_block_size_128b_log2 + 7),
+                            blkdev_io_block_size_128b_log2 as u8,
+                            second_header_part,
+                            0,
+                            blkdev_io_block_size_128b_log2 as u8,
+                        );
+                        this.fut_state = ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
+                            read_fut,
+                            min_header: min_mkfsinfo_header,
+                            first_header_part: mem::take(first_header_part),
+                            tier0_integrity_state,
+                            from_backup,
+                        };
+                    }
                 }
                 ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
                     read_fut,
                     min_header,
-                    mkfsinfo_header_len,
                     first_header_part,
-                    first_error,
+                    tier0_integrity_state,
+                    from_backup,
                 } => {
                     let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((second_header_part, Ok(())))) => second_header_part,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
-                            match e {
-                                NvBlkDevIoError::IoBlockNotMapped => {
-                                    match *first_error {
-                                        None => {
-                                            // Reading the MkFsInfoHeader remainder at the image's
-                                            // beginning.  There is a MkFsInfoHeader magic, but the
-                                            // IO request to read the remainder failed. This can
-                                            // only happen if the encoded salt length determining
-                                            // the total header size is invalid. Try to read the
-                                            // backup MkFsInfoHeader, if any, instead.
-                                            this.fut_state =
-                                                ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                                    first_error: NvFsError::from(NvBlkDevIoError::IoBlockNotMapped),
-                                                };
-                                            continue;
-                                        }
-                                        Some(first_error) => {
-                                            // Reading the MkFsInfoHeader remainder from the backup
-                                            // location failied, give up.
-                                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                            return task::Poll::Ready(Err(first_error));
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(NvFsError::from(e)));
-                                }
-                            };
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let first_header_part = mem::take(first_header_part);
                     this.fut_state = ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
                         min_header: min_header.clone(),
-                        mkfsinfo_header_len: *mkfsinfo_header_len,
-                        first_header_part,
+                        first_header_part: mem::take(first_header_part),
                         second_header_part,
-                        first_error: *first_error,
+                        tier0_integrity_state: *tier0_integrity_state,
+                        from_backup: *from_backup,
                     };
                 }
                 ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
                     min_header,
-                    mkfsinfo_header_len,
                     first_header_part,
                     second_header_part,
-                    first_error,
+                    tier0_integrity_state,
+                    from_backup,
                 } => {
-                    // Verify the checksums.
-                    let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
-                        .chain(io_slices::SingletonIoSlice::new(second_header_part));
-                    let mut checksum = checksum::ChecksumInstance::new();
-                    let mut checksummed_header_io_slice = header_io_slice.as_ref().take_exact(*mkfsinfo_header_len - 8);
-                    while let Some(checksummed_header_part) = match checksummed_header_io_slice.next_slice(None) {
-                        Ok(checksummed_header_part) => checksummed_header_part,
+                    // Complete the integrity protection verification.
+                    let image_layout = &min_header.image_layout;
+                    let is_valid = match extent_integrity_protections_verify_and_remove(
+                        io_slices::BuffersSliceIoSlicesMutIter::new(&mut [
+                            first_header_part.as_mut_slice(),
+                            second_header_part.as_mut_slice(),
+                        ]),
+                        MAGIC_MKFS.len(),
+                        MinMkFsInfoHeader::encoded_len() as usize - MAGIC_MKFS.len(),
+                        Some(tier0_integrity_state),
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                        blkdev.io_block_size_128b_log2(),
+                    ) {
+                        Ok((is_valid, _)) => is_valid,
                         Err(e) => {
-                            // Infallible.
-                            match e {
-                                io_slices::IoSlicesIterError::BackendIteratorError(e) => {
-                                    // Infallible.
-                                    match e {}
-                                }
-                                io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
-                                    io_slices::IoSlicesError::BuffersExhausted => {
-                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                        return task::Poll::Ready(Err(nvfs_err_internal!()));
-                                    }
-                                },
-                            }
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(e));
                         }
-                    } {
-                        checksum.update(checksummed_header_part);
-                    }
+                    };
 
-                    let mut expected_checksum = [0u8; checksum::CHECKSUM_LEN as usize];
-                    let mut expected_checksum_io_slice = io_slices::SingletonIoSliceMut::new(&mut expected_checksum);
-                    if let Err(e) = expected_checksum_io_slice.as_ref().copy_from_iter(&mut header_io_slice) {
-                        // Infallible.
-                        match e {}
-                    }
-                    if !match expected_checksum_io_slice.is_empty() {
-                        Ok(is_empty) => is_empty,
-                        Err(e) => {
-                            // Infallible.
-                            match e {}
-                        }
-                    } {
-                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(nvfs_err_internal!()));
-                    }
-
-                    if !checksum.finish_receive(&expected_checksum) {
-                        // Checksum mismatch. Proceed with attempting to read the backup MkFsInfoHeader,
-                        // if not currently there yet.
-                        match *first_error {
-                            None => {
-                                this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader {
-                                    first_error: NvFsError::from(FormatError::InvalidImageHeaderChecksum),
-                                };
-                                continue;
-                            }
-                            Some(first_error) => {
-                                // Just failed to read the backup MkFsInfoHeader.
-                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                return task::Poll::Ready(Err(first_error));
-                            }
+                    if !is_valid {
+                        if !*from_backup {
+                            this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader;
+                            continue;
+                        } else {
+                            // No more options to try, give up.
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidImageHeader)));
                         }
                     }
 
-                    // Decode the mkfsinfo image header.
+                    // Decode the MkFsInfoHeader header.
                     let mut header_io_slice = io_slices::SingletonIoSlice::new(first_header_part)
                         .chain(io_slices::SingletonIoSlice::new(second_header_part));
 
+                    // Skip over the already decoded MinMkFsInfoHeader.
                     if let Err(e) = header_io_slice.skip(MinMkFsInfoHeader::encoded_len() as usize) {
                         let e = match e {
                             io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
@@ -1025,26 +1083,29 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         return task::Poll::Ready(Err(e));
                     }
 
-                    // Decode the ImageLayout. This validates the configuration.
-                    let image_layout = match layout::ImageLayout::decode(&min_header.encoded_image_layout) {
-                        Ok(image_layout) => image_layout,
-                        Err(e) => {
+                    // Skip over the integrity protections section.
+                    let integrity_protections_len = match usize::try_from(extent_integrity_protections_len(
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                    )) {
+                        Ok(integrity_protections_len) => integrity_protections_len,
+                        Err(_) => {
                             this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                         }
                     };
-
-                    // Verify at this point that the backend storage's minimum IO size is <= the one
-                    // supported by the image. As an IO Block size is guaranteed to fit an u64 (and
-                    // an usize as well), this will henceforth apply to the Device IO Block size as
-                    // well then.
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    if (image_layout.io_block_allocation_blocks_log2 as u32
-                        + image_layout.allocation_block_size_128b_log2 as u32)
-                        < blkdev_io_block_size_128b_log2
-                    {
+                    if let Err(e) = header_io_slice.skip(integrity_protections_len) {
+                        let e = match e {
+                            io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                                io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+                            },
+                            io_slices::IoSlicesIterError::BackendIteratorError(e) => {
+                                // Infallible.
+                                match e {}
+                            }
+                        };
                         this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                        return task::Poll::Ready(Err(NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
+                        return task::Poll::Ready(Err(e));
                     }
 
                     // Decode the remainder of the MkFsInfoHeader.
@@ -1073,8 +1134,9 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         }
                     }
 
+                    let image_layout = image_layout.clone();
                     let image_size = min_header.image_size;
-                    let from_backup = first_error.is_some();
+                    let from_backup = *from_backup;
                     this.fut_state = ReadCoreImageHeaderFutureState::Done;
                     return task::Poll::Ready(Ok(ReadCoreImageHeaderFutureResult::MkFsInfoHeader {
                         header: MkFsInfoHeader {
@@ -1085,7 +1147,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         from_backup,
                     }));
                 }
-                ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader { first_error } => {
+                ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader => {
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let blkdev_io_blocks = blkdev.io_blocks();
                     let blkdev_io_blocks = blkdev_io_blocks.min(u64::MAX >> (blkdev_io_block_size_128b_log2 + 7));
@@ -1098,9 +1160,8 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                             Err(_) => {
                                 // Failure to deduce the backup location from the storage dimensions
                                 // indicates that they're invalid/unusable anyway.
-                                let first_error = *first_error;
                                 this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                return task::Poll::Ready(Err(first_error));
+                                return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidImageHeader)));
                             }
                         };
 
@@ -1129,23 +1190,20 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     this.fut_state = ReadCoreImageHeaderFutureState::ReadBackupMinMkFsInfoHeader {
                         read_fut,
                         backup_location_blkdev_io_blocks_begin,
-                        first_error: *first_error,
                     };
                 }
                 ReadCoreImageHeaderFutureState::ReadBackupMinMkFsInfoHeader {
                     read_fut,
                     backup_location_blkdev_io_blocks_begin,
-                    first_error,
                 } => {
                     let first_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((first_header_part, Ok(())))) => first_header_part,
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                             match e {
                                 NvBlkDevIoError::IoBlockNotMapped => {
-                                    // There doesn't seem to be a backup.
-                                    let first_error = *first_error;
+                                    // There doesn't seem to be a backup. Give up.
                                     this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(first_error));
+                                    return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidImageHeader)));
                                 }
                                 _ => {
                                     this.fut_state = ReadCoreImageHeaderFutureState::Done;
@@ -1156,84 +1214,9 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    // Try to decode the MinMkFsInfoHeader read from the backup location.
-                    match MinMkFsInfoHeader::decode(&first_header_part) {
-                        Ok(min_mkfsinfo_header) => {
-                            // Ok, there is something which seems to be a
-                            // MkFsInfoHeader. Try to read its remainder, if any.
-                            let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                            debug_assert_eq!(first_header_part.len(), 1usize << (blkdev_io_block_size_128b_log2 + 7));
-                            let mkfsinfo_header_len = MkFsInfoHeader::encoded_len(min_mkfsinfo_header.salt_len);
-                            // Remember from above: it is known by now that the Device IO Block size fits an
-                            // u64.
-                            let remaining_mkfsinfo_header_len =
-                                (mkfsinfo_header_len as u64).saturating_sub(first_header_part.len() as u64);
-                            if remaining_mkfsinfo_header_len == 0 {
-                                this.fut_state = ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
-                                    min_header: min_mkfsinfo_header,
-                                    mkfsinfo_header_len: mkfsinfo_header_len as usize,
-                                    first_header_part,
-                                    second_header_part: FixedVec::new_empty(),
-                                    first_error: Some(*first_error),
-                                };
-
-                                continue;
-                            }
-
-                            // This cannot happen, as we've just read a device IO Block from that location,
-                            // but make it explicit.
-                            if *backup_location_blkdev_io_blocks_begin >= u64::MAX >> blkdev_io_block_size_128b_log2 {
-                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
-                            }
-
-                            let aligned_remaining_header_len_128b = ((remaining_mkfsinfo_header_len - 1) >> 7) + 1;
-                            if aligned_remaining_header_len_128b > u64::MAX >> 7 {
-                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
-                            }
-                            let aligned_remaining_header_len =
-                                match usize::try_from(aligned_remaining_header_len_128b << 7) {
-                                    Ok(aligned_remaining_header_len) => aligned_remaining_header_len,
-                                    Err(_) => {
-                                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                        return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
-                                    }
-                                };
-                            let second_header_part = match FixedVec::new_with_default(aligned_remaining_header_len) {
-                                Ok(second_header_part) => second_header_part,
-                                Err(e) => {
-                                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                                    return task::Poll::Ready(Err(NvFsError::from(e)));
-                                }
-                            };
-                            let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
-                                (*backup_location_blkdev_io_blocks_begin + 1) << blkdev_io_block_size_128b_log2,
-                                aligned_remaining_header_len_128b,
-                                0u8,
-                                second_header_part,
-                                0,
-                                0u8,
-                            );
-
-                            this.fut_state = ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
-                                read_fut,
-                                min_header: min_mkfsinfo_header,
-                                mkfsinfo_header_len: mkfsinfo_header_len as usize,
-                                first_header_part,
-                                first_error: Some(*first_error),
-                            };
-                        }
-                        Err(NvFsError::Internal) => {
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::Internal));
-                        }
-                        Err(_) => {
-                            // No MinMkFsInfoHeader found at the backup location.
-                            let first_error = *first_error;
-                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                            return task::Poll::Ready(Err(first_error));
-                        }
+                    this.fut_state = ReadCoreImageHeaderFutureState::TryDecodeMinMkFsInfoHeader {
+                        mkfsinfo_header_blkdev_io_blocks_begin: *backup_location_blkdev_io_blocks_begin,
+                        first_header_part,
                     };
                 }
                 ReadCoreImageHeaderFutureState::Done => unreachable!(),
@@ -1361,7 +1344,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadMutableImageHeaderFu
 /// header size.
 #[derive(Clone)]
 struct MinMkFsInfoHeader {
-    encoded_image_layout: [u8; layout::ImageLayout::encoded_len() as usize],
+    image_layout: ImageLayout,
     image_size: layout::AllocBlockCount,
     salt_len: u8,
 }
@@ -1371,7 +1354,7 @@ impl MinMkFsInfoHeader {
     const fn encoded_len() -> u8 {
         const ENCODED_LEN: u32 = {
             // Magic 'CCFSMKFS'.
-            let mut encoded_len = 8u32;
+            let mut encoded_len = MAGIC_MKFS.len() as u32;
             // The u8 image format version.
             encoded_len += mem::size_of::<u8>() as u32;
             // The encoded ImageLayout.
@@ -1384,8 +1367,12 @@ impl MinMkFsInfoHeader {
             encoded_len
         };
 
+        // The integrity protection section's offset, which follows the
+        // MinMkfsInfoHeader, must be small enough that the minimum possible
+        // integrity protection section is located within the first 128B, as per
+        // the requirements of the integrity protection scheme.
         #[allow(clippy::assertions_on_constants)]
-        let _: () = assert!(ENCODED_LEN <= 128);
+        let _: () = assert!(ENCODED_LEN <= 128 - extent_integrity_protections_len(0, 0));
 
         ENCODED_LEN as u8
     }
@@ -1401,10 +1388,9 @@ impl MinMkFsInfoHeader {
             return Err(nvfs_err_internal!());
         }
 
-        let expected_magic = b"CCFSMKFS";
-        let (magic, buf) = buf.split_at(expected_magic.len());
-        if magic != expected_magic {
-            return Err(NvFsError::from(FormatError::InvalidImageHeaderMagic));
+        let (magic, buf) = buf.split_at(MAGIC_MKFS.len());
+        if magic != MAGIC_MKFS {
+            return Err(NvFsError::from(FormatError::InvalidImageHeader));
         }
 
         let (version, buf) = buf.split_at(mem::size_of::<u8>());
@@ -1416,8 +1402,7 @@ impl MinMkFsInfoHeader {
         }
 
         let (encoded_image_layout, buf) = buf.split_at(layout::ImageLayout::encoded_len() as usize);
-        let encoded_image_layout = <&[u8; layout::ImageLayout::encoded_len() as usize]>::try_from(encoded_image_layout)
-            .map_err(|_| nvfs_err_internal!())?;
+        let image_layout = ImageLayout::decode(encoded_image_layout)?;
 
         let (image_size, buf) = buf.split_at(mem::size_of::<u64>());
         let image_size = layout::AllocBlockCount::from(u64::from_le_bytes(
@@ -1431,7 +1416,7 @@ impl MinMkFsInfoHeader {
             u8::from_le_bytes(*<&[u8; mem::size_of::<u8>()]>::try_from(salt_len).map_err(|_| nvfs_err_internal!())?);
 
         Ok(Self {
-            encoded_image_layout: *encoded_image_layout,
+            image_layout,
             image_size,
             salt_len,
         })
@@ -1473,26 +1458,109 @@ pub struct MkFsInfoHeader {
 impl MkFsInfoHeader {
     /// Encoded length of a [`MkFsInfoHeader`].
     ///
-    /// Returns the encoded length of a [`MkFsInfoHeader`] with a salt length
-    /// of `salt_len` without any of the padding to align to the next [IO
+    /// Returns the encoded length of a [`MkFsInfoHeader`] with
+    /// an [IO Block size](ImageLayout::io_block_allocation_blocks_log2) as
+    /// specified by `io_block_allocation_blocks_log2`, an [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) as specified by
+    /// `allocation_block_size_128b_log2` and with a salt length
+    /// of `salt_len`, without any of the padding to align to the next [IO
     /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary
     /// included.
     ///
+    /// The encoded length is guaranteed to not exceed the larger of `3 * 128`
+    /// and the size of one
+    /// [IO Block](ImageLayout::io_block_allocation_blocks_log2).
+    ///
     /// # Arguments:
     ///
+    /// * `io_block_allocation_blocks_log2` - Verbatim copy of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim copy of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     /// * `salt_len` - Length of the salt stored in the [`MkFsInfoHeader`].
-    pub fn encoded_len(salt_len: u8) -> u32 {
+    ///
+    /// # See also:
+    ///
+    /// * [`io_block_aligned_encoded_len_allocation_blocks()`](Self::io_block_aligned_encoded_len_allocation_blocks)
+    pub fn encoded_len(io_block_allocation_blocks_log2: u8, allocation_block_size_128b_log2: u8, salt_len: u8) -> u32 {
+        // The encoded length always is <= the larger of 3 * 128 and the IO Block size.
+        // Verify case that the IO Block size <= 2 * 128:
+        const _: () = assert!(
+            3u64 * 128 - extent_integrity_protections_len(1, 0) as u64
+                >= MinMkFsInfoHeader::encoded_len() as u64 + u8::MAX as u64
+        );
+        // Verify case that the IO Block size >= 4 * 128:
+        const _: () = assert!(
+            (1u64 << (2 + 7)) - extent_integrity_protections_len(2, 0) as u64
+                >= MinMkFsInfoHeader::encoded_len() as u64 + u8::MAX as u64
+        );
+
         // The minimal common header containing everything needed to deduce the full
         // header's length.
         let mut encoded_len = MinMkFsInfoHeader::encoded_len() as u32;
 
+        // The integrity protection section.
+        encoded_len +=
+            extent_integrity_protections_len(io_block_allocation_blocks_log2, allocation_block_size_128b_log2);
+
         // And the image salt.
         encoded_len += salt_len as u32;
 
-        // The checksum.
-        encoded_len += checksum::CHECKSUM_LEN;
-
         encoded_len
+    }
+
+    /// [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2) aligned
+    /// length of [`MkFsInfoHeader`].
+    ///
+    /// The [`MkFsInfoHeader`]'s length on storage gets padded to the next [IO
+    /// Block](ImageLayout::io_block_allocation_blocks_log2) boundary, so that
+    /// the generic integrity protections are applicable to it.
+    ///
+    /// Return the length of a [`MkFsInfoHeader`] with
+    /// an [IO Block size](ImageLayout::io_block_allocation_blocks_log2) as
+    /// specified by `io_block_allocation_blocks_log2`, an [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2) as specified by
+    /// `allocation_block_size_128b_log2` and a salt length
+    /// of `salt_len`, aligned to the next [IO
+    /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) boundary in
+    /// units of [Allocation
+    /// Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
+    ///
+    /// The aligned length in units of Bytes is guaranteed to never exceed the
+    /// larger of `4 * 128` and one IO Block size.
+    ///
+    /// # Arguments:
+    ///
+    /// * `io_block_allocation_blocks_log2` - Verbatim copy of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim copy of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    /// * `salt_len` - Length of the salt stored in the static image header.
+    ///
+    /// # See also:
+    ///
+    /// * [`encoded_len()`](Self::encoded_len).
+    pub fn io_block_aligned_encoded_len_allocation_blocks(
+        io_block_allocation_blocks_log2: u8,
+        allocation_block_size_128b_log2: u8,
+        salt_len: u8,
+    ) -> layout::AllocBlockCount {
+        let encoded_len = Self::encoded_len(
+            io_block_allocation_blocks_log2,
+            allocation_block_size_128b_log2,
+            salt_len,
+        ) as u64;
+
+        // The length always fits the larger of a few multiples (<= 3) of 128 Bytes and
+        // the IO Block size, as per the documented guarantees of encoded_len(),
+        // hence is definitely <= than 2^63. The size of an IO Block in units of
+        // Bytes is a power of two and <= 1^63 also. Hence the aligned result
+        // (in units of Bytes) will be <= that uppber bound as well.
+        layout::AllocBlockCount::from(
+            encoded_len.round_up_pow2_unchecked(
+                io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7,
+            ) >> (allocation_block_size_128b_log2 + 7),
+        )
     }
 
     /// Determine the beginning of the backup [`MkFsInfoHeader`]'s location in
@@ -1526,8 +1594,7 @@ impl MkFsInfoHeader {
         // Partition the image into blocks of largest possible alignment, such that
         // there are at least 16 of these and take the last.
         let blkdev_size_128b_log2 = blkdev_size_128b.ilog2();
-        // The aligned blocks should be able to contain the MkfsInfoHeader in full,
-        // which may need 3 * 128b < 2^2 * 128b.
+        // The aligned blocks should be at least 4 * 128B in size.
         if blkdev_size_128b_log2 < 4 + 2 {
             return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
@@ -1579,61 +1646,61 @@ impl MkFsInfoHeader {
     /// [`Device IO Block`](blkdev::NvBlkDev::io_block_size_128b_log2) size,
     /// and within the bounds of the backing storage.
     ///
-    /// The extent's beginning, but not necessarily its end, is also aligned to
-    /// the block size determined by `io_block_allocation_blocks_log2`. The
-    /// backing storage will provide at least one full block of that size at
-    /// the location, even though the returned extent might not fully extend
-    /// through it.
+    /// The returned extent's boundaries are aligned to the block size
+    /// determined by `io_block_allocation_blocks_log2` and within the
+    /// storage volume's limits.
     ///
     /// # Arguments:
     ///
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     /// * `salt_len` - Length of the filesystem salt to be stored in the
     ///   [`MkFsInfoHeader`].
     /// * `blkdev_io_blocks` - Value of
     ///   [`NvBlkDev::io_blocks()`](blkdev::NvBlkDev::io_blocks).
     /// * `blkdev_io_block_size_128b_log2` - Value of
     ///   [`NvBlkDev::io_block_size_128b_log2()`](blkdev::NvBlkDev::io_block_size_128b_log2).
-    /// * `io_block_allocation_blocks_log2` - Verbatim value of
-    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
-    /// * `allocation_block_size_128b_log2` - Verbatim value of
-    ///   [`ImageLayout::allocation_block_size_128b_log2`].
     pub fn physical_backup_location(
+        io_block_allocation_blocks_log2: u8,
+        allocation_block_size_128b_log2: u8,
         salt_len: u8,
         blkdev_io_blocks: u64,
         blkdev_io_block_size_128b_log2: u32,
-        io_block_allocation_blocks_log2: u32,
-        allocation_block_size_128b_log2: u32,
     ) -> Result<layout::PhysicalAllocBlockRange, NvFsError> {
         let (backup_location_begin_128b, backup_location_begin_alignment_128b_log2) =
             Self::physical_backup_location_begin_128b(blkdev_io_blocks, blkdev_io_block_size_128b_log2)?;
         // Any HW with a compatible blkdev_io_block_size_128b_log2 should be guaranteed
         // to arrive at the same location and discover the backup.
-        if backup_location_begin_alignment_128b_log2 < io_block_allocation_blocks_log2 + allocation_block_size_128b_log2
+        if backup_location_begin_alignment_128b_log2
+            < io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32
         {
             return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
         debug_assert!(
             backup_location_begin_128b
-                .is_aligned_pow2(io_block_allocation_blocks_log2 + allocation_block_size_128b_log2)
+                .is_aligned_pow2(io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32)
         );
         let backup_location_allocation_blocks_begin =
             layout::PhysicalAllocBlockIndex::from(backup_location_begin_128b >> allocation_block_size_128b_log2);
 
-        let encoded_len = Self::encoded_len(salt_len);
-        // Make the returned extent to align with the Device IO Block size. There will
-        // be enough room at the end of the storage: one block of size as
-        // specified by backup_location_begin_alignment_128b_log2 is large
-        // enough to hold the MkFsInfoHeader.
-        let blkdev_io_block_allocation_blocks_log2 =
-            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-        let header_blkdev_io_blocks =
-            ((encoded_len - 1) >> (blkdev_io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 + 7)) + 1;
-        let header_allocation_blocks =
-            layout::AllocBlockCount::from((header_blkdev_io_blocks as u64) << blkdev_io_block_allocation_blocks_log2);
-
+        // Make the returned extent to align with the IO Block size. There will be
+        // enough room at the end of storage:
+        // - The IO Block aligned length is always <= the maximum of 4 * 128B and the IO
+        //   Block size, c.f. the documentation of
+        //   Self::io_block_allocation_blocks_log2(), while
+        // - there is at least one block of size as specified by
+        //   backup_location_begin_alignment_128b_log2 available at the end, and that is
+        //   >= the IO Block size (verified above), and >= 4 * 128B, as per the
+        //   documentation of Self::physical_backup_location_begin_128b().
         Ok(layout::PhysicalAllocBlockRange::from((
             backup_location_allocation_blocks_begin,
-            header_allocation_blocks,
+            Self::io_block_aligned_encoded_len_allocation_blocks(
+                io_block_allocation_blocks_log2,
+                allocation_block_size_128b_log2,
+                salt_len,
+            ),
         )))
     }
 
@@ -1641,51 +1708,46 @@ impl MkFsInfoHeader {
     ///
     /// # Arguments:
     ///
-    /// * `dst` - The destination buffers. Their total length must be at least
-    ///   that returned by [`encoded_len()`](Self::encoded_len).
+    /// * `dst` - The destination buffers. Their total length must be exactly
+    ///   that returned by
+    ///   [`io_block_aligned_encoded_len_allocation_blocks()`](Self::io_block_aligned_encoded_len_allocation_blocks).
     /// * `image_layout` - The filesystem image's [`ImageLayout`] to be stored
     ///   in the [`MkFsInfoHeader`].
     /// * `image_size` - The desired filesystem image size to be stored in the
     ///   [`MkFsInfoHeader`].
     /// * `salt` - The filesystem salt to be stored in the [`MkFsInfoHeader`].
     ///   It's length must not exceed `u8::MAX`.
-    pub fn encode<'a, DI: io_slices::IoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
+    pub fn encode<'a, DI: io_slices::MutPeekableIoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
         mut dst: DI,
         image_layout: &layout::ImageLayout,
         image_size: layout::AllocBlockCount,
         salt: &[u8],
     ) -> Result<(), NvFsError> {
-        let mut checksum = checksum::ChecksumInstance::new();
-
-        let magic = b"CCFSMKFS";
-        checksum.update(magic.as_slice());
-        let mut magic = io_slices::SingletonIoSlice::new(magic.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut magic)?;
+        let mut encoding_dst = dst.decoupled_borrow_mut();
+        let mut magic = io_slices::SingletonIoSlice::new(MAGIC_MKFS.as_slice()).map_infallible_err();
+        encoding_dst.copy_from_iter(&mut magic)?;
         if !magic.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
         let version = 0u8.to_le_bytes();
-        checksum.update(&version);
         let mut version = io_slices::SingletonIoSlice::new(version.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut version)?;
+        encoding_dst.copy_from_iter(&mut version)?;
         if !version.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
         let encoded_image_layout = image_layout.encode()?;
-        checksum.update(&encoded_image_layout);
         let mut encoded_image_layout =
             io_slices::SingletonIoSlice::new(encoded_image_layout.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut encoded_image_layout)?;
+        encoding_dst.copy_from_iter(&mut encoded_image_layout)?;
         if !encoded_image_layout.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
         let image_size = u64::from(image_size).to_le_bytes();
-        checksum.update(&image_size);
         let mut image_size = io_slices::SingletonIoSlice::new(image_size.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut image_size)?;
+        encoding_dst.copy_from_iter(&mut image_size)?;
         if !image_size.is_empty()? {
             return Err(nvfs_err_internal!());
         }
@@ -1693,25 +1755,41 @@ impl MkFsInfoHeader {
         let salt_len = u8::try_from(salt.len())
             .map_err(|_| NvFsError::from(FormatError::InvalidSaltLength))?
             .to_le_bytes();
-        checksum.update(&salt_len);
         let mut salt_len = io_slices::SingletonIoSlice::new(salt_len.as_slice()).map_infallible_err();
-        dst.copy_from_iter(&mut salt_len)?;
+        encoding_dst.copy_from_iter(&mut salt_len)?;
         if !salt_len.is_empty()? {
             return Err(nvfs_err_internal!());
         }
-        checksum.update(salt);
+
+        let integrity_protections_len = usize::try_from(extent_integrity_protections_len(
+            image_layout.io_block_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        ))
+        .map_err(|_| NvFsError::DimensionsNotSupported)?;
+        encoding_dst.skip(integrity_protections_len).map_err(|e| match e {
+            io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+            },
+            io_slices::IoSlicesIterError::BackendIteratorError(e) => e,
+        })?;
+
         let mut salt = io_slices::SingletonIoSlice::new(salt).map_infallible_err();
-        dst.copy_from_iter(&mut salt)?;
+        encoding_dst.copy_from_iter(&mut salt)?;
         if !salt.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
-        let checksum = checksum.finish_send();
-        let mut checksum = io_slices::SingletonIoSlice::new(&checksum).map_infallible_err();
-        dst.copy_from_iter(&mut checksum)?;
-        if !checksum.is_empty()? {
-            return Err(nvfs_err_internal!());
-        }
+        drop(encoding_dst);
+
+        extent_integrity_protections_apply(
+            dst,
+            MAGIC_MKFS.len(),
+            MinMkFsInfoHeader::encoded_len() as usize - MAGIC_MKFS.len(),
+            &ExtentIntegrityState::new_clean(),
+            image_layout.io_block_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+            1, // Only used for debug assertions.
+        )?;
 
         Ok(())
     }

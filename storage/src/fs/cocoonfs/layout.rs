@@ -613,7 +613,7 @@ impl ImageLayout {
 
     pub fn decode(buf: &[u8]) -> Result<Self, NvFsError> {
         if buf.len() != Self::encoded_len() as usize {
-            return Err(NvFsError::from(FormatError::InvalidImageHeaderFormat));
+            return Err(nvfs_err_internal!());
         }
         let allocation_block_size_128b_log2 = buf[0];
         let io_block_allocation_blocks_log2 = buf[1];
@@ -681,7 +681,7 @@ impl ImageLayout {
                 _ => nvfs_err_internal!(),
             })?;
 
-        Ok(Self {
+        Self::new(
             allocation_block_size_128b_log2,
             io_block_allocation_blocks_log2,
             auth_tree_node_io_blocks_log2,
@@ -695,6 +695,6 @@ impl ImageLayout {
             preauth_cca_protection_hmac_hash_alg,
             kdf_hash_alg,
             block_cipher_alg,
-        })
+        )
     }
 }
