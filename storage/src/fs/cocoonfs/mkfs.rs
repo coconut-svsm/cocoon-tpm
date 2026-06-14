@@ -15,7 +15,9 @@ use crate::{
         cocoonfs::{
             FormatError, ImageLayout, alloc_bitmap, auth_tree, encryption_entities, extent_ptr, extents,
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
-            image_header, inode_extents_list, inode_index, journal, keys,
+            image_header, inode_extents_list, inode_index,
+            integrity::ExtentIntegrityState,
+            journal, keys,
             layout::{self, BlockCount as _, BlockIndex as _},
             read_buffer,
         },
@@ -2198,6 +2200,7 @@ where
                     };
                     let fs_sync_state = CocoonFsSyncState {
                         image_size,
+                        journal_log_head_integrity_state: ExtentIntegrityState::new_clean(),
                         alloc_bitmap,
                         alloc_bitmap_file,
                         auth_tree,

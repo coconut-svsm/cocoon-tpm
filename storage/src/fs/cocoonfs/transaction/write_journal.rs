@@ -31,7 +31,9 @@ use crate::{
                 CocoonFsPendingTransactionsSyncState, CocoonFsSyncStateMemberMutRef, CocoonFsSyncStateMemberRef,
                 CocoonFsSyncStateReadFuture,
             },
-            image_header, inode_index, journal,
+            image_header, inode_index,
+            integrity::{ExtentIntegrityState, extent_integrity_protections_apply},
+            journal,
             layout::{self, BlockCount as _},
             leb128, transaction,
         },
@@ -110,7 +112,8 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, B: blkdev::Nv
         // reference on Self.
         transaction: Option<Box<Transaction>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
-        journal_log_head_extent_buf: FixedVec<u8, 7>,
+        journal_log_head_extent_head_blkdev_io_block_buf: FixedVec<u8, 7>,
+        journal_log_head_extent_tail_buf: FixedVec<u8, 7>,
         journal_log_tail_extents_bufs: FixedVec<FixedVec<u8, 7>, 0>,
         next_tail_extent_index: usize,
     },
@@ -119,24 +122,53 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, B: blkdev::Nv
         // reference on Self.
         transaction: Option<Box<Transaction>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
-        journal_log_head_extent_buf: FixedVec<u8, 7>,
+        journal_log_head_extent_head_blkdev_io_block_buf: FixedVec<u8, 7>,
+        journal_log_head_extent_tail_buf: FixedVec<u8, 7>,
         journal_log_tail_extents_bufs: FixedVec<FixedVec<u8, 7>, 0>,
         cur_tail_extent_index: usize,
         write_extent_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
     },
-    WriteBarrierBeforeJournalLogHeadWrite {
+    InvalidateStaleJournalLogHead {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
         journal_log_head_extent: layout::PhysicalAllocBlockRange,
-        journal_log_head_extent_buf: FixedVec<u8, 7>,
-        write_barrier_fut: B::WriteBarrierFuture,
+        journal_log_head_extent_head_blkdev_io_block_buf: FixedVec<u8, 7>,
+        journal_log_head_extent_tail_buf: FixedVec<u8, 7>,
+        invalidate_journal_log_fut: journal::log::JournalLogInvalidateFuture<B>,
     },
-    WriteJournalLogHeadExtent {
+    PrepareWriteJournalLogHeadExtent {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
-        write_extent_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
+        journal_log_head_extent: layout::PhysicalAllocBlockRange,
+        journal_log_head_extent_head_blkdev_io_block_buf: FixedVec<u8, 7>,
+        journal_log_head_extent_tail_buf: FixedVec<u8, 7>,
+    },
+    WriteJournalLogHeadExtentTail {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<Transaction>>,
+        journal_log_head_extent_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
+        journal_log_head_extent_head_blkdev_io_block_buf: FixedVec<u8, 7>,
+        updated_journal_log_head_integrity_state: ExtentIntegrityState,
+        write_extent_tail_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
+    },
+    WriteBarrierBeforeJournalLogHeadExtentHeadWrite {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<Transaction>>,
+        journal_log_head_extent_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
+        journal_log_head_extent_head_blkdev_io_block_buf: FixedVec<u8, 7>,
+        updated_journal_log_head_integrity_state: ExtentIntegrityState,
+        write_barrier_fut: B::WriteBarrierFuture,
+    },
+    WriteJournalLogHeadExtentHead {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<Transaction>>,
+        updated_journal_log_head_integrity_state: ExtentIntegrityState,
+        write_extent_head_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
     },
     WriteSyncAfterJournalLogHeadWrite {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
@@ -962,18 +994,41 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     // Allocate the encryption target buffers, one for each extent. None of the
                     // extents' length exceeds an usize, as has been checked above in the previous
                     // step.
-                    let allocation_block_size_128b_log2 =
-                        fs_instance.fs_config.image_layout.allocation_block_size_128b_log2 as u32;
-                    let journal_log_head_extent_len = (u64::from(journal_log_head_extent.block_count())
-                        << (allocation_block_size_128b_log2 + 7))
-                        as usize;
-                    let mut journal_log_head_extent_buf = match FixedVec::new_with_default(journal_log_head_extent_len)
-                    {
-                        Ok(journal_log_head_extent_buf) => journal_log_head_extent_buf,
+                    let image_layout = &fs_instance.fs_config.image_layout;
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_size_128b_log2 = fs_instance.blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                    // The head extent gets split into two buffers: one for the first block device
+                    // IO block (written last) and another one for the
+                    // remainder.
+                    let journal_log_head_extent_blkdev_io_blocks = u64::from(journal_log_head_extent.block_count())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let mut journal_log_head_extent_head_blkdev_io_block_buf =
+                        match FixedVec::new_with_default(1 << (blkdev_io_block_size_128b_log2 + 7)) {
+                            Ok(journal_log_head_extent_head_blkdev_io_block_buf) => {
+                                journal_log_head_extent_head_blkdev_io_block_buf
+                            }
+                            Err(e) => break (false, Some(transaction), NvFsError::from(e)),
+                        };
+                    // The Journal log head extent's length fits an usize,
+                    // as verified in JournalLog::head_extent_physical_location().
+                    let mut journal_log_head_extent_tail_buf = match FixedVec::new_with_default(
+                        (journal_log_head_extent_blkdev_io_blocks as usize - 1) << (blkdev_io_block_size_128b_log2 + 7),
+                    ) {
+                        Ok(journal_log_head_extent_tail_buf) => journal_log_head_extent_tail_buf,
                         Err(e) => break (false, Some(transaction), NvFsError::from(e)),
                     };
+                    debug_assert_eq!(
+                        journal_log_head_extent_head_blkdev_io_block_buf.len() + journal_log_head_extent_tail_buf.len(),
+                        (u64::from(journal_log_head_extent.block_count()) as usize)
+                            << (allocation_block_size_128b_log2 + 7)
+                    );
                     // Encode the magic stored in plain.
-                    *match <&mut [u8; 8]>::try_from(&mut journal_log_head_extent_buf[..8])
+                    *match <&mut [u8; 8]>::try_from(&mut journal_log_head_extent_head_blkdev_io_block_buf[..8])
                         .map_err(|_| nvfs_err_internal!())
                     {
                         Ok(magic_dst) => magic_dst,
@@ -1027,7 +1082,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         io_slices::SingletonIoSlice::new(&journal_log_encode_buf).map_infallible_err();
 
                     if let Err(e) = journal_log_extents_encryption_instance.encrypt_one_extent(
-                        io_slices::SingletonIoSliceMut::new(&mut journal_log_head_extent_buf).map_infallible_err(),
+                        io_slices::BuffersSliceIoSlicesMutIter::new(&mut [
+                            journal_log_head_extent_head_blkdev_io_block_buf.as_mut_slice(),
+                            journal_log_head_extent_tail_buf.as_mut_slice(),
+                        ])
+                        .map_infallible_err(),
                         &mut journal_log_encode_buf_io_slice,
                         authenticated_associated_data.decoupled_borrow(),
                         journal_log_head_extent.block_count(),
@@ -1057,7 +1116,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     this.fut_state = TransactionWriteJournalFutureState::PrepareWriteJournalLogTailExtent {
                         transaction: Some(transaction),
                         journal_log_head_extent: *journal_log_head_extent,
-                        journal_log_head_extent_buf,
+                        journal_log_head_extent_head_blkdev_io_block_buf,
+                        journal_log_head_extent_tail_buf,
                         journal_log_tail_extents_bufs,
                         next_tail_extent_index: 0,
                     };
@@ -1065,7 +1125,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                 TransactionWriteJournalFutureState::PrepareWriteJournalLogTailExtent {
                     transaction,
                     journal_log_head_extent,
-                    journal_log_head_extent_buf,
+                    journal_log_head_extent_head_blkdev_io_block_buf,
+                    journal_log_head_extent_tail_buf,
                     journal_log_tail_extents_bufs,
                     next_tail_extent_index,
                 } => {
@@ -1077,16 +1138,30 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
                     let journal_log_tail_extents = &transaction.journal_log_tail_extents;
                     if *next_tail_extent_index == journal_log_tail_extents.len() {
-                        let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
-                            Ok(write_barrier_fut) => write_barrier_fut,
-                            Err(e) => break (false, Some(transaction), NvFsError::from(e)),
-                        };
-                        this.fut_state = TransactionWriteJournalFutureState::WriteBarrierBeforeJournalLogHeadWrite {
-                            transaction: Some(transaction),
-                            journal_log_head_extent: *journal_log_head_extent,
-                            journal_log_head_extent_buf: mem::take(journal_log_head_extent_buf),
-                            write_barrier_fut,
-                        };
+                        if !fs_instance_sync_state.journal_log_head_integrity_state.need_clear(
+                            b"CCFSJRNL".len(),
+                            0,
+                            fs_instance.blkdev.io_block_size_128b_log2(),
+                        ) {
+                            this.fut_state = TransactionWriteJournalFutureState::PrepareWriteJournalLogHeadExtent {
+                                transaction: Some(transaction),
+                                journal_log_head_extent: *journal_log_head_extent,
+                                journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                                    journal_log_head_extent_head_blkdev_io_block_buf,
+                                ),
+                                journal_log_head_extent_tail_buf: mem::take(journal_log_head_extent_tail_buf),
+                            };
+                        } else {
+                            this.fut_state = TransactionWriteJournalFutureState::InvalidateStaleJournalLogHead {
+                                transaction: Some(transaction),
+                                journal_log_head_extent: *journal_log_head_extent,
+                                journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                                    journal_log_head_extent_head_blkdev_io_block_buf,
+                                ),
+                                journal_log_head_extent_tail_buf: mem::take(journal_log_head_extent_tail_buf),
+                                invalidate_journal_log_fut: journal::log::JournalLogInvalidateFuture::new(false),
+                            };
+                        }
                     } else {
                         let image_layout = &fs_instance.fs_config.image_layout;
                         let next_tail_extent = journal_log_tail_extents.get_extent_range(*next_tail_extent_index);
@@ -1101,7 +1176,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         this.fut_state = TransactionWriteJournalFutureState::WriteJournalLogTailExtent {
                             transaction: Some(transaction),
                             journal_log_head_extent: *journal_log_head_extent,
-                            journal_log_head_extent_buf: mem::take(journal_log_head_extent_buf),
+                            journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                                journal_log_head_extent_head_blkdev_io_block_buf,
+                            ),
+                            journal_log_head_extent_tail_buf: mem::take(journal_log_head_extent_tail_buf),
                             journal_log_tail_extents_bufs: mem::take(journal_log_tail_extents_bufs),
                             cur_tail_extent_index: *next_tail_extent_index,
                             write_extent_fut,
@@ -1111,7 +1189,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                 TransactionWriteJournalFutureState::WriteJournalLogTailExtent {
                     transaction,
                     journal_log_head_extent,
-                    journal_log_head_extent_buf,
+                    journal_log_head_extent_head_blkdev_io_block_buf,
+                    journal_log_head_extent_tail_buf,
                     journal_log_tail_extents_bufs,
                     cur_tail_extent_index,
                     write_extent_fut,
@@ -1127,15 +1206,166 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     this.fut_state = TransactionWriteJournalFutureState::PrepareWriteJournalLogTailExtent {
                         transaction: transaction.take(),
                         journal_log_head_extent: *journal_log_head_extent,
-                        journal_log_head_extent_buf: mem::take(journal_log_head_extent_buf),
+                        journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                            journal_log_head_extent_head_blkdev_io_block_buf,
+                        ),
+                        journal_log_head_extent_tail_buf: mem::take(journal_log_head_extent_tail_buf),
                         journal_log_tail_extents_bufs: mem::take(journal_log_tail_extents_bufs),
                         next_tail_extent_index: *cur_tail_extent_index + 1,
                     };
                 }
-                TransactionWriteJournalFutureState::WriteBarrierBeforeJournalLogHeadWrite {
+                TransactionWriteJournalFutureState::InvalidateStaleJournalLogHead {
                     transaction,
                     journal_log_head_extent,
-                    journal_log_head_extent_buf,
+                    journal_log_head_extent_head_blkdev_io_block_buf,
+                    journal_log_head_extent_tail_buf,
+                    invalidate_journal_log_fut,
+                } => {
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let fs_config = &fs_instance.fs_config;
+                    match journal::log::JournalLogInvalidateFuture::poll(
+                        pin::Pin::new(invalidate_journal_log_fut),
+                        &fs_instance.blkdev,
+                        &fs_config.image_layout,
+                        fs_config.image_header_end,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break (false, transaction.take(), e),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+                    drop(fs_instance);
+
+                    fs_instance_sync_state.journal_log_head_integrity_state.record_clear();
+
+                    this.fut_state = TransactionWriteJournalFutureState::PrepareWriteJournalLogHeadExtent {
+                        transaction: transaction.take(),
+                        journal_log_head_extent: *journal_log_head_extent,
+                        journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                            journal_log_head_extent_head_blkdev_io_block_buf,
+                        ),
+                        journal_log_head_extent_tail_buf: mem::take(journal_log_head_extent_tail_buf),
+                    };
+                }
+                TransactionWriteJournalFutureState::PrepareWriteJournalLogHeadExtent {
+                    transaction,
+                    journal_log_head_extent,
+                    journal_log_head_extent_head_blkdev_io_block_buf,
+                    journal_log_head_extent_tail_buf,
+                } => {
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let image_layout = &fs_instance.fs_config.image_layout;
+                    let blkdev_io_block_size_128b_log2 = fs_instance.blkdev.io_block_size_128b_log2();
+
+                    let updated_journal_log_head_integrity_state = match extent_integrity_protections_apply(
+                        io_slices::BuffersSliceIoSlicesMutIter::new(&mut [
+                            journal_log_head_extent_head_blkdev_io_block_buf.as_mut_slice(),
+                            journal_log_head_extent_tail_buf.as_mut_slice(),
+                        ]),
+                        b"CCFSJRNL".len(),
+                        0,
+                        &fs_instance_sync_state.journal_log_head_integrity_state,
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                        blkdev_io_block_size_128b_log2,
+                    ) {
+                        Ok(updated_journal_log_head_integrity_state) => updated_journal_log_head_integrity_state,
+                        Err(e) => {
+                            break (false, transaction.take(), e);
+                        }
+                    };
+
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                    // The head extent gets split into two buffers: one for the first block device
+                    // IO block (written last) and another one for the
+                    // remainder.
+                    let journal_log_head_extent_blkdev_io_blocks = u64::from(journal_log_head_extent.block_count())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    debug_assert_ne!(journal_log_head_extent_blkdev_io_blocks, 0);
+                    debug_assert_eq!(
+                        journal_log_head_extent_tail_buf.is_empty(),
+                        journal_log_head_extent_blkdev_io_blocks == 1
+                    );
+                    if journal_log_head_extent_blkdev_io_blocks > 1 {
+                        let write_extent_tail_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+                            (u64::from(journal_log_head_extent.begin()) >> blkdev_io_block_allocation_blocks_log2
+                                << allocation_block_blkdev_io_blocks_log2)
+                                + 1,
+                            journal_log_head_extent_blkdev_io_blocks - 1,
+                            blkdev_io_block_size_128b_log2 as u8,
+                            mem::take(journal_log_head_extent_tail_buf),
+                            0,
+                            blkdev_io_block_size_128b_log2 as u8,
+                        );
+
+                        this.fut_state = TransactionWriteJournalFutureState::WriteJournalLogHeadExtentTail {
+                            transaction: transaction.take(),
+                            updated_journal_log_head_integrity_state,
+                            journal_log_head_extent_allocation_blocks_begin: journal_log_head_extent.begin(),
+                            journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                                journal_log_head_extent_head_blkdev_io_block_buf,
+                            ),
+                            write_extent_tail_fut,
+                        };
+                    } else {
+                        let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
+                            Ok(write_barrier_fut) => write_barrier_fut,
+                            Err(e) => break (false, transaction.take(), NvFsError::from(e)),
+                        };
+                        this.fut_state =
+                            TransactionWriteJournalFutureState::WriteBarrierBeforeJournalLogHeadExtentHeadWrite {
+                                transaction: transaction.take(),
+                                updated_journal_log_head_integrity_state,
+                                journal_log_head_extent_allocation_blocks_begin: journal_log_head_extent.begin(),
+                                journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                                    journal_log_head_extent_head_blkdev_io_block_buf,
+                                ),
+                                write_barrier_fut,
+                            };
+                    }
+                }
+                TransactionWriteJournalFutureState::WriteJournalLogHeadExtentTail {
+                    transaction,
+                    journal_log_head_extent_allocation_blocks_begin,
+                    journal_log_head_extent_head_blkdev_io_block_buf,
+                    updated_journal_log_head_integrity_state,
+                    write_extent_tail_fut,
+                } => {
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_extent_tail_fut), &fs_instance.blkdev, cx) {
+                        task::Poll::Ready(Ok((_, Ok(())))) => (),
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                            break (false, transaction.take(), NvFsError::from(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => break (false, transaction.take(), NvFsError::from(e)),
+                    };
+                    this.fut_state =
+                        TransactionWriteJournalFutureState::WriteBarrierBeforeJournalLogHeadExtentHeadWrite {
+                            transaction: transaction.take(),
+                            journal_log_head_extent_allocation_blocks_begin:
+                                *journal_log_head_extent_allocation_blocks_begin,
+                            journal_log_head_extent_head_blkdev_io_block_buf: mem::take(
+                                journal_log_head_extent_head_blkdev_io_block_buf,
+                            ),
+                            updated_journal_log_head_integrity_state: *updated_journal_log_head_integrity_state,
+                            write_barrier_fut,
+                        };
+                }
+                TransactionWriteJournalFutureState::WriteBarrierBeforeJournalLogHeadExtentHeadWrite {
+                    transaction,
+                    journal_log_head_extent_allocation_blocks_begin,
+                    journal_log_head_extent_head_blkdev_io_block_buf,
+                    updated_journal_log_head_integrity_state,
                     write_barrier_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
@@ -1146,36 +1376,57 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     };
 
                     let image_layout = &fs_instance.fs_config.image_layout;
-                    let write_extent_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
-                        u64::from(journal_log_head_extent.begin()),
-                        u64::from(journal_log_head_extent.block_count()),
-                        image_layout.allocation_block_size_128b_log2,
-                        mem::take(journal_log_head_extent_buf),
-                        0,
-                        image_layout
-                            .io_block_allocation_blocks_log2
-                            .max(image_layout.auth_tree_data_block_allocation_blocks_log2)
-                            + image_layout.allocation_block_size_128b_log2,
-                    );
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_size_128b_log2 = fs_instance.blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
 
-                    this.fut_state = TransactionWriteJournalFutureState::WriteJournalLogHeadExtent {
+                    let journal_log_head_extent_blkdev_io_blocks_begin =
+                        u64::from(*journal_log_head_extent_allocation_blocks_begin)
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
+                    let write_extent_head_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+                        journal_log_head_extent_blkdev_io_blocks_begin,
+                        1,
+                        blkdev_io_block_size_128b_log2 as u8,
+                        mem::take(journal_log_head_extent_head_blkdev_io_block_buf),
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
+                    this.fut_state = TransactionWriteJournalFutureState::WriteJournalLogHeadExtentHead {
                         transaction: transaction.take(),
-                        write_extent_fut,
+                        updated_journal_log_head_integrity_state: *updated_journal_log_head_integrity_state,
+                        write_extent_head_fut,
                     };
                 }
-                TransactionWriteJournalFutureState::WriteJournalLogHeadExtent {
+                TransactionWriteJournalFutureState::WriteJournalLogHeadExtentHead {
                     transaction,
-                    write_extent_fut,
+                    updated_journal_log_head_integrity_state,
+                    write_extent_head_fut,
                 } => {
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_extent_fut), &fs_instance.blkdev, cx) {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_extent_head_fut), &fs_instance.blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
                         task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                            drop(fs_instance);
+                            fs_instance_sync_state
+                                .journal_log_head_integrity_state
+                                .record_failed_write(updated_journal_log_head_integrity_state);
                             break (true, transaction.take(), NvFsError::from(e));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
+                    drop(fs_instance);
 
+                    // The journal log will always get invalidated as part of the current
+                    // transaction application before and before the next attempt to write to it, so
+                    // the integrity protection state isn't really needed anymore. Still maintain it
+                    // for consistency though.
+                    fs_instance_sync_state.journal_log_head_integrity_state = *updated_journal_log_head_integrity_state;
+
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
                     if this.issue_sync {
                         let write_sync_fut = match fs_instance.blkdev.write_sync() {
                             Ok(write_sync_fut) => write_sync_fut,

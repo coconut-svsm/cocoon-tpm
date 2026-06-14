@@ -764,7 +764,7 @@ impl<B: blkdev::NvBlkDev> TransactionAbortJournalFuture<B> {
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
+        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<(), (Option<Box<Transaction>>, NvFsError)>> {
         let this = pin::Pin::into_inner(self);
@@ -809,6 +809,11 @@ impl<B: blkdev::NvBlkDev> TransactionAbortJournalFuture<B> {
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
+
+                    drop(fs_instance);
+                    fs_instance_sync_state.journal_log_head_integrity_state.record_clear();
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let fs_config = &fs_instance.fs_config;
 
                     if !fs_config.enable_trimming {
                         this.fut_state = TransactionAbortJournalFutureState::Done;

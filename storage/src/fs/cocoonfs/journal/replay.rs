@@ -17,7 +17,9 @@ use crate::{
     blkdev::{self, NvBlkDevIoError},
     fs::{
         NvFsError, NvFsIoError,
-        cocoonfs::{FormatError, alloc_bitmap, auth_tree, extents, image_header, keys, layout},
+        cocoonfs::{
+            FormatError, alloc_bitmap, auth_tree, extents, image_header, integrity::ExtentIntegrityState, keys, layout,
+        },
     },
     nvfs_err_internal,
     utils_async::sync_types,
@@ -33,8 +35,15 @@ use core::{mem, pin, task};
 ///
 /// Check if the journal is active and needs replay. If so, do that and cleanup
 /// afterwards, including an invalidation of the journal.
+///
+/// In either case the journal log head extent's [`ExtentIntegrityState`] information required to
+/// maintain protection against torn [device IO Block](blkdev::NvBlkDev::io_block_size_128b_log2)
+/// writes for the first journal log update is returned from [`poll()`](Self::poll).
 pub struct JournalReplayFuture<B: blkdev::NvBlkDev> {
     enable_trimming: bool,
+
+    // Populated after the Journal Log has been read.
+    journal_log_head_integrity_state: ExtentIntegrityState,
 
     // Populated after the Journal Log has been read.
     journal_log_extents: Option<extents::PhysicalExtents>,
@@ -101,6 +110,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
         let read_log_fut = JournalLogReadFuture::new();
         Self {
             enable_trimming,
+            journal_log_head_integrity_state: ExtentIntegrityState::new_indeterminate(),
             journal_log_extents: None,
             apply_writes_script: None,
             update_auth_digests_script: None,
@@ -113,6 +123,11 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
     }
 
     /// Poll the [`JournalReplayFuture`] to completion.
+    ///
+    /// On success, the journal log head extent's [`ExtentIntegrityState`] information required to
+    /// maintain protection against torn [device IO
+    /// Block](blkdev::NvBlkDev::io_block_size_128b_log2) writes for the first journal log update is
+    /// returned from [`poll()`](Self::poll).
     ///
     /// # Arguments:
     ///
@@ -134,12 +149,13 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<'_, ST>,
         cx: &mut task::Context<'_>,
-    ) -> task::Poll<Result<(), NvFsError>> {
+    ) -> task::Poll<Result<ExtentIntegrityState, NvFsError>> {
         let this = pin::Pin::into_inner(self);
         loop {
             match &mut this.fut_state {
                 JournalReplayFutureState::ReadLog { read_log_fut } => {
-                    let journal_log = match JournalLogReadFuture::poll(
+                    let journal_log;
+                    (journal_log, this.journal_log_head_integrity_state) = match JournalLogReadFuture::poll(
                         pin::Pin::new(read_log_fut),
                         blkdev,
                         image_layout,
@@ -148,7 +164,9 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                         keys_cache,
                         cx,
                     ) {
-                        task::Poll::Ready(Ok(journal_log)) => journal_log,
+                        task::Poll::Ready(Ok((journal_log, journal_log_head_integrity_state))) => {
+                            (journal_log, journal_log_head_integrity_state)
+                        }
                         task::Poll::Ready(Err(e)) => {
                             this.fut_state = JournalReplayFutureState::Done;
                             return task::Poll::Ready(Err(e));
@@ -160,7 +178,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                         None => {
                             // No Journal active, nothing to do.
                             this.fut_state = JournalReplayFutureState::Done;
-                            return task::Poll::Ready(Ok(()));
+                            return task::Poll::Ready(Ok(this.journal_log_head_integrity_state));
                         }
                     };
                     let JournalLog {
@@ -448,8 +466,11 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    // The JournalCleanupFuture cleared the journal log head.
+                    this.journal_log_head_integrity_state.record_clear();
+
                     this.fut_state = JournalReplayFutureState::Done;
-                    return task::Poll::Ready(Ok(()));
+                    return task::Poll::Ready(Ok(this.journal_log_head_integrity_state));
                 }
                 JournalReplayFutureState::Done => unreachable!(),
             }

@@ -26,7 +26,13 @@ use crate::{
             },
             extents,
             fs::CocoonFsConfig,
-            image_header, inode_extents_list, inode_index, keys,
+            image_header, inode_extents_list, inode_index,
+            integrity::{
+                ExtentIntegrityProtectionsInvalidateFuture, ExtentIntegrityState,
+                extent_integrity_protections_determine_state, extent_integrity_protections_len,
+                extent_integrity_protections_verify_and_remove,
+            },
+            keys,
             layout::{self, BlockIndex as _},
             leb128,
             transaction::{Transaction, TransactionJournalUpdateAuthDigestsScriptIterator},
@@ -461,13 +467,22 @@ impl JournalLog {
     ) -> Result<EncryptedChainedExtentsLayout, NvFsError> {
         let auth_tree_data_block_allocation_blocks_log2 = image_layout.auth_tree_data_block_allocation_blocks_log2;
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2;
+        let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
         // Journal Log extents are aligned to the larger of the Authentication Tree Data
         // Block and the IO block sizes.
         let journal_block_allocation_blocks_log2 =
             auth_tree_data_block_allocation_blocks_log2.max(io_block_allocation_blocks_log2);
 
+        // The plaintext header placed at the beginning of the Journal Log head extent
+        // is comprised of
+        // - The magic.
+        // - The head extent's integrity protection section.
+        let plaintext_hdr_len =
+            8 + extent_integrity_protections_len(io_block_allocation_blocks_log2, allocation_block_size_128b_log2);
+        let plaintext_hdr_len = usize::try_from(plaintext_hdr_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
+
         EncryptedChainedExtentsLayout::new(
-            8, // For the magic.
+            plaintext_hdr_len,
             image_layout.block_cipher_alg,
             Some(image_layout.preauth_cca_protection_hmac_hash_alg),
             journal_block_allocation_blocks_log2,
@@ -626,6 +641,14 @@ impl JournalLog {
         // Minimum possible size of the first extent is found by requiring an effective
         // payload size of zero.
         let head_extent_allocation_blocks_count = journal_extents_layout.min_extents_allocation_blocks().0;
+        // Check that the full head extent can be read into memory.
+        if usize::try_from(
+            u64::from(head_extent_allocation_blocks_count) << (image_layout.allocation_block_size_128b_log2 as u32 + 7),
+        )
+        .is_err()
+        {
+            return Err(NvFsError::DimensionsNotSupported);
+        }
         let head_extent_payload_len =
             journal_extents_layout.extent_effective_payload_len(head_extent_allocation_blocks_count, true);
 
@@ -1215,23 +1238,19 @@ impl JournalLog {
 /// to replay it will be made.
 pub struct JournalLogInvalidateFuture<B: blkdev::NvBlkDev> {
     fut_state: JournalLogInvalidateFutureState<B>,
-    issue_sync: bool,
 }
 
 /// [`JournalLogInvalidateFuture`] state-machine state.
 enum JournalLogInvalidateFutureState<B: blkdev::NvBlkDev> {
-    Init,
+    Init {
+        issue_sync: bool,
+    },
     WriteBarrierBeforeInvalidate {
         write_barrier_fut: B::WriteBarrierFuture,
+        issue_sync: bool,
     },
     InvalidateJournalLogHead {
-        clear_fut: blkdev::helpers::NvBlkDevClearRegionFuture<B>,
-    },
-    WriteBarrierAfterInvalidate {
-        write_barrier_fut: B::WriteBarrierFuture,
-    },
-    WriteSyncAfterInvalidate {
-        write_sync_fut: B::WriteSyncFuture,
+        invalidate_fut: ExtentIntegrityProtectionsInvalidateFuture<B>,
     },
     Done,
 }
@@ -1246,8 +1265,7 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
     ///   the journal log invalidation.
     pub fn new(issue_sync: bool) -> Self {
         Self {
-            fut_state: JournalLogInvalidateFutureState::Init,
-            issue_sync,
+            fut_state: JournalLogInvalidateFutureState::Init { issue_sync },
         }
     }
 
@@ -1273,7 +1291,7 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
 
         loop {
             match &mut this.fut_state {
-                JournalLogInvalidateFutureState::Init => {
+                JournalLogInvalidateFutureState::Init { issue_sync } => {
                     let write_barrier_fut = match blkdev.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(e) => {
@@ -1281,10 +1299,15 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                     };
-                    this.fut_state =
-                        JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate { write_barrier_fut };
+                    this.fut_state = JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate {
+                        write_barrier_fut,
+                        issue_sync: *issue_sync,
+                    };
                 }
-                JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate { write_barrier_fut } => {
+                JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate {
+                    write_barrier_fut,
+                    issue_sync,
+                } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => {
@@ -1303,68 +1326,23 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                                 return task::Poll::Ready(Err(e));
                             }
                         };
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    let blkdev_io_block_allocation_blocks_log2 = blkdev_io_block_size_128b_log2
-                        .saturating_sub(image_layout.allocation_block_size_128b_log2 as u32);
-                    let clear_fut = blkdev::helpers::NvBlkDevClearRegionFuture::new(
-                        u64::from(journal_log_head_extent.begin()),
-                        1u64 << blkdev_io_block_allocation_blocks_log2,
+                    let invalidate_fut = ExtentIntegrityProtectionsInvalidateFuture::new(
+                        journal_log_head_extent.begin(),
                         image_layout.allocation_block_size_128b_log2,
+                        *issue_sync,
                     );
-                    this.fut_state = JournalLogInvalidateFutureState::InvalidateJournalLogHead { clear_fut };
+                    this.fut_state = JournalLogInvalidateFutureState::InvalidateJournalLogHead { invalidate_fut };
                 }
-                JournalLogInvalidateFutureState::InvalidateJournalLogHead { clear_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(clear_fut), blkdev, cx) {
+                JournalLogInvalidateFutureState::InvalidateJournalLogHead { invalidate_fut } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(invalidate_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                            return task::Poll::Ready(Err(e));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    if !this.issue_sync {
-                        let write_barrier_fut = match blkdev.write_barrier() {
-                            Ok(write_barrier_fut) => write_barrier_fut,
-                            Err(e) => {
-                                this.fut_state = JournalLogInvalidateFutureState::Done;
-                                return task::Poll::Ready(Err(NvFsError::from(e)));
-                            }
-                        };
-                        this.fut_state =
-                            JournalLogInvalidateFutureState::WriteBarrierAfterInvalidate { write_barrier_fut };
-                    } else {
-                        let write_sync_fut = match blkdev.write_sync() {
-                            Ok(write_sync_fut) => write_sync_fut,
-                            Err(e) => {
-                                this.fut_state = JournalLogInvalidateFutureState::Done;
-                                return task::Poll::Ready(Err(NvFsError::from(e)));
-                            }
-                        };
-                        this.fut_state = JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut };
-                    }
-                }
-                JournalLogInvalidateFutureState::WriteBarrierAfterInvalidate { write_barrier_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok(())) => (),
-                        task::Poll::Ready(Err(e)) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
-                    this.fut_state = JournalLogInvalidateFutureState::Done;
-                    return task::Poll::Ready(Ok(()));
-                }
-                JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_sync_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok(())) => (),
-                        task::Poll::Ready(Err(e)) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
                     this.fut_state = JournalLogInvalidateFutureState::Done;
                     return task::Poll::Ready(Ok(()));
                 }
@@ -1377,6 +1355,7 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
 /// Read the journal log at filesystem opening time.
 pub struct JournalLogReadFuture<B: blkdev::NvBlkDev> {
     fut_state: JournalLogReadFutureState<B>,
+    log_head_integrity_state: ExtentIntegrityState,
     log_extents: extents::PhysicalExtents,
     extents_decryption_instance: Option<EncryptedChainedExtentsDecryptionInstance>,
     decrypted_journal_log_extents: Vec<zeroize::Zeroizing<Vec<u8>>>,
@@ -1418,6 +1397,7 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
     pub fn new() -> Self {
         Self {
             fut_state: JournalLogReadFutureState::Init,
+            log_head_integrity_state: ExtentIntegrityState::new_indeterminate(),
             log_extents: extents::PhysicalExtents::new(),
             extents_decryption_instance: None,
             decrypted_journal_log_extents: Vec::new(),
@@ -1426,9 +1406,14 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
 
     /// Poll the [`JournalLogReadFuture`] to completion.
     ///
-    /// On successful completion, a [`JournalLog`] wrapped in a `Some` is
-    /// returned if a journal to get replayed has been found, or a `None` in
-    /// case the journal is inactive.
+    /// On successful completion, a pair of the journal log head extent's
+    /// [`ExtentIntegrityState`] and a [`JournalLog`] wrapped in an
+    /// [`Option`] is being returned.  The [`ExtentIntegrityState`] contains
+    /// all information required to maintain protection against torn [device
+    /// IO Block](blkdev::NvBlkDev::io_block_size_128b_log2) writes for the
+    /// first journal log update. The latter is present only if a journal to
+    /// get replayed has been found, and `None` in case the journal is
+    /// inactive.
     ///
     /// # Arguments:
     ///
@@ -1450,7 +1435,7 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<'_, ST>,
         cx: &mut task::Context<'_>,
-    ) -> task::Poll<Result<Option<JournalLog>, NvFsError>> {
+    ) -> task::Poll<Result<(Option<JournalLog>, ExtentIntegrityState), NvFsError>> {
         let this = pin::Pin::into_inner(self);
 
         loop {
@@ -1540,14 +1525,29 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
+
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     if &journal_log_head_extent_head[..8] != b"CCFSJRNL".as_slice() {
                         // Magic not found, journal is not active, all done.
                         this.fut_state = JournalLogReadFutureState::Done;
-                        return task::Poll::Ready(Ok(None));
+                        let log_head_integrity_state = match extent_integrity_protections_determine_state(
+                            io_slices::SingletonIoSlice::new(&journal_log_head_extent_head),
+                            b"CCFSJRNL".len(),
+                            0,
+                            None,
+                            image_layout.io_block_allocation_blocks_log2,
+                            image_layout.allocation_block_size_128b_log2,
+                            blkdev_io_block_size_128b_log2,
+                        ) {
+                            Ok(log_head_integrity_state) => log_head_integrity_state,
+                            Err(e) => {
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+                        return task::Poll::Ready(Ok((None, log_head_integrity_state)));
                     }
 
                     // Read the remainder from the log's head extent.
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let blkdev_io_block_allocation_blocks_log2 =
                         blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
@@ -1632,6 +1632,35 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     journal_log_head_extent_allocation_blocks,
                     journal_log_head_extent_effective_payload_len,
                 } => {
+                    let journal_active;
+                    (journal_active, this.log_head_integrity_state) =
+                        match extent_integrity_protections_verify_and_remove(
+                            io_slices::BuffersSliceIoSlicesMutIter::new(&mut [
+                                journal_log_head_extent_head.as_mut_slice(),
+                                journal_log_head_extent_tail.as_mut_slice(),
+                            ]),
+                            b"CCFSJRNL".len(),
+                            0,
+                            None,
+                            image_layout.io_block_allocation_blocks_log2,
+                            image_layout.allocation_block_size_128b_log2,
+                            blkdev.io_block_size_128b_log2(),
+                        ) {
+                            Ok((journal_active, log_head_integrity_state)) => {
+                                (journal_active, log_head_integrity_state)
+                            }
+                            Err(e) => {
+                                this.fut_state = JournalLogReadFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+                    if !journal_active {
+                        // If the integrity cannot get verified, the Journal Log head extent write had
+                        // been interrupted and the journal is considered non-existant.
+                        this.fut_state = JournalLogReadFutureState::Done;
+                        return task::Poll::Ready(Ok((None, this.log_head_integrity_state)));
+                    }
+
                     let extents_decryption_instance =
                         match JournalLog::extents_decryption_instance(image_layout, root_key, keys_cache) {
                             Ok(extents_decryption_instance) => extents_decryption_instance,
@@ -1680,14 +1709,6 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                         *journal_log_head_extent_allocation_blocks,
                     ) {
                         Ok(next_chained_extent) => next_chained_extent,
-                        Err(NvFsError::AuthenticationFailure) => {
-                            // An authentication failure for the Journal log's first "entry" extent
-                            // is non-fatal and silently ignored -- the write to it might have been
-                            // incomplete, i.e. interrupted by a power cut, in which case the
-                            // Journal is considered to be non-existant.
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Ok(None));
-                        }
                         Err(e) => {
                             this.fut_state = JournalLogReadFutureState::Done;
                             return task::Poll::Ready(Err(e));
@@ -1911,7 +1932,7 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     };
                     this.decrypted_journal_log_extents = Vec::new();
                     this.fut_state = JournalLogReadFutureState::Done;
-                    return task::Poll::Ready(Ok(Some(journal_log)));
+                    return task::Poll::Ready(Ok((Some(journal_log), this.log_head_integrity_state)));
                 }
                 JournalLogReadFutureState::Done => unreachable!(),
             }

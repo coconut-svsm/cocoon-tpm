@@ -1331,6 +1331,7 @@ service interruption. From a high level, it consists of *staging copies* of the 
 block](#def-io-block) granularity and a log specifying what needs to get written where as well as information about
 which parts of the the [authentication tree](#sec-auth-tree) need a reconstruction.
 
+### [Journal log encryption]{#sec-journal-log-encryption}
 The journal log is stored in a list of [encrypted chained extents](#sec-encryption-entity-chained-extents), with the
 head extent, the [*journal log head*](#def-journal-log-head), being located at a fixed position in the filesystem image,
 which can get determined from the information provided in the [static image header](#sec-static-image-header). More
@@ -1361,23 +1362,28 @@ the encrypted chained extents' inline authentication is set to
 3. An identifier byte of constant 1 identifying the type of authenticated associated data for the encrypted chained
    extents' inline authentication.
 
+### Journal log head extent plaintext header
+The [encrypted chained extents](#sec-encryption-entity-chained-extents) encryption entity format allows for a plaintext
+header to get stored in the first head extent. For the journal log, this plaintext header comprises
+
+* a magic of `CCFSJRNL`, without a terminating zero byte, if the journal is to be considered active,
+* an [extent integrity protection section](#sec-extent-integrity) for detecting torn writes to the head extent.
+
+Note that updates of the journal log head extent on storage must follow the [fail-safe extent write
+protocol](#def-extent-integrity-fail-safe-write), as is the case for any extent subject to the [common integrity
+protection scheme](#sec-extent-integrity).
+
 The journal is to be considered non-empty and to get applied upon the next filesystem opening following a possible
 service interruption whenever its head extent begins with a magic of `'CCFSJRNL'`, without a terminating zero byte, and
-the head extent's inline authentication digest successfully verifies its contents. Note that the head extent's inline
-authentication digest serves as an integrity protection measure here, in particular it is not an error if the head
-extent's authentication fails -- in this case the journal is simply considered as having been only partially written and
-is disregarded.
+the head [extent's integrity protections](#sec-extent-integrity) can get successfully verified. The magic is exempt from
+the [extent integrity protection's](#sec-extent-integrity) transformations.
 
-It is expected that implementations would write all of the journal's data before the journal log head extent, issuing
-write barriers as is appropriate for the underlying hardware device inbetween. Similarly, after the journal has been
-applied, either online or following a service interruption, it is expected that implementations would first invalidate
-the journal log head extent before proceeding to reusing any of the storage areas occupied by the journal's remainder,
-likewise issuing write barriers as needed. In particular failure to authenticate a journal log tail extent when the head
-authenticated successfully is a fatal error.
-
-The journal log plaintext is organized as sequence of tag-length-value (TLV) encoded fields. The tag and length are
-encoded as unsigned integers in LEB128 format, the format of the value depends on the field. The fields must be stored
-in the journal in the order induced by increasing tag values. The defined tag values are:
+### [Journal log payload contents]{#sec-journal-log-payload-contents}
+The journal log payload, subject to encryption in the [encrypted chained
+extents](#sec-encryption-entity-chained-extents) format, is organized as sequence of tag-length-value (TLV) encoded
+fields. The tag and length are encoded as unsigned integers in LEB128 format, the format of the value depends on the
+field. The fields must be stored in the journal in the order induced by increasing tag values. The defined tag values
+are:
 
 +----------------------------------------------------------------+-----+-----------------------------------------------+
 |Name                                                            |Value|Description                                    |
@@ -1404,7 +1410,7 @@ in the journal in the order induced by increasing tag values. The defined tag va
 |                                                                |     |disguising the journal's data staging copies.  |
 +----------------------------------------------------------------+-----+-----------------------------------------------+
 
-### Allocation bitmap file fragments' authentication digests
+#### Allocation bitmap file fragments' authentication digests
 Whenever [replaying any authentication tree node entry update](#sec-journal-auth-tree-updates-script) from the journal
 at filesystem opening time, the complete node must get reconstructed in full from scratch: the nodes' boundaries are
 aligned to the [IO Block](#def-io-block) size each, but some previous attempt to apply the journal might have failed and
@@ -1454,7 +1460,7 @@ The field's value contents is constructed by concatenating
 	  3. A format version identifier byte of constant 0 identifying the outer "envelope" format.
       4. The value of [`AUTH_SUBJECT_ID_JOURNAL_LOG_FIELD`](#sec-auth-context) encoded as a single byte.
 	  
-### [Writes application script]{#sec-journal-apply-writes-script-script}
+#### [Writes application script]{#sec-journal-apply-writes-script-script}
 The journal log contains instructions how to apply pending data updates, more specifically which journal staging copies
 to write to which target location. This information is encoded in a journal log field with a tag value of
 `JOURNAL_LOG_FIELD_TAG_APPLY_WRITES_SCRIPT` as a sequence of records, each one consisting of
@@ -1473,7 +1479,7 @@ The sequence is terminated with a termination records of three consecutive zero 
 No target region may overlap with any source region, with the exception that the two may be equal for a given record, in
 which case implementations must skip it.
 
-### [Authentication tree update script]{#sec-journal-auth-tree-updates-script}
+#### [Authentication tree update script]{#sec-journal-auth-tree-updates-script}
 The journal log field with tag `JOURNAL_LOG_FIELD_TAG_UPDATE_AUTH_DIGESTS_SCRIPT` contains all information needed to
 update the authentication tree, namely a list of [Authentication Tree Data Blocks](#def-auth-tree-data-block) whose
 [digests](#sec-auth-tree-data-block-digest) have changed -- either because their contents got updated or because some of
@@ -1498,7 +1504,7 @@ It should be stressed that implementations must always reconstruct any modified 
 when replaying the journal: a previous attempt to write to it might have failed and the contents must therefore be
 assumed to be in an indeterminate state.
 
-### Trim script
+#### Trim script
 A journal log may contain an optional field of tag `JOURNAL_LOG_FIELD_TAG_TRIM_SCRIPT` for specifying a sequence of
 ranges to issue trim commands on after the journal has been replayed and the journal log head invalidated.
 

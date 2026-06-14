@@ -411,6 +411,10 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    drop(fs_instance);
+                    fs_instance_sync_state.journal_log_head_integrity_state.record_clear();
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+
                     // If everything needed for trimming had been flushed due to a low memory
                     // condition, then don't even bother.
                     if fs_instance.fs_config.enable_trimming && this.low_memory < 2 {

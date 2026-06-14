@@ -14,8 +14,8 @@ use crate::{
     fs::{
         self, NvFsError,
         cocoonfs::{
-            alloc_bitmap, auth_tree, extent_ptr, extents, inode_index, keys, layout, read_buffer,
-            read_inode_data::ReadInodeDataFuture, transaction, write_inode_data::WriteInodeDataFuture,
+            alloc_bitmap, auth_tree, extent_ptr, extents, inode_index, integrity::ExtentIntegrityState, keys, layout,
+            read_buffer, read_inode_data::ReadInodeDataFuture, transaction, write_inode_data::WriteInodeDataFuture,
         },
     },
     nvfs_err_internal,
@@ -122,6 +122,7 @@ pub(super) struct CocoonFsConfig {
 /// Maintained at [`CocoonFs::sync_state`].
 pub(super) struct CocoonFsSyncState<ST: sync_types::SyncTypes> {
     pub image_size: layout::AllocBlockCount,
+    pub journal_log_head_integrity_state: ExtentIntegrityState,
     pub alloc_bitmap: alloc_bitmap::AllocBitmap,
     pub alloc_bitmap_file: alloc_bitmap::AllocBitmapFile,
     pub auth_tree: auth_tree::AuthTree<ST>,

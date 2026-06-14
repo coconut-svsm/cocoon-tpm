@@ -15,7 +15,9 @@ use crate::{
         cocoonfs::{
             FormatError, alloc_bitmap, auth_tree, extent_ptr, extents,
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
-            image_header, inode_extents_list, inode_index, journal, keys, layout, mkfs, read_buffer,
+            image_header, inode_extents_list, inode_index,
+            integrity::ExtentIntegrityState,
+            journal, keys, layout, mkfs, read_buffer,
         },
     },
     nvfs_err_internal,
@@ -201,6 +203,9 @@ where
     // Self.
     raw_root_key: Option<zeroize::Zeroizing<Vec<u8>>>,
 
+    // Initialized after the journal has been replayed.
+    journal_log_head_integrity_state: ExtentIntegrityState,
+
     // Initialized after the static + mutable image headers have been read.
     fs_config: Option<CocoonFsConfig>,
 
@@ -367,6 +372,7 @@ where
             blkdev: Some(blkdev),
             rng: Some(rng),
             raw_root_key: Some(raw_root_key),
+            journal_log_head_integrity_state: ExtentIntegrityState::new_indeterminate(),
             fs_config: None,
             root_hmac_digest: FixedVec::new_empty(),
             inode_index_entry_leaf_node_preauth_cca_protection_digest: FixedVec::new_empty(),
@@ -590,7 +596,7 @@ where
                     };
                     let mut keys_cache = keys::KeyCacheRef::<ST>::new_mut(keys_cache);
 
-                    match journal::replay::JournalReplayFuture::poll(
+                    this.journal_log_head_integrity_state = match journal::replay::JournalReplayFuture::poll(
                         pin::Pin::new(replay_journal_fut),
                         blkdev,
                         image_layout,
@@ -599,7 +605,7 @@ where
                         &mut keys_cache,
                         cx,
                     ) {
-                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Ok(journal_log_head_integrity_state)) => journal_log_head_integrity_state,
                         task::Poll::Ready(Err(e)) => break e,
                         task::Poll::Pending => return task::Poll::Pending,
                     };
@@ -1138,6 +1144,7 @@ where
 
                     let fs_sync_state = CocoonFsSyncState {
                         image_size: this.image_size,
+                        journal_log_head_integrity_state: this.journal_log_head_integrity_state,
                         alloc_bitmap,
                         alloc_bitmap_file,
                         auth_tree,
