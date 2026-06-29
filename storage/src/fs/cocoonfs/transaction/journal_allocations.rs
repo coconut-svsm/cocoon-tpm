@@ -8,7 +8,10 @@
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
-use super::{Transaction, auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndexRange};
+use super::{
+    Transaction, TransactionAllocationConstraints,
+    auth_tree_data_blocks_update_states::AuthTreeDataBlocksUpdateStatesIndexRange,
+};
 use crate::{
     blkdev,
     fs::{
@@ -349,7 +352,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             transaction,
                             journal_block_allocation_blocks_log2,
                             total_needed_blocks,
-                            true,
+                            TransactionAllocationConstraints::Journal,
                         ) {
                             Ok(allocate_journal_staging_copy_blocks_fut) => allocate_journal_staging_copy_blocks_fut,
                             Err((mut transaction, e)) => {
@@ -752,7 +755,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             &fs_instance,
                             transaction,
                             allocation_request.clone(),
-                            true,
+                            TransactionAllocationConstraints::Journal,
                         ) {
                             Ok(allocate_journal_extents_fut) => allocate_journal_extents_fut,
                             Err((transaction, e)) => {

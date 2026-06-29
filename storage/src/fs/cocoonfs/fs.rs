@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Definition of [`CocoonFs`] and implementation of the [`NvFs`](fs::NvFs)
@@ -3556,7 +3556,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         // reference on Self.
         transaction: Option<Box<transaction::Transaction>>,
         request: alloc_bitmap::ExtentsAllocationRequest,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     },
     /// Serve a [`AllocateBlockFuture`].
     AllocateBlock {
@@ -3564,7 +3564,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         // reference on Self.
         transaction: Option<Box<transaction::Transaction>>,
         block_allocation_blocks_log2: u32,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     },
     /// Serve a [`AllocateBlocksFuture`].
     AllocateBlocks {
@@ -3573,7 +3573,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         transaction: Option<Box<transaction::Transaction>>,
         block_allocation_blocks_log2: u32,
         count: usize,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
         request_pending_allocs: alloc_bitmap::SparseAllocBitmap,
         result: Vec<layout::PhysicalAllocBlockIndex>,
     },
@@ -3665,7 +3665,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
             Self::AllocateExtents {
                 transaction,
                 request,
-                for_journal,
+                constraints,
             } => {
                 let mut transaction = match transaction.take() {
                     Some(transaction) => transaction,
@@ -3680,10 +3680,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
                 // Do not repurpose pending frees if allocating for the journal.
-                let transaction_pending_frees = if *for_journal {
-                    &empty_pending_frees
-                } else {
-                    &transaction.allocs.pending_frees
+                let transaction_pending_frees = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
+                    transaction::TransactionAllocationConstraints::NoPendingFrees
+                    | transaction::TransactionAllocationConstraints::Journal => &empty_pending_frees,
                 };
 
                 let pending_allocs = [
@@ -3708,10 +3708,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                             pending_transactions_sync_state.register_allocated_extents(fs_sync_state, &result.0)
                         {
                             Err(e)
-                        } else if let Err(e) = if *for_journal {
-                            &mut transaction.allocs.journal_allocs
-                        } else {
-                            &mut transaction.allocs.pending_allocs
+                        } else if let Err(e) = match constraints {
+                            transaction::TransactionAllocationConstraints::Regular
+                            | transaction::TransactionAllocationConstraints::NoPendingFrees => {
+                                &mut transaction.allocs.pending_allocs
+                            }
+                            transaction::TransactionAllocationConstraints::Journal => {
+                                &mut transaction.allocs.journal_allocs
+                            }
                         }
                         .add_extents(result.0.iter())
                         {
@@ -3733,7 +3737,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
             Self::AllocateBlock {
                 transaction,
                 block_allocation_blocks_log2,
-                for_journal,
+                constraints,
             } => {
                 let mut transaction = match transaction.take() {
                     Some(transaction) => transaction,
@@ -3748,10 +3752,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
                 // Do not repurpose pending frees if allocating for the journal.
-                let transaction_pending_frees = if *for_journal {
-                    &empty_pending_frees
-                } else {
-                    &transaction.allocs.pending_frees
+                let transaction_pending_frees = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
+                    transaction::TransactionAllocationConstraints::NoPendingFrees
+                    | transaction::TransactionAllocationConstraints::Journal => &empty_pending_frees,
                 };
 
                 let pending_allocs = [
@@ -3780,10 +3784,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                             *block_allocation_blocks_log2,
                         ) {
                             Err(e)
-                        } else if let Err(e) = if *for_journal {
-                            &mut transaction.allocs.journal_allocs
-                        } else {
-                            &mut transaction.allocs.pending_allocs
+                        } else if let Err(e) = match constraints {
+                            transaction::TransactionAllocationConstraints::Regular
+                            | transaction::TransactionAllocationConstraints::NoPendingFrees => {
+                                &mut transaction.allocs.pending_allocs
+                            }
+                            transaction::TransactionAllocationConstraints::Journal => {
+                                &mut transaction.allocs.journal_allocs
+                            }
                         }
                         .add_block(allocated_block, *block_allocation_blocks_log2)
                         {
@@ -3812,7 +3820,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 transaction,
                 block_allocation_blocks_log2,
                 count,
-                for_journal,
+                constraints,
                 request_pending_allocs,
                 result: allocated_blocks,
             } => {
@@ -3829,10 +3837,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
                 // Do not repurpose pending frees if allocating for the journal.
-                let transaction_pending_frees = if *for_journal {
-                    &empty_pending_frees
-                } else {
-                    &transaction.allocs.pending_frees
+                let transaction_pending_frees = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
+                    transaction::TransactionAllocationConstraints::NoPendingFrees
+                    | transaction::TransactionAllocationConstraints::Journal => &empty_pending_frees,
                 };
 
                 let pending_frees = [transaction_pending_frees];
@@ -3883,10 +3891,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     *block_allocation_blocks_log2,
                 ) {
                     Err(e)
-                } else if let Err(e) = if *for_journal {
-                    &mut transaction.allocs.journal_allocs
-                } else {
-                    &mut transaction.allocs.pending_allocs
+                } else if let Err(e) = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular
+                    | transaction::TransactionAllocationConstraints::NoPendingFrees => {
+                        &mut transaction.allocs.pending_allocs
+                    }
+                    transaction::TransactionAllocationConstraints::Journal => &mut transaction.allocs.journal_allocs,
                 }
                 .add_blocks(allocated_blocks.iter().copied(), *block_allocation_blocks_log2)
                 {
@@ -3950,19 +3960,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateExtentsFuture<ST, B
     ///   behalf to allocate. Will get returned back from [`poll()`](Self::poll)
     ///   upon future completion.
     /// * `request` - The allocation request.
-    /// * `for_journal` - Whether or not the allocation is for the journal.
+    /// * `constraints`: Constraints on the allocation pertaining to its
+    ///   intended use.
     pub fn new(
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
         transaction: Box<transaction::Transaction>,
         request: alloc_bitmap::ExtentsAllocationRequest,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     ) -> Result<Self, (Option<Box<transaction::Transaction>>, NvFsError)> {
         let pending_transactions_sync_state_fut = asynchronous::FutureQueue::enqueue(
             CocoonFs::get_pending_transactions_sync_state_ref(fs_instance).make_clone(),
             PendingTransactionsSyncFuture::AllocateExtents {
                 transaction: Some(transaction),
                 request,
-                for_journal,
+                constraints,
             },
         )
         .map_err(|(f, e)| {
@@ -4067,19 +4078,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlockFuture<ST, B> 
     /// * `block_allocation_blocks_log2` - Base-2 logarithm of the desired block
     ///   size in units of [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
-    /// * `for_journal` - Whether or not the allocation is for the journal.
+    /// * `constraints`: Constraints on the allocation pertaining to its
+    ///   intended use.
     pub fn new(
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
         transaction: Box<transaction::Transaction>,
         block_allocation_blocks_log2: u32,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     ) -> Result<Self, (Option<Box<transaction::Transaction>>, NvFsError)> {
         let pending_transactions_sync_state_fut = asynchronous::FutureQueue::enqueue(
             CocoonFs::get_pending_transactions_sync_state_ref(fs_instance).make_clone(),
             PendingTransactionsSyncFuture::AllocateBlock {
                 transaction: Some(transaction),
                 block_allocation_blocks_log2,
-                for_journal,
+                constraints,
             },
         )
         .map_err(|(f, e)| {
@@ -4184,13 +4196,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlocksFuture<ST, B>
     ///   size in units of [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
     /// * `count` - The number of blocks to allocate.
-    /// * `for_journal` - Whether or not the allocation is for the journal.
+    /// * `constraints`: Constraints on the allocation pertaining to its
+    ///   intended use.
     pub fn new(
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
         transaction: Box<transaction::Transaction>,
         block_allocation_blocks_log2: u32,
         count: usize,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     ) -> Result<Self, (Option<Box<transaction::Transaction>>, NvFsError)> {
         let mut result = Vec::new();
         if let Err(e) = result.try_reserve_exact(count) {
@@ -4202,7 +4215,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlocksFuture<ST, B>
                 transaction: Some(transaction),
                 block_allocation_blocks_log2,
                 count,
-                for_journal,
+                constraints,
                 request_pending_allocs: alloc_bitmap::SparseAllocBitmap::new(),
                 result,
             },

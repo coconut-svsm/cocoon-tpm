@@ -598,6 +598,43 @@ impl Transaction {
     }
 }
 
+/// Constraints on allocation to be made on behalf of a [`Transaction`].
+pub(super) enum TransactionAllocationConstraints {
+    /// Permanent allocation for data written through the journal.
+    ///
+    /// Common [pre-commit write
+    /// rules](super::fs::CocoonFsPendingTransactionsSyncState::pending_allocs)
+    /// apply.
+    ///
+    /// The allocation may draw from [`TransactionAllocations::pending_frees`]
+    /// and will get recorded at [`TransactionAllocations::pending_allocs`].
+    Regular,
+    /// Permanent allocation for data not written through the journal.
+    ///
+    /// The allocated storage may get written to at pre-commit time already, if
+    /// aligned to the larger of the [IO
+    /// Block](ImageLayout::io_block_allocation_blocks_log2) and the
+    /// [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) size.
+    ///
+    /// The allocation may *not* draw from
+    /// [`TransactionAllocations::pending_frees`] and will get recorded
+    /// at [`TransactionAllocations::pending_allocs`].
+    NoPendingFrees,
+    /// Temporary allocation for the journal.
+    ///
+    /// The allocated storage may get written to at pre-commit time already, if
+    /// aligned to the larger of the [IO
+    /// Block](ImageLayout::io_block_allocation_blocks_log2) and the
+    /// [Authentication Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) size.
+    ///
+    /// The allocation may *not* draw from
+    /// [`TransactionAllocations::pending_frees`] and will get recorded
+    /// at [`TransactionAllocations::journal_allocs`].
+    Journal,
+}
+
 /// Allocations and deallocations made on behalf of the [`Transaction`].
 ///
 /// Track allocations and deallocations relative to

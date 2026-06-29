@@ -422,7 +422,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &fs_instance_sync_state.get_fs_ref(),
                         transaction,
                         inode_extents_allocation_request,
-                        false,
+                        transaction::TransactionAllocationConstraints::Regular,
                     ) {
                         Ok(allocate_fut) => allocate_fut,
                         Err((transaction, e)) => break (transaction, e),

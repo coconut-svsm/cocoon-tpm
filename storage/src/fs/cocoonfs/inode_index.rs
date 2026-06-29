@@ -6567,7 +6567,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 transaction,
                                 image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
                                 2,
-                                false,
+                                transaction::TransactionAllocationConstraints::Regular,
                             ) {
                                 Ok(allocate_fut) => allocate_fut,
                                 Err((transaction, e)) => break (transaction, Err(e)),
@@ -6584,7 +6584,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 &fs_instance,
                                 transaction,
                                 image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
-                                false,
+                                transaction::TransactionAllocationConstraints::Regular,
                             ) {
                                 Ok(allocate_fut) => allocate_fut,
                                 Err((transaction, e)) => break (transaction, Err(e)),
@@ -6823,7 +6823,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     } else {
                                         image_layout.index_tree_internal_node_allocation_blocks_log2
                                     } as u32,
-                                    false,
+                                    transaction::TransactionAllocationConstraints::Regular,
                                 ) {
                                     Ok(allocate_fut) => allocate_fut,
                                     Err((transaction, e)) => break (transaction, Err(e)),
@@ -7219,7 +7219,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &fs_instance,
                         transaction,
                         image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32,
-                        false,
+                        transaction::TransactionAllocationConstraints::Regular,
                     ) {
                         Ok(allocate_fut) => allocate_fut,
                         Err((transaction, e)) => {
@@ -8086,7 +8086,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             transaction,
                             image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
                             2,
-                            false,
+                            transaction::TransactionAllocationConstraints::Regular,
                         ) {
                             Ok(allocate_fut) => allocate_fut,
                             Err((transaction, e)) => break (transaction, Err(e)),
@@ -8205,7 +8205,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32,
-                            false,
+                            transaction::TransactionAllocationConstraints::Regular,
                         ) {
                             Ok(allocate_fut) => allocate_fut,
                             Err((transaction, e)) => break (transaction, Err(e)),
