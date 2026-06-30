@@ -2672,6 +2672,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                         sync_state_write_guard: None,
                                         cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                             transaction,
+                                            Some(pending_transactions_sync_state),
                                         ),
                                         pre_commit_error: e,
                                     };
@@ -2688,7 +2689,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                 pending_transactions_sync_state,
                             ) {
                                 Ok(write_journal_fut) => write_journal_fut,
-                                Err((transaction, e)) => {
+                                Err((transaction, pending_transactions_sync_state, e)) => {
                                     *this = Self::CleanupOnPreCommitError {
                                         // Will receive the
                                         // CocoonFsSyncStateMemberWriteGuard::into_weak() upon
@@ -2696,6 +2697,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                         sync_state_write_guard: None,
                                         cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                             transaction,
+                                            Some(pending_transactions_sync_state),
                                         ),
                                         pre_commit_error: e,
                                     };
@@ -2816,6 +2818,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                             sync_state_write_guard: None,
                                             cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                                 transaction,
+                                                None,
                                             ),
                                             pre_commit_error: e,
                                         };
@@ -3678,7 +3681,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let pending_transactions_allocs = &pending_transactions_sync_state.pending_allocs;
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
-                // Do not repurpose pending frees if allocating for the journal.
+                // Do not repurpose pending_frees if allocating for the journal.
                 let transaction_pending_frees = match constraints {
                     transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
                     transaction::TransactionAllocationConstraints::NoPendingFrees
@@ -3691,7 +3694,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     pending_transactions_allocs,
                 ];
                 let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
-                let pending_frees = [transaction_pending_frees];
+                let pending_frees = [transaction_pending_frees, &transaction.allocs.journal_frees];
                 let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
 
                 let result = fs_sync_state.alloc_bitmap.find_free_extents(
@@ -3722,6 +3725,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                             Err(e)
                         } else {
                             transaction.allocs.pending_frees.remove_extents(result.0.iter());
+                            transaction.allocs.journal_frees.remove_extents(result.0.iter());
                             Ok(result)
                         }
                     }
@@ -3750,7 +3754,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let pending_transactions_allocs = &pending_transactions_sync_state.pending_allocs;
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
-                // Do not repurpose pending frees if allocating for the journal.
+                // Do not repurpose pending_frees if allocating for the journal.
                 let transaction_pending_frees = match constraints {
                     transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
                     transaction::TransactionAllocationConstraints::NoPendingFrees
@@ -3763,7 +3767,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     pending_transactions_allocs,
                 ];
                 let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
-                let pending_frees = [transaction_pending_frees];
+                let pending_frees = [transaction_pending_frees, &transaction.allocs.journal_frees];
                 let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
 
                 let result = fs_sync_state.alloc_bitmap.find_free_block(
@@ -3806,6 +3810,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                                 .allocs
                                 .pending_frees
                                 .remove_block(allocated_block, *block_allocation_blocks_log2);
+                            transaction
+                                .allocs
+                                .journal_frees
+                                .remove_block(allocated_block, *block_allocation_blocks_log2);
                             Ok(allocated_block)
                         }
                     }
@@ -3835,7 +3843,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let pending_transactions_allocs = &pending_transactions_sync_state.pending_allocs;
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
-                // Do not repurpose pending frees if allocating for the journal.
+                // Do not repurpose pending_frees if allocating for the journal.
                 let transaction_pending_frees = match constraints {
                     transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
                     transaction::TransactionAllocationConstraints::NoPendingFrees
@@ -3849,7 +3857,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 ];
                 let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
 
-                let pending_frees = [transaction_pending_frees];
+                let pending_frees = [transaction_pending_frees, &transaction.allocs.journal_frees];
                 let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
 
                 while allocated_blocks.len() < *count {
@@ -3911,6 +3919,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     transaction
                         .allocs
                         .pending_frees
+                        .remove_blocks(allocated_blocks.iter().copied(), *block_allocation_blocks_log2);
+                    transaction
+                        .allocs
+                        .journal_frees
                         .remove_blocks(allocated_blocks.iter().copied(), *block_allocation_blocks_log2);
                     Ok(mem::take(allocated_blocks))
                 };

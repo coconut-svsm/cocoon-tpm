@@ -5,7 +5,7 @@
 //! Implementation of [`TransactionApplyJournalFuture`].
 
 extern crate alloc;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 
 use super::{
     Transaction,
@@ -508,11 +508,8 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
             transaction.allocs.pending_allocs = alloc_bitmap::SparseAllocBitmap::new();
             transaction.allocs.pending_frees = alloc_bitmap::SparseAllocBitmap::new();
             transaction.allocs.journal_allocs = alloc_bitmap::SparseAllocBitmap::new();
+            transaction.allocs.journal_frees = alloc_bitmap::SparseAllocBitmap::new();
             transaction.journal_log_tail_extents = extents::PhysicalExtents::new();
-            transaction.abandoned_journal_staging_copy_blocks = Vec::new();
-            transaction
-                .accumulated_fs_instance_pending_transactions_sync_state
-                .pending_allocs = alloc_bitmap::SparseAllocBitmap::new();
             self.low_memory = 2;
 
             // The transaction's update states are needed only for copying the data updates

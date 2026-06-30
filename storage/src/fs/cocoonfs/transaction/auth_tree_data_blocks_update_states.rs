@@ -1665,81 +1665,10 @@ impl AuthTreeDataBlocksUpdateStates {
     ///
     /// # Arguments:
     ///
-    /// * `abandoned_journal_staging_copy_blocks` - Destination for collecting
-    ///   abandoned journal staging copy blocks. Entries will point to the
-    ///   beginning of abandoned blocks, all equal to the larger of an
-    ///   [Authentication Tree Data
-    ///   Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) and
-    ///   an [IO Block](layout::ImageLayout::io_block_allocation_blocks_log2) in
-    ///   size.
     /// * `image_header_end` - [End of the filesystem image header on
     ///   storage](crate::fs::cocoonfs::image_header::MutableImageHeader::physical_location).
-    pub fn prune_unmodified(
-        &mut self,
-        abandoned_journal_staging_copy_blocks: &mut Vec<layout::PhysicalAllocBlockIndex>,
-        image_header_end: layout::PhysicalAllocBlockIndex,
-    ) -> Result<(), NvFsError> {
+    pub fn prune_unmodified(&mut self, image_header_end: layout::PhysicalAllocBlockIndex) {
         let io_block_allocation_blocks_log2 = self.io_block_allocation_blocks_log2 as u32;
-        let auth_tree_data_block_allocation_blocks_log2 = self.auth_tree_data_block_allocation_blocks_log2 as u32;
-        let journal_block_allocation_blocks_log2 =
-            io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2);
-
-        let mut prune_states_range = |this: &mut Self, range_begin: usize, range_end: usize| -> Result<(), NvFsError> {
-            // Count how many Journal Staging Blocks will get abandoned and reserve the
-            // additional capacity only once.
-            let mut abandoned_journal_staging_copy_blocks_in_range = 1usize;
-            let mut last_journal_staging_copy_allocation_blocks_begin: Option<layout::PhysicalAllocBlockIndex> = None;
-            for i in range_begin..range_end {
-                if let Some(cur_journal_staging_copy_allocation_blocks_begin) =
-                    this.states[i].get_journal_staging_copy_allocation_blocks_begin()
-                {
-                    if last_journal_staging_copy_allocation_blocks_begin
-                        .map(|last_journal_staging_copy_allocation_blocks_begin| {
-                            (u64::from(last_journal_staging_copy_allocation_blocks_begin)
-                                ^ u64::from(cur_journal_staging_copy_allocation_blocks_begin))
-                                >> journal_block_allocation_blocks_log2
-                                != 0
-                        })
-                        .unwrap_or(true)
-                    {
-                        abandoned_journal_staging_copy_blocks_in_range += 1;
-                    }
-                    last_journal_staging_copy_allocation_blocks_begin =
-                        Some(cur_journal_staging_copy_allocation_blocks_begin);
-                }
-            }
-            abandoned_journal_staging_copy_blocks.try_reserve(abandoned_journal_staging_copy_blocks_in_range)?;
-
-            // Now add all abandoned Journal Staging Blocks.
-            let mut last_journal_staging_copy_allocation_blocks_begin: Option<layout::PhysicalAllocBlockIndex> = None;
-            for i in range_begin..range_end {
-                if let Some(cur_journal_staging_copy_allocation_blocks_begin) =
-                    this.states[i].get_journal_staging_copy_allocation_blocks_begin()
-                {
-                    if last_journal_staging_copy_allocation_blocks_begin
-                        .map(|last_journal_staging_copy_allocation_blocks_begin| {
-                            (u64::from(last_journal_staging_copy_allocation_blocks_begin)
-                                ^ u64::from(cur_journal_staging_copy_allocation_blocks_begin))
-                                >> journal_block_allocation_blocks_log2
-                                != 0
-                        })
-                        .unwrap_or(true)
-                    {
-                        abandoned_journal_staging_copy_blocks.push(
-                            cur_journal_staging_copy_allocation_blocks_begin
-                                .align_down(journal_block_allocation_blocks_log2),
-                        );
-                    }
-                    last_journal_staging_copy_allocation_blocks_begin =
-                        Some(cur_journal_staging_copy_allocation_blocks_begin);
-                }
-            }
-
-            // And finally remove the states in the specified range.
-            this.states.drain(range_begin..range_end);
-            Ok(())
-        };
-
         let mut prune_range_begin: Option<usize> = None;
         let mut cur_states_index = 0usize;
         while cur_states_index < self.states.len() {
@@ -1784,7 +1713,7 @@ impl AuthTreeDataBlocksUpdateStates {
 
             if any_modified {
                 if let Some(prune_range_begin) = prune_range_begin.take() {
-                    prune_states_range(self, prune_range_begin, cur_states_index)?;
+                    self.states.drain(prune_range_begin..cur_states_index);
                     cur_states_index = prune_range_begin;
                 }
             } else if prune_range_begin.is_none() {
@@ -1794,9 +1723,8 @@ impl AuthTreeDataBlocksUpdateStates {
         }
 
         if let Some(prune_range_begin) = prune_range_begin.take() {
-            prune_states_range(self, prune_range_begin, self.states.len())?;
+            self.states.drain(prune_range_begin..self.states.len());
         }
-        Ok(())
     }
 
     /// Test whether the [storage

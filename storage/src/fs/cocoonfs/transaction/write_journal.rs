@@ -67,6 +67,7 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, B: blkdev::Nv
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
         transaction: Option<Box<Transaction>>,
+        accumulated_pending_transactions_sync_state: CocoonFsPendingTransactionsSyncState,
     },
     InodeIndexApplyStagedUpdates {
         update_root_inode_fut: inode_index::InodeIndexUpdateRootNodeInodeFuture<ST, B>,
@@ -206,14 +207,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
     ///   [`CocoonFs::pending_transactions_sync_state`] upon starting the commit
     ///   process for `transaction`.
     pub fn new(
-        mut transaction: Box<Transaction>,
+        transaction: Box<Transaction>,
         issue_sync: bool,
         _fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         accumulated_pending_transactions_sync_state: CocoonFsPendingTransactionsSyncState,
-    ) -> Result<Self, (Box<Transaction>, NvFsError)> {
-        transaction.accumulated_fs_instance_pending_transactions_sync_state =
-            accumulated_pending_transactions_sync_state;
-
+    ) -> Result<Self, (Box<Transaction>, CocoonFsPendingTransactionsSyncState, NvFsError)> {
         // Check if there's any staged update in a failed state, meaning
         // some prior update staging operation failed and it hasn't got rectified.
         if transaction
@@ -226,12 +224,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                 )
             })
         {
-            return Err((transaction, NvFsError::FailedDataUpdateRead));
+            return Err((
+                transaction,
+                accumulated_pending_transactions_sync_state,
+                NvFsError::FailedDataUpdateRead,
+            ));
         }
 
         Ok(Self {
             fut_state: TransactionWriteJournalFutureState::Init {
                 transaction: Some(transaction),
+                accumulated_pending_transactions_sync_state,
             },
             encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction: FixedVec::new_empty(),
             issue_sync,
@@ -264,20 +267,33 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
 
         let (need_journal_abort, transaction, e) = 'outer: loop {
             match &mut this.fut_state {
-                TransactionWriteJournalFutureState::Init { transaction } => {
+                TransactionWriteJournalFutureState::Init {
+                    transaction,
+                    accumulated_pending_transactions_sync_state,
+                } => {
                     let mut transaction = match transaction.take() {
                         Some(transaction) => transaction,
                         None => break (false, None, nvfs_err_internal!()),
                     };
 
-                    transaction
-                        .accumulated_fs_instance_pending_transactions_sync_state
+                    // Remove from the the grabbed CocoonFsPendingTransactionsSyncState's tracked
+                    // allocations any tracked as allocated in this Transaction.
+                    accumulated_pending_transactions_sync_state
                         .pending_allocs
                         .subtract(&transaction.allocs.pending_allocs);
-                    transaction
-                        .accumulated_fs_instance_pending_transactions_sync_state
+                    accumulated_pending_transactions_sync_state
                         .pending_allocs
                         .subtract(&transaction.allocs.journal_allocs);
+
+                    // Now the
+                    // accumulated_fs_instance_pending_transactions_sync_state.pending_allocs
+                    // contains allocations from all other concurrenly executing transactions
+                    // cancelled by now, as well as this transaction's
+                    // journal_frees. Make journal_frees the superset of that.
+                    transaction.allocs.journal_frees = mem::replace(
+                        &mut accumulated_pending_transactions_sync_state.pending_allocs,
+                        alloc_bitmap::SparseAllocBitmap::new(),
+                    );
 
                     this.fut_state = TransactionWriteJournalFutureState::InodeIndexApplyStagedUpdates {
                         update_root_inode_fut: inode_index::InodeIndexUpdateRootNodeInodeFuture::new(transaction),
@@ -370,31 +386,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     }
 
                     // Prune any unneeded update states before proceeding further.
-                    if let Err(e) = transaction.auth_tree_data_blocks_update_states.prune_unmodified(
-                        &mut transaction.abandoned_journal_staging_copy_blocks,
-                        fs_config.image_header_end,
-                    ) {
-                        break (false, Some(transaction), e);
-                    }
-                    // Subsequent code would attempt to repurpose abandandoned Journal Staging Copy
-                    // Blocks for allocations, make sure that they're recorded in journal_allocs to
-                    // avoid potentially allocating the same block twice: once through the abandoned
-                    // list and once through the regular allocation primitives. Note that most
-                    // abandoned Journal Staging Copy Blocks should already be present in
-                    // journal_allocs, this is relevant only for those that qualified for in-place
-                    // writes.
-                    let image_layout = &fs_config.image_layout;
-                    let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
-                    let auth_tree_data_block_allocation_blocks_log2 =
-                        image_layout.auth_tree_data_block_allocation_blocks_log2 as u32;
-                    let journal_block_allocation_blocks_log2 =
-                        io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2);
-                    if let Err(e) = transaction.allocs.journal_allocs.add_blocks(
-                        transaction.abandoned_journal_staging_copy_blocks.iter().copied(),
-                        journal_block_allocation_blocks_log2,
-                    ) {
-                        break (false, Some(transaction), e);
-                    }
+                    transaction
+                        .auth_tree_data_blocks_update_states
+                        .prune_unmodified(fs_config.image_header_end);
 
                     let all_update_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::new(
                         AuthTreeDataBlocksUpdateStatesIndex::from(0),

@@ -5,18 +5,14 @@
 //! Implementation of [`Transaction`].
 
 extern crate alloc;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 
 use crate::{
     blkdev,
     crypto::rng,
     fs::{
         NvFsError,
-        cocoonfs::{
-            alloc_bitmap, auth_tree, extents,
-            fs::{CocoonFsPendingTransactionsSyncState, CocoonFsSyncStateMemberRef},
-            inode_index, journal, layout,
-        },
+        cocoonfs::{alloc_bitmap, auth_tree, extents, fs::CocoonFsSyncStateMemberRef, inode_index, journal, layout},
     },
     utils_async::sync_types,
     utils_common::fixed_vec::FixedVec,
@@ -36,7 +32,7 @@ mod write_dirty_data;
 mod write_journal;
 
 #[cfg(doc)]
-use crate::fs::cocoonfs::fs::CocoonFs;
+use crate::fs::cocoonfs::fs::{CocoonFs, CocoonFsPendingTransactionsSyncState};
 #[cfg(doc)]
 use auth_tree_data_blocks_update_states::AllocationBlockUpdateStagedUpdate;
 #[cfg(doc)]
@@ -76,24 +72,11 @@ pub struct Transaction {
     /// Allocations and deallocations staged on behalf of the [`Transaction`].
     pub(super) allocs: TransactionAllocations,
 
-    /// List of recollected abandoned journal staging copy blocks.
-    ///
-    /// Collection of blocks, all equal to the larger of the [Authentication
-    /// Tree Data
-    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2) and the
-    /// [IO Block](ImageLayout::io_block_allocation_blocks_log2) size,
-    /// identified by their respective beginning on storage.
-    abandoned_journal_staging_copy_blocks: Vec<layout::PhysicalAllocBlockIndex>,
-
     /// Whether the [`Transaction`] has been elected as the primary one among
     /// the pending.
     ///
     /// The primary [`Transaction`] has more freedom regarding in-place writes.
     pub(super) is_primary_pending: bool,
-
-    /// State transferred from [`CocoonFs::pending_transactions_sync_state`]
-    /// upon [`Transaction`] commit.
-    accumulated_fs_instance_pending_transactions_sync_state: CocoonFsPendingTransactionsSyncState,
 
     /// Updates to the inode index staged at the [`Transaction`].
     pub(super) inode_index_updates: inode_index::TransactionInodeIndexUpdates,
@@ -161,9 +144,7 @@ impl Transaction {
             blkdev_io_block_size_128b_log2,
             preferred_blkdev_io_blocks_bulk_log2,
             allocs: TransactionAllocations::new(),
-            abandoned_journal_staging_copy_blocks: Vec::new(),
             is_primary_pending,
-            accumulated_fs_instance_pending_transactions_sync_state: CocoonFsPendingTransactionsSyncState::new(),
             inode_index_updates: inode_index::TransactionInodeIndexUpdates::new(&fs_instance_sync_state.inode_index),
             pending_auth_tree_updates: TransactionPendingAuthTreeUpdates::new(),
             journal_log_tail_extents: extents::PhysicalExtents::new(),
@@ -647,6 +628,16 @@ pub(super) struct TransactionAllocations {
     pub pending_frees: alloc_bitmap::SparseAllocBitmap,
     /// Temporary allocations for the lifetime of the journal.
     pub journal_allocs: alloc_bitmap::SparseAllocBitmap,
+    /// Allocations that had been made with
+    /// [`TransactionAllocationConstraints::NoPendingFrees`]
+    /// or [`TransactionAllocationConstraints::Journal`], but have been freed
+    /// again.
+    ///
+    /// The allocations are still recorded at the central
+    /// [`CocoonFsPendingTransactionsSyncState::pending_allocs`], so will not
+    /// get reallocated to any other concurrently pending [`Transaction`].
+    /// The "owning" transaction may repurpose though.
+    pub journal_frees: alloc_bitmap::SparseAllocBitmap,
 }
 
 impl TransactionAllocations {
@@ -656,6 +647,7 @@ impl TransactionAllocations {
             pending_allocs: alloc_bitmap::SparseAllocBitmap::new(),
             pending_frees: alloc_bitmap::SparseAllocBitmap::new(),
             journal_allocs: alloc_bitmap::SparseAllocBitmap::new(),
+            journal_frees: alloc_bitmap::SparseAllocBitmap::new(),
         }
     }
 
