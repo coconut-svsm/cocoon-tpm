@@ -784,7 +784,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     };
                     if let Err(e) = image_header::MutableImageHeader::encode(
                         mutable_image_header_update_staging_bufs_iter.map_err(NvFsError::from),
-                        &fs_instance_sync_state.aux_fs_metadata_update_groups_heads,
+                        if let Some(aux_fs_metadata_update) = transaction.aux_fs_metadata_update.as_ref() {
+                            &aux_fs_metadata_update.aux_fs_metadata_update_groups_heads
+                        } else {
+                            &fs_instance_sync_state.aux_fs_metadata_update_groups_heads
+                        },
                         &transaction.pending_auth_tree_updates.updated_root_hmac_digest,
                         inode_index_entry_leaf_node_preauth_cca_protection_digest,
                         &fs_config.inode_index_entry_leaf_node_block_ptr,
@@ -1040,7 +1044,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                                 &mut journal_log_head_extent_head_blkdev_io_block_buf,
                                 &mut journal_log_head_extent_tail_buf,
                             ]),
-                            fs_sync_state_aux_fs_metadata_update_groups_heads,
+                            if let Some(aux_fs_metadata_update) = transaction.aux_fs_metadata_update.as_ref() {
+                                &aux_fs_metadata_update.aux_fs_metadata_update_groups_heads
+                            } else {
+                                fs_sync_state_aux_fs_metadata_update_groups_heads
+                            },
                             image_layout,
                         )
                     {

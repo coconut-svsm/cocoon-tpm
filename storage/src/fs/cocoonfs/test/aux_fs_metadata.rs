@@ -6,12 +6,15 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{
-    CocoonFsTestConfigs, cocoonfs_test_fs_instance_into_blkdev_helper, cocoonfs_test_mkfs_op_helper,
-    cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper, cocoonfs_test_read_fs_metadata_helper,
+    CocoonFsTestConfigs, cocoonfs_test_commit_transaction_op_helper, cocoonfs_test_fs_instance_into_blkdev_helper,
+    cocoonfs_test_mkfs_op_helper, cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper,
+    cocoonfs_test_openfs_op_helper, cocoonfs_test_read_aux_fs_metadata_op_helper,
+    cocoonfs_test_read_fs_metadata_helper, cocoonfs_test_start_transaction_op_helper,
     cocoonfs_test_write_aux_fs_metadata_offline_helper, cocoonfs_test_write_mkfsinfo_header_op_helper,
+    cocooonfs_test_write_aux_fs_metadata_op_helper,
 };
 use crate::fs::{
-    NvFsError, NvFsIoError,
+    self, NvFsError, NvFsIoError,
     cocoonfs::{AuxFsMetadata, FsMetadata, layout},
 };
 
@@ -410,5 +413,172 @@ fn write_offline_mkfsinfo_fail_final_write_and_retry_fail_resize() {
             }
             FsMetadata::Formatted(_) => assert!(false),
         };
+    }
+}
+
+#[test]
+fn write_read() {
+    let mut written_aux_fs_metadata = AuxFsMetadata::new();
+    written_aux_fs_metadata
+        .add_entry(&mk_test_uuid(1), &[1, 2, 3, 4])
+        .unwrap();
+
+    for test_config in CocoonFsTestConfigs::new() {
+        for enable_trimming in [false, true] {
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
+
+            let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
+
+            let transaction = cocooonfs_test_write_aux_fs_metadata_op_helper(
+                &fs_instance,
+                transaction,
+                written_aux_fs_metadata.try_clone().unwrap(),
+            )
+            .unwrap();
+
+            // Read through the uncommitted transaction
+            let (read_context, read_aux_fs_metadata) = cocoonfs_test_read_aux_fs_metadata_op_helper(
+                &fs_instance,
+                Some(fs::NvFsReadContext::Transaction { transaction }),
+            )
+            .unwrap();
+            let transaction = match read_context {
+                fs::NvFsReadContext::Transaction { transaction } => transaction,
+                _ => panic!("Transaction read context not returned back."),
+            };
+            assert_eq!(&written_aux_fs_metadata, &read_aux_fs_metadata);
+
+            // Read directly from the filesystem, bypassing the transaction.
+            let (_read_context, read_aux_fs_metadata) =
+                cocoonfs_test_read_aux_fs_metadata_op_helper(&fs_instance, None).unwrap();
+            assert_eq!(&read_aux_fs_metadata, &AuxFsMetadata::new());
+
+            // Now commit and read from the FS.
+            cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, false).unwrap();
+
+            let (_read_context, read_aux_fs_metadata) =
+                cocoonfs_test_read_aux_fs_metadata_op_helper(&fs_instance, None).unwrap();
+            assert_eq!(&written_aux_fs_metadata, &read_aux_fs_metadata);
+
+            // Close the FS, open and try to read again.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+
+            let (blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            assert_eq!(&written_aux_fs_metadata, fs_metadata.get_aux());
+
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
+            let (_read_context, read_aux_fs_metadata) =
+                cocoonfs_test_read_aux_fs_metadata_op_helper(&fs_instance, None).unwrap();
+            assert_eq!(&written_aux_fs_metadata, &read_aux_fs_metadata);
+        }
+    }
+}
+
+#[test]
+fn write_journal_replay_read() {
+    let mut written_aux_fs_metadata = AuxFsMetadata::new();
+    written_aux_fs_metadata
+        .add_entry(&mk_test_uuid(1), &[1, 2, 3, 4])
+        .unwrap();
+
+    for test_config in CocoonFsTestConfigs::new() {
+        for enable_trimming in [false, true] {
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
+
+            let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
+
+            let transaction = cocooonfs_test_write_aux_fs_metadata_op_helper(
+                &fs_instance,
+                transaction,
+                written_aux_fs_metadata.try_clone().unwrap(),
+            )
+            .unwrap();
+
+            // Now commit with failure to apply the journal, thereby leaving it in place.
+            cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
+
+            // Close the FS, open and try to read again.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+
+            // Once a journal is pending, ReadFsMetadataFuture should read the AuxFsMetadata
+            // from there.
+            let (blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            assert_eq!(&written_aux_fs_metadata, fs_metadata.get_aux());
+
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
+            let (_read_context, read_aux_fs_metadata) =
+                cocoonfs_test_read_aux_fs_metadata_op_helper(&fs_instance, None).unwrap();
+            assert_eq!(&written_aux_fs_metadata, &read_aux_fs_metadata);
+
+            // Close the FS again, and check what's been replayed is what's expected.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let (_blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            assert_eq!(&written_aux_fs_metadata, fs_metadata.get_aux());
+        }
+    }
+}
+
+#[test]
+fn write_journal_replay_overwritten_read() {
+    let mut written_aux_fs_metadata0 = AuxFsMetadata::new();
+    written_aux_fs_metadata0
+        .add_entry(&mk_test_uuid(1), &[1, 2, 3, 4])
+        .unwrap();
+    written_aux_fs_metadata0.set_extra_reserve_capacity(Some(0)).unwrap();
+    let mut written_aux_fs_metadata1 = AuxFsMetadata::new();
+    written_aux_fs_metadata1
+        .add_entry(&mk_test_uuid(1), &[5, 6, 7, 8])
+        .unwrap();
+
+    for test_config in CocoonFsTestConfigs::new() {
+        for enable_trimming in [false, true] {
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
+
+            let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
+
+            let transaction = cocooonfs_test_write_aux_fs_metadata_op_helper(
+                &fs_instance,
+                transaction,
+                written_aux_fs_metadata0.try_clone().unwrap(),
+            )
+            .unwrap();
+
+            // Now commit with failure to apply the journal, thereby leaving it in place.
+            cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
+
+            // Close the FS, update the AuxFsMetadata offline, with the journal pending,
+            // open and read.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+
+            // Once a journal is pending, ReadFsMetadataFuture should read the AuxFsMetadata
+            // from there.
+            let (blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            assert_eq!(&written_aux_fs_metadata0, fs_metadata.get_aux());
+
+            // Overwrite offline what's in the journal.
+            let (blkdev, result) = cocoonfs_test_write_aux_fs_metadata_offline_helper(
+                blkdev,
+                fs_metadata,
+                written_aux_fs_metadata1.try_clone().unwrap(),
+                false,
+                false,
+            );
+            result.unwrap();
+
+            // Verify that reading it offline gets us the updated contents.
+            let (blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            assert_eq!(&written_aux_fs_metadata1, fs_metadata.get_aux());
+
+            // And apply the journal and read online.
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
+            let (_read_context, read_aux_fs_metadata) =
+                cocoonfs_test_read_aux_fs_metadata_op_helper(&fs_instance, None).unwrap();
+            assert_eq!(&written_aux_fs_metadata1, &read_aux_fs_metadata);
+
+            // Close the FS again, and check what's been replayed is what's expected.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let (_blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            assert_eq!(&written_aux_fs_metadata1, fs_metadata.get_aux());
+        }
     }
 }

@@ -221,6 +221,14 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                     transaction.inode_index_updates =
                         inode_index::TransactionInodeIndexUpdates::new(&fs_instance_sync_state.inode_index);
 
+                    // Apply updates to the AuxFsMetadata.
+                    if let Some(aux_fs_metadata_update) = transaction.aux_fs_metadata_update.as_ref() {
+                        fs_instance_sync_state.aux_fs_metadata_update_groups_heads =
+                            aux_fs_metadata_update.aux_fs_metadata_update_groups_heads;
+                    }
+                    // Reset, it's not needed anymore.
+                    transaction.aux_fs_metadata_update = None;
+
                     this.fut_state = TransactionApplyJournalFutureState::ApplyAuthTreeUpdatesPrepare {
                         transaction: Some(transaction),
                     };

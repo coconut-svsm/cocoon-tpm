@@ -5,9 +5,11 @@
 //! Implementation [`AuxFsMetadata`] and related functionality.
 
 extern crate alloc;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use cocoon_tpm_utils_common::fixed_vec::FixedVec;
 
+use crate::blkdev::NvBlkDevFuture;
+use crate::utils_async::sync_types;
 use crate::utils_common::{
     alloc::{TryNewError, try_alloc_vec},
     bitmanip::BitManip as _,
@@ -23,6 +25,7 @@ use crate::{
             extent_ptr::EncodedExtentPtr,
             extents::PhysicalExtents,
             extents_layout,
+            fs::{self, AllocateExtentsFuture, CocoonFsSyncStateMemberRef, CocoonFsSyncStateReadFuture},
             integrity::{
                 ExtentIntegrityProtectionsInvalidateFuture, ExtentIntegrityState, extent_integrity_protections_apply,
                 extent_integrity_protections_len, extent_integrity_protections_verify_and_remove,
@@ -31,6 +34,7 @@ use crate::{
             layout::{AllocBlockCount, ImageLayout, PhysicalAllocBlockIndex, PhysicalAllocBlockRange},
             mkfs::UpdateMkFsInfoAuxFsMetadataFuture,
             openfs::{FsMetadata, FsMetadataFormatted},
+            transaction,
         },
     },
     nvfs_err_internal,
@@ -4017,6 +4021,10 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoAuxFsMetadataFuture<B> {
 /// even in case of service interruptions. That is, the on-disk data structures
 /// would still be in a consistent state and the original [`AuxFsMetadata`]
 /// readable upon torn writes.
+///
+/// # See also:
+///
+/// * [`CocoonFs::write_aux_fs_metadata()`](crate::fs::cocoonfs::fs::CocoonFs::write_aux_fs_metadata).
 pub struct WriteAuxFsMetadataOfflineFuture<B: blkdev::NvBlkDev> {
     fut_state: WriteAuxFsMetadataOfflineFutureState<B>,
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
@@ -4191,5 +4199,417 @@ impl<B: blkdev::NvBlkDev> future::Future for WriteAuxFsMetadataOfflineFuture<B> 
             Some(blkdev) => task::Poll::Ready(Ok((blkdev, result))),
             None => task::Poll::Ready(Err(nvfs_err_internal!())),
         }
+    }
+}
+
+/// Stage updates to the [`AuxFsMetadata`] at a
+/// [`Transaction`](transaction::Transaction).
+///
+/// Used for the implementation of
+/// [`CocoonFs::write_aux_fs_metadata()`](fs::CocoonFs::write_aux_fs_metadata).
+pub struct TransactionStagedAuxFsMetatdataUpdate {
+    aux_fs_metatada_extents: PhysicalExtents,
+    pub aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
+}
+
+pub struct TransactionWriteAuxFsMetadataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: TransactionWriteAuxFsMetadataFutureState<ST, B>,
+    original_aux_fs_metadata_extents: PhysicalExtents,
+    new_aux_fs_metadata: AuxFsMetadata,
+    new_extents: PhysicalExtents,
+    new_update_group1_extents_begin: Option<usize>,
+    new_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
+}
+
+/// Internal [`TransactionWriteAuxFsMetadataFuture::poll()`] state-machine
+/// state.
+enum TransactionWriteAuxFsMetadataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    Init {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<transaction::Transaction>>,
+    },
+    FindOriginalAuxFsMetadataExtents {
+        find_aux_fs_metadata_extents_fut: FindAuxFsMetadataExtentsFuture<B>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<transaction::Transaction>>,
+    },
+    AllocateExtentsPrepare {
+        transaction: Option<Box<transaction::Transaction>>,
+    },
+    AllocateUpdateGroupExtentsPrepare {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<transaction::Transaction>>,
+        update_group: AuxFsMetadataExtentsUpdateGroup,
+    },
+    AllocateUpdateGroupExtents {
+        allocate_fut: fs::AllocateExtentsFuture<ST, B>,
+        update_group: AuxFsMetadataExtentsUpdateGroup,
+    },
+    InitializeExtents {
+        initialize_fut: InitializeAuxFsMetadataExtentsFuture<B>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<transaction::Transaction>>,
+    },
+    Done,
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteAuxFsMetadataFuture<ST, B> {
+    /// Instantiate a [`TransactionWriteAuxFsMetadataFuture`].
+    ///
+    /// The [`TransactionWriteAuxFsMetadataFuture`] assumes ownership of the
+    /// `transaction` for the duration of the operation, it will eventually
+    /// get returned back from [`poll()`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `transaction` - The [`Transaction`](transaction::Transaction) to stage
+    ///   the updates at.
+    /// * `updated_aux_fs_metadata` - The updated [`AuxFsMetadata`] to write.
+    pub fn new(transaction: Box<transaction::Transaction>, updated_aux_fs_metadata: AuxFsMetadata) -> Self {
+        Self {
+            fut_state: TransactionWriteAuxFsMetadataFutureState::Init {
+                transaction: Some(transaction),
+            },
+            original_aux_fs_metadata_extents: PhysicalExtents::new(),
+            new_aux_fs_metadata: updated_aux_fs_metadata,
+            new_extents: PhysicalExtents::new(),
+            new_update_group1_extents_begin: None,
+            new_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair::new_nil(),
+        }
+    }
+
+    /// Steal the input [`AuxFsMetadata`].
+    ///
+    /// Steal the internally owned input [`AuxFsMetadata`] initially passed to
+    /// [`new()`](Self::new). Intended for use in the upper layers' error
+    /// handling logic, i.e. when the [`TransactionWriteAuxFsMetadataFuture`] is
+    /// to get cancelled. The [`TransactionWriteAuxFsMetadataFuture`] must
+    /// henceforth not get [polled](Self::poll) any further.
+    pub fn grab_data(&mut self) -> AuxFsMetadata {
+        debug_assert!(!matches!(
+            self.fut_state,
+            TransactionWriteAuxFsMetadataFutureState::Done
+        ));
+        self.fut_state = TransactionWriteAuxFsMetadataFutureState::Done;
+        mem::take(&mut self.new_aux_fs_metadata)
+    }
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture<ST, B>
+    for TransactionWriteAuxFsMetadataFuture<ST, B>
+{
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A pair of the input [`AuxFsMetadata`] and a two-level [`Result`] is
+    /// returned upon [future](CocoonFsSyncStateReadFuture) completion.
+    /// * `(aux_fs_metadata, Err(e))` - The outer level [`Result`] is set to
+    ///   [`Err`] upon encountering an internal error and the
+    ///   [`Transaction`](transaction::Transaction) is lost.
+    /// * `(aux_fs_metadata, Ok((transaction, ...)))` - Otherwise the outer
+    ///   level [`Result`] is set to [`Ok`] and a pair of the input
+    ///   [`Transaction`](transaction::Transaction) and the operation result
+    ///   will get returned within:
+    ///     * `(aux_fs_metadata, Ok((transaction, Err(e))))` - In case of an
+    ///       error, the error reason `e` is returned in an [`Err`].
+    ///     * `(aux_fs_metadata, Ok((transaction, Ok(()))))` -  Otherwise,
+    ///       `Ok(())` will get returned for the operation result on success.
+    type Output = (
+        AuxFsMetadata,
+        Result<(Box<transaction::Transaction>, Result<(), NvFsError>), NvFsError>,
+    );
+
+    type AuxPollData<'a> = ();
+
+    fn poll<'a>(
+        self: pin::Pin<&mut Self>,
+        fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
+        _aux_data: &mut Self::AuxPollData<'a>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        let (transaction, result) = 'outer: loop {
+            match &mut this.fut_state {
+                TransactionWriteAuxFsMetadataFutureState::Init { transaction } => {
+                    let mut transaction = match transaction.take() {
+                        Some(transaction) => transaction,
+                        None => break (None, Err(nvfs_err_internal!())),
+                    };
+                    this.fut_state = match transaction.aux_fs_metadata_update.as_ref() {
+                        Some(previous_aux_fs_metatada_update) => {
+                            // Add to journal_frees now, as that can fail. On a subsequent failure,
+                            // they will get removed from journal_frees again. On success, the
+                            // extents will eventually also get removed from pending_allocs.
+                            if let Err(e) = transaction
+                                .allocs
+                                .journal_frees
+                                .add_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter())
+                            {
+                                break (Some(transaction), Err(e));
+                            }
+
+                            TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare {
+                                transaction: Some(transaction),
+                            }
+                        }
+                        None => {
+                            // This is the first attempt to stage an update. The original
+                            // AuxFsMetadata extents need to get deallocated. Find them.
+                            let image_layout = &fs_instance_sync_state.get_fs_ref().fs_config.image_layout;
+                            let original_update_group_heads =
+                                fs_instance_sync_state.aux_fs_metadata_update_groups_heads;
+                            let find_aux_fs_metadata_extents_fut =
+                                FindAuxFsMetadataExtentsFuture::new(original_update_group_heads, image_layout);
+                            TransactionWriteAuxFsMetadataFutureState::FindOriginalAuxFsMetadataExtents {
+                                find_aux_fs_metadata_extents_fut,
+                                transaction: Some(transaction),
+                            }
+                        }
+                    };
+                }
+                TransactionWriteAuxFsMetadataFutureState::FindOriginalAuxFsMetadataExtents {
+                    find_aux_fs_metadata_extents_fut,
+                    transaction,
+                } => {
+                    this.original_aux_fs_metadata_extents = match NvBlkDevFuture::poll(
+                        pin::Pin::new(find_aux_fs_metadata_extents_fut),
+                        &fs_instance_sync_state.get_fs_ref().blkdev,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(original_aux_fs_metadata_extents)) => original_aux_fs_metadata_extents,
+                        task::Poll::Ready(Err(e)) => break (transaction.take(), Err(e)),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    // Deallocate the extents now, as that can fail. On a subsequent failure, they
+                    // will get removed from pending_frees again. Note that the
+                    // extents have not been allocated by the transaction
+                    // itself, so no need to remove them from the transaction's
+                    // pending_allocs.
+                    let mut transaction = match transaction.take() {
+                        Some(transaction) => transaction,
+                        None => break (None, Err(nvfs_err_internal!())),
+                    };
+                    if let Err(e) = transaction
+                        .allocs
+                        .pending_frees
+                        .add_extents(this.original_aux_fs_metadata_extents.iter())
+                    {
+                        break (Some(transaction), Err(e));
+                    }
+
+                    this.fut_state = TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare {
+                        transaction: Some(transaction),
+                    };
+                }
+                TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare { transaction } => {
+                    if !this.new_aux_fs_metadata.is_trivial() {
+                        this.fut_state = TransactionWriteAuxFsMetadataFutureState::AllocateUpdateGroupExtentsPrepare {
+                            transaction: transaction.take(),
+                            update_group: AuxFsMetadataExtentsUpdateGroup::Group0,
+                        }
+                    } else {
+                        // All done.
+                        break (transaction.take(), Ok(()));
+                    }
+                }
+                TransactionWriteAuxFsMetadataFutureState::AllocateUpdateGroupExtentsPrepare {
+                    transaction,
+                    update_group,
+                } => {
+                    let transaction = match transaction.take() {
+                        Some(transaction) => transaction,
+                        None => break (None, Err(nvfs_err_internal!())),
+                    };
+
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let image_layout = &fs_instance.fs_config.image_layout;
+                    let allocation_request = match this.new_aux_fs_metadata.extents_allocation_request(
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.auth_tree_data_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                    ) {
+                        Ok(allocation_request) => allocation_request,
+                        Err(e) => break (Some(transaction), Err(e)),
+                    };
+                    // Do not repurpose pending_frees, as the allocations will get written to at
+                    // pre-commit time.
+                    let allocate_fut = match AllocateExtentsFuture::new(
+                        &fs_instance,
+                        transaction,
+                        allocation_request,
+                        transaction::TransactionAllocationConstraints::NoPendingFrees,
+                    ) {
+                        Ok(allocate_fut) => allocate_fut,
+                        Err((transaction, e)) => break (transaction, Err(e)),
+                    };
+                    this.fut_state = TransactionWriteAuxFsMetadataFutureState::AllocateUpdateGroupExtents {
+                        allocate_fut,
+                        update_group: *update_group,
+                    };
+                }
+                TransactionWriteAuxFsMetadataFutureState::AllocateUpdateGroupExtents {
+                    allocate_fut,
+                    update_group,
+                } => {
+                    let (mut transaction, allocated_extents) = match CocoonFsSyncStateReadFuture::poll(
+                        pin::Pin::new(allocate_fut),
+                        fs_instance_sync_state,
+                        &mut (),
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok((transaction, Ok(allocated_extents)))) => {
+                            (transaction, allocated_extents.0)
+                        }
+                        task::Poll::Ready(Ok((transaction, Err(e)))) => break (Some(transaction), Err(e)),
+                        task::Poll::Ready(Err(e)) => break (None, Err(e)),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    this.fut_state = match update_group {
+                        AuxFsMetadataExtentsUpdateGroup::Group0 => {
+                            this.new_extents = allocated_extents;
+
+                            if this.new_aux_fs_metadata.get_extra_reserve_capacity().is_some() {
+                                // Allocate an update group 1.
+                                TransactionWriteAuxFsMetadataFutureState::AllocateUpdateGroupExtentsPrepare {
+                                    transaction: Some(transaction),
+                                    update_group: AuxFsMetadataExtentsUpdateGroup::Group1,
+                                }
+                            } else {
+                                this.new_update_groups_heads = match AuxFsMetadataExtentsPtrsPair::new(Some((
+                                    this.new_extents.get_extent_range(0),
+                                    None,
+                                )))
+                                .encode()
+                                {
+                                    Ok(new_update_groups_heads) => new_update_groups_heads,
+                                    Err(e) => break (Some(transaction), Err(e)),
+                                };
+                                TransactionWriteAuxFsMetadataFutureState::InitializeExtents {
+                                    initialize_fut: InitializeAuxFsMetadataExtentsFuture::new(),
+                                    transaction: Some(transaction),
+                                }
+                            }
+                        }
+                        AuxFsMetadataExtentsUpdateGroup::Group1 => {
+                            // Append the allocated extents to the group 0's extent in new_extents.
+                            let new_update_group1_extents_begin = this.new_extents.len();
+                            for extent in allocated_extents.iter().enumerate() {
+                                if let Err(e) = this.new_extents.push_extent(&extent.1, true) {
+                                    // Failure to add is non-fatal, the extents will still be recorded at
+                                    // the CocoonFsPendingTransactionsSyncState and trimmed, if enabled.
+                                    // All that would happen on failure is that this transaction cannot subsequently
+                                    // repurpose the allocation.
+                                    let _ = transaction.allocs.journal_allocs.add_extents(allocated_extents.iter());
+                                    break 'outer (Some(transaction), Err(e));
+                                }
+                            }
+
+                            this.new_update_group1_extents_begin = Some(new_update_group1_extents_begin);
+                            this.new_update_groups_heads = match AuxFsMetadataExtentsPtrsPair::new(Some((
+                                this.new_extents.get_extent_range(0),
+                                Some(this.new_extents.get_extent_range(new_update_group1_extents_begin)),
+                            )))
+                            .encode()
+                            {
+                                Ok(new_update_groups_heads) => new_update_groups_heads,
+                                Err(e) => break (Some(transaction), Err(e)),
+                            };
+
+                            TransactionWriteAuxFsMetadataFutureState::InitializeExtents {
+                                initialize_fut: InitializeAuxFsMetadataExtentsFuture::new(),
+                                transaction: Some(transaction),
+                            }
+                        }
+                    };
+                }
+                TransactionWriteAuxFsMetadataFutureState::InitializeExtents {
+                    initialize_fut,
+                    transaction,
+                } => {
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    match InitializeAuxFsMetadataExtentsFuture::poll(
+                        pin::Pin::new(initialize_fut),
+                        &fs_instance.blkdev,
+                        &this.new_aux_fs_metadata,
+                        &this.new_extents,
+                        this.new_update_group1_extents_begin,
+                        &fs_instance.fs_config.image_layout,
+                        cx,
+                    ) {
+                        task::Poll::Ready(result) => break (transaction.take(), result),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+                }
+                TransactionWriteAuxFsMetadataFutureState::Done => unreachable!(),
+            }
+        };
+
+        this.fut_state = TransactionWriteAuxFsMetadataFutureState::Done;
+        task::Poll::Ready(match transaction {
+            Some(mut transaction) => {
+                if result.is_ok() {
+                    if let Some(previous_aux_fs_metatada_update) = transaction.aux_fs_metadata_update.as_ref() {
+                        // Conclude the deallocation.
+                        transaction
+                            .allocs
+                            .pending_allocs
+                            .remove_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter());
+                        transaction.allocs.pending_allocs.reset_remove_rollback();
+                    }
+
+                    // Make the update effective.
+                    transaction.aux_fs_metadata_update = Some(TransactionStagedAuxFsMetatdataUpdate {
+                        aux_fs_metatada_extents: mem::replace(&mut this.new_extents, PhysicalExtents::new()),
+                        aux_fs_metadata_update_groups_heads: this.new_update_groups_heads,
+                    });
+                } else {
+                    match transaction.aux_fs_metadata_update.as_ref() {
+                        Some(previous_aux_fs_metatada_update) => {
+                            // Rollback.
+                            transaction
+                                .allocs
+                                .journal_frees
+                                .remove_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter());
+                            transaction.allocs.journal_frees.reset_remove_rollback();
+                        }
+                        None => {
+                            // Rollback.
+                            transaction
+                                .allocs
+                                .pending_frees
+                                .remove_extents(this.original_aux_fs_metadata_extents.iter());
+                            transaction.allocs.pending_frees.reset_remove_rollback();
+                        }
+                    };
+
+                    // Free the newly allocated extents.
+                    transaction
+                        .allocs
+                        .pending_allocs
+                        .remove_extents(this.new_extents.iter());
+                    transaction.allocs.pending_allocs.reset_remove_rollback();
+                    // Failure to add is non-fatal, the extents will still be recorded at
+                    // the CocoonFsPendingTransactionsSyncState and trimmed, if enabled.
+                    // All that would happen on failure is that this transaction cannot subsequently
+                    // repurpose the allocation.
+                    let _ = transaction.allocs.journal_allocs.add_extents(this.new_extents.iter());
+                }
+
+                (mem::take(&mut this.new_aux_fs_metadata), Ok((transaction, result)))
+            }
+            None => (
+                mem::take(&mut this.new_aux_fs_metadata),
+                Err(match result {
+                    Ok(_) => nvfs_err_internal!(),
+                    Err(e) => e,
+                }),
+            ),
+        })
     }
 }

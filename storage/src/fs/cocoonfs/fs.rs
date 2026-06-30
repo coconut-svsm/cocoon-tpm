@@ -14,9 +14,16 @@ use crate::{
     fs::{
         self, NvFsError,
         cocoonfs::{
-            alloc_bitmap, auth_tree, aux_fs_metadata::AuxFsMetadataEncodedExtentsPtrsPair, extent_ptr, extents,
-            inode_index, integrity::ExtentIntegrityState, keys, layout, read_buffer,
-            read_inode_data::ReadInodeDataFuture, transaction, write_inode_data::WriteInodeDataFuture,
+            alloc_bitmap, auth_tree,
+            aux_fs_metadata::{
+                self, AuxFsMetadata, AuxFsMetadataEncodedExtentsPtrsPair, TransactionWriteAuxFsMetadataFuture,
+            },
+            extent_ptr, extents, inode_index,
+            integrity::ExtentIntegrityState,
+            keys, layout, read_buffer,
+            read_inode_data::ReadInodeDataFuture,
+            transaction,
+            write_inode_data::WriteInodeDataFuture,
         },
     },
     nvfs_err_internal,
@@ -33,9 +40,6 @@ use core::{
     sync::atomic,
     task,
 };
-
-#[cfg(doc)]
-use crate::fs::cocoonfs::aux_fs_metadata::AuxFsMetadata;
 
 /// [`SyncRcPtr`](sync_types::SyncRcPtr) to a [`CocoonFs`] instance.
 pub type CocoonFsSyncRcPtrType<ST, B> = pin::Pin<
@@ -859,6 +863,67 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFs<ST, B> {
     ) -> CocoonFsPendingTransactionsSyncStateMemberSyncRcPtrRefType<'a, ST, B> {
         // This is sound: the outer 'this' is pinned, and so remains the member.
         unsafe { PlainCocoonFsPendingTransactionsSyncStateMemberSyncRcPtrRefType::new_projection_pin(this) }
+    }
+
+    /// Write the filesystem's [`AuxFsMetadata`].
+    ///
+    /// Stage an update to the filesystem's [`AuxFsMetadata`] at `transaction`.
+    ///
+    /// `write_aux_fs_metadata()` returns a [future](WriteAuxFsMetadataFuture),
+    /// which must get [polled](fs::NvFsFuture::poll) to stage the
+    /// [`AuxFsMetadata`] update at `transaction` and eventually return the
+    /// operation's result.
+    ///
+    /// # Arguments:
+    ///
+    /// * `this` - A [`SyncRcPtrRef<Self>`](sync_types::SyncRcPtrRef) referring
+    ///   to the [`SyncRcPtr<Self>`](sync_types::SyncRcPtr) managing the `NvFs`
+    ///   instance.
+    /// * `transaction` - The [`Transaction`](fs::NvFs::Transaction) to stage
+    ///   the updates at.
+    /// * `updated_aux_fs_metadata` - The updated [`AuxFsMetadata`] to write.
+    ///
+    /// # See also:
+    ///
+    /// * [`read_aux_fs_metadata()`](Self::read_aux_fs_metadata).
+    /// * [`WriteAuxFsMetadataOfflineFuture`](super::WriteAuxFsMetadataOfflineFuture).
+    pub fn write_aux_fs_metadata(
+        _this: &<Self as fs::NvFs>::SyncRcPtrRef<'_>,
+        transaction: Transaction,
+        updated_aux_fs_metadata: AuxFsMetadata,
+    ) -> WriteAuxFsMetadataFuture<ST, B> {
+        WriteAuxFsMetadataFuture::new(transaction, updated_aux_fs_metadata)
+    }
+
+    /// Read the filesystem's [`AuxFsMetadata`].
+    ///
+    /// An optional [`NvFsReadContext`](fs::NvFsReadContext) is accepted for the
+    /// `context` argument. It may be set to `Some` for specifying either a
+    /// [ConsistentReadSequence](fs::NvFsReadContext::Committed) to continue on
+    /// or to some [`Transaction`](fs::NvFsReadContext::Transaction) to read
+    /// through. If `None`, a new
+    /// [`ConsistentReadSequence`](fs::NvFs::ConsistentReadSequence) will get
+    /// [started](fs::NvFs::start_read_sequence) implicitly as part of the call.
+    ///
+    /// # Arguments:
+    ///
+    /// * `this` - A [`SyncRcPtrRef<Self>`](sync_types::SyncRcPtrRef) referring
+    ///   to the [`SyncRcPtr<Self>`](sync_types::SyncRcPtr) managing the `NvFs`
+    ///   instance.
+    /// * `context` - The optional [`NvFsReadContext`](fs::NvFsReadContext). If
+    ///   `None`, a [`ConsistentReadSequence`](fs::NvFs::ConsistentReadSequence)
+    ///   will be [started](fs::NvFs::start_read_sequence) implicitly as part of
+    ///   the operation.
+    ///
+    /// # See also:
+    ///
+    /// * [`ReadFsMetadataFuture`](super::ReadFsMetadataFuture).
+    /// * [`write_aux_fs_metadata()`](Self::write_aux_fs_metadata).
+    pub fn read_aux_fs_metadata(
+        _this: &<Self as fs::NvFs>::SyncRcPtrRef<'_>,
+        context: Option<fs::NvFsReadContext<Self>>,
+    ) -> ReadAuxFsMetadataFuture<ST, B> {
+        ReadAuxFsMetadataFuture::new(context)
     }
 }
 
@@ -2066,6 +2131,310 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
             ))),
             task::Poll::Ready(Err(e)) => task::Poll::Ready(Err(e)),
             task::Poll::Pending => task::Poll::Pending,
+        }
+    }
+}
+
+/// Future returned by [`CocoonFs::write_aux_fs_metadata()`].
+pub struct WriteAuxFsMetadataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: WriteAuxFsMetadataFutureState<ST, B>,
+}
+
+/// Internal [`WriteAuxFsMetadataFuture`] state-machine state.
+#[allow(clippy::large_enum_variant)]
+enum WriteAuxFsMetadataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    Init {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Transaction>,
+        updated_aux_fs_metadata: AuxFsMetadata,
+    },
+    Write {
+        read_sequence: ConsistentReadSequence,
+        write_aux_fs_metadata_fut: TransactionWriteAuxFsMetadataFuture<ST, B>,
+    },
+    Done,
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteAuxFsMetadataFuture<ST, B> {
+    fn new(transaction: Transaction, updated_aux_fs_metadata: AuxFsMetadata) -> Self {
+        Self {
+            fut_state: WriteAuxFsMetadataFutureState::Init {
+                transaction: Some(transaction),
+                updated_aux_fs_metadata,
+            },
+        }
+    }
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
+    for WriteAuxFsMetadataFuture<ST, B>
+{
+    /// Output type of [`poll()`](fs::NvFsFuture::poll).
+    ///
+    /// A pair of the input [`AuxFsMetadata`] and a two-level [`Result`] is
+    /// returned upon [future](fs::NvFsFuture) completion.
+    /// * `(aux_fs_metadata, Err(e))` - The outer level [`Result`] is set to
+    ///   [`Err`] upon encountering an internal error and the
+    ///   [`Transaction`](fs::NvFs::Transaction) is lost.
+    /// * `(aux_fs_metadata, Ok((transaction, ...)))` - Otherwise the outer
+    ///   level [`Result`] is set to [`Ok`] and a pair of the input
+    ///   [`Transaction`](fs::NvFs::Transaction) and the operation result will
+    ///   get returned within:
+    ///     * `(aux_fs_metadata, Ok((transaction, Err(e))))` - In case of an
+    ///       error, the error reason `e` is returned in an [`Err`].
+    ///     * `(aux_fs_metadata, Ok((transaction, Ok(()))))` -  Otherwise,
+    ///       `Ok(())` will get returned for the operation result on success.
+    type Output = (AuxFsMetadata, Result<(Transaction, Result<(), NvFsError>), NvFsError>);
+
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        fs_instance: &<CocoonFs<ST, B> as fs::NvFs>::SyncRcPtrRef<'_>,
+        _rng: &mut dyn rng::RngCoreDispatchable,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                WriteAuxFsMetadataFutureState::Init {
+                    transaction,
+                    updated_aux_fs_metadata,
+                } => {
+                    let transaction = match transaction.take() {
+                        Some(transaction) => transaction,
+                        None => {
+                            let aux_fs_metadata = mem::take(updated_aux_fs_metadata);
+                            this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready((aux_fs_metadata, Err(nvfs_err_internal!())));
+                        }
+                    };
+
+                    let Transaction {
+                        read_sequence,
+                        transaction,
+                    } = transaction;
+
+                    let write_aux_fs_metadata_fut =
+                        TransactionWriteAuxFsMetadataFuture::new(transaction, mem::take(updated_aux_fs_metadata));
+                    this.fut_state = WriteAuxFsMetadataFutureState::Write {
+                        read_sequence,
+                        write_aux_fs_metadata_fut,
+                    };
+                }
+                WriteAuxFsMetadataFutureState::Write {
+                    read_sequence,
+                    write_aux_fs_metadata_fut,
+                } => {
+                    let sync_state_read_guard = match read_sequence.continue_sequence::<ST, B>(fs_instance) {
+                        Ok(sync_state) => sync_state,
+                        Err(e) => {
+                            let aux_fs_metadata = write_aux_fs_metadata_fut.grab_data();
+                            this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready((aux_fs_metadata, Err(e)));
+                        }
+                    };
+                    let mut sync_state = CocoonFsSyncStateMemberRef::from(&sync_state_read_guard);
+
+                    let (aux_fs_metadata, transaction, result) = match CocoonFsSyncStateReadFuture::poll(
+                        pin::Pin::new(write_aux_fs_metadata_fut),
+                        &mut sync_state,
+                        &mut (),
+                        cx,
+                    ) {
+                        task::Poll::Ready((aux_fs_metadata, Ok((transaction, result)))) => {
+                            (aux_fs_metadata, transaction, result)
+                        }
+                        task::Poll::Ready((aux_fs_metadata, Err(e))) => {
+                            this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready((aux_fs_metadata, Err(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let transaction = Transaction {
+                        read_sequence: *read_sequence,
+                        transaction,
+                    };
+                    this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                    return task::Poll::Ready((aux_fs_metadata, Ok((transaction, result))));
+                }
+                WriteAuxFsMetadataFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Future returned by [`CocoonFs::read_aux_fs_metadata()`].
+pub struct ReadAuxFsMetadataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: ReadAuxFsMetadataFutureState<ST, B>,
+}
+
+/// Internal [`ReadAuxFsMetadataFuture`] state-machine state.
+#[allow(clippy::large_enum_variant)]
+enum ReadAuxFsMetadataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    StartReadSequence {
+        start_read_sequence_fut: StartReadSequenceFuture<ST, B>,
+    },
+    ReadPrepare {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        context: Option<fs::NvFsReadContext<CocoonFs<ST, B>>>,
+    },
+    Read {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        context: Option<fs::NvFsReadContext<CocoonFs<ST, B>>>,
+        read_aux_fs_metadata_fut: aux_fs_metadata::ReadAuxFsMetadataFuture<B>,
+    },
+    Done,
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadAuxFsMetadataFuture<ST, B> {
+    fn new(context: Option<fs::NvFsReadContext<CocoonFs<ST, B>>>) -> Self {
+        Self {
+            fut_state: match context {
+                Some(context) => ReadAuxFsMetadataFutureState::ReadPrepare { context: Some(context) },
+                None => ReadAuxFsMetadataFutureState::StartReadSequence {
+                    start_read_sequence_fut: StartReadSequenceFuture::new(),
+                },
+            },
+        }
+    }
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
+    for ReadAuxFsMetadataFuture<ST, B>
+{
+    /// Output type of [`poll()`](fs::NvFsFuture::poll).
+    ///
+    /// A  two-level [`Result`] is
+    /// returned upon [future](fs::NvFsFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input
+    ///   [`NvFsReadContext`](fs::NvFsReadContext), if any, is lost.
+    /// * `Ok((context, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the [`NvFsReadContext`](fs::NvFsReadContext) and
+    ///   the operation result will get returned within:
+    ///     * `Ok((context, Err(e)))` - In case of an error, the error reason
+    ///       `e` is returned in an [`Err`].
+    ///     * `Ok((context, Ok((aux_fs_metadata))))` -  Otherwise, the read
+    ///       [`AuxFsMetadata`] will get returned wrapped in an `Ok`.
+    type Output = Result<(fs::NvFsReadContext<CocoonFs<ST, B>>, Result<AuxFsMetadata, NvFsError>), NvFsError>;
+
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
+        rng: &mut dyn rng::RngCoreDispatchable,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                ReadAuxFsMetadataFutureState::StartReadSequence {
+                    start_read_sequence_fut,
+                } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, rng, cx) {
+                    task::Poll::Ready(Ok(read_sequence)) => {
+                        this.fut_state = ReadAuxFsMetadataFutureState::ReadPrepare {
+                            context: Some(fs::NvFsReadContext::Committed { seq: read_sequence }),
+                        };
+                    }
+                    task::Poll::Ready(Err(e)) => {
+                        this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                        return task::Poll::Ready(Err(e));
+                    }
+                    task::Poll::Pending => return task::Poll::Pending,
+                },
+                ReadAuxFsMetadataFutureState::ReadPrepare { context } => {
+                    let aux_fs_metadata_update_groups_heads = match context.as_ref() {
+                        Some(fs::NvFsReadContext::Committed { seq }) => {
+                            let sync_state_read_guard = match seq.continue_sequence::<ST, B>(fs_instance) {
+                                Ok(sync_state) => sync_state,
+                                Err(e) => {
+                                    this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                                    return task::Poll::Ready(Err(e));
+                                }
+                            };
+                            sync_state_read_guard.aux_fs_metadata_update_groups_heads
+                        }
+                        Some(fs::NvFsReadContext::Transaction { transaction }) => {
+                            if let Some(aux_fs_metadata_update) =
+                                transaction.transaction.aux_fs_metadata_update.as_ref()
+                            {
+                                aux_fs_metadata_update.aux_fs_metadata_update_groups_heads
+                            } else {
+                                let sync_state_read_guard =
+                                    match transaction.read_sequence.continue_sequence::<ST, B>(fs_instance) {
+                                        Ok(sync_state) => sync_state,
+                                        Err(e) => {
+                                            this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                                            return task::Poll::Ready(Err(e));
+                                        }
+                                    };
+                                sync_state_read_guard.aux_fs_metadata_update_groups_heads
+                            }
+                        }
+                        None => {
+                            this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    let read_aux_fs_metadata_fut = aux_fs_metadata::ReadAuxFsMetadataFuture::new(
+                        aux_fs_metadata_update_groups_heads,
+                        &fs_instance.as_ref().fs_config.image_layout,
+                    );
+                    this.fut_state = ReadAuxFsMetadataFutureState::Read {
+                        context: context.take(),
+                        read_aux_fs_metadata_fut,
+                    };
+                }
+                ReadAuxFsMetadataFutureState::Read {
+                    context,
+                    read_aux_fs_metadata_fut,
+                } => {
+                    let sync_state_read_guard = match context
+                        .as_ref()
+                        .map(|context| match context {
+                            fs::NvFsReadContext::Committed { seq } => seq,
+                            fs::NvFsReadContext::Transaction { transaction } => &transaction.read_sequence,
+                        })
+                        .ok_or_else(|| nvfs_err_internal!())
+                        .and_then(|read_sequence| read_sequence.continue_sequence::<ST, B>(fs_instance))
+                    {
+                        Ok(sync_state) => sync_state,
+                        Err(e) => {
+                            this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+
+                    let aux_fs_metadata =
+                        match NvBlkDevFuture::poll(pin::Pin::new(read_aux_fs_metadata_fut), &fs_instance.blkdev, cx) {
+                            task::Poll::Ready(Ok((
+                                _aux_fs_metadata_extents,
+                                _aux_fs_metadata_extents_reallocation_needed,
+                                aux_fs_metadata,
+                            ))) => aux_fs_metadata,
+                            task::Poll::Ready(Err(e)) => {
+                                drop(sync_state_read_guard);
+                                let context = context.take();
+                                this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                                return task::Poll::Ready(context.map(|context| (context, Err(e))).ok_or(e));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+                    drop(sync_state_read_guard);
+                    let context = context.take();
+                    this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                    return task::Poll::Ready(
+                        context
+                            .map(|context| (context, Ok(aux_fs_metadata)))
+                            .ok_or_else(|| nvfs_err_internal!()),
+                    );
+                }
+                ReadAuxFsMetadataFutureState::Done => unreachable!(),
+            }
         }
     }
 }

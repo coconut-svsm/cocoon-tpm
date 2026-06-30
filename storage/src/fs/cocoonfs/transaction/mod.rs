@@ -12,7 +12,10 @@ use crate::{
     crypto::rng,
     fs::{
         NvFsError,
-        cocoonfs::{alloc_bitmap, auth_tree, extents, fs::CocoonFsSyncStateMemberRef, inode_index, journal, layout},
+        cocoonfs::{
+            alloc_bitmap, auth_tree, aux_fs_metadata, extents, fs::CocoonFsSyncStateMemberRef, inode_index, journal,
+            layout,
+        },
     },
     utils_async::sync_types,
     utils_common::fixed_vec::FixedVec,
@@ -81,6 +84,10 @@ pub struct Transaction {
     /// Updates to the inode index staged at the [`Transaction`].
     pub(super) inode_index_updates: inode_index::TransactionInodeIndexUpdates,
 
+    /// Update to the [`AuxFsMetadata`](aux_fs_metadata::AuxFsMetadata) staged
+    /// at the [`Transaction`], if any.
+    pub(super) aux_fs_metadata_update: Option<aux_fs_metadata::TransactionStagedAuxFsMetatdataUpdate>,
+
     /// Pending updates to the authentication tree.
     ///
     /// Populated at [`Transaction`] commit and applied to the authentication
@@ -146,6 +153,7 @@ impl Transaction {
             allocs: TransactionAllocations::new(),
             is_primary_pending,
             inode_index_updates: inode_index::TransactionInodeIndexUpdates::new(&fs_instance_sync_state.inode_index),
+            aux_fs_metadata_update: None,
             pending_auth_tree_updates: TransactionPendingAuthTreeUpdates::new(),
             journal_log_tail_extents: extents::PhysicalExtents::new(),
             #[cfg(test)]

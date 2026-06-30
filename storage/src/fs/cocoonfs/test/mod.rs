@@ -438,6 +438,54 @@ fn cocoonfs_test_commit_transaction_op_helper(
     commit_transaction_waiter.take().unwrap().unwrap().1
 }
 
+fn cocooonfs_test_write_aux_fs_metadata_op_helper(
+    fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
+    transaction: <TestCocoonFs as fs::NvFs>::Transaction,
+    aux_fs_metadata: AuxFsMetadata,
+) -> Result<<TestCocoonFs as fs::NvFs>::Transaction, fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
+    let write_aux_fs_metadata_fut = TestCocoonFs::write_aux_fs_metadata(
+        &cocoonfs_test_mk_fs_instance_ref(fs_instance),
+        transaction,
+        aux_fs_metadata,
+    );
+    let executor = TestAsyncExecutor::new();
+    let write_aux_fs_metadata_waiter = TestAsyncExecutor::spawn(
+        &executor,
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(
+            fs_instance.clone(),
+            write_aux_fs_metadata_fut,
+            rng,
+        ),
+    );
+    TestAsyncExecutor::run_to_completion(&executor);
+    let write_aux_fs_metadata_result = write_aux_fs_metadata_waiter.take().unwrap().unwrap().1.1;
+    write_aux_fs_metadata_result.and_then(|(transaction, write_inode_result)| write_inode_result.map(|_| transaction))
+}
+
+fn cocoonfs_test_read_aux_fs_metadata_op_helper(
+    fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
+    read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
+) -> Result<(fs::NvFsReadContext<TestCocoonFs>, AuxFsMetadata), fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
+    let read_aux_fs_metadata_fut =
+        TestCocoonFs::read_aux_fs_metadata(&cocoonfs_test_mk_fs_instance_ref(fs_instance), read_context);
+    let executor = TestAsyncExecutor::new();
+    let read_aux_fs_metadata_waiter = TestAsyncExecutor::spawn(
+        &executor,
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(
+            fs_instance.clone(),
+            read_aux_fs_metadata_fut,
+            rng,
+        ),
+    );
+    TestAsyncExecutor::run_to_completion(&executor);
+    let read_aux_fs_metadata_result = read_aux_fs_metadata_waiter.take().unwrap().unwrap().1;
+    read_aux_fs_metadata_result.and_then(|(read_context, read_aux_fs_metadata_result)| {
+        read_aux_fs_metadata_result.map(|read_aux_fs_metadata| (read_context, read_aux_fs_metadata))
+    })
+}
+
 fn cocoonfs_test_write_inode_op_helper(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     transaction: <TestCocoonFs as fs::NvFs>::Transaction,
