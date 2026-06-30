@@ -3574,7 +3574,6 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         block_allocation_blocks_log2: u32,
         count: usize,
         constraints: transaction::TransactionAllocationConstraints,
-        request_pending_allocs: alloc_bitmap::SparseAllocBitmap,
         result: Vec<layout::PhysicalAllocBlockIndex>,
     },
     Done(marker::PhantomData<fn() -> (ST, B)>),
@@ -3769,6 +3768,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
 
                 let result = fs_sync_state.alloc_bitmap.find_free_block(
                     *block_allocation_blocks_log2,
+                    &[],
                     None,
                     &pending_allocs,
                     &pending_frees,
@@ -3821,7 +3821,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 block_allocation_blocks_log2,
                 count,
                 constraints,
-                request_pending_allocs,
                 result: allocated_blocks,
             } => {
                 let mut transaction = match transaction.take() {
@@ -3843,20 +3842,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     | transaction::TransactionAllocationConstraints::Journal => &empty_pending_frees,
                 };
 
+                let pending_allocs = [
+                    &transaction.allocs.pending_allocs,
+                    &transaction.allocs.journal_allocs,
+                    pending_transactions_allocs,
+                ];
+                let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
+
                 let pending_frees = [transaction_pending_frees];
                 let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
 
                 while allocated_blocks.len() < *count {
-                    let pending_allocs = [
-                        &transaction.allocs.pending_allocs,
-                        &transaction.allocs.journal_allocs,
-                        pending_transactions_allocs,
-                        request_pending_allocs,
-                    ];
-                    let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
-
                     let allocated_block_allocation_blocks_begin = match fs_sync_state.alloc_bitmap.find_free_block(
                         *block_allocation_blocks_log2,
+                        allocated_blocks,
                         None,
                         &pending_allocs,
                         &pending_frees,
@@ -3873,16 +3872,18 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                         }
                     };
 
-                    if let Err(e) = request_pending_allocs
-                        .add_block(allocated_block_allocation_blocks_begin, *block_allocation_blocks_log2)
-                    {
-                        *this = Self::Done(marker::PhantomData);
-                        return task::Poll::Ready(PendingTransactionsSyncFutureResult::AllocateBlocks {
-                            result: Err(e),
-                        });
-                    }
-
-                    allocated_blocks.push(allocated_block_allocation_blocks_begin);
+                    let allocated_blocks_insertion_pos =
+                        match allocated_blocks.binary_search(&allocated_block_allocation_blocks_begin) {
+                            Ok(_) => {
+                                // The Block has been allocated twice now?!
+                                *this = Self::Done(marker::PhantomData);
+                                return task::Poll::Ready(PendingTransactionsSyncFutureResult::AllocateBlocks {
+                                    result: Err(nvfs_err_internal!()),
+                                });
+                            }
+                            Err(allocated_blocks_insertion_pos) => allocated_blocks_insertion_pos,
+                        };
+                    allocated_blocks.insert(allocated_blocks_insertion_pos, allocated_block_allocation_blocks_begin);
                 }
 
                 let result = if let Err(e) = pending_transactions_sync_state.register_allocated_blocks(
@@ -4216,7 +4217,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlocksFuture<ST, B>
                 block_allocation_blocks_log2,
                 count,
                 constraints,
-                request_pending_allocs: alloc_bitmap::SparseAllocBitmap::new(),
                 result,
             },
         )

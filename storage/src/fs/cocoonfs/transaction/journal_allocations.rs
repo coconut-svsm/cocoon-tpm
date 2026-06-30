@@ -276,12 +276,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     {
                         // Exclusive access to the fs_sync_state means there are no other pending
                         // transactions to coordinate with. Allocate directly.
+                        let pending_allocs = [&transaction.allocs.pending_allocs, &transaction.allocs.journal_allocs];
+                        let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
                         let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
                         // Do not repurpose pending frees when allocating for the journal.
                         let pending_frees = [&empty_pending_frees];
                         let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
-
-                        let mut request_pending_allocs = alloc_bitmap::SparseAllocBitmap::new();
 
                         let mut allocated_blocks = Vec::new();
                         if let Err(e) = allocated_blocks.try_reserve_exact(total_needed_blocks) {
@@ -292,19 +292,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         while allocated_blocks.len()
                             < total_needed_blocks - transaction.abandoned_journal_staging_copy_blocks.len()
                         {
-                            let pending_allocs = [
-                                &transaction.allocs.pending_allocs,
-                                &transaction.allocs.journal_allocs,
-                                &request_pending_allocs,
-                            ];
-                            let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
-
                             // Mutable access to the filesystem instance's sync state means that there
                             // will be no subsequent allocations for long-living entities with placement
-                            // optimization enabled. So disabling placement optimization here is fine..
+                            // optimization enabled. So disabling placement optimization here is fine.
                             let allocated_block_allocation_blocks_begin =
                                 match fs_instance_sync_state_write_guard.alloc_bitmap.find_free_block(
                                     journal_block_allocation_blocks_log2,
+                                    &allocated_blocks,
                                     None,
                                     &pending_allocs,
                                     &pending_frees,
@@ -318,16 +312,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         return task::Poll::Ready(Ok((transaction, Err(NvFsError::NoSpace))));
                                     }
                                 };
-
-                            if let Err(e) = request_pending_allocs.add_block(
-                                allocated_block_allocation_blocks_begin,
-                                journal_block_allocation_blocks_log2,
-                            ) {
-                                this.fut_state = TransactionAllocateJournalStagingCopiesFutureState::Done;
-                                return task::Poll::Ready(Ok((transaction, Err(e))));
-                            }
-
-                            allocated_blocks.push(allocated_block_allocation_blocks_begin);
+                            let allocated_blocks_insertion_pos =
+                                match allocated_blocks.binary_search(&allocated_block_allocation_blocks_begin) {
+                                    Ok(_) => {
+                                        // The block has been allocated twice now?!
+                                        this.fut_state = TransactionAllocateJournalStagingCopiesFutureState::Done;
+                                        return task::Poll::Ready(Ok((transaction, Err(nvfs_err_internal!()))));
+                                    }
+                                    Err(allocated_blocks_insertion_pos) => allocated_blocks_insertion_pos,
+                                };
+                            allocated_blocks
+                                .insert(allocated_blocks_insertion_pos, allocated_block_allocation_blocks_begin);
                         }
 
                         if let Err(e) = transaction
