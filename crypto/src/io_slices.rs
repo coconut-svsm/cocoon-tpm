@@ -174,8 +174,8 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a> for EmptyCryptoIoSlices {
         self.iter.total_len()
     }
 
-    fn all_aligned_to(&self, alignment: usize) -> Result<bool, Self::BackendIteratorError> {
-        self.iter.all_aligned_to(alignment)
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        self.iter.all_lengths_multiple_of(divisor)
     }
 }
 
