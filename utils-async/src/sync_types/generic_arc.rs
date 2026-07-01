@@ -15,7 +15,7 @@
 // - no new_cyclic(), hence no uninitialized memory at birth, which allows for
 //   weaker memory ordering Weak::upgrade().
 
-//! Implementaion of [`GenericArc`].
+//! Implementation of [`GenericArc`].
 //!
 //! Based heavily on a trimmed version of Rust's core [`Arc`](alloc::sync::Arc).
 
@@ -60,7 +60,7 @@ impl<T: Sized> Arc<T> {
     }
 }
 
-/// Trimmed reimplementation of Rust's core [`Weak`](alloc::sync::Weak
+/// Trimmed reimplementation of Rust's core [`Weak`](alloc::sync::Weak).
 struct Weak<T> {
     ptr: NonNull<ArcInner<T>>,
 }
@@ -94,9 +94,7 @@ impl<T> Arc<T> {
         x.data.write(data);
         unsafe { Ok(Self::from_inner(Box::leak(x).into())) }
     }
-}
 
-impl<T> Arc<T> {
     /// Constructs an `Arc<T>` from a raw pointer.
     #[inline]
     pub unsafe fn from_raw(ptr: *const T) -> Self {
@@ -109,9 +107,7 @@ impl<T> Arc<T> {
             Self::from_ptr(arc_ptr)
         }
     }
-}
 
-impl<T> Arc<T> {
     /// Consumes the `Arc`, returning the wrapped pointer.
     #[inline]
     pub fn into_raw(this: Self) -> *const T {
@@ -127,6 +123,10 @@ impl<T> Arc<T> {
 
     /// Creates a new [`Weak`] pointer to this allocation.
     pub fn downgrade(this: &Self) -> Weak<T> {
+        // Relaxed is sufficient here because this Arc exposes no `get_mut`,
+        // `is_unique`, or `new_cyclic` — there is no operation that needs to
+        // synchronize with weak-count changes. std::sync::Arc uses
+        // Acquire/Release in its downgrade to support those APIs.
         let mut cur = this.inner().weak.load(atomic::Ordering::Relaxed);
 
         loop {
@@ -344,6 +344,11 @@ impl<T> Weak<T> {
         // We use a CAS loop to increment the strong count instead of a
         // fetch_add as this function should never take the reference count
         // from zero to one.
+        //
+        // Relaxed is sufficient: the only transition that must synchronize
+        // with a strong-count change is the Release/Acquire pair in
+        // Arc::drop, which guards destruction. std::sync::Arc::upgrade uses
+        // Acquire to support get_mut/is_unique; we expose neither.
         if self
             .inner()
             .strong
@@ -357,8 +362,7 @@ impl<T> Weak<T> {
         }
     }
 
-    /// Returns `None` when the pointer is dangling and there is no allocated
-    /// `ArcInner`, (i.e., when this `Weak` was created by `Weak::new`).
+    /// Gets the [`WeakInner`] pointer to access the reference counts.
     #[inline]
     fn inner(&self) -> WeakInner<'_> {
         let ptr = self.ptr.as_ptr();

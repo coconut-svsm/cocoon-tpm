@@ -30,7 +30,7 @@
 //! for the reason of complying with the API's expectations -- after all, a lock
 //! on the containing `struct` grants exclusive access to the inner member as
 //! well and analogous for [`SyncRcPtr`]s. As atomic operations typically have
-//! some performace cost, it's desirable to eliminate the need for wrapping the
+//! some performance cost, it's desirable to eliminate the need for wrapping the
 //! member in an extra [`Lock`] or [`SyncRcPtr`]. For such scenarios the
 //! [`LockForInner`] and [`SyncRcPtrForInner`] implementations are provided.
 
@@ -141,7 +141,7 @@ where
 
 /// Locking guard obtained from [`LockForInner::lock()`](LockForInner::lock).
 ///
-/// Alternatively, an exising guard for the [`Lock`] wrapping the outer `OT` may
+/// Alternatively, an existing guard for the [`Lock`] wrapping the outer `OT` may
 /// get converted directly [to](Self::from_outer) and [back
 /// from](Self::into_outer) a `LockForInnerGuard` instance.
 pub struct LockForInnerGuard<'a, OT, OL, TAG>
@@ -252,7 +252,7 @@ pub trait SyncRcPtr<T: ?Sized>: Clone + ops::Deref<Target = T> + marker::Send + 
     /// Weak pointer type returned by [downgrade()](Self::downgrade).
     type WeakSyncRcPtr: WeakSyncRcPtr<T, Self>;
 
-    /// Pointer reference type returned by [ref()](Self::as_ref).
+    /// Pointer reference type returned by [as_ref()](Self::as_ref).
     ///
     /// Implementations generic over some `SyncRcPtr<T>` should prefer accepting
     /// a `SyncRcPtr<T>::SyncRcPtrRef` over `&SyncRcPtr<T>` whenever
@@ -308,7 +308,7 @@ pub trait SyncRcPtr<T: ?Sized>: Clone + ops::Deref<Target = T> + marker::Send + 
 ///
 /// A `WeakSyncRcPtr` instance does not hinder destruction of the original
 /// [`SyncRcPtr`]'s wrapped value. Note that this concerns only the
-/// [`drop()`](Drop::drop) -- the backing memory mat get deallocated only once
+/// [`drop()`](Drop::drop) -- the backing memory may get deallocated only once
 /// the last `WeakSyncRcPtr` is gone.
 pub trait WeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>>: Clone + marker::Send + marker::Unpin {
     /// Convert a `WeakSyncRcPtr` back to a [`SyncRcPtr`].
@@ -348,16 +348,17 @@ pub trait WeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>>: Clone + marker::Send + mark
 /// [`SyncRcPtrFactory::try_new_recoverable()`](SyncRcPtrFactory::try_new_recoverable).
 #[derive(Debug)]
 pub enum SyncRcPtrTryNewError {
-    /// Memory alocation failure.
+    /// Memory allocation failure.
     AllocationFailure,
 }
 
 /// Error type returned by
 /// [`SyncRcPtrFactory::try_new_with()`](SyncRcPtrFactory::try_new_with).
+#[derive(Debug)]
 pub enum SyncRcPtrTryNewWithError<E> {
     /// Failure to allocate a new [`SyncRcPtr`].
     TryNewError(SyncRcPtrTryNewError),
-    /// The provided initalization callback returned an error indication.
+    /// The provided initialization callback returned an error indication.
     WithError(E),
 }
 
@@ -428,7 +429,7 @@ pub trait SyncRcPtrFactory {
     ///
     /// Furthermore, writing the initialization value returned by `new` directly
     /// into the destination memory may enable certain compiler
-    /// optimizations and safe copy over the stack.
+    /// optimizations and save a copy over the stack.
     fn try_new_with<T, R, E, N>(new: N) -> Result<(Self::SyncRcPtr<T>, R), SyncRcPtrTryNewWithError<E>>
     where
         T: marker::Send + marker::Sync,
@@ -464,7 +465,7 @@ pub trait SyncRcPtrFactory {
 /// Implementations generic over some [`SyncRcPtr<T>`](SyncRcPtr) should prefer
 /// accepting a `SyncRcPtrRef<T>` over a `&SyncRcPtr<T>` whenever possible.
 ///
-/// Doing so enables callers to potentially safe an atomic operation
+/// Doing so enables callers to potentially save an atomic operation
 /// just for creating an intermediate [`SyncRcPtr<T>`] in cases where that
 /// happens to be a derived [`SyncRcPtrForInner`], referring to some member of
 /// type `T` contained in an outer `struct OT` managed by a
@@ -488,14 +489,14 @@ pub trait SyncRcPtrRef<'a, T: ?Sized, P: 'a + SyncRcPtr<T>>: Clone + ops::Deref<
 
 /// [`WeakSyncRcPtr`] associated with a `Pin<SyncRcPtr<T>>`.
 ///
-/// An of [`SyncRcPtr`] for `Pin<SyncRcPtr<T>>` is provided and
+/// An implementation of [`SyncRcPtr`] for `Pin<SyncRcPtr<T>>` is provided and
 /// `PinnedWeakSyncRcPtr` is its associated [`WeakSyncRcPtr`] type returned by
 /// the implementation of
 /// [`Pin<SyncRcPtr<T>>::downgrade()`](SyncRcPtr::downgrade).
 ///
-/// Note that it is not possible to simply use `Pin<SyncRcPtr<T>::WeakSyncRcPtr`
+/// Note that it is not possible to simply use `Pin<SyncRcPtr<T>::WeakSyncRcPtr>`
 /// for that, as [`Pin`](pin::Pin) requires the wrapped pointer to be
-/// dereferencable.
+/// dereferenceable.
 pub struct PinnedWeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>> {
     weak_ptr: P::WeakSyncRcPtr,
 }
@@ -694,7 +695,7 @@ pub trait DerefInnerByTag<TAG> {
 /// Helper macro for implementing the [`DerefInnerByTag`] trait.
 #[macro_export]
 macro_rules! impl_deref_inner_by_tag {
-    ($field:ident, $field_type:path) => {
+    ($field:ident, $field_type:ty) => {
         type Output = $field_type;
 
         fn deref_inner(&self) -> &Self::Output {
@@ -735,7 +736,7 @@ macro_rules! impl_deref_inner_by_tag {
 /// typically a `struct` member.
 ///
 /// Users should not implement this trait by themselves, but use the
-/// [`impl_deref_mut inner_by_tag!()`](crate::impl_deref_mut inner_by_tag)
+/// [`impl_deref_mut_inner_by_tag!()`](crate::impl_deref_mut_inner_by_tag)
 /// macro.
 ///
 /// # Example:
@@ -781,7 +782,7 @@ macro_rules! impl_deref_mut_inner_by_tag {
 ///   reduces locality relative to the containing `struct`,
 /// * the atomic operations typically involved with cloning and destruction of
 ///   [`SyncRcPtr`] can be expensive -- the more instances there are and the
-///   more cachelines the different atomic reference counts are scattered over
+///   more cache lines the different atomic reference counts are scattered over
 ///   the worse it tends to get,
 /// * whereas the inner member's wrapping [`SyncRcPtr`] instance would be
 ///   completely superfluous from a lifetime management perspective, because the
@@ -1027,7 +1028,7 @@ where
 ///
 /// As outlined in the documentation to [`SyncRcPtrRef`], translating a
 /// [`SyncRcPtrRef`] for the outer containing `struct` to a
-/// `SyncRcPtrRefForInner` for the member is a zero cost operation, wheras going
+/// `SyncRcPtrRefForInner` for the member is a zero cost operation, whereas going
 /// from a [`SyncRcPtr`] for the outer `struct` to a [`SyncRcPtrForInner`] for
 /// the member is not.
 pub struct SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
