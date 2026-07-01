@@ -11,11 +11,16 @@ use crate::{
     blkdev::{self, NvBlkDevIoError},
     crypto::{CryptoError, hash, rng},
     fs::{
-        NvFsError, NvFsIoError,
+        NvFsError,
         cocoonfs::{
-            FormatError, ImageLayout, alloc_bitmap, auth_tree, encryption_entities, extent_ptr, extents,
+            FormatError, ImageLayout, alloc_bitmap, auth_tree,
+            aux_fs_metadata::{
+                self, AuxFsMetadata, AuxFsMetadataExtentsPtrsPair, InitializeAuxFsMetadataExtentsFuture,
+            },
+            encryption_entities, extent_ptr, extents,
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
-            image_header, inode_extents_list, inode_index,
+            image_header::{self, FsMetadataMkFsInfo},
+            inode_extents_list, inode_index,
             integrity::{ExtentIntegrityProtectionsInvalidateFuture, ExtentIntegrityState},
             journal, keys,
             layout::{self, BlockCount as _, BlockIndex as _},
@@ -32,6 +37,9 @@ use crate::{
 };
 use core::{future, iter, marker, mem, pin, task};
 
+#[cfg(test)]
+use crate::fs::NvFsIoError;
+
 /// Filesystem layout description internal to [`MkFsFuture`].
 struct MkFsLayout {
     image_layout: layout::ImageLayout,
@@ -42,6 +50,8 @@ struct MkFsLayout {
     inode_index_entry_leaf_node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     journal_log_head_extent: layout::PhysicalAllocBlockRange,
     auth_tree_extent: layout::PhysicalAllocBlockRange,
+    aux_fs_metadata_extents: extents::PhysicalExtents,
+    aux_fs_metadata_update_group1_extents_begin: Option<usize>,
     alloc_bitmap_file_extent: layout::PhysicalAllocBlockRange,
     auth_tree_inode_extents_list_extents: Option<extents::PhysicalExtents>,
     alloc_bitmap_inode_extents_list_extents: Option<extents::PhysicalExtents>,
@@ -55,11 +65,13 @@ impl MkFsLayout {
     /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the
     ///   [`StaticImageHeader::salt`](image_header::StaticImageHeader::salt).
+    /// * `aux_fs_metadata` - The [`AuxFsMetadata`] to write to the filesystem.
     /// * `image_size` - The filesystem image size to get recorded in the
     ///   [`MutableImageHeader::image_size`](image_header::MutableImageHeader::image_size).
     pub fn new(
         image_layout: &layout::ImageLayout,
         salt: FixedVec<u8, 4>,
+        aux_fs_metadata: Option<&aux_fs_metadata::AuxFsMetadata>,
         image_size: layout::AllocBlockCount,
     ) -> Result<Self, NvFsError> {
         let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
@@ -122,6 +134,81 @@ impl MkFsLayout {
                 .is_aligned_pow2(journal_block_allocation_blocks_log2)
         );
 
+        // The Authentication Tree extent is aligned to the larger of the IO Block and
+        // the Authentication Tree Data Block size. The same constraint applies
+        // to the AuxFsMetadata extents. Place them right after.
+        let mut allocated_image_allocation_blocks_end = auth_tree_extent.end();
+        let mut aux_fs_metadata_extents = extents::PhysicalExtents::new();
+        let mut aux_fs_metadata_update_group1_extents_begin = None;
+        if let Some(aux_fs_metadata) = aux_fs_metadata.filter(|aux_fs_metadata| !aux_fs_metadata.is_trivial()) {
+            let allocation_request = aux_fs_metadata.extents_allocation_request(
+                image_layout.io_block_allocation_blocks_log2,
+                image_layout.auth_tree_data_block_allocation_blocks_log2,
+                image_layout.allocation_block_size_128b_log2,
+            )?;
+            let mut allocated_payload_len = 0;
+            while allocated_payload_len < allocation_request.total_effective_payload_len {
+                let remaining_payload_len = allocation_request.total_effective_payload_len - allocated_payload_len;
+                let (extent_allocation_blocks, done) = allocation_request
+                    .get_layout()
+                    .extent_payload_len_to_allocation_blocks(remaining_payload_len, allocated_payload_len == 0);
+                if image_size - (allocated_image_allocation_blocks_end - layout::PhysicalAllocBlockIndex::from(0u64))
+                    < extent_allocation_blocks
+                {
+                    return Err(NvFsError::NoSpace);
+                }
+                aux_fs_metadata_extents.push_extent(
+                    &layout::PhysicalAllocBlockRange::from((
+                        allocated_image_allocation_blocks_end,
+                        extent_allocation_blocks,
+                    )),
+                    true,
+                )?;
+                allocated_image_allocation_blocks_end += extent_allocation_blocks;
+                if done {
+                    allocated_payload_len += remaining_payload_len;
+                } else {
+                    allocated_payload_len += allocation_request
+                        .get_layout()
+                        .extent_effective_payload_len(extent_allocation_blocks, allocated_payload_len == 0);
+                }
+            }
+
+            // If offline updates are to be supported, allocated the second update group as
+            // well.
+            if aux_fs_metadata.get_extra_reserve_capacity().is_some() {
+                aux_fs_metadata_update_group1_extents_begin = Some(aux_fs_metadata_extents.len());
+                let mut allocated_payload_len = 0;
+                while allocated_payload_len < allocation_request.total_effective_payload_len {
+                    let remaining_payload_len = allocation_request.total_effective_payload_len - allocated_payload_len;
+                    let (extent_allocation_blocks, done) = allocation_request
+                        .get_layout()
+                        .extent_payload_len_to_allocation_blocks(remaining_payload_len, allocated_payload_len == 0);
+                    if image_size
+                        - (allocated_image_allocation_blocks_end - layout::PhysicalAllocBlockIndex::from(0u64))
+                        < extent_allocation_blocks
+                    {
+                        return Err(NvFsError::NoSpace);
+                    }
+                    aux_fs_metadata_extents.push_extent(
+                        &layout::PhysicalAllocBlockRange::from((
+                            allocated_image_allocation_blocks_end,
+                            extent_allocation_blocks,
+                        )),
+                        true,
+                    )?;
+                    allocated_image_allocation_blocks_end += extent_allocation_blocks;
+                    if done {
+                        allocated_payload_len += remaining_payload_len;
+                    } else {
+                        allocated_payload_len += allocation_request
+                            .get_layout()
+                            .extent_effective_payload_len(extent_allocation_blocks, allocated_payload_len == 0);
+                    }
+                }
+            }
+        }
+
         let alloc_bitmap_file_blocks =
             alloc_bitmap::AllocBitmapFile::image_allocation_blocks_to_file_blocks(image_layout, image_size)?;
         let alloc_bitmap_file_allocation_blocks = layout::AllocBlockCount::from(
@@ -134,8 +221,12 @@ impl MkFsLayout {
             return Err(NvFsError::from(FormatError::InvalidImageSize));
         }
         // The Allocation Bitmap File's extents must be aligned to the Authentication
-        // Tree Data Block size. The beginning, i.e. auth_tree_extent.end(), is
-        // already, so align the length as well.
+        // Tree Data Block size. The beginning, i.e. the current
+        // allocated_image_allocation_blocks_end, is already, so align the
+        // length as well.
+        debug_assert!(
+            u64::from(allocated_image_allocation_blocks_end).is_aligned_pow2(journal_block_allocation_blocks_log2)
+        );
         let alloc_bitmap_file_allocation_blocks = alloc_bitmap_file_allocation_blocks
             .align_up(auth_tree_data_block_allocation_blocks_log2)
             .ok_or(NvFsError::NoSpace)?;
@@ -143,11 +234,10 @@ impl MkFsLayout {
             return Err(NvFsError::NoSpace);
         }
         let alloc_bitmap_file_extent = layout::PhysicalAllocBlockRange::new(
-            auth_tree_extent.end(),
-            auth_tree_extent.end() + alloc_bitmap_file_allocation_blocks,
+            allocated_image_allocation_blocks_end,
+            allocated_image_allocation_blocks_end + alloc_bitmap_file_allocation_blocks,
         );
-
-        let mut allocated_image_allocation_blocks_end = alloc_bitmap_file_extent.end();
+        allocated_image_allocation_blocks_end = alloc_bitmap_file_extent.end();
 
         // Place the Inode Index entry leaf node. If there's enough space inbetween the
         // image header and the journal log head, put it there for improved
@@ -219,6 +309,8 @@ impl MkFsLayout {
             inode_index_entry_leaf_node_allocation_blocks_begin,
             journal_log_head_extent,
             auth_tree_extent,
+            aux_fs_metadata_extents,
+            aux_fs_metadata_update_group1_extents_begin,
             alloc_bitmap_file_extent,
             auth_tree_inode_extents_list_extents,
             alloc_bitmap_inode_extents_list_extents,
@@ -273,10 +365,19 @@ impl MkFsLayout {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum MkFsFutureBackupMkFsInfoHeaderWriteControl {
-    Write,
-    RetainExisting,
+enum MkFsFutureBackupMkFsInfoHeaderWriteControl {
+    Write {
+        backup_mkfsinfo_data_location: layout::PhysicalAllocBlockRange,
+        original_mkfsinfo_aux_fs_metadata: AuxFsMetadata,
+    },
+    RetainExisting {
+        backup_mkfsinfo_data_location: layout::PhysicalAllocBlockRange,
+    },
+    Relocate {
+        old_backup_mkfsinfo_data_location: layout::PhysicalAllocBlockRange,
+        new_backup_mkfsinfo_data_location: layout::PhysicalAllocBlockRange,
+        original_mkfsinfo_aux_fs_metadata: AuxFsMetadata,
+    },
 }
 
 /// Format a CocoonFs filesystem instance.
@@ -340,20 +441,51 @@ struct MkFsFutureFsInitData<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
 /// [`MkFsFuture`] state-machine state.
 #[allow(clippy::large_enum_variant)]
 enum MkFsFutureState<B: blkdev::NvBlkDev> {
-    Init,
-    ResizeBlkDev {
-        resize_fut: B::ResizeFuture,
+    Init {
+        aux_fs_metadata: Option<AuxFsMetadata>,
     },
-    WriteBackupMkFsInfoHeader {
-        write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
+    RestorePrimaryMkFsInfoHeaderData {
+        new_blkdev_io_blocks: u64,
+        aux_fs_metadata: Option<AuxFsMetadata>,
+        write_primary_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
     },
-    WriteBarrierAfterBackupMkFsInfoHeaderWrite {
+    WriteBarrierAfterPrimaryMkFsInfoHeaderDataRestore {
+        new_blkdev_io_blocks: u64,
+        aux_fs_metadata: Option<AuxFsMetadata>,
         write_barrier_fut: B::WriteBarrierFuture,
     },
-    InvalidateImageHeaderPrepare,
+    ResizeBlkDevPrepare {
+        new_blkdev_io_blocks: u64,
+        aux_fs_metadata: Option<AuxFsMetadata>,
+    },
+    ResizeBlkDev {
+        new_blkdev_io_blocks: u64,
+        aux_fs_metadata: Option<AuxFsMetadata>,
+        resize_fut: B::ResizeFuture,
+    },
+    WriteBackupMkFsInfoHeaderDataPrepare {
+        aux_fs_metadata: Option<AuxFsMetadata>,
+    },
+    WriteBackupMkFsInfoHeaderData {
+        aux_fs_metadata: Option<AuxFsMetadata>,
+        write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
+    },
+    WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
+        aux_fs_metadata: AuxFsMetadata,
+        write_barrier_fut: B::WriteBarrierFuture,
+    },
+    InvalidateImageHeaderPrepare {
+        aux_fs_metadata: AuxFsMetadata,
+    },
     InvalidateImageHeader {
+        aux_fs_metadata: AuxFsMetadata,
         invalidate_fut: ExtentIntegrityProtectionsInvalidateFuture<B>,
     },
+    WriteAuxFsMetadata {
+        aux_fs_metadata: AuxFsMetadata,
+        write_fut: InitializeAuxFsMetadataExtentsFuture<B>,
+    },
+    AdvanceAuthTreeCursorToInitPosPrepare,
     AdvanceAuthTreeCursorToInodeIndexEntryLeafNode {
         advance_fut: auth_tree::AuthTreeInitializationCursorAdvanceFuture<B>,
     },
@@ -454,11 +586,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
     ///
     /// # See also:
     ///
+    /// * [`new_with_mkfsinfo()`](Self::new_with_mkfsinfo).
     /// * [`WriteMkFsInfoHeaderFuture`].
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         blkdev: B,
         image_layout: &ImageLayout,
         salt: FixedVec<u8, 4>,
+        aux_fs_metadata: AuxFsMetadata,
         image_size: Option<u64>,
         raw_root_key: &[u8],
         enable_trimming: bool,
@@ -472,9 +607,101 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
             blkdev,
             image_layout,
             salt,
+            Some(aux_fs_metadata),
             image_size,
             raw_root_key,
             None,
+            None,
+            enable_trimming,
+            rng,
+        )
+    }
+
+    /// Instantiate a [`MkFsFuture`] from a [`FsMetadataMkFsInfo`] found on
+    /// storage.
+    ///
+    /// If a filesystem creation info header is found on the storage volume,
+    /// the [`OpenFsFuture`](super::openfs::OpenFsFuture) would initialize the
+    /// filesystem in the course of its operation, i.e. upon the first
+    /// attempt to open it.
+    ///
+    /// Users requiring a more fine-grained control over the filesystem creation
+    /// may invoke `new_with_mkfsinfo()` directly themselves instead. Typically,
+    /// they would [read the filesystem
+    /// metadata](super::openfs::ReadFsMetadataFuture) in a first step,
+    /// and, if that is found to be in the
+    /// [`FsMetadata::MkFsInfo`](super::openfs::FsMetadata::MkFsInfo) state,
+    /// they would pass the associated data to the `mkfsinfo` argument of
+    /// `MkFsFuture::new_with_mkfsinfo()` then.
+    ///
+    /// The `aux_fs_metadata`, if specified, takes precedence over the
+    /// [`AuxFsMetadata`] found in the `mkfsinfo`, allowing for further
+    /// amendments before writing it to the initialized filesystem.
+    ///
+    /// On error, the input `blkdev` and `rng` are returned directly as part of
+    /// the `Err`. On success, the [`MkFsFuture`] assumes ownership of the
+    /// `blkdev` and `rng` for the duration of the operation. They will get
+    /// either returned back from [`poll()`](Self::poll) at completion,
+    /// or will be passed onwards to the resulting [`CocoonFs`] instance as
+    /// appropriate.
+    ///
+    /// # Arguments:
+    ///
+    /// * `blkdev` - The storage to create a filesystem on.
+    /// * `mkfsinfo` - The filesystem creation info data found on storage,
+    ///   typically extracted from a
+    ///   [`FsMetadata::MkFsInfo`](super::openfs::FsMetadata::MkFsInfo).
+    /// * `aux_fs_metadata` - Optional [`AuxFsMetadata`] taking precedence over
+    ///   the one found in the `mkfsinfo`.
+    /// * `raw_root_key` - The filesystem's raw root key material supplied from
+    ///   extern.
+    /// * `enable_trimming` - Whether to enable the submission of [trim
+    ///   commands](blkdev::NvBlkDev::trim) to the underlying storage for the
+    ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
+    ///   upon successful completion. The setting of this value also controls
+    ///   whether whether unallocated storage will get initialized with random
+    ///   data in the course of the filesystem formatting -- unallocated storage
+    ///   will get randomized if and only if `enable_trimming` is off.
+    /// * `rng` - The [random number generator](rng::RngCoreDispatchable) used
+    ///   for generating IVs, as well as randomizing padding in data structures
+    ///   and for initializing unallocated storage if `enable_trimming` is off.
+    ///
+    /// # See also:
+    ///
+    /// * [`new()`](Self::new).
+    /// * [`WriteMkFsInfoHeaderFuture`].
+    /// * [`OpenFsFuture`](super::OpenFsFuture).
+    /// * [`FsMetadata::MkFsInfo`](super::openfs::FsMetadata::MkFsInfo).
+    pub fn new_with_mkfsinfo(
+        blkdev: B,
+        mkfsinfo: FsMetadataMkFsInfo,
+        aux_fs_metadata: Option<AuxFsMetadata>,
+        raw_root_key: &[u8],
+        enable_trimming: bool,
+        rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
+    ) -> Result<Self, (B, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
+        let FsMetadataMkFsInfo {
+            header: mkfsinfo_header,
+            aux_fs_metadata: mkfsinfo_aux_fs_metadata,
+            mkfsinfo_data_location,
+        } = mkfsinfo;
+
+        let image_header::MkFsInfoHeader {
+            image_layout,
+            aux_fs_metadata_len: _,
+            image_size,
+            salt,
+        } = mkfsinfo_header;
+
+        Self::_new(
+            blkdev,
+            &image_layout,
+            salt,
+            aux_fs_metadata,
+            Some(image_size),
+            raw_root_key,
+            Some(mkfsinfo_data_location),
+            Some(mkfsinfo_aux_fs_metadata),
             enable_trimming,
             rng,
         )
@@ -494,6 +721,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
     /// * `blkdev` - The storage to create a filesystem on.
     /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the static image header.
+    /// * `aux_fs_metadata` - The [`AuxFsMetadata`] to write to the filesystem.
     /// * `image_size` - Optional filesystem image size to get recorded in the
     ///   mutable image header. If specified, it must not exceed the undelying
     ///   storage's size, as reported by
@@ -501,11 +729,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
     ///   not specified, the maximum possible value will be used.
     /// * `raw_root_key` - The filesystem's raw root key material supplied from
     ///   extern.
-    /// * `backup_mkfsinfo_header_write_control` - If specified, controls
-    ///   whether the backup filesystem creation info header is to be written or
-    ///   an already existing one must be left unmodified. If `None`, it is
+    /// * `mkfsinfo_data_location` - Location of the MkFsInfoHeader, if any, and
+    ///   [`AuxFsMetadata`] stored alongside on storage. If `None`, it is
     ///   assumed that this is a "direct" filesystem creation operation and no
     ///   filesystem creation info header had been setup beforehand.
+    /// * `mkfsinfo_aux_fs_metadata` - The [`AuxFsMetadata`] found alongside the
+    ///   [`MkFsInfoHeader`](image_header::MkFsInfoHeader) on storage, if any.
     /// * `enable_trimming` - Whether to enable the submission of [trim
     ///   commands](blkdev::NvBlkDev::trim) to the underlying storage for the
     ///   [`CocoonFs`] instance eventually returned from [`poll()`](Self::poll)
@@ -517,13 +746,15 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
     ///   for generating IVs, as well as randomizing padding in data structures
     ///   and for initializing unallocated storage if `enable_trimming` is off.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn _new(
+    fn _new(
         blkdev: B,
         image_layout: &ImageLayout,
         salt: FixedVec<u8, 4>,
+        aux_fs_metadata: Option<AuxFsMetadata>,
         image_size: Option<layout::AllocBlockCount>,
         raw_root_key: &[u8],
-        backup_mkfsinfo_header_write_control: Option<MkFsFutureBackupMkFsInfoHeaderWriteControl>,
+        mkfsinfo_data_location: Option<layout::PhysicalAllocBlockRange>,
+        mkfsinfo_aux_fs_metadata: Option<AuxFsMetadata>,
         enable_trimming: bool,
         mut rng: Box<dyn rng::RngCoreDispatchable + marker::Send>,
     ) -> Result<Self, (B, Box<dyn rng::RngCoreDispatchable + marker::Send>, NvFsError)> {
@@ -560,11 +791,138 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
             blkdev_io_blocks << blkdev_io_block_allocation_blocks_log2 >> allocation_block_blkdev_io_blocks_log2,
         );
         let image_size = image_size.unwrap_or(blkdev_allocation_blocks);
-        let mkfs_layout = match MkFsLayout::new(image_layout, salt, image_size) {
+        // If aux_fs_metadata is supplied, that takes precence over the one found in the
+        // filesystem creation info on storage.
+        let final_aux_fs_metatdata = aux_fs_metadata.as_ref().or(mkfsinfo_aux_fs_metadata.as_ref());
+        let mkfs_layout = match MkFsLayout::new(image_layout, salt, final_aux_fs_metatdata, image_size) {
             Ok(mkfs_layout) => mkfs_layout,
             Err(e) => return Err((blkdev, rng, e)),
         };
 
+        // Figure out how the existing mkfsinfo data, if any, is to be handled.
+        debug_assert_eq!(mkfsinfo_data_location.is_some(), mkfsinfo_aux_fs_metadata.is_some());
+        let (aux_fs_metadata, backup_mkfsinfo_header_write_control) = match mkfsinfo_data_location
+            .as_ref()
+            .zip(mkfsinfo_aux_fs_metadata)
+        {
+            Some((mkfsinfo_data_location, mkfsinfo_aux_fs_metadata)) => {
+                // An attempt to resize the NvBlkDev storage will be made. In either case the
+                // storage will be >= the image_size in the end. Figure out where the backup
+                // mkfsinfo copy would be expected after a successful resizing operation had
+                // taken place.
+                // MkfsLayout::new() verifies that the salt length fits an u8.
+                let salt_len = mkfs_layout.salt.len() as u8;
+                let backup_mkfsinfo_header_location = match image_header::MkFsInfoHeader::physical_backup_location(
+                    image_layout.io_block_allocation_blocks_log2,
+                    image_layout.allocation_block_size_128b_log2,
+                    salt_len,
+                    u64::from(mkfs_layout.image_size) << allocation_block_blkdev_io_blocks_log2
+                        >> blkdev_io_block_allocation_blocks_log2,
+                    blkdev_io_block_size_128b_log2,
+                ) {
+                    Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                    Err(e) => return Err((blkdev, rng, e)),
+                };
+
+                let backup_mkfsinfo_data_allocation_blocks_begin = if !mkfsinfo_aux_fs_metadata.is_trivial() {
+                    // As documented, the result of AuxFsMetadata::encoded_len() is always
+                    // representable as an u64.
+                    let backup_aux_fs_metadata_location = match AuxFsMetadata::mkfsinfo_physical_location(
+                        &backup_mkfsinfo_header_location,
+                        mkfsinfo_aux_fs_metadata.encoded_len() as u64,
+                        image_layout.io_block_allocation_blocks_log2 as u32,
+                        allocation_block_size_128b_log2,
+                    ) {
+                        Ok(backup_mkfsinfo_aux_fs_metadata_location) => backup_mkfsinfo_aux_fs_metadata_location,
+                        Err(e) => return Err((blkdev, rng, e)),
+                    };
+                    backup_aux_fs_metadata_location
+                        .map(|backup_mkfsinfo_header_location| backup_mkfsinfo_header_location.begin())
+                        .unwrap_or(backup_mkfsinfo_header_location.begin())
+                } else {
+                    backup_mkfsinfo_header_location.begin()
+                };
+                debug_assert!(backup_mkfsinfo_data_allocation_blocks_begin <= backup_mkfsinfo_header_location.begin());
+                let backup_mkfsinfo_data_location = layout::PhysicalAllocBlockRange::new(
+                    backup_mkfsinfo_data_allocation_blocks_begin,
+                    backup_mkfsinfo_header_location.end(),
+                );
+
+                if u64::from(mkfsinfo_data_location.begin()) == 0 {
+                    // Filesystem creation info found at the primary location at the beginning of
+                    // the storage volume. A copy needs to get written at the backup
+                    // location near the end. Use the original AuxFsMetadata found in the
+                    // filesystem creation info for that. If the provided aux_fs_metadata is None,
+                    // the mkfsinfo_aux_fs_metadata will eventually get used for that, once the
+                    // backup has been written.
+                    // Check that the backup MkFsInfoHeader or the the associated AuxFsMetadata to
+                    // be written towards the image end do not extend into the original
+                    // MkFsInfoHeader, it's associated AuxFsMetadata or to the initial metadata
+                    // structures to be written out.
+                    if mkfsinfo_data_location.end() > backup_mkfsinfo_data_location.begin()
+                        || mkfs_layout.allocated_image_allocation_blocks_end > backup_mkfsinfo_data_location.end()
+                    {
+                        return Err((blkdev, rng, NvFsError::NoSpace));
+                    }
+
+                    (
+                        aux_fs_metadata,
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write {
+                            backup_mkfsinfo_data_location,
+                            original_mkfsinfo_aux_fs_metadata: mkfsinfo_aux_fs_metadata,
+                        }),
+                    )
+                } else {
+                    // Filesystem creation info found at the backup location near the current
+                    // end of the storage volume. It might need to get relocated if block
+                    // device resizing is due.
+                    if backup_mkfsinfo_header_location.end() != mkfsinfo_data_location.end() {
+                        // A relocation is needed. To that end, the a copy of the mkfsinfo data
+                        // will first get written to the primary location at the image's beginning,
+                        // and then to the new backup location.
+                        // Verify that
+                        // current location does not overlap with the primary one, and that the new
+                        // location does not overlap with the primary one or the to be created
+                        // filesystems' data structures storage.
+                        let primary_mkfsinfo_data_allocation_blocks_end =
+                            layout::PhysicalAllocBlockIndex::from(0) + backup_mkfsinfo_data_location.block_count();
+
+                        if primary_mkfsinfo_data_allocation_blocks_end > mkfsinfo_data_location.begin()
+                            || primary_mkfsinfo_data_allocation_blocks_end > backup_mkfsinfo_data_location.begin()
+                            || mkfs_layout.allocated_image_allocation_blocks_end > backup_mkfsinfo_data_location.begin()
+                        {
+                            return Err((blkdev, rng, NvFsError::NoSpace));
+                        }
+
+                        (
+                            aux_fs_metadata,
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate {
+                                old_backup_mkfsinfo_data_location: *mkfsinfo_data_location,
+                                new_backup_mkfsinfo_data_location: backup_mkfsinfo_data_location,
+                                original_mkfsinfo_aux_fs_metadata: mkfsinfo_aux_fs_metadata,
+                            }),
+                        )
+                    } else {
+                        // The existing backup mkfsinfo data will get retained. Unlike it's the case
+                        // in the other branch, the mkfsinfo_aux_fs_metadata doesn't need to get
+                        // kept separately. Use it for the aux_fs_metadata right away if none has
+                        // been provided, otherwise dismiss it.  Verify that the to be created
+                        // filesystem structures won't extend into backup mkfsinfo location.
+                        if mkfs_layout.allocated_image_allocation_blocks_end > mkfsinfo_data_location.begin() {
+                            return Err((blkdev, rng, NvFsError::NoSpace));
+                        }
+
+                        (
+                            aux_fs_metadata.or(Some(mkfsinfo_aux_fs_metadata)),
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting {
+                                backup_mkfsinfo_data_location,
+                            }),
+                        )
+                    }
+                }
+            }
+            None => (aux_fs_metadata, None),
+        };
         // Verify that the contiguously written regions' length can be represented in an
         // usize each.
         // First check the head data.
@@ -642,50 +1000,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
             return Err((blkdev, rng, NvFsError::DimensionsNotSupported));
         }
 
-        if let Some(backup_mkfsinfo_header_write_control) = backup_mkfsinfo_header_write_control {
-            if backup_mkfsinfo_header_write_control == MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting
-                && mkfs_layout.image_size > blkdev_allocation_blocks
-            {
-                // If the backup MkFsInfoHeader is to be retained, the storage resizing
-                // operation is assumed to have taken place already. In either
-                // case it cannot be attempted once more, because the backup
-                // MkFsInfoHeader location is determined by the storage size.
-                return Err((blkdev, rng, NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
-            }
-
-            // Verify that the desired image size is valid (large enough) for writing the
-            // backup mkfsinfo header.
-            // MkfsLayout::new() verifies that the salt length fits an u8.
-            let salt_len = mkfs_layout.salt.len() as u8;
-            let backup_mkfsinfo_header_location = match image_header::MkFsInfoHeader::physical_backup_location(
-                image_layout.io_block_allocation_blocks_log2,
-                image_layout.allocation_block_size_128b_log2,
-                salt_len,
-                match backup_mkfsinfo_header_write_control {
-                    MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting => {
-                        // No attempt to resize will be made, see above.
-                        blkdev_io_blocks
-                    }
-                    MkFsFutureBackupMkFsInfoHeaderWriteControl::Write => {
-                        // An attempt to resize will be made. In either case the storage will be >=
-                        // the image_size in the end.
-                        u64::from(mkfs_layout.image_size) << allocation_block_blkdev_io_blocks_log2
-                            >> blkdev_io_block_allocation_blocks_log2
-                    }
-                },
-                blkdev_io_block_size_128b_log2,
-            ) {
-                Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
-                Err(e) => return Err((blkdev, rng, e)),
-            };
-
-            // Check that the storage allocated to the initial metadata structures does not
-            // extend into the backup MkFsInfoHeader.
-            if backup_mkfsinfo_header_location.begin() < mkfs_layout.allocated_image_allocation_blocks_end {
-                return Err((blkdev, rng, NvFsError::NoSpace));
-            }
-        }
-
         let mut alloc_bitmap = match alloc_bitmap::AllocBitmap::new(
             mkfs_layout.allocated_image_allocation_blocks_end - layout::PhysicalAllocBlockIndex::from(0u64),
         ) {
@@ -717,6 +1031,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
         }
         if let Err(e) = alloc_bitmap.set_in_range(&mkfs_layout.auth_tree_extent, true) {
             return Err((blkdev, rng, e));
+        }
+        for i in 0..mkfs_layout.aux_fs_metadata_extents.len() {
+            if let Err(e) = alloc_bitmap.set_in_range(&mkfs_layout.aux_fs_metadata_extents.get_extent_range(i), true) {
+                return Err((blkdev, rng, e));
+            }
         }
         if let Err(e) = alloc_bitmap.set_in_range(&mkfs_layout.alloc_bitmap_file_extent, true) {
             return Err((blkdev, rng, e));
@@ -835,7 +1154,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
             first_static_image_header_blkdev_io_block: FixedVec::new_empty(),
             #[cfg(test)]
             test_fail_write_static_image_header: false,
-            fut_state: MkFsFutureState::Init,
+            fut_state: MkFsFutureState::Init { aux_fs_metadata },
         })
     }
 }
@@ -883,7 +1202,7 @@ where
 
         let e = 'outer: loop {
             match &mut this.fut_state {
-                MkFsFutureState::Init => {
+                MkFsFutureState::Init { aux_fs_metadata } => {
                     let image_layout = &fs_init_data.mkfs_layout.image_layout;
                     let blkdev = &fs_init_data.blkdev;
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
@@ -899,74 +1218,385 @@ where
                             >> allocation_block_blkdev_io_blocks_log2,
                     );
 
-                    if this.backup_mkfsinfo_header_write_control
-                        == Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting)
-                    {
-                        // It's been checked from Self::new() that the storage size is >= the desired
-                        // image size.
-                        debug_assert!(blkdev_allocation_blocks >= fs_init_data.mkfs_layout.image_size);
-                        this.fut_state = MkFsFutureState::InvalidateImageHeaderPrepare;
-                        continue;
-                    }
-
-                    if fs_init_data.mkfs_layout.image_size != blkdev_allocation_blocks {
-                        match blkdev.resize(
-                            u64::from(fs_init_data.mkfs_layout.image_size) << allocation_block_blkdev_io_blocks_log2
-                                >> blkdev_io_block_allocation_blocks_log2,
-                        ) {
-                            Ok(resize_fut) => {
-                                this.fut_state = MkFsFutureState::ResizeBlkDev { resize_fut };
-                                continue;
-                            }
-                            Err(e) => {
-                                // Only consider failures to shrink as fatal.
-                                if fs_init_data.mkfs_layout.image_size > blkdev_allocation_blocks {
-                                    break NvFsError::from(match e {
-                                        NvBlkDevIoError::OperationNotSupported => NvBlkDevIoError::IoBlockOutOfRange,
-                                        _ => e,
-                                    });
+                    this.fut_state = if fs_init_data.mkfs_layout.image_size != blkdev_allocation_blocks {
+                        let new_blkdev_io_blocks = u64::from(fs_init_data.mkfs_layout.image_size)
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
+                        match this.backup_mkfsinfo_header_write_control.as_ref() {
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write { .. })
+                            | Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. })
+                            | None => MkFsFutureState::ResizeBlkDevPrepare {
+                                new_blkdev_io_blocks,
+                                aux_fs_metadata: aux_fs_metadata.take(),
+                            },
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate { .. }) => {
+                                // On a high level, backup mkfsinfo data relocation is implemented by restoring
+                                // the primary copy, and turning the
+                                // backup_mkfsinfo_header_write_control into
+                                // MkFsFutureBackupMkFsInfoHeaderWriteControl::Write.
+                                let write_primary_mkfsinfo_header_fut = WriteMkFsInfoHeaderDataFuture::new(false);
+                                MkFsFutureState::RestorePrimaryMkFsInfoHeaderData {
+                                    new_blkdev_io_blocks,
+                                    aux_fs_metadata: aux_fs_metadata.take(),
+                                    write_primary_mkfsinfo_header_fut,
                                 }
                             }
                         }
+                    } else {
+                        match this.backup_mkfsinfo_header_write_control.as_mut() {
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write { .. }) => {
+                                MkFsFutureState::WriteBackupMkFsInfoHeaderDataPrepare {
+                                    aux_fs_metadata: aux_fs_metadata.take(),
+                                }
+                            }
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. }) | None => {
+                                // In the RetainExisting case, the AuxFsMetadata from the mkfsinfo data
+                                // had been moved to aux_fs_metadata in Self::_new() already, if needed.
+                                debug_assert!(aux_fs_metadata.is_some());
+                                MkFsFutureState::InvalidateImageHeaderPrepare {
+                                    aux_fs_metadata: aux_fs_metadata.take().unwrap_or(AuxFsMetadata::new()),
+                                }
+                            }
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate {
+                                old_backup_mkfsinfo_data_location,
+                                original_mkfsinfo_aux_fs_metadata,
+                                ..
+                            }) => {
+                                // If we're not going to resize, then there should be no need to
+                                // relocate existing backup mkfsinfo data. Still handle the case for
+                                // good measure and turn the Relocate into a RetainExisting.
+                                debug_assert!(false);
+                                // Verify that the to be created filesystem structures won't extend into the
+                                // backup mkfsinfo data region -- Self::_new() only checked that this wouldn't
+                                // be the case for the relocated location.
+                                if fs_init_data.mkfs_layout.allocated_image_allocation_blocks_end
+                                    > old_backup_mkfsinfo_data_location.begin()
+                                {
+                                    break NvFsError::NoSpace;
+                                }
+                                let original_mkfsinfo_aux_fs_metadata = mem::take(original_mkfsinfo_aux_fs_metadata);
+                                this.backup_mkfsinfo_header_write_control =
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting {
+                                        backup_mkfsinfo_data_location: *old_backup_mkfsinfo_data_location,
+                                    });
+                                // If aux_fs_metadata is supplied, that takes precence over the one found in the
+                                // filesystem creation info on storage.
+                                MkFsFutureState::InvalidateImageHeaderPrepare {
+                                    aux_fs_metadata: aux_fs_metadata
+                                        .take()
+                                        .unwrap_or(original_mkfsinfo_aux_fs_metadata),
+                                }
+                            }
+                        }
+                    };
+                }
+                MkFsFutureState::RestorePrimaryMkFsInfoHeaderData {
+                    new_blkdev_io_blocks,
+                    aux_fs_metadata,
+                    write_primary_mkfsinfo_header_fut,
+                } => {
+                    // The primary mkfsinfo data is restored only as part of relocating the backup.
+                    let original_mkfsinfo_aux_fs_metadata = match this.backup_mkfsinfo_header_write_control.as_ref() {
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate {
+                            original_mkfsinfo_aux_fs_metadata,
+                            ..
+                        }) => original_mkfsinfo_aux_fs_metadata,
+                        _ => break nvfs_err_internal!(),
+                    };
+                    let blkdev = &fs_init_data.blkdev;
+                    let mkfs_layout = &fs_init_data.mkfs_layout;
+                    let image_layout = &mkfs_layout.image_layout;
+                    let salt = &mkfs_layout.salt;
+                    let image_size = mkfs_layout.image_size;
+                    match WriteMkFsInfoHeaderDataFuture::poll(
+                        pin::Pin::new(write_primary_mkfsinfo_header_fut),
+                        blkdev,
+                        image_layout,
+                        salt,
+                        original_mkfsinfo_aux_fs_metadata,
+                        image_size,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break e,
+                        task::Poll::Pending => return task::Poll::Pending,
                     }
 
-                    match this.backup_mkfsinfo_header_write_control {
-                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting) => {
-                            // Handled above, so is unreachable, but for the sake of
-                            // completeness, handle it here as well
-                            this.fut_state = MkFsFutureState::InvalidateImageHeaderPrepare;
-                        }
-                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write) => {
-                            this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
-                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(true),
-                            };
-                        }
-                        None => {
-                            this.fut_state = MkFsFutureState::InvalidateImageHeaderPrepare;
-                        }
-                    }
+                    // Issue a write barrier for the NvBlkDev::resize() operation: once the resizing
+                    // has completed, the expected backup mkfsinfo location would have changed,
+                    // meaning that the original backup cannot be found anymore.
+                    let write_barrier_fut = match blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => break NvFsError::from(e),
+                    };
+                    this.fut_state = MkFsFutureState::WriteBarrierAfterPrimaryMkFsInfoHeaderDataRestore {
+                        new_blkdev_io_blocks: *new_blkdev_io_blocks,
+                        aux_fs_metadata: aux_fs_metadata.take(),
+                        write_barrier_fut,
+                    };
                 }
-                MkFsFutureState::ResizeBlkDev { resize_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(resize_fut), &fs_init_data.blkdev, cx) {
+                MkFsFutureState::WriteBarrierAfterPrimaryMkFsInfoHeaderDataRestore {
+                    new_blkdev_io_blocks,
+                    aux_fs_metadata,
+                    write_barrier_fut,
+                } => {
+                    let blkdev = &fs_init_data.blkdev;
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break NvFsError::from(e),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    // The primary mkfsinfo data has been written
+                    // now. backup_mkfsinfo_header_write_control will eventually get moved to
+                    // MkFsFutureBackupMkFsInfoHeaderWriteControl::Write. However, don't do that
+                    // until after the NvBlkDev resizing has completed, and the
+                    // new_backup_mkfsinfo_data_location is known to actually be the one to be
+                    // considered effective.
+                    this.fut_state = MkFsFutureState::ResizeBlkDevPrepare {
+                        new_blkdev_io_blocks: *new_blkdev_io_blocks,
+                        aux_fs_metadata: aux_fs_metadata.take(),
+                    };
+                }
+                MkFsFutureState::ResizeBlkDevPrepare {
+                    new_blkdev_io_blocks,
+                    aux_fs_metadata,
+                } => {
+                    let blkdev = &fs_init_data.blkdev;
+                    let resize_fut = match blkdev.resize(*new_blkdev_io_blocks) {
+                        Ok(resize_fut) => resize_fut,
+                        Err(e) => {
+                            // Consider failures to shrink as non-fatal.
+                            if blkdev.io_blocks() >= *new_blkdev_io_blocks {
+                                this.fut_state = match this.backup_mkfsinfo_header_write_control.as_mut() {
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate {
+                                        old_backup_mkfsinfo_data_location,
+                                        new_backup_mkfsinfo_data_location: _,
+                                        original_mkfsinfo_aux_fs_metadata,
+                                    }) => {
+                                        // No resize has taken place, cancel the backup mkfsinfo data relocation.
+                                        let original_mkfsinfo_aux_fs_metadata =
+                                            mem::take(original_mkfsinfo_aux_fs_metadata);
+                                        this.backup_mkfsinfo_header_write_control =
+                                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting {
+                                                backup_mkfsinfo_data_location: *old_backup_mkfsinfo_data_location,
+                                            });
+                                        // If aux_fs_metadata is supplied, that takes precence over the one found in the
+                                        // filesystem creation info on storage.
+                                        MkFsFutureState::InvalidateImageHeaderPrepare {
+                                            aux_fs_metadata: aux_fs_metadata
+                                                .take()
+                                                .unwrap_or(original_mkfsinfo_aux_fs_metadata),
+                                        }
+                                    }
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write {
+                                        backup_mkfsinfo_data_location,
+                                        original_mkfsinfo_aux_fs_metadata,
+                                    }) => {
+                                        // With no resize having taken place, the backup_mkfsinfo_data_location is
+                                        // stale. Update it.
+                                        let mkfs_layout = &fs_init_data.mkfs_layout;
+                                        let image_layout = &mkfs_layout.image_layout;
+                                        // MkfsLayout::new() verifies that the salt length fits an u8.
+                                        let salt_len = mkfs_layout.salt.len() as u8;
+                                        let backup_mkfsinfo_header_location =
+                                            match image_header::MkFsInfoHeader::physical_backup_location(
+                                                image_layout.io_block_allocation_blocks_log2,
+                                                image_layout.allocation_block_size_128b_log2,
+                                                salt_len,
+                                                blkdev.io_blocks(),
+                                                blkdev.io_block_size_128b_log2(),
+                                            ) {
+                                                Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                                                Err(e) => break e,
+                                            };
+                                        // The stale backup_mkfsinfo_header_location had been computed as if
+                                        // the block device had been shrunken.
+                                        debug_assert!(
+                                            backup_mkfsinfo_data_location.end()
+                                                <= backup_mkfsinfo_header_location.end()
+                                        );
+                                        let backup_mkfsinfo_data_allocation_blocks_begin =
+                                            if !original_mkfsinfo_aux_fs_metadata.is_trivial() {
+                                                // As documented, the result of AuxFsMetadata::encoded_len() is always
+                                                // representable as an u64.
+                                                let backup_aux_fs_metadata_location =
+                                                    match AuxFsMetadata::mkfsinfo_physical_location(
+                                                        &backup_mkfsinfo_header_location,
+                                                        original_mkfsinfo_aux_fs_metadata.encoded_len() as u64,
+                                                        image_layout.io_block_allocation_blocks_log2 as u32,
+                                                        image_layout.allocation_block_size_128b_log2 as u32,
+                                                    ) {
+                                                        Ok(backup_mkfsinfo_aux_fs_metadata_location) => {
+                                                            backup_mkfsinfo_aux_fs_metadata_location
+                                                        }
+                                                        Err(e) => break e,
+                                                    };
+                                                backup_aux_fs_metadata_location
+                                                    .map(|backup_mkfsinfo_header_location| {
+                                                        backup_mkfsinfo_header_location.begin()
+                                                    })
+                                                    .unwrap_or(backup_mkfsinfo_header_location.begin())
+                                            } else {
+                                                backup_mkfsinfo_header_location.begin()
+                                            };
+                                        debug_assert!(
+                                            backup_mkfsinfo_data_allocation_blocks_begin
+                                                <= backup_mkfsinfo_header_location.begin()
+                                        );
+                                        // The stale backup_mkfsinfo_header_location had been computed as if
+                                        // the block device had been shrunken.
+                                        debug_assert!(
+                                            backup_mkfsinfo_data_location.begin()
+                                                <= backup_mkfsinfo_data_allocation_blocks_begin
+                                        );
+                                        *backup_mkfsinfo_data_location = layout::PhysicalAllocBlockRange::new(
+                                            backup_mkfsinfo_data_allocation_blocks_begin,
+                                            backup_mkfsinfo_header_location.end(),
+                                        );
+
+                                        MkFsFutureState::WriteBackupMkFsInfoHeaderDataPrepare {
+                                            aux_fs_metadata: aux_fs_metadata.take(),
+                                        }
+                                    }
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. }) | None => {
+                                        // In the RetainExisting case, the AuxFsMetadata from the mkfsinfo data
+                                        // had been moved to aux_fs_metadata in Self::_new() already, if needed.
+                                        MkFsFutureState::InvalidateImageHeaderPrepare {
+                                            aux_fs_metadata: aux_fs_metadata.take().unwrap_or(AuxFsMetadata::new()),
+                                        }
+                                    }
+                                };
+                                continue;
+                            } else {
+                                break NvFsError::from(match e {
+                                    NvBlkDevIoError::OperationNotSupported => NvBlkDevIoError::IoBlockOutOfRange,
+                                    _ => e,
+                                });
+                            }
+                        }
+                    };
+
+                    this.fut_state = MkFsFutureState::ResizeBlkDev {
+                        new_blkdev_io_blocks: *new_blkdev_io_blocks,
+                        aux_fs_metadata: aux_fs_metadata.take(),
+                        resize_fut,
+                    };
+                }
+                MkFsFutureState::ResizeBlkDev {
+                    new_blkdev_io_blocks,
+                    aux_fs_metadata,
+                    resize_fut,
+                } => {
+                    let blkdev = &fs_init_data.blkdev;
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(resize_fut), &fs_init_data.blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => {
+                            if let Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate {
+                                old_backup_mkfsinfo_data_location: _,
+                                new_backup_mkfsinfo_data_location,
+                                original_mkfsinfo_aux_fs_metadata,
+                            }) = this.backup_mkfsinfo_header_write_control.as_mut()
+                            {
+                                // The primary header had been restored, and the NvBlkDev resized.
+                                // The remaining step of the relocation is a matter of writing the
+                                // backup mkfsinfo data to the (new) backup location.
+                                this.backup_mkfsinfo_header_write_control =
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write {
+                                        backup_mkfsinfo_data_location: *new_backup_mkfsinfo_data_location,
+                                        original_mkfsinfo_aux_fs_metadata: mem::take(original_mkfsinfo_aux_fs_metadata),
+                                    });
+                            }
+                        }
                         task::Poll::Ready(Err(e)) => {
-                            // Only consider failures to shrink as fatal.
-                            let image_layout = &fs_init_data.mkfs_layout.image_layout;
-                            let blkdev = &fs_init_data.blkdev;
-                            let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                            let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                            let blkdev_io_block_allocation_blocks_log2 =
-                                blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
-                            let allocation_block_blkdev_io_blocks_log2 =
-                                allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
-                            let blkdev_io_blocks = blkdev.io_blocks();
-                            let blkdev_io_blocks =
-                                blkdev_io_blocks.min(u64::MAX >> (blkdev_io_block_size_128b_log2 + 7));
-                            let blkdev_allocation_blocks = layout::AllocBlockCount::from(
-                                blkdev_io_blocks << blkdev_io_block_allocation_blocks_log2
-                                    >> allocation_block_blkdev_io_blocks_log2,
-                            );
-                            if blkdev_allocation_blocks < fs_init_data.mkfs_layout.image_size {
+                            // Consider failures to shrink as non-fatal.
+                            if blkdev.io_blocks() >= *new_blkdev_io_blocks {
+                                match this.backup_mkfsinfo_header_write_control.as_mut() {
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate {
+                                        old_backup_mkfsinfo_data_location,
+                                        new_backup_mkfsinfo_data_location: _,
+                                        original_mkfsinfo_aux_fs_metadata,
+                                    }) => {
+                                        // No resize has taken place, cancel the backup mkfsinfo data relocation.
+                                        // If aux_fs_metadata is supplied, that takes precence over the one found in the
+                                        // filesystem creation info on storage.
+                                        if aux_fs_metadata.is_none() {
+                                            *aux_fs_metadata = Some(mem::take(original_mkfsinfo_aux_fs_metadata));
+                                        };
+                                        this.backup_mkfsinfo_header_write_control =
+                                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting {
+                                                backup_mkfsinfo_data_location: *old_backup_mkfsinfo_data_location,
+                                            });
+                                    }
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write {
+                                        backup_mkfsinfo_data_location,
+                                        original_mkfsinfo_aux_fs_metadata,
+                                    }) => {
+                                        // With no resize having taken place, the backup_mkfsinfo_data_location is
+                                        // stale. Update it.
+                                        let mkfs_layout = &fs_init_data.mkfs_layout;
+                                        let image_layout = &mkfs_layout.image_layout;
+                                        // MkfsLayout::new() verifies that the salt length fits an u8.
+                                        let salt_len = mkfs_layout.salt.len() as u8;
+                                        let backup_mkfsinfo_header_location =
+                                            match image_header::MkFsInfoHeader::physical_backup_location(
+                                                image_layout.io_block_allocation_blocks_log2,
+                                                image_layout.allocation_block_size_128b_log2,
+                                                salt_len,
+                                                blkdev.io_blocks(),
+                                                blkdev.io_block_size_128b_log2(),
+                                            ) {
+                                                Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                                                Err(e) => break e,
+                                            };
+                                        // The stale backup_mkfsinfo_header_location had been computed as if
+                                        // the block device had been shrunken.
+                                        debug_assert!(
+                                            backup_mkfsinfo_data_location.end()
+                                                <= backup_mkfsinfo_header_location.end()
+                                        );
+                                        let backup_mkfsinfo_data_allocation_blocks_begin =
+                                            if !original_mkfsinfo_aux_fs_metadata.is_trivial() {
+                                                // As documented, the result of AuxFsMetadata::encoded_len() is always
+                                                // representable as an u64.
+                                                let backup_aux_fs_metadata_location =
+                                                    match AuxFsMetadata::mkfsinfo_physical_location(
+                                                        &backup_mkfsinfo_header_location,
+                                                        original_mkfsinfo_aux_fs_metadata.encoded_len() as u64,
+                                                        image_layout.io_block_allocation_blocks_log2 as u32,
+                                                        image_layout.allocation_block_size_128b_log2 as u32,
+                                                    ) {
+                                                        Ok(backup_mkfsinfo_aux_fs_metadata_location) => {
+                                                            backup_mkfsinfo_aux_fs_metadata_location
+                                                        }
+                                                        Err(e) => break e,
+                                                    };
+                                                backup_aux_fs_metadata_location
+                                                    .map(|backup_mkfsinfo_header_location| {
+                                                        backup_mkfsinfo_header_location.begin()
+                                                    })
+                                                    .unwrap_or(backup_mkfsinfo_header_location.begin())
+                                            } else {
+                                                backup_mkfsinfo_header_location.begin()
+                                            };
+                                        debug_assert!(
+                                            backup_mkfsinfo_data_allocation_blocks_begin
+                                                <= backup_mkfsinfo_header_location.begin()
+                                        );
+                                        // The stale backup_mkfsinfo_header_location had been computed as if
+                                        // the block device had been shrunken.
+                                        debug_assert!(
+                                            backup_mkfsinfo_data_location.begin()
+                                                <= backup_mkfsinfo_data_allocation_blocks_begin
+                                        );
+                                        *backup_mkfsinfo_data_location = layout::PhysicalAllocBlockRange::new(
+                                            backup_mkfsinfo_data_allocation_blocks_begin,
+                                            backup_mkfsinfo_header_location.end(),
+                                        );
+                                    }
+                                    Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. }) | None => {}
+                                };
+                                continue;
+                            } else {
                                 break NvFsError::from(match e {
                                     NvBlkDevIoError::OperationNotSupported => NvBlkDevIoError::IoBlockOutOfRange,
                                     _ => e,
@@ -976,31 +1606,55 @@ where
                         task::Poll::Pending => return task::Poll::Pending,
                     }
 
-                    match this.backup_mkfsinfo_header_write_control {
-                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting) => {
-                            // If there's already a backup MkFsInfoHeader to retain, a storage resizing
-                            // operation wouldn't have been attempted in the first place.
+                    this.fut_state = match this.backup_mkfsinfo_header_write_control.as_ref() {
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Relocate { .. }) => {
+                            // At this point, Relocate would have been transformed into Write
+                            // (or, upon NvBlkDev resizing failure, into RetainExisting) right above.
                             break nvfs_err_internal!();
                         }
-                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write) => {
-                            this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeader {
-                                write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture::new(true),
-                            };
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write { .. }) => {
+                            MkFsFutureState::WriteBackupMkFsInfoHeaderDataPrepare {
+                                aux_fs_metadata: aux_fs_metadata.take(),
+                            }
                         }
-                        None => {
-                            this.fut_state = MkFsFutureState::InvalidateImageHeaderPrepare;
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. }) | None => {
+                            // In the RetainExisting case, the AuxFsMetadata from the mkfsinfo data
+                            // had been moved to aux_fs_metadata in Self::_new() already, if needed.
+                            MkFsFutureState::InvalidateImageHeaderPrepare {
+                                aux_fs_metadata: aux_fs_metadata.take().unwrap_or(AuxFsMetadata::new()),
+                            }
                         }
-                    }
+                    };
                 }
-                MkFsFutureState::WriteBackupMkFsInfoHeader {
+                MkFsFutureState::WriteBackupMkFsInfoHeaderDataPrepare { aux_fs_metadata } => {
+                    let write_backup_mkfsinfo_header_fut = WriteMkFsInfoHeaderDataFuture::new(true);
+                    this.fut_state = MkFsFutureState::WriteBackupMkFsInfoHeaderData {
+                        aux_fs_metadata: aux_fs_metadata.take(),
+                        write_backup_mkfsinfo_header_fut,
+                    };
+                }
+                MkFsFutureState::WriteBackupMkFsInfoHeaderData {
+                    aux_fs_metadata,
                     write_backup_mkfsinfo_header_fut,
                 } => {
                     let blkdev = &fs_init_data.blkdev;
+                    let (backup_mkfsinfo_data_location, original_mkfsinfo_aux_fs_metadata) =
+                        match this.backup_mkfsinfo_header_write_control.as_mut() {
+                            Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::Write {
+                                backup_mkfsinfo_data_location,
+                                original_mkfsinfo_aux_fs_metadata,
+                            }) => (*backup_mkfsinfo_data_location, original_mkfsinfo_aux_fs_metadata),
+                            _ => {
+                                // We would not have been here then.
+                                break nvfs_err_internal!();
+                            }
+                        };
                     match WriteMkFsInfoHeaderDataFuture::poll(
                         pin::Pin::new(write_backup_mkfsinfo_header_fut),
                         blkdev,
                         &fs_init_data.mkfs_layout.image_layout,
                         &fs_init_data.mkfs_layout.salt,
+                        original_mkfsinfo_aux_fs_metadata,
                         fs_init_data.mkfs_layout.image_size,
                         cx,
                     ) {
@@ -1009,21 +1663,48 @@ where
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    // The aux_fs_metadata supplied at construction time takes precedence over the
+                    // one from the filesystem creation info found on storage.
+                    let aux_fs_metadata = aux_fs_metadata
+                        .take()
+                        .unwrap_or(mem::take(original_mkfsinfo_aux_fs_metadata));
+
+                    // Transform the Write, which has happened now, into a RetainExisting.
+                    this.backup_mkfsinfo_header_write_control =
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting {
+                            backup_mkfsinfo_data_location,
+                        });
+
                     let write_barrier_fut = match blkdev.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(e) => break NvFsError::from(e),
                     };
-                    this.fut_state = MkFsFutureState::WriteBarrierAfterBackupMkFsInfoHeaderWrite { write_barrier_fut };
+                    this.fut_state = MkFsFutureState::WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
+                        aux_fs_metadata,
+                        write_barrier_fut,
+                    };
                 }
-                MkFsFutureState::WriteBarrierAfterBackupMkFsInfoHeaderWrite { write_barrier_fut } => {
+                MkFsFutureState::WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
+                    aux_fs_metadata,
+                    write_barrier_fut,
+                } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_init_data.blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => break NvFsError::from(e),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
-                    this.fut_state = MkFsFutureState::InvalidateImageHeaderPrepare;
+                    this.fut_state = MkFsFutureState::InvalidateImageHeaderPrepare {
+                        aux_fs_metadata: mem::take(aux_fs_metadata),
+                    };
                 }
-                MkFsFutureState::InvalidateImageHeaderPrepare => {
+                MkFsFutureState::InvalidateImageHeaderPrepare { aux_fs_metadata } => {
+                    // When here, there's either no mkfsinfo data involved at all,
+                    // or there's a backup copy near the end of the filesystem image now and
+                    // that is to be retained.
+                    debug_assert!(matches!(
+                        this.backup_mkfsinfo_header_write_control.as_ref(),
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. }) | None
+                    ));
                     // Before writing anything, clear out the header at the beginning of the image,
                     // to that no partial writes will be considered until everything is complete.
                     let invalidate_fut = ExtentIntegrityProtectionsInvalidateFuture::new(
@@ -1031,9 +1712,15 @@ where
                         fs_init_data.mkfs_layout.image_layout.allocation_block_size_128b_log2,
                         false,
                     );
-                    this.fut_state = MkFsFutureState::InvalidateImageHeader { invalidate_fut };
+                    this.fut_state = MkFsFutureState::InvalidateImageHeader {
+                        invalidate_fut,
+                        aux_fs_metadata: mem::take(aux_fs_metadata),
+                    };
                 }
-                MkFsFutureState::InvalidateImageHeader { invalidate_fut } => {
+                MkFsFutureState::InvalidateImageHeader {
+                    invalidate_fut,
+                    aux_fs_metadata,
+                } => {
                     let blkdev = &fs_init_data.blkdev;
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(invalidate_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
@@ -1041,6 +1728,39 @@ where
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    this.fut_state = if !aux_fs_metadata.is_trivial() {
+                        MkFsFutureState::WriteAuxFsMetadata {
+                            aux_fs_metadata: mem::take(aux_fs_metadata),
+                            write_fut: InitializeAuxFsMetadataExtentsFuture::new(),
+                        }
+                    } else {
+                        MkFsFutureState::AdvanceAuthTreeCursorToInitPosPrepare
+                    };
+                }
+                MkFsFutureState::WriteAuxFsMetadata {
+                    aux_fs_metadata,
+                    write_fut,
+                } => {
+                    let blkdev = &fs_init_data.blkdev;
+                    let mkfs_layout = &fs_init_data.mkfs_layout;
+                    let image_layout = &mkfs_layout.image_layout;
+                    match InitializeAuxFsMetadataExtentsFuture::poll(
+                        pin::Pin::new(write_fut),
+                        blkdev,
+                        aux_fs_metadata,
+                        &mkfs_layout.aux_fs_metadata_extents,
+                        mkfs_layout.aux_fs_metadata_update_group1_extents_begin,
+                        image_layout,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => break e,
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = MkFsFutureState::AdvanceAuthTreeCursorToInitPosPrepare;
+                }
+                MkFsFutureState::AdvanceAuthTreeCursorToInitPosPrepare => {
                     // Advance the auth_tree_initialization_cursor. See MkFsLayout::new(): the inode
                     // index tree node might perhaps come first (if there's enough space), followed
                     // by Journal Log Head and the Authentication Tree, which are themselves not
@@ -1663,10 +2383,31 @@ where
                         Ok(inode_index_entry_leaf_node_block_ptr) => inode_index_entry_leaf_node_block_ptr,
                         Err(e) => break e,
                     };
+                    let aux_fs_metadata_update_groups_heads =
+                        match AuxFsMetadataExtentsPtrsPair::new(if !mkfs_layout.aux_fs_metadata_extents.is_empty() {
+                            Some((
+                                mkfs_layout.aux_fs_metadata_extents.get_extent_range(0),
+                                mkfs_layout.aux_fs_metadata_update_group1_extents_begin.map(
+                                    |update_group1_extents_begin| {
+                                        mkfs_layout
+                                            .aux_fs_metadata_extents
+                                            .get_extent_range(update_group1_extents_begin)
+                                    },
+                                ),
+                            ))
+                        } else {
+                            None
+                        })
+                        .encode()
+                        {
+                            Ok(aux_fs_metadata_update_group_heads) => aux_fs_metadata_update_group_heads,
+                            Err(e) => break e,
+                        };
                     if let Err(e) = image_header::MutableImageHeader::encode(
                         head_tail_data_blkdev_io_blocks_io_slices_iter
                             .as_ref()
                             .map_err(|e| match e {}),
+                        &aux_fs_metadata_update_groups_heads,
                         &this.root_hmac_digest,
                         fs_init_data
                             .inode_index
@@ -1891,100 +2632,75 @@ where
                     // If there's a backup MkFsInfoHeader, then be careful not to overwrite it.
                     // Split the image remainder to randomize in (up to two) regions then: one
                     // before it and/or another one subsequent to it.
-                    let randomization_ranges = if this.backup_mkfsinfo_header_write_control.is_some() {
-                        // MkfsLayout::new() verifies that the salt length fits an u8.
-                        let salt_len = mkfs_layout.salt.len() as u8;
-                        let blkdev = &fs_init_data.blkdev;
-                        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                        let blkdev_io_blocks = blkdev.io_blocks();
-                        let blkdev_io_blocks = blkdev_io_blocks.min(u64::MAX >> (blkdev_io_block_size_128b_log2 + 7));
-                        let backup_mkfsinfo_header_location =
-                            match image_header::MkFsInfoHeader::physical_backup_location(
-                                image_layout.io_block_allocation_blocks_log2,
-                                image_layout.allocation_block_size_128b_log2,
-                                salt_len,
-                                blkdev_io_blocks,
-                                blkdev_io_block_size_128b_log2,
-                            ) {
-                                Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
-                                Err(e) => break e,
-                            };
-                        debug_assert!(
-                            backup_mkfsinfo_header_location.begin() >= image_remainder_allocation_blocks_begin
-                        );
-                        // The WriteRandomDataFuture needs an IO Block aligned region, so align the
-                        // region to skip over.
-                        let backup_mkfsinfo_header_location =
-                            if backup_mkfsinfo_header_location.begin() < image_remainder_allocation_blocks_end {
-                                // MkFsInfoHeader::physical_backup_location() verifies that the
-                                // backup location's beginning is aligned to the IO Block size.
-                                debug_assert!(
-                                    u64::from(backup_mkfsinfo_header_location.begin())
-                                        .is_aligned_pow2(io_block_allocation_blocks_log2)
-                                );
-                                backup_mkfsinfo_header_location
-                                    .align(io_block_allocation_blocks_log2)
-                                    .unwrap_or(layout::PhysicalAllocBlockRange::new(
-                                        backup_mkfsinfo_header_location.begin(),
-                                        image_remainder_allocation_blocks_end,
+                    let randomization_ranges = match this.backup_mkfsinfo_header_write_control.as_ref() {
+                        Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting {
+                            backup_mkfsinfo_data_location,
+                        }) => {
+                            // The WriteRandomDataFuture needs an IO Block aligned region, but the
+                            // mkfsinfo data region is always aligned.
+                            if backup_mkfsinfo_data_location.end() >= image_remainder_allocation_blocks_end {
+                                let randomization_range_end =
+                                    image_remainder_allocation_blocks_end.min(backup_mkfsinfo_data_location.begin());
+                                if image_remainder_allocation_blocks_begin != randomization_range_end {
+                                    Some((
+                                        layout::PhysicalAllocBlockRange::new(
+                                            image_remainder_allocation_blocks_begin,
+                                            randomization_range_end,
+                                        ),
+                                        None,
                                     ))
+                                } else {
+                                    None
+                                }
+                            } else if backup_mkfsinfo_data_location.begin() == image_remainder_allocation_blocks_begin {
+                                debug_assert!(
+                                    backup_mkfsinfo_data_location.end() < image_remainder_allocation_blocks_end
+                                );
+                                Some((
+                                    layout::PhysicalAllocBlockRange::new(
+                                        backup_mkfsinfo_data_location.end(),
+                                        image_remainder_allocation_blocks_end,
+                                    ),
+                                    None,
+                                ))
                             } else {
-                                backup_mkfsinfo_header_location
-                            };
-
-                        if backup_mkfsinfo_header_location.end() >= image_remainder_allocation_blocks_end {
-                            let randomization_range_end =
-                                image_remainder_allocation_blocks_end.min(backup_mkfsinfo_header_location.begin());
-                            if image_remainder_allocation_blocks_begin != randomization_range_end {
+                                debug_assert!(
+                                    backup_mkfsinfo_data_location.begin() > image_remainder_allocation_blocks_begin
+                                );
+                                debug_assert!(
+                                    backup_mkfsinfo_data_location.end() < image_remainder_allocation_blocks_end
+                                );
                                 Some((
                                     layout::PhysicalAllocBlockRange::new(
                                         image_remainder_allocation_blocks_begin,
-                                        randomization_range_end,
+                                        backup_mkfsinfo_data_location.begin(),
+                                    ),
+                                    Some(layout::PhysicalAllocBlockRange::new(
+                                        backup_mkfsinfo_data_location.end(),
+                                        image_remainder_allocation_blocks_end,
+                                    )),
+                                ))
+                            }
+                        }
+                        None => {
+                            if image_remainder_allocation_blocks_begin != image_remainder_allocation_blocks_end {
+                                Some((
+                                    layout::PhysicalAllocBlockRange::new(
+                                        image_remainder_allocation_blocks_begin,
+                                        image_remainder_allocation_blocks_end,
                                     ),
                                     None,
                                 ))
                             } else {
                                 None
                             }
-                        } else if backup_mkfsinfo_header_location.begin() == image_remainder_allocation_blocks_begin {
-                            debug_assert!(
-                                backup_mkfsinfo_header_location.end() < image_remainder_allocation_blocks_end
-                            );
-                            Some((
-                                layout::PhysicalAllocBlockRange::new(
-                                    backup_mkfsinfo_header_location.end(),
-                                    image_remainder_allocation_blocks_end,
-                                ),
-                                None,
-                            ))
-                        } else {
-                            debug_assert!(
-                                backup_mkfsinfo_header_location.begin() > image_remainder_allocation_blocks_begin
-                            );
-                            debug_assert!(
-                                backup_mkfsinfo_header_location.end() < image_remainder_allocation_blocks_end
-                            );
-                            Some((
-                                layout::PhysicalAllocBlockRange::new(
-                                    image_remainder_allocation_blocks_begin,
-                                    backup_mkfsinfo_header_location.begin(),
-                                ),
-                                Some(layout::PhysicalAllocBlockRange::new(
-                                    backup_mkfsinfo_header_location.end(),
-                                    image_remainder_allocation_blocks_end,
-                                )),
-                            ))
                         }
-                    } else if image_remainder_allocation_blocks_begin != image_remainder_allocation_blocks_end {
-                        Some((
-                            layout::PhysicalAllocBlockRange::new(
-                                image_remainder_allocation_blocks_begin,
-                                image_remainder_allocation_blocks_end,
-                            ),
-                            None,
-                        ))
-                    } else {
-                        None
+                        _ => {
+                            // When here, there's either no mkfsinfo data involved at all,
+                            // or there's a backup copy near the end of the filesystem image now and
+                            // that is to be retained.
+                            break nvfs_err_internal!();
+                        }
                     };
 
                     if let Some((first_randomization_range, remaining_randomization_range)) = randomization_ranges {
@@ -2162,6 +2878,8 @@ where
                         inode_index_entry_leaf_node_allocation_blocks_begin,
                         journal_log_head_extent: _,
                         auth_tree_extent: _,
+                        aux_fs_metadata_extents,
+                        aux_fs_metadata_update_group1_extents_begin,
                         alloc_bitmap_file_extent: _,
                         auth_tree_inode_extents_list_extents: _,
                         alloc_bitmap_inode_extents_list_extents: _,
@@ -2191,6 +2909,23 @@ where
                         image_header_end,
                     };
 
+                    let aux_fs_metadata_update_groups_heads =
+                        match AuxFsMetadataExtentsPtrsPair::new(if !aux_fs_metadata_extents.is_empty() {
+                            Some((
+                                aux_fs_metadata_extents.get_extent_range(0),
+                                aux_fs_metadata_update_group1_extents_begin.map(|update_group1_extents_begin| {
+                                    aux_fs_metadata_extents.get_extent_range(update_group1_extents_begin)
+                                }),
+                            ))
+                        } else {
+                            None
+                        })
+                        .encode()
+                        {
+                            Ok(aux_fs_metadata_update_group_heads) => aux_fs_metadata_update_group_heads,
+                            Err(e) => return task::Poll::Ready(Ok((rng, Err((blkdev, e))))),
+                        };
+
                     // Up to know, the alloc_bitmap had been just large enough to cover everything
                     // allocated only. Extend to the full image size.
                     if let Err(e) = alloc_bitmap.resize(mkfs_layout.image_size) {
@@ -2206,6 +2941,7 @@ where
                         Err(e) => return task::Poll::Ready(Ok((rng, Err((blkdev, e))))),
                     };
                     let fs_sync_state = CocoonFsSyncState {
+                        aux_fs_metadata_update_groups_heads,
                         image_size,
                         journal_log_head_integrity_state: ExtentIntegrityState::new_clean(),
                         alloc_bitmap,
@@ -2734,12 +3470,25 @@ enum WriteMkFsInfoHeaderDataFutureState<B: blkdev::NvBlkDev> {
         invalidate_fut: ExtentIntegrityProtectionsInvalidateFuture<B>,
         mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
     },
+    WriteAuxFsMetadata {
+        write_fut: aux_fs_metadata::WriteMkFsInfoAuxFsMetadataFuture<B>,
+        mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
+        aux_fs_metadata_len: u64,
+    },
+    WriteHeaderPrepare {
+        mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
+        aux_fs_metadata_len: u64,
+    },
     WriteHeaderTail {
         write_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
         mkfsinfo_header_blkdev_io_blocks_begin: u64,
         mkfsinfo_header_head_blkdev_io_block_buf: FixedVec<u8, 7>,
     },
-    WriteBarrierAfterHeaderTailWrite {
+    WriteBarrierBeforeHeaderHeadWritePrepare {
+        mkfsinfo_header_blkdev_io_blocks_begin: u64,
+        mkfsinfo_header_head_blkdev_io_block_buf: FixedVec<u8, 7>,
+    },
+    WriteBarrierBeforeHeaderHeadWrite {
         write_barrier_fut: B::WriteBarrierFuture,
         mkfsinfo_header_blkdev_io_blocks_begin: u64,
         mkfsinfo_header_head_blkdev_io_block_buf: FixedVec<u8, 7>,
@@ -2777,6 +3526,8 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
     ///   [`MkFsInfoHeader`](image_header::MkFsInfoHeader).
     /// * `salt` - The to be created filesystem's salt. Its lenght must not
     ///   exceed [`u8::MAX`].
+    /// * `aux_fs_metadata` - The initial [`AuxFsMetadata`] to write alongside
+    ///   the [`MkFsInfoHeader`](image_header::MkFsInfoHeader).
     /// * `image_size` - The filesystem's desired image size.
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
@@ -2785,6 +3536,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
         blkdev: &B,
         image_layout: &layout::ImageLayout,
         salt: &FixedVec<u8, 4>,
+        aux_fs_metadata: &AuxFsMetadata,
         image_size: layout::AllocBlockCount,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<(), NvFsError>> {
@@ -2884,6 +3636,54 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    if !aux_fs_metadata.is_trivial() {
+                        // The AuxFsMetadata::encoded_len() is guaranteed to be representable as an u64.
+                        let aux_fs_metadata_len = aux_fs_metadata.encoded_len() as u64;
+                        let write_fut = aux_fs_metadata::WriteMkFsInfoAuxFsMetadataFuture::new(
+                            mkfsinfo_header_location,
+                            image_layout.io_block_allocation_blocks_log2,
+                            image_layout.allocation_block_size_128b_log2,
+                        );
+                        this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteAuxFsMetadata {
+                            write_fut,
+                            mkfsinfo_header_location: *mkfsinfo_header_location,
+                            aux_fs_metadata_len,
+                        };
+                    } else {
+                        this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteHeaderPrepare {
+                            mkfsinfo_header_location: *mkfsinfo_header_location,
+                            aux_fs_metadata_len: 0,
+                        };
+                    }
+                }
+                WriteMkFsInfoHeaderDataFutureState::WriteAuxFsMetadata {
+                    write_fut,
+                    mkfsinfo_header_location,
+                    aux_fs_metadata_len,
+                } => {
+                    match aux_fs_metadata::WriteMkFsInfoAuxFsMetadataFuture::poll(
+                        pin::Pin::new(write_fut),
+                        blkdev,
+                        aux_fs_metadata,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteHeaderPrepare {
+                        mkfsinfo_header_location: *mkfsinfo_header_location,
+                        aux_fs_metadata_len: *aux_fs_metadata_len,
+                    };
+                }
+                WriteMkFsInfoHeaderDataFutureState::WriteHeaderPrepare {
+                    mkfsinfo_header_location,
+                    aux_fs_metadata_len,
+                } => {
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let blkdev_io_block_allocation_blocks_log2 =
@@ -2925,6 +3725,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         ])
                         .map_infallible_err(),
                         image_layout,
+                        *aux_fs_metadata_len,
                         image_size,
                         salt,
                     ) {
@@ -2946,7 +3747,17 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                             mkfsinfo_header_blkdev_io_blocks_begin,
                             mkfsinfo_header_head_blkdev_io_block_buf,
                         };
+                    } else if *aux_fs_metadata_len != 0 {
+                        // If some AuxFsMetadata had been written, a write barrier is still
+                        // needed before writing out the header head, even though the header
+                        // tail is trivial.
+                        this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteBarrierBeforeHeaderHeadWritePrepare {
+                            mkfsinfo_header_blkdev_io_blocks_begin,
+                            mkfsinfo_header_head_blkdev_io_block_buf,
+                        };
                     } else {
+                        // Trivial AuxFsMetadata and trivial header tail. Proceed directly to
+                        // writing the header head, with no prior write barrier.
                         this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteHeaderHeadPrepare {
                             mkfsinfo_header_blkdev_io_blocks_begin,
                             mkfsinfo_header_head_blkdev_io_block_buf,
@@ -2956,7 +3767,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                 WriteMkFsInfoHeaderDataFutureState::WriteHeaderTail {
                     write_fut,
                     mkfsinfo_header_blkdev_io_blocks_begin,
-                    mkfsinfo_header_head_blkdev_io_block_buf: first_mkfsinfo_header_blkdev_io_block,
+                    mkfsinfo_header_head_blkdev_io_block_buf,
                 } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((_, Ok(())))) => (),
@@ -2967,6 +3778,15 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteBarrierBeforeHeaderHeadWritePrepare {
+                        mkfsinfo_header_blkdev_io_blocks_begin: *mkfsinfo_header_blkdev_io_blocks_begin,
+                        mkfsinfo_header_head_blkdev_io_block_buf: mem::take(mkfsinfo_header_head_blkdev_io_block_buf),
+                    };
+                }
+                WriteMkFsInfoHeaderDataFutureState::WriteBarrierBeforeHeaderHeadWritePrepare {
+                    mkfsinfo_header_blkdev_io_blocks_begin,
+                    mkfsinfo_header_head_blkdev_io_block_buf,
+                } => {
                     let write_barrier_fut = match blkdev.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(e) => {
@@ -2974,16 +3794,17 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                     };
-                    this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteBarrierAfterHeaderTailWrite {
+
+                    this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteBarrierBeforeHeaderHeadWrite {
                         write_barrier_fut,
                         mkfsinfo_header_blkdev_io_blocks_begin: *mkfsinfo_header_blkdev_io_blocks_begin,
-                        mkfsinfo_header_head_blkdev_io_block_buf: mem::take(first_mkfsinfo_header_blkdev_io_block),
+                        mkfsinfo_header_head_blkdev_io_block_buf: mem::take(mkfsinfo_header_head_blkdev_io_block_buf),
                     };
                 }
-                WriteMkFsInfoHeaderDataFutureState::WriteBarrierAfterHeaderTailWrite {
+                WriteMkFsInfoHeaderDataFutureState::WriteBarrierBeforeHeaderHeadWrite {
                     write_barrier_fut,
                     mkfsinfo_header_blkdev_io_blocks_begin,
-                    mkfsinfo_header_head_blkdev_io_block_buf: first_mkfsinfo_header_blkdev_io_block,
+                    mkfsinfo_header_head_blkdev_io_block_buf,
                 } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
@@ -2996,19 +3817,19 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
 
                     this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteHeaderHeadPrepare {
                         mkfsinfo_header_blkdev_io_blocks_begin: *mkfsinfo_header_blkdev_io_blocks_begin,
-                        mkfsinfo_header_head_blkdev_io_block_buf: mem::take(first_mkfsinfo_header_blkdev_io_block),
+                        mkfsinfo_header_head_blkdev_io_block_buf: mem::take(mkfsinfo_header_head_blkdev_io_block_buf),
                     };
                 }
                 WriteMkFsInfoHeaderDataFutureState::WriteHeaderHeadPrepare {
                     mkfsinfo_header_blkdev_io_blocks_begin,
-                    mkfsinfo_header_head_blkdev_io_block_buf: first_mkfsinfo_header_blkdev_io_block,
+                    mkfsinfo_header_head_blkdev_io_block_buf,
                 } => {
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
                         *mkfsinfo_header_blkdev_io_blocks_begin,
                         1,
                         blkdev_io_block_size_128b_log2 as u8,
-                        mem::take(first_mkfsinfo_header_blkdev_io_block),
+                        mem::take(mkfsinfo_header_head_blkdev_io_block_buf),
                         0,
                         blkdev_io_block_size_128b_log2 as u8,
                     );
@@ -3039,18 +3860,26 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
 /// provision a storage volume for use with CocoonFs, they may write a
 /// "filesystem creation info" header" containing all the required core
 /// filesystem configuration parameters to it. The filesystem will then get
-/// created ("mkfs") at first use, i.e. at the first attempt to open it.
+/// created ("mkfs") at first use, i.e. at the first attempt to open it through
+/// an [`OpenFsFuture`](super::openfs::OpenFsFuture). Alternatively,
+/// users may subsequently invoke [`MkFsFuture::new_with_mkfsinfo()`] directly
+/// on the filesystem creation info found on storage for a more fine-grained
+/// control.
 ///
 /// # See also:
 ///
-/// * [`MkFsFuture`] for direct filesystem creation without a filesystem
+/// * [`MkFsFuture::new()`] for direct filesystem creation without a filesystem
 ///   creation info header.
+/// * [`OpenFsFuture`](super::openfs::OpenFsFuture).
+/// * [`MkFsFuture::new_with_mkfsinfo()`] for explicit filesystem creation from
+///   a a [`FsMetadataMkFsInfo`] found on storage.
 pub struct WriteMkFsInfoHeaderFuture<B: blkdev::NvBlkDev> {
     // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
     // Self.
     blkdev: Option<B>,
     image_layout: layout::ImageLayout,
     salt: FixedVec<u8, 4>,
+    aux_fs_metadata: AuxFsMetadata,
     image_size: layout::AllocBlockCount,
     fut_state: WriteMkFsInfoHeaderFutureState<B>,
 }
@@ -3083,6 +3912,8 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
     /// * `image_layout` - The filesystem's [`ImageLayout`].
     /// * `salt` - The filsystem salt to be stored in the static image header.
     ///   Its length must not exceed [`u8::MAX`].
+    /// * `aux_fs_metadata` - The initial [`AuxFsMetadata`] to store alongside
+    ///   the filesystem creation info header.
     /// * `image_size` - Optional desired filesystem image size in units of
     ///   Bytes to eventually get recorded in the filesystem's mutable image
     ///   header in the course of the actual filesystem creation. If not
@@ -3097,6 +3928,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
         blkdev: B,
         image_layout: &ImageLayout,
         salt: FixedVec<u8, 4>,
+        aux_fs_metadata: AuxFsMetadata,
         image_size: Option<u64>,
         resize_image_to_final_size: bool,
     ) -> Result<Self, (B, NvFsError)> {
@@ -3123,7 +3955,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
 
         // Before writing anything, verify that the to be created filesystem can get
         // layout properly on a storage of size image_size.
-        let mkfs_layout = match MkFsLayout::new(image_layout, salt, image_size) {
+        let mkfs_layout = match MkFsLayout::new(image_layout, salt, Some(&aux_fs_metadata), image_size) {
             Ok(mkfs_layout) => mkfs_layout,
             Err(e) => {
                 return Err((blkdev, e));
@@ -3149,10 +3981,30 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
             Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
             Err(e) => return Err((blkdev, e)),
         };
+        let backup_mkfsinfo_data_begin = if !aux_fs_metadata.is_trivial() {
+            // As documented, the result of AuxFsMetadata::encoded_len() is always
+            // representable as an u64.
+            let backup_aux_fs_metadata_location = match AuxFsMetadata::mkfsinfo_physical_location(
+                &backup_mkfsinfo_header_location,
+                aux_fs_metadata.encoded_len() as u64,
+                io_block_allocation_blocks_log2,
+                allocation_block_size_128b_log2,
+            ) {
+                Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                Err(e) => return Err((blkdev, e)),
+            };
+
+            backup_aux_fs_metadata_location
+                .map(|backup_mkfsinfo_header_location| backup_mkfsinfo_header_location.begin())
+                .unwrap_or(backup_mkfsinfo_header_location.begin())
+        } else {
+            backup_mkfsinfo_header_location.begin()
+        };
+        debug_assert!(backup_mkfsinfo_data_begin <= backup_mkfsinfo_header_location.begin());
 
         // Check that the storage allocated to the initial metadata structures does not
-        // extend into the backup MkFsInfoHeader.
-        if backup_mkfsinfo_header_location.begin() < allocated_image_allocation_blocks_end {
+        // extend into the backup MkFsInfoHeader or associated AuxFsMetadata.
+        if backup_mkfsinfo_data_begin < allocated_image_allocation_blocks_end {
             return Err((blkdev, NvFsError::NoSpace));
         }
 
@@ -3165,13 +4017,42 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
                 salt_len,
             );
 
-        let fut_state = if mkfsinfo_header_allocation_blocks > blkdev_allocation_blocks
+        let mkfsinfo_data_allocation_blocks = if !aux_fs_metadata.is_trivial() {
+            let aux_fs_metadata_location = match AuxFsMetadata::mkfsinfo_physical_location(
+                &layout::PhysicalAllocBlockRange::from((
+                    layout::PhysicalAllocBlockIndex::from(0),
+                    mkfsinfo_header_allocation_blocks,
+                )),
+                aux_fs_metadata.encoded_len() as u64,
+                io_block_allocation_blocks_log2,
+                allocation_block_size_128b_log2,
+            ) {
+                Ok(aux_fs_metadata_location) => aux_fs_metadata_location,
+                Err(e) => return Err((blkdev, e)),
+            };
+            aux_fs_metadata_location
+                .map(|aux_fs_metadata_location| {
+                    aux_fs_metadata_location.end() - layout::PhysicalAllocBlockIndex::from(0)
+                })
+                .unwrap_or(mkfsinfo_header_allocation_blocks)
+        } else {
+            mkfsinfo_header_allocation_blocks
+        };
+
+        // Check whether the mkfsinfo data at the image's beginning would overlap with
+        // the backup copy.
+        if layout::PhysicalAllocBlockIndex::from(0) + mkfsinfo_data_allocation_blocks > backup_mkfsinfo_data_begin {
+            return Err((blkdev, NvFsError::NoSpace));
+        }
+        debug_assert!(mkfsinfo_data_allocation_blocks <= image_size);
+
+        let fut_state = if mkfsinfo_data_allocation_blocks > blkdev_allocation_blocks
             || resize_image_to_final_size && image_size != blkdev_allocation_blocks
         {
             let resize_target_allocation_blocks = if resize_image_to_final_size {
                 image_size
             } else {
-                mkfsinfo_header_allocation_blocks
+                mkfsinfo_data_allocation_blocks
             };
             let resize_fut = match blkdev.resize(
                 u64::from(resize_target_allocation_blocks) << allocation_block_blkdev_io_blocks_log2
@@ -3199,6 +4080,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderFuture<B> {
             blkdev: Some(blkdev),
             image_layout: image_layout.clone(),
             salt,
+            aux_fs_metadata,
             image_size,
             fut_state,
         })
@@ -3259,6 +4141,7 @@ impl<B: blkdev::NvBlkDev> future::Future for WriteMkFsInfoHeaderFuture<B> {
                         blkdev,
                         &this.image_layout,
                         &this.salt,
+                        &this.aux_fs_metadata,
                         this.image_size,
                         cx,
                     ) {

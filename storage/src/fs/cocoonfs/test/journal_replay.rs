@@ -17,7 +17,7 @@ use crate::fs::cocoonfs::extent_ptr;
 fn write_read_one_small() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -46,6 +46,7 @@ fn write_read_one_large() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (18 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -91,6 +92,7 @@ fn write_read_two_large_interleaved_growth() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (18 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -170,6 +172,7 @@ fn write_update_two_large_interleaved_growth() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (18 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -283,6 +286,7 @@ fn write_unlink_two_large_interleaved_growth() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (18 + allocation_block_size_128b_log2),
                 enable_trimming,
             )

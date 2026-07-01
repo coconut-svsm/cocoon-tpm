@@ -14,8 +14,9 @@ use crate::{
     fs::{
         self, NvFsError,
         cocoonfs::{
-            alloc_bitmap, auth_tree, extent_ptr, extents, inode_index, integrity::ExtentIntegrityState, keys, layout,
-            read_buffer, read_inode_data::ReadInodeDataFuture, transaction, write_inode_data::WriteInodeDataFuture,
+            alloc_bitmap, auth_tree, aux_fs_metadata::AuxFsMetadataEncodedExtentsPtrsPair, extent_ptr, extents,
+            inode_index, integrity::ExtentIntegrityState, keys, layout, read_buffer,
+            read_inode_data::ReadInodeDataFuture, transaction, write_inode_data::WriteInodeDataFuture,
         },
     },
     nvfs_err_internal,
@@ -32,6 +33,9 @@ use core::{
     sync::atomic,
     task,
 };
+
+#[cfg(doc)]
+use crate::fs::cocoonfs::aux_fs_metadata::AuxFsMetadata;
 
 /// [`SyncRcPtr`](sync_types::SyncRcPtr) to a [`CocoonFs`] instance.
 pub type CocoonFsSyncRcPtrType<ST, B> = pin::Pin<
@@ -121,6 +125,8 @@ pub(super) struct CocoonFsConfig {
 ///
 /// Maintained at [`CocoonFs::sync_state`].
 pub(super) struct CocoonFsSyncState<ST: sync_types::SyncTypes> {
+    /// Pointers to the two [`AuxFsMetadata`] update groups' heads, if any.
+    pub aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     pub image_size: layout::AllocBlockCount,
     pub journal_log_head_integrity_state: ExtentIntegrityState,
     pub alloc_bitmap: alloc_bitmap::AllocBitmap,
@@ -584,6 +590,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         &'b mut self,
     ) -> (
         CocoonFsSyncRcPtrRefType<'b, ST, B>,
+        &'b AuxFsMetadataEncodedExtentsPtrsPair,
         &'b layout::AllocBlockCount,
         &'b alloc_bitmap::AllocBitmap,
         &'b alloc_bitmap::AllocBitmapFile,
@@ -597,6 +604,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
                 let fs_instance = sync_state_read_guard.get_rwlock().get_container().clone();
                 (
                     fs_instance,
+                    &sync_state_read_guard.aux_fs_metadata_update_groups_heads,
                     &sync_state_read_guard.image_size,
                     &sync_state_read_guard.alloc_bitmap,
                     &sync_state_read_guard.alloc_bitmap_file,
@@ -617,6 +625,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
                 let fs_instance = rwlock_ptr_ref.get_container().clone();
                 (
                     fs_instance,
+                    &sync_state.aux_fs_metadata_update_groups_heads,
                     &sync_state.image_size,
                     &sync_state.alloc_bitmap,
                     &sync_state.alloc_bitmap_file,
@@ -725,6 +734,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         &'b mut self,
     ) -> (
         CocoonFsSyncRcPtrRefType<'b, ST, B>,
+        &'b mut AuxFsMetadataEncodedExtentsPtrsPair,
         &'b mut layout::AllocBlockCount,
         &'b mut alloc_bitmap::AllocBitmap,
         &'b mut alloc_bitmap::AllocBitmapFile,
@@ -739,6 +749,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         let fs_instance = rwlock_ptr_ref.get_container().clone();
         (
             fs_instance,
+            &mut sync_state.aux_fs_metadata_update_groups_heads,
             &mut sync_state.image_size,
             &mut sync_state.alloc_bitmap,
             &mut sync_state.alloc_bitmap_file,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Functionality related to the filesystem image header.
@@ -10,7 +10,9 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            FormatError, ImageLayout, extent_ptr,
+            FormatError, ImageLayout,
+            aux_fs_metadata::{AuxFsMetadata, AuxFsMetadataEncodedExtentsPtrsPair, ReadMkFsInfoAuxFsMetadataFuture},
+            extent_ptr,
             integrity::{
                 ExtentIntegrityState, ExtentTier0IntegrityState, extent_integrity_protections_apply,
                 extent_integrity_protections_len, extent_integrity_protections_verify_and_remove,
@@ -303,6 +305,8 @@ impl StaticImageHeader {
 
 /// Mutable image header.
 pub struct MutableImageHeader {
+    /// Pointers to the two [`AuxFsMetadata`] update groups' heads, if any.
+    pub aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     /// The current authentication tree root digest.
     pub root_hmac_digest: FixedVec<u8, 5>,
     /// The current inode index entry leaf node preauthentication CCA protection
@@ -324,8 +328,10 @@ impl MutableImageHeader {
     ///
     /// # Arguments:
     pub fn encoded_len(image_layout: &layout::ImageLayout) -> u32 {
+        // The AuxFsMetadata update groups' head extent pointers.
+        let mut encoded_len = AuxFsMetadataEncodedExtentsPtrsPair::encoded_len();
         // The root hmac.
-        let mut encoded_len = hash::hash_alg_digest_len(image_layout.auth_tree_root_hmac_hash_alg) as u32;
+        encoded_len += hash::hash_alg_digest_len(image_layout.auth_tree_root_hmac_hash_alg) as u32;
         // The inode index entry node pre-authentication CCA protection digest.
         encoded_len += hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as u32;
         // The inode index entry leaf node pointer.
@@ -370,6 +376,8 @@ impl MutableImageHeader {
     ///
     /// * `dst` - The destination buffers. Their total length must be at least
     ///   that returned by [`encoded_len()`](Self::encoded_len).
+    /// * `aux_fs_metadata_update_groups_heads` - Pointers to the two
+    ///   [`AuxFsMetadata`] update groups' heads, if any.
     /// * `root_hmac_digest` - The current authentication tree root digest. Its
     ///   length must match that of digests produced by
     ///   [`ImageLayout::auth_tree_root_hmac_hash_alg`] exactly.
@@ -382,11 +390,14 @@ impl MutableImageHeader {
     /// * `image_size` - The filesystem image size.
     pub fn encode<'a, DI: io_slices::IoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
         mut dst: DI,
+        aux_fs_metadata_update_groups_heads: &AuxFsMetadataEncodedExtentsPtrsPair,
         root_hmac_digest: &[u8],
         inode_index_entry_leaf_node_preauth_cca_protection_digest: &[u8],
         inode_index_entry_leaf_node_block_ptr: &extent_ptr::EncodedBlockPtr,
         image_size: layout::AllocBlockCount,
     ) -> Result<(), NvFsError> {
+        aux_fs_metadata_update_groups_heads.encode(&mut dst)?;
+
         let mut root_hmac_digest = io_slices::SingletonIoSlice::new(root_hmac_digest).map_infallible_err();
         dst.copy_from_iter(&mut root_hmac_digest)?;
         if !root_hmac_digest.is_empty()? {
@@ -429,7 +440,10 @@ impl MutableImageHeader {
         mut src: SI,
         image_layout: &layout::ImageLayout,
     ) -> Result<Self, NvFsError> {
-        // And the root HMAC.
+        // The AuxFsMetadata update group' head extent pointers.
+        let aux_fs_metadata_update_groups_heads = AuxFsMetadataEncodedExtentsPtrsPair::decode(&mut src)?;
+
+        // The root HMAC.
         let root_hmac_digest_len = hash::hash_alg_digest_len(image_layout.auth_tree_root_hmac_hash_alg) as usize;
         let mut root_hmac_digest = FixedVec::new_with_default(root_hmac_digest_len)?;
         let mut root_hmac_digest_io_slice =
@@ -488,11 +502,30 @@ impl MutableImageHeader {
         let image_size = layout::AllocBlockCount::from(image_size);
 
         Ok(Self {
+            aux_fs_metadata_update_groups_heads,
             root_hmac_digest,
             inode_index_entry_leaf_node_preauth_cca_protection_digest,
             inode_index_entry_leaf_node_block_ptr,
             image_size,
         })
+    }
+
+    /// Decode only the pointers to the [`AuxFsMetadata`] update
+    /// groups' heads from an encoded [`MutableImageHeader`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `src` - The source buffers. Their total length must be at least that
+    ///   returned by [`AuxFsMetadataEncodedExtentsPtrsPair::encoded_len()`].
+    pub fn decode_aux_fs_metadata_update_groups_heads<
+        'a,
+        SI: io_slices::IoSlicesIter<'a, BackendIteratorError = NvFsError>,
+    >(
+        mut src: SI,
+    ) -> Result<AuxFsMetadataEncodedExtentsPtrsPair, NvFsError> {
+        // The pointers to the AuxFsMetadata update groups' heads are stored at the
+        // beginning.
+        AuxFsMetadataEncodedExtentsPtrsPair::decode(&mut src)
     }
 }
 
@@ -507,7 +540,7 @@ pub enum ReadCoreImageHeaderFutureResult {
     StaticImageHeader(StaticImageHeader),
     /// The filesysyem has a [`MkFsInfoHeader`], from which the filesystem is
     /// to be created at first filesystem opening time.
-    MkFsInfoHeader { header: MkFsInfoHeader, from_backup: bool },
+    MkFsInfoHeader(FsMetadataMkFsInfo),
 }
 
 /// Read the core filesystem header.
@@ -542,16 +575,22 @@ enum ReadCoreImageHeaderFutureState<B: blkdev::NvBlkDev> {
     ReadMkFsInfoHeaderRemainder {
         read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         min_header: MinMkFsInfoHeader,
+        mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
         first_header_part: FixedVec<u8, 7>,
         tier0_integrity_state: ExtentTier0IntegrityState,
-        from_backup: bool,
     },
     DecodeMkFsInfoHeader {
         min_header: MinMkFsInfoHeader,
+        mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
         first_header_part: FixedVec<u8, 7>,
         second_header_part: FixedVec<u8, 7>,
         tier0_integrity_state: ExtentTier0IntegrityState,
-        from_backup: bool,
+    },
+    ReadMkFsInfoHeaderAuxFsMetadata {
+        read_aux_fs_metadata_fut: ReadMkFsInfoAuxFsMetadataFuture<B>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        mkfsinfo_header: Option<MkFsInfoHeader>,
     },
     PrepareReadBackupMinMkFsInfoHeader,
     ReadBackupMinMkFsInfoHeader {
@@ -946,10 +985,60 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         return task::Poll::Ready(Err(NvFsError::from(FormatError::IoBlockSizeNotSupportedByDevice)));
                     }
 
-                    // Now that the MinMkFsInfoImageHeader has been read and decoded, deduce the
-                    // total header length from it, read the remainder, if any,
-                    // and continue with the decoding.
-                    // The IO Block aligned length in units of Bytes never exceeds the larger of
+                    // In case of the Backup MkFsInfoHeader, we know (by construction), that its
+                    // beginning is aligned to the device's IO Block size. As per the spec, the
+                    // backup header is to be placed at the last position of maximal alignment, such
+                    // that there are at least 16 of such alignment units available in the storage
+                    // volume, and that maximal alignment must not be less than the IO Block
+                    // size. Verify the self-consistency.
+                    let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    if *mkfsinfo_header_blkdev_io_blocks_begin != 0
+                        && (!mkfsinfo_header_blkdev_io_blocks_begin.is_aligned_pow2(
+                            io_block_allocation_blocks_log2 + allocation_block_size_128b_log2
+                                - blkdev_io_block_size_128b_log2,
+                        ) || *mkfsinfo_header_blkdev_io_blocks_begin
+                            >> (io_block_allocation_blocks_log2 + allocation_block_size_128b_log2
+                                - blkdev_io_block_size_128b_log2)
+                            < 15)
+                    {
+                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::InconsistentBackupMkFsInfoHeader)));
+                    }
+                    // As per the alignment check above, the right shift only shifts out zero bits.
+                    // Also note that the block device size had been capped to u64::MAX Bytes in the
+                    // computation of the MkFsInfoHeader backup location. Therefore the upper 7
+                    // bits will be clear.
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                    let mkfsinfo_header_allocation_blocks_begin = layout::PhysicalAllocBlockIndex::from(
+                        *mkfsinfo_header_blkdev_io_blocks_begin << blkdev_io_block_allocation_blocks_log2
+                            >> allocation_block_blkdev_io_blocks_log2,
+                    );
+                    let mkfsinfo_header_allocation_blocks =
+                        MkFsInfoHeader::io_block_aligned_encoded_len_allocation_blocks(
+                            image_layout.io_block_allocation_blocks_log2,
+                            image_layout.allocation_block_size_128b_log2,
+                            min_mkfsinfo_header.salt_len,
+                        );
+                    if (u64::MAX >> (allocation_block_size_128b_log2 + 7))
+                        - u64::from(mkfsinfo_header_allocation_blocks_begin)
+                        < u64::from(mkfsinfo_header_allocation_blocks)
+                    {
+                        // The end converted to units of Bytes would overflow an u64.
+                        this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::from(FormatError::InconsistentBackupMkFsInfoHeader)));
+                    }
+                    let mkfsinfo_header_location = layout::PhysicalAllocBlockRange::from((
+                        mkfsinfo_header_allocation_blocks_begin,
+                        mkfsinfo_header_allocation_blocks,
+                    ));
+
+                    // Now that the MinMkFsInfoHeader has been read and decoded, proceed to reading
+                    // the remainder. The mkfsinfo header length in units
+                    // of Bytes never exceeds the larger of
                     // 4 * 128B and the IO Block size, c.f. the documentation of
                     // MkFsInfoHeader::io_block_aligned_encoded_len_allocation_blocks(). Either
                     // way, both can be represented as an u64 and the shift will not overflow.
@@ -958,7 +1047,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                             image_layout.io_block_allocation_blocks_log2,
                             image_layout.allocation_block_size_128b_log2,
                             min_mkfsinfo_header.salt_len,
-                        )) << (image_layout.allocation_block_size_128b_log2 as u32 + 7);
+                        )) << (allocation_block_size_128b_log2 + 7);
 
                     // Remember from above: it is known by now that the Device IO Block size fits an
                     // u64.
@@ -967,10 +1056,10 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     if remaining_mkfsinfo_header_len == 0 {
                         this.fut_state = ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
                             min_header: min_mkfsinfo_header,
+                            mkfsinfo_header_location,
                             first_header_part: mem::take(first_header_part),
                             second_header_part: FixedVec::new_empty(),
                             tier0_integrity_state,
-                            from_backup,
                         };
                     } else {
                         let second_header_part = match usize::try_from(remaining_mkfsinfo_header_len)
@@ -995,18 +1084,18 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                         this.fut_state = ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
                             read_fut,
                             min_header: min_mkfsinfo_header,
+                            mkfsinfo_header_location,
                             first_header_part: mem::take(first_header_part),
                             tier0_integrity_state,
-                            from_backup,
                         };
                     }
                 }
                 ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderRemainder {
                     read_fut,
                     min_header,
+                    mkfsinfo_header_location,
                     first_header_part,
                     tier0_integrity_state,
-                    from_backup,
                 } => {
                     let second_header_part = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((second_header_part, Ok(())))) => second_header_part,
@@ -1019,18 +1108,18 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
 
                     this.fut_state = ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
                         min_header: min_header.clone(),
+                        mkfsinfo_header_location: *mkfsinfo_header_location,
                         first_header_part: mem::take(first_header_part),
                         second_header_part,
                         tier0_integrity_state: *tier0_integrity_state,
-                        from_backup: *from_backup,
                     };
                 }
                 ReadCoreImageHeaderFutureState::DecodeMkFsInfoHeader {
                     min_header,
+                    mkfsinfo_header_location,
                     first_header_part,
                     second_header_part,
                     tier0_integrity_state,
-                    from_backup,
                 } => {
                     // Complete the integrity protection verification.
                     let image_layout = &min_header.image_layout;
@@ -1054,7 +1143,8 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     };
 
                     if !is_valid {
-                        if !*from_backup {
+                        let from_backup = u64::from(mkfsinfo_header_location.begin()) != 0;
+                        if !from_backup {
                             this.fut_state = ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader;
                             continue;
                         } else {
@@ -1135,17 +1225,53 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     }
 
                     let image_layout = image_layout.clone();
-                    let image_size = min_header.image_size;
-                    let from_backup = *from_backup;
-                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
-                    return task::Poll::Ready(Ok(ReadCoreImageHeaderFutureResult::MkFsInfoHeader {
-                        header: MkFsInfoHeader {
-                            image_layout,
-                            image_size,
+                    let read_aux_fs_metadata_fut = ReadMkFsInfoAuxFsMetadataFuture::new(
+                        *mkfsinfo_header_location,
+                        min_header.aux_fs_metadata_len,
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                    );
+                    this.fut_state = ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderAuxFsMetadata {
+                        read_aux_fs_metadata_fut,
+                        mkfsinfo_header: Some(MkFsInfoHeader {
+                            image_layout: image_layout.clone(),
+                            aux_fs_metadata_len: min_header.aux_fs_metadata_len,
+                            image_size: min_header.image_size,
                             salt,
+                        }),
+                    };
+                }
+                ReadCoreImageHeaderFutureState::ReadMkFsInfoHeaderAuxFsMetadata {
+                    read_aux_fs_metadata_fut,
+                    mkfsinfo_header,
+                } => {
+                    let (mkfsinfo_data_location, aux_fs_metadata) =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_aux_fs_metadata_fut), blkdev, cx) {
+                            task::Poll::Ready(Ok((mkfsinfo_data_location, aux_fs_metadata))) => {
+                                (mkfsinfo_data_location, aux_fs_metadata)
+                            }
+                            task::Poll::Ready(Err(e)) => {
+                                this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    let mkfsinfo_header = match mkfsinfo_header.take() {
+                        Some(mkfsinfo_header) => mkfsinfo_header,
+                        None => {
+                            this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    this.fut_state = ReadCoreImageHeaderFutureState::Done;
+                    return task::Poll::Ready(Ok(ReadCoreImageHeaderFutureResult::MkFsInfoHeader(
+                        FsMetadataMkFsInfo {
+                            header: mkfsinfo_header,
+                            aux_fs_metadata,
+                            mkfsinfo_data_location,
                         },
-                        from_backup,
-                    }));
+                    )));
                 }
                 ReadCoreImageHeaderFutureState::PrepareReadBackupMinMkFsInfoHeader => {
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
@@ -1345,6 +1471,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadMutableImageHeaderFu
 #[derive(Clone)]
 struct MinMkFsInfoHeader {
     image_layout: ImageLayout,
+    aux_fs_metadata_len: u64,
     image_size: layout::AllocBlockCount,
     salt_len: u8,
 }
@@ -1359,6 +1486,8 @@ impl MinMkFsInfoHeader {
             encoded_len += mem::size_of::<u8>() as u32;
             // The encoded ImageLayout.
             encoded_len += layout::ImageLayout::encoded_len() as u32;
+            // Length of the AuxFsMetadata stored alongside the filesystem creation header.
+            encoded_len += mem::size_of::<u64>() as u32;
             // The desired filesystem image size in units of Allocation Blocks.
             encoded_len += mem::size_of::<u64>() as u32;
             // The length of the salt as an u8.
@@ -1404,6 +1533,11 @@ impl MinMkFsInfoHeader {
         let (encoded_image_layout, buf) = buf.split_at(layout::ImageLayout::encoded_len() as usize);
         let image_layout = ImageLayout::decode(encoded_image_layout)?;
 
+        let (aux_fs_metadata_len, buf) = buf.split_at(mem::size_of::<u64>());
+        let aux_fs_metadata_len = u64::from_le_bytes(
+            *<&[u8; mem::size_of::<u64>()]>::try_from(aux_fs_metadata_len).map_err(|_| nvfs_err_internal!())?,
+        );
+
         let (image_size, buf) = buf.split_at(mem::size_of::<u64>());
         let image_size = layout::AllocBlockCount::from(u64::from_le_bytes(
             *<&[u8; mem::size_of::<u64>()]>::try_from(image_size).map_err(|_| nvfs_err_internal!())?,
@@ -1417,6 +1551,7 @@ impl MinMkFsInfoHeader {
 
         Ok(Self {
             image_layout,
+            aux_fs_metadata_len,
             image_size,
             salt_len,
         })
@@ -1446,9 +1581,16 @@ impl MinMkFsInfoHeader {
 /// alignment. More specifically: the largest possible power of two is chosen
 /// such that the storage can accomodate at least 16 blocks of that size. The
 /// backup header is then placed at the beginning of the last such block.
+///
+/// # See also:
+///
+/// * [`FsMetadataMkFsInfo`].
 pub struct MkFsInfoHeader {
     /// The filesystem's [`ImageLayout`] configuration parameters.
     pub image_layout: layout::ImageLayout,
+    /// Length of the encoded [`AuxFsMetadata`] in units of Bytes.
+    #[allow(unused)]
+    pub aux_fs_metadata_len: u64,
     /// The desired filesystem image size in units of Allocation Blocks.
     pub image_size: layout::AllocBlockCount,
     /// The filesystem's salt value.
@@ -1713,6 +1855,8 @@ impl MkFsInfoHeader {
     ///   [`io_block_aligned_encoded_len_allocation_blocks()`](Self::io_block_aligned_encoded_len_allocation_blocks).
     /// * `image_layout` - The filesystem image's [`ImageLayout`] to be stored
     ///   in the [`MkFsInfoHeader`].
+    /// * `aux_fs_metadata_len` - Length of the encoded [`AuxFsMetadata`] in
+    ///   units of Bytes.
     /// * `image_size` - The desired filesystem image size to be stored in the
     ///   [`MkFsInfoHeader`].
     /// * `salt` - The filesystem salt to be stored in the [`MkFsInfoHeader`].
@@ -1720,6 +1864,7 @@ impl MkFsInfoHeader {
     pub fn encode<'a, DI: io_slices::MutPeekableIoSlicesMutIter<'a, BackendIteratorError = NvFsError>>(
         mut dst: DI,
         image_layout: &layout::ImageLayout,
+        aux_fs_metadata_len: u64,
         image_size: layout::AllocBlockCount,
         salt: &[u8],
     ) -> Result<(), NvFsError> {
@@ -1742,6 +1887,14 @@ impl MkFsInfoHeader {
             io_slices::SingletonIoSlice::new(encoded_image_layout.as_slice()).map_infallible_err();
         encoding_dst.copy_from_iter(&mut encoded_image_layout)?;
         if !encoded_image_layout.is_empty()? {
+            return Err(nvfs_err_internal!());
+        }
+
+        let aux_fs_metadata_len = aux_fs_metadata_len.to_le_bytes();
+        let mut aux_fs_metadata_len =
+            io_slices::SingletonIoSlice::new(aux_fs_metadata_len.as_slice()).map_infallible_err();
+        encoding_dst.copy_from_iter(&mut aux_fs_metadata_len)?;
+        if !aux_fs_metadata_len.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
@@ -1792,5 +1945,44 @@ impl MkFsInfoHeader {
         )?;
 
         Ok(())
+    }
+}
+
+/// Filesystem creation info read from the storage volume.
+///
+/// # See also:
+///
+/// * [`FsMetadata::MkFsInfo`](super::openfs::FsMetadata::MkFsInfo).
+pub struct FsMetadataMkFsInfo {
+    /// The [`MkFsInfoHeader`].
+    pub(super) header: MkFsInfoHeader,
+    /// The [`AuxFsMetadata`] stored alongside the [`MkFsInfoHeader`].
+    pub(super) aux_fs_metadata: AuxFsMetadata,
+    /// The range on storage containing the filesystem creation info data.
+    ///
+    /// The filesystem creation info data in this context comprises the
+    /// [`header`](Self::header) as well as the
+    /// [`aux_fs_metadata`](Self::aux_fs_metadata) stored alongside.
+    pub(super) mkfsinfo_data_location: layout::PhysicalAllocBlockRange,
+}
+
+impl FsMetadataMkFsInfo {
+    /// Get the filesystem instance's salt.
+    pub fn get_salt(&self) -> &[u8] {
+        &self.header.salt
+    }
+
+    /// Get the filesystem instance's configuration parameters.
+    ///
+    /// Note that the [`ImageLayout`] includes all of the filesystem instance's
+    /// cryptography related parameters, i.e. the algorithms selection for
+    /// the various purposes.
+    pub fn get_config(&self) -> &layout::ImageLayout {
+        &self.header.image_layout
+    }
+
+    /// Get the filesystem instance's auxiliary metadata.
+    pub fn get_aux(&self) -> &AuxFsMetadata {
+        &self.aux_fs_metadata
     }
 }

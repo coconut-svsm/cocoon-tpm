@@ -299,6 +299,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     let mut fs_instance_sync_state = CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state);
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -333,6 +334,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     let mut fs_instance_sync_state = CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state);
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         fs_sync_state_alloc_bitmap_file,
@@ -788,6 +790,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     };
                     if let Err(e) = image_header::MutableImageHeader::encode(
                         mutable_image_header_update_staging_bufs_iter.map_err(NvFsError::from),
+                        &fs_instance_sync_state.aux_fs_metadata_update_groups_heads,
                         &transaction.pending_auth_tree_updates.updated_root_hmac_digest,
                         inode_index_entry_leaf_node_preauth_cca_protection_digest,
                         &fs_config.inode_index_entry_leaf_node_block_ptr,
@@ -964,6 +967,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     let mut fs_instance_sync_state = CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state);
                     let (
                         fs_instance,
+                        fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         fs_sync_state_alloc_bitmap_file,
@@ -1034,6 +1038,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         Ok(magic_dst) => magic_dst,
                         Err(e) => break (false, Some(transaction), e),
                     } = *b"CCFSJRNL";
+
+                    // Encode the pointer to the AuxFsMetadata update groups' heads.
+                    if let Err(e) =
+                        journal::log::JournalLog::plaintext_header_encode_aux_fs_metadata_update_groups_heads(
+                            io_slices::BuffersSliceIoSlicesMutIter::new(&mut [
+                                &mut journal_log_head_extent_head_blkdev_io_block_buf,
+                                &mut journal_log_head_extent_tail_buf,
+                            ]),
+                            fs_sync_state_aux_fs_metadata_update_groups_heads,
+                            image_layout,
+                        )
+                    {
+                        break (false, Some(transaction), e);
+                    }
 
                     let journal_log_tail_extents = &transaction.journal_log_tail_extents;
                     let mut journal_log_tail_extents_bufs =
@@ -1788,6 +1806,7 @@ impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> 
                     let mut fs_instance_sync_state = CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state);
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,

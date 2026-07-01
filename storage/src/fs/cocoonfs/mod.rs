@@ -19,6 +19,7 @@
 mod alloc_bitmap;
 mod auth_subject_ids;
 mod auth_tree;
+mod aux_fs_metadata;
 mod checksum;
 mod crc32;
 mod encryption_entities;
@@ -59,48 +60,57 @@ pub enum FormatError {
     InvalidImageLayoutConfig = 4,
     UnsupportedImageLayoutConfig = 5,
     UnsupportedCryptoAlgorithm = 6,
-    InvalidSaltLength = 7,
-    IoBlockSizeNotSupportedByDevice = 8,
-    InvalidImageSize = 9,
-    InvalidAuthTreeConfig = 10,
-    UnsupportedAuthTreeConfig = 11,
-    UnalignedAuthTreeExtents = 12,
-    InvalidAuthTreeDimensions = 13,
-    InvalidAllocationBitmapFileConfig = 14,
-    UnalignedAllocationBitmapFileExtents = 15,
-    InvalidAllocationBitmapFileSize = 16,
-    InconsistentAllocBitmapFileExtents = 17,
-    InvalidDigestLength = 18,
-    InvalidFileSize = 19,
-    BlockOutOfRange = 20,
-    InvalidExtents = 21,
-    InvalidPadding = 22,
-    InvalidIndexConfig = 23,
-    InvalidIndexNode = 24,
-    InvalidIndexRootExtents = 25,
-    SpecialInodeMissing = 26,
-    UnalignedJournalExtents = 27,
+    InconsistentBackupMkFsInfoHeader = 7,
+    InvalidAuxFsMetadataChecksum = 8,
+    InvalidAuxFsMetadataSize = 9,
+    InvalidAuxFsMetadataExtent = 10,
+    UnalignedAuxFsMetadataExtent = 11,
+    IncoherentAuxFsMetadataExtents = 12,
+    InconsistentAuxFsMetadataExtentsChain = 13,
+    InvalidAuxFsMetadataExtentFormat = 14,
+    InvalidAuxFsMetadataFormat = 15,
+    InvalidSaltLength = 16,
+    IoBlockSizeNotSupportedByDevice = 17,
+    InvalidImageSize = 18,
+    InvalidAuthTreeConfig = 19,
+    UnsupportedAuthTreeConfig = 20,
+    UnalignedAuthTreeExtents = 21,
+    InvalidAuthTreeDimensions = 22,
+    InvalidAllocationBitmapFileConfig = 23,
+    UnalignedAllocationBitmapFileExtents = 24,
+    InvalidAllocationBitmapFileSize = 25,
+    InconsistentAllocBitmapFileExtents = 26,
+    InvalidDigestLength = 27,
+    InvalidFileSize = 28,
+    BlockOutOfRange = 29,
+    InvalidExtents = 30,
+    InvalidPadding = 31,
+    InvalidIndexConfig = 32,
+    InvalidIndexNode = 33,
+    InvalidIndexRootExtents = 34,
+    SpecialInodeMissing = 35,
+    UnalignedJournalExtents = 36,
 
-    InvalidJournalLogFieldTagEncoding = 28,
-    InvalidJournalLogFieldLengthEncoding = 29,
-    InvalidJournalLogFieldTag = 30,
-    JournalLogFieldLengthOverflow = 31,
+    InvalidJournalLogFieldTagEncoding = 37,
+    InvalidJournalLogFieldLengthEncoding = 38,
+    InvalidJournalLogFieldTag = 39,
+    JournalLogFieldLengthOverflow = 40,
 
-    IncompleteJournalLog = 32,
-    UnexpectedJournalLogField = 33,
-    JournalLogFieldLengthOutOfBounds = 34,
-    ExcessJournalLogFieldLength = 35,
+    IncompleteJournalLog = 41,
+    UnexpectedJournalLogField = 42,
+    JournalLogFieldLengthOutOfBounds = 43,
+    ExcessJournalLogFieldLength = 44,
 
-    InvalidJournalExtentsCoveringAuthDigestsFormat = 36,
-    InvalidJournalExtentsCoveringAuthDigestsEntry = 37,
-    UnexpectedJournalExtentsCoveringAuthDigestsEntry = 38,
+    InvalidJournalExtentsCoveringAuthDigestsFormat = 45,
+    InvalidJournalExtentsCoveringAuthDigestsEntry = 46,
+    UnexpectedJournalExtentsCoveringAuthDigestsEntry = 47,
 
-    InvalidJournalApplyWritesScriptFormat = 39,
-    InvalidJournalApplyWritesScriptEntry = 40,
-    InvalidJournalUpdateAuthDigestsScriptFormat = 41,
-    InvalidJournalUpdateAuthDigestsScriptEntry = 42,
-    InvalidJournalTrimsScriptFormat = 43,
-    InvalidJournalTrimsScriptEntry = 44,
+    InvalidJournalApplyWritesScriptFormat = 48,
+    InvalidJournalApplyWritesScriptEntry = 49,
+    InvalidJournalUpdateAuthDigestsScriptFormat = 50,
+    InvalidJournalUpdateAuthDigestsScriptEntry = 51,
+    InvalidJournalTrimsScriptFormat = 52,
+    InvalidJournalTrimsScriptEntry = 53,
 }
 
 impl convert::From<FormatError> for NvFsError {
@@ -109,7 +119,9 @@ impl convert::From<FormatError> for NvFsError {
     }
 }
 
+pub use aux_fs_metadata::{AuxFsMetadata, AuxFsMetadataIter, AuxFsMetadataPushError};
 pub use fs::CocoonFs;
+pub use image_header::FsMetadataMkFsInfo;
 pub use layout::ImageLayout;
 pub use mkfs::{MkFsFuture, WriteMkFsInfoHeaderFuture};
-pub use openfs::{FsMetadata, OpenFsFuture, ReadFsMetadataFuture};
+pub use openfs::{FsMetadata, FsMetadataFormatted, OpenFsFuture, ReadFsMetadataFuture};

@@ -18,7 +18,11 @@ use crate::{
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
-            FormatError, alloc_bitmap, auth_tree, extents, image_header, integrity::ExtentIntegrityState, keys, layout,
+            FormatError, alloc_bitmap, auth_tree,
+            aux_fs_metadata::{AuxFsMetadataEncodedExtentsPtrsPair, FindAuxFsMetadataExtentsFuture},
+            extents, image_header,
+            integrity::ExtentIntegrityState,
+            keys, layout,
         },
     },
     nvfs_err_internal,
@@ -29,6 +33,10 @@ use crate::{
         io_slices::{self, IoSlicesIterCommon as _},
     },
 };
+
+#[cfg(doc)]
+use crate::fs::cocoonfs::aux_fs_metadata::AuxFsMetadata;
+
 use core::{mem, pin, task};
 
 /// Replay the journal at filesystem opening time if needed.
@@ -36,9 +44,10 @@ use core::{mem, pin, task};
 /// Check if the journal is active and needs replay. If so, do that and cleanup
 /// afterwards, including an invalidation of the journal.
 ///
-/// In either case the journal log head extent's [`ExtentIntegrityState`] information required to
-/// maintain protection against torn [device IO Block](blkdev::NvBlkDev::io_block_size_128b_log2)
-/// writes for the first journal log update is returned from [`poll()`](Self::poll).
+/// In either case the journal log head extent's [`ExtentIntegrityState`]
+/// information required to maintain protection against torn [device IO
+/// Block](blkdev::NvBlkDev::io_block_size_128b_log2) writes for the first
+/// journal log update is returned from [`poll()`](Self::poll).
 pub struct JournalReplayFuture<B: blkdev::NvBlkDev> {
     enable_trimming: bool,
 
@@ -69,9 +78,12 @@ pub struct JournalReplayFuture<B: blkdev::NvBlkDev> {
 /// [`JournalReplayFuture`] state-machine state.
 enum JournalReplayFutureState<B: blkdev::NvBlkDev> {
     ReadLog {
+        aux_fs_metadata_extents: Option<extents::PhysicalExtents>,
         read_log_fut: JournalLogReadFuture<B>,
     },
     ReadMutableImageHeader {
+        aux_fs_metadata_extents: Option<extents::PhysicalExtents>,
+        journal_log_aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
         // Self.
         auth_tree_extents: Option<extents::LogicalExtents>,
@@ -84,7 +96,31 @@ enum JournalReplayFutureState<B: blkdev::NvBlkDev> {
 
         read_mutable_image_header_fut: JournalReadMutableImageHeaderFuture<B>,
     },
+    FindAuxFsMetadataExtents {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        alloc_bitmap_file_extents: Option<extents::PhysicalExtents>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        alloc_bitmap_file_fragments_auth_digests: Option<ExtentsCoveringAuthDigests>,
+
+        find_aux_metadata_extents_fut: FindAuxFsMetadataExtentsFuture<B>,
+    },
+    ReadAllocBitmapJournalFragmentsPrepare {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        aux_fs_metadata_extents: Option<extents::PhysicalExtents>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        alloc_bitmap_file_extents: Option<extents::PhysicalExtents>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        alloc_bitmap_file_fragments_auth_digests: Option<ExtentsCoveringAuthDigests>,
+    },
     ReadAllocBitmapJournalFragments {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        aux_fs_metadata_extents: Option<extents::PhysicalExtents>,
         alloc_bitmap_file: alloc_bitmap::AllocBitmapFile,
         image_header_end: layout::PhysicalAllocBlockIndex,
         read_alloc_bitmap_journal_fragments_fut: alloc_bitmap::AllocBitmapFileReadJournalFragmentsFuture<B>,
@@ -106,7 +142,12 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
     /// * `enable_trimming` - Whether or not to submit [trim
     ///   commands](blkdev::NvBlkDev::trim) to the underlying storage for
     ///   cleanup.
-    pub fn new(enable_trimming: bool) -> Self {
+    /// * `aux_fs_metadata_extents` - The extents of the [`AuxFsMetadata`] on
+    ///   storage, which may optionally be provided if already available in
+    ///   order to avoid some duplicate work. If not provided,
+    ///   `JournalReplayFuture` will determine the extents itself as part of its
+    ///   operation.
+    pub fn new(enable_trimming: bool, aux_fs_metadata_extents: Option<extents::PhysicalExtents>) -> Self {
         let read_log_fut = JournalLogReadFuture::new();
         Self {
             enable_trimming,
@@ -118,16 +159,19 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
             journal_staging_copy_undisguise: None,
             mutable_image_header: None,
             auth_tree_config: None,
-            fut_state: JournalReplayFutureState::ReadLog { read_log_fut },
+            fut_state: JournalReplayFutureState::ReadLog {
+                aux_fs_metadata_extents,
+                read_log_fut,
+            },
         }
     }
 
     /// Poll the [`JournalReplayFuture`] to completion.
     ///
-    /// On success, the journal log head extent's [`ExtentIntegrityState`] information required to
-    /// maintain protection against torn [device IO
-    /// Block](blkdev::NvBlkDev::io_block_size_128b_log2) writes for the first journal log update is
-    /// returned from [`poll()`](Self::poll).
+    /// On success, the journal log head extent's [`ExtentIntegrityState`]
+    /// information required to maintain protection against torn [device IO
+    /// Block](blkdev::NvBlkDev::io_block_size_128b_log2) writes for the first
+    /// journal log update is returned from [`poll()`](Self::poll).
     ///
     /// # Arguments:
     ///
@@ -153,7 +197,10 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
         let this = pin::Pin::into_inner(self);
         loop {
             match &mut this.fut_state {
-                JournalReplayFutureState::ReadLog { read_log_fut } => {
+                JournalReplayFutureState::ReadLog {
+                    aux_fs_metadata_extents,
+                    read_log_fut,
+                } => {
                     let journal_log;
                     (journal_log, this.journal_log_head_integrity_state) = match JournalLogReadFuture::poll(
                         pin::Pin::new(read_log_fut),
@@ -183,6 +230,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                     };
                     let JournalLog {
                         log_extents: journal_log_extents,
+                        aux_fs_metadata_update_groups_heads: journal_log_aux_fs_metadata_update_groups_heads,
                         auth_tree_extents,
                         alloc_bitmap_file_extents,
                         alloc_bitmap_file_fragments_auth_digests,
@@ -197,6 +245,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                     this.trim_script = trim_script;
                     this.journal_staging_copy_undisguise = journal_staging_copy_undisguise;
 
+                    let auth_tree_extents = extents::LogicalExtents::from(auth_tree_extents);
                     let read_mutable_image_header_fut =
                         match JournalReadMutableImageHeaderFuture::new(blkdev, image_layout, salt_len) {
                             Ok(read_mutable_image_header_fut) => read_mutable_image_header_fut,
@@ -205,8 +254,9 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                                 return task::Poll::Ready(Err(e));
                             }
                         };
-                    let auth_tree_extents = extents::LogicalExtents::from(auth_tree_extents);
                     this.fut_state = JournalReplayFutureState::ReadMutableImageHeader {
+                        aux_fs_metadata_extents: aux_fs_metadata_extents.take(),
+                        journal_log_aux_fs_metadata_update_groups_heads,
                         auth_tree_extents: Some(auth_tree_extents),
                         alloc_bitmap_file_extents: Some(alloc_bitmap_file_extents),
                         alloc_bitmap_file_fragments_auth_digests: Some(alloc_bitmap_file_fragments_auth_digests),
@@ -214,6 +264,8 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                     };
                 }
                 JournalReplayFutureState::ReadMutableImageHeader {
+                    aux_fs_metadata_extents,
+                    journal_log_aux_fs_metadata_update_groups_heads,
                     auth_tree_extents,
                     alloc_bitmap_file_extents,
                     alloc_bitmap_file_fragments_auth_digests,
@@ -241,6 +293,26 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
+
+                    // The pointers to the AuxFsMetadata update groups' heads found
+                    // in the journal log and in the mutable image header should match.
+                    // Verify that.
+                    // Note that in case the aux_fs_metadata_extents had been provided from extern,
+                    // i.e. retrieved independently through the journal log head's plaintext header,
+                    // there still wasn't any TOCTOU issue -- the aux_fs_metadata_extents are used
+                    // exclusively for determining Authentication Tree Data Blocks authenticated as
+                    // unallocated when reconstructing the Authentication Tree during journal replay
+                    // and all that could happen upon bogus aux_fs_metadata_extents would be an
+                    // authentication failure.  So this check is really only a consistency check to
+                    // protect against bugs potentially leading to an unusable filesystem image.
+                    if *journal_log_aux_fs_metadata_update_groups_heads
+                        != mutable_image_header.aux_fs_metadata_update_groups_heads
+                    {
+                        this.fut_state = JournalReplayFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::from(
+                            FormatError::InconsistentAuxFsMetadataExtentsChain,
+                        )));
+                    }
 
                     let auth_tree_extents = match auth_tree_extents.take() {
                         Some(auth_tree_extents) => auth_tree_extents,
@@ -273,6 +345,62 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                     };
                     this.auth_tree_config = Some(auth_tree_config);
                     this.mutable_image_header = Some(mutable_image_header);
+
+                    // If the auxiliary FS metadata extents had been provided at
+                    // initialization, proceed directly to
+                    // reading the Allocation Bitmap File fragments.
+                    // Otherwise find them first.
+                    if aux_fs_metadata_extents.is_none() {
+                        let find_aux_metadata_extents_fut = FindAuxFsMetadataExtentsFuture::new(
+                            *journal_log_aux_fs_metadata_update_groups_heads,
+                            image_layout,
+                        );
+                        this.fut_state = JournalReplayFutureState::FindAuxFsMetadataExtents {
+                            alloc_bitmap_file_extents: Some(alloc_bitmap_file_extents),
+                            alloc_bitmap_file_fragments_auth_digests: alloc_bitmap_file_fragments_auth_digests.take(),
+                            find_aux_metadata_extents_fut,
+                        };
+                    } else {
+                        this.fut_state = JournalReplayFutureState::ReadAllocBitmapJournalFragmentsPrepare {
+                            aux_fs_metadata_extents: aux_fs_metadata_extents.take(),
+                            alloc_bitmap_file_extents: Some(alloc_bitmap_file_extents),
+                            alloc_bitmap_file_fragments_auth_digests: alloc_bitmap_file_fragments_auth_digests.take(),
+                        };
+                    }
+                }
+                JournalReplayFutureState::FindAuxFsMetadataExtents {
+                    alloc_bitmap_file_extents,
+                    alloc_bitmap_file_fragments_auth_digests,
+                    find_aux_metadata_extents_fut,
+                } => {
+                    let aux_fs_metadata_extents =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(find_aux_metadata_extents_fut), blkdev, cx) {
+                            task::Poll::Ready(Ok(aux_fs_metadata_extents)) => aux_fs_metadata_extents,
+                            task::Poll::Ready(Err(e)) => {
+                                this.fut_state = JournalReplayFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    this.fut_state = JournalReplayFutureState::ReadAllocBitmapJournalFragmentsPrepare {
+                        aux_fs_metadata_extents: Some(aux_fs_metadata_extents),
+                        alloc_bitmap_file_extents: alloc_bitmap_file_extents.take(),
+                        alloc_bitmap_file_fragments_auth_digests: alloc_bitmap_file_fragments_auth_digests.take(),
+                    };
+                }
+                JournalReplayFutureState::ReadAllocBitmapJournalFragmentsPrepare {
+                    aux_fs_metadata_extents,
+                    alloc_bitmap_file_extents,
+                    alloc_bitmap_file_fragments_auth_digests,
+                } => {
+                    let alloc_bitmap_file_extents = match alloc_bitmap_file_extents.take() {
+                        Some(alloc_bitmap_file_extents) => alloc_bitmap_file_extents,
+                        None => {
+                            this.fut_state = JournalReplayFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
 
                     let alloc_bitmap_file =
                         match alloc_bitmap::AllocBitmapFile::new(image_layout, alloc_bitmap_file_extents) {
@@ -309,6 +437,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                         };
 
                     this.fut_state = JournalReplayFutureState::ReadAllocBitmapJournalFragments {
+                        aux_fs_metadata_extents: aux_fs_metadata_extents.take(),
                         alloc_bitmap_file,
                         image_header_end: image_header::MutableImageHeader::physical_location(image_layout, salt_len)
                             .end(),
@@ -316,6 +445,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                     };
                 }
                 JournalReplayFutureState::ReadAllocBitmapJournalFragments {
+                    aux_fs_metadata_extents,
                     alloc_bitmap_file,
                     image_header_end,
                     read_alloc_bitmap_journal_fragments_fut,
@@ -354,6 +484,14 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                             task::Poll::Pending => return task::Poll::Pending,
                         };
 
+                    let aux_fs_metadata_extents = match aux_fs_metadata_extents.as_ref() {
+                        Some(aux_fs_metadata_extents) => aux_fs_metadata_extents,
+                        None => {
+                            this.fut_state = JournalReplayFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+
                     let mutable_image_header = match this.mutable_image_header.as_ref() {
                         Some(mutable_image_header) => mutable_image_header,
                         None => {
@@ -385,6 +523,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayFuture<B> {
                         auth_tree_config,
                         *image_header_end,
                         &journal_log_head_extent,
+                        aux_fs_metadata_extents,
                         mutable_image_header.image_size,
                         alloc_bitmap_journal_fragments,
                         update_auth_digests_script,
@@ -773,6 +912,8 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
     ///   storage](image_header::MutableImageHeader::physical_location).
     /// * `journal_log_head_extent` - The filesystem's fixed [journal log head
     ///   extent](JournalLog::head_extent_physical_location)
+    /// * `aux_fs_metadata_extents` - The extents of the [`AuxFsMetadata`] on
+    ///   storage.
     /// * `image_size` - The filesystem image size as found in the filesystem's
     ///   [`MutableImageHeader::image_size`](image_header::MutableImageHeader::image_size).
     /// * `alloc_bitmap_journal_fragments` - Allocation bitmap with valid
@@ -787,6 +928,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
         auth_tree_config: &auth_tree::AuthTreeConfig,
         image_header_end: layout::PhysicalAllocBlockIndex,
         journal_log_head_extent: &layout::PhysicalAllocBlockRange,
+        aux_fs_metadata_extents: &extents::PhysicalExtents,
         image_size: layout::AllocBlockCount,
         alloc_bitmap_journal_fragments: alloc_bitmap::AllocBitmap,
         update_auth_digests_script: JournalUpdateAuthDigestsScript,
@@ -796,6 +938,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
             auth_tree_config,
             image_header_end,
             journal_log_head_extent,
+            aux_fs_metadata_extents,
             image_size,
             alloc_bitmap_journal_fragments,
             update_auth_digests_script,

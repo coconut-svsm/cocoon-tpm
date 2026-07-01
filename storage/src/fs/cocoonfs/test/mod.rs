@@ -10,7 +10,10 @@ use crate::{
     crypto::{hash, rng, symcipher},
     fs::{
         self,
-        cocoonfs::{CocoonFs, MkFsFuture, OpenFsFuture, WriteMkFsInfoHeaderFuture, layout},
+        cocoonfs::{
+            AuxFsMetadata, CocoonFs, FsMetadata, MkFsFuture, OpenFsFuture, ReadFsMetadataFuture,
+            WriteMkFsInfoHeaderFuture, layout,
+        },
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::{
@@ -250,15 +253,24 @@ fn cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance: <TestCocoonFs as fs
 
 fn cocoonfs_test_mkfs_op_helper(
     test_config: &CocoonFsTestConfig,
+    aux_fs_metadata: Option<AuxFsMetadata>,
     image_size: usize,
     enable_trimming: bool,
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let (blkdev, image_layout, salt) = test_config.instantiate(image_size);
-    let mkfs_fut =
-        MkFsFuture::<TestNopSyncTypes, _>::new(blkdev, &image_layout, salt, None, &[0u8; 0], enable_trimming, rng)
-            .map_err(|(_blkdev, _rng, e)| e)
-            .unwrap();
+    let mkfs_fut = MkFsFuture::<TestNopSyncTypes, _>::new(
+        blkdev,
+        &image_layout,
+        salt,
+        aux_fs_metadata.unwrap_or(AuxFsMetadata::new()),
+        None,
+        &[0u8; 0],
+        enable_trimming,
+        rng,
+    )
+    .map_err(|(_blkdev, _rng, e)| e)
+    .unwrap();
 
     let executor = TestAsyncExecutor::new();
     let mkfs_waiter = TestAsyncExecutor::spawn(&executor, mkfs_fut);
@@ -270,13 +282,20 @@ fn cocoonfs_test_mkfs_op_helper(
 
 fn cocoonfs_test_write_mkfsinfo_header_op_helper(
     test_config: &CocoonFsTestConfig,
+    aux_fs_metadata: Option<AuxFsMetadata>,
     image_size: usize,
 ) -> Result<TestNvBlkDev, fs::NvFsError> {
     let (blkdev, image_layout, salt) = test_config.instantiate(0);
     let image_size = image_size as u64;
-    let write_mkfsinfo_header_fut =
-        WriteMkFsInfoHeaderFuture::new(blkdev, &image_layout, salt, Some(image_size), false)
-            .map_err(|(_blkdev, e)| e)?;
+    let write_mkfsinfo_header_fut = WriteMkFsInfoHeaderFuture::new(
+        blkdev,
+        &image_layout,
+        salt,
+        aux_fs_metadata.unwrap_or(AuxFsMetadata::new()),
+        Some(image_size),
+        false,
+    )
+    .map_err(|(_blkdev, e)| e)?;
 
     let executor = TestAsyncExecutor::new();
     let write_mkfsinfo_header_waiter = TestAsyncExecutor::spawn(&executor, write_mkfsinfo_header_fut);
@@ -287,6 +306,16 @@ fn cocoonfs_test_write_mkfsinfo_header_op_helper(
         Ok(()) => Ok(blkdev),
         Err(e) => Err(e),
     }
+}
+
+fn cocoonfs_test_read_fs_metadata_helper(blkdev: TestNvBlkDev) -> Result<(TestNvBlkDev, FsMetadata), fs::NvFsError> {
+    let read_fs_metadata_fut = ReadFsMetadataFuture::new(blkdev).map_err(|(_blkdev, e)| e).unwrap();
+    let executor = TestAsyncExecutor::new();
+    let read_fs_metadata_waiter = TestAsyncExecutor::spawn(&executor, read_fs_metadata_fut);
+    TestAsyncExecutor::run_to_completion(&executor);
+    let read_fs_metadata_result = read_fs_metadata_waiter.take().unwrap();
+    let (blkdev, read_fs_metadata_result) = read_fs_metadata_result.unwrap();
+    read_fs_metadata_result.map(|fs_metadata| (blkdev, fs_metadata))
 }
 
 fn cocoonfs_test_openfs_op_helper(
@@ -944,6 +973,7 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
     }
 }
 
+mod aux_fs_metadata;
 mod inode_index;
 mod journal_replay;
 mod mkfs;

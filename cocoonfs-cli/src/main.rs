@@ -14,7 +14,7 @@ use crypto::{
 };
 use storage::fs::{
     NvFs, NvFsEnumerateCursor as _, NvFsFutureAsCoreFuture, NvFsReadContext, NvFsUnlinkCursor as _,
-    cocoonfs::{CocoonFs, ImageLayout, MkFsFuture, OpenFsFuture, WriteMkFsInfoHeaderFuture},
+    cocoonfs::{AuxFsMetadata, CocoonFs, ImageLayout, MkFsFuture, OpenFsFuture, WriteMkFsInfoHeaderFuture},
 };
 use tpm2_interface::TpmiAlgHash;
 use utils_async::sync_types;
@@ -823,6 +823,7 @@ fn main() {
                 blkdev,
                 &image_layout,
                 salt,
+                AuxFsMetadata::new(),
                 cli_mkfs_args.mkfsinfo.image_size,
                 &key,
                 cli_mkfs_args.enable_trimming,
@@ -858,6 +859,7 @@ fn main() {
                 blkdev,
                 &image_layout,
                 salt,
+                AuxFsMetadata::new(),
                 cli_write_mkfsinfo_header_args.mkfsinfo.image_size,
                 !cli_write_mkfsinfo_header_args.trim_volume_file_to_header,
             ) {

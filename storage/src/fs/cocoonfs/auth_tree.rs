@@ -3867,6 +3867,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                     // into the associated parent entry, if any.
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -6056,6 +6057,8 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///   storage](MutableImageHeader::physical_location).
     /// * `journal_log_head_extent` - [Location of the journal log head
     ///   extent](super::journal::log::JournalLog::head_extent_physical_location).
+    /// * `aux_fs_metadata_extents` - The extents of the
+    ///   [`AuxFsMetadata`](super::aux_fs_metadata::AuxFsMetadata) on storage.
     /// * `image_size` - The filesystem image size as found in the filesystem's
     ///   (possibly updated) [`MutableImageHeader::image_size`].
     /// * `alloc_bitmap_journal_fragments` - [Allocation bitmap](AllocBitmap)
@@ -6065,11 +6068,13 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///   [`AllocBitmapFileReadJournalFragmentsFuture`](super::alloc_bitmap::AllocBitmapFileReadJournalFragmentsFuture).
     /// * `journal_update_script` - The [`JournalUpdateAuthDigestsScript`]
     ///   decoded from the journal log to apply to the tree.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         image_layout: &layout::ImageLayout,
         tree_config: &AuthTreeConfig,
         image_header_end: layout::PhysicalAllocBlockIndex,
         journal_log_head_extent: &layout::PhysicalAllocBlockRange,
+        aux_fs_metadata_extents: &extents::PhysicalExtents,
         image_size: layout::AllocBlockCount,
         mut alloc_bitmap_journal_fragments: AllocBitmap,
         journal_update_script: JournalUpdateAuthDigestsScript,
@@ -6096,15 +6101,19 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
             return Err(NvFsError::from(FormatError::UnsupportedAuthTreeConfig));
         }
 
-        // The image header and the Journal Log head extent are tracked as allocated in
-        // the Allocation Bitmap, but authenticated as if unallocated. As
-        // alloc_bitmap is owned and being used exclusively for authentication,
-        // simply clear the corresponding bits here.
+        // The image header, the Journal Log head extent as well as the auxiliary FS
+        // metadata extents are tracked as allocated in the Allocation Bitmap,
+        // but authenticated as if unallocated. As alloc_bitmap is owned and
+        // being used exclusively for authentication, simply clear the
+        // corresponding bits here.
         alloc_bitmap_journal_fragments.set_in_range(
             &layout::PhysicalAllocBlockRange::new(layout::PhysicalAllocBlockIndex::from(0), image_header_end),
             false,
         )?;
         alloc_bitmap_journal_fragments.set_in_range(journal_log_head_extent, false)?;
+        for aux_fs_metadata_extent in aux_fs_metadata_extents.iter() {
+            alloc_bitmap_journal_fragments.set_in_range(&aux_fs_metadata_extent, false)?;
+        }
 
         let data_block_hmac_instance_init =
             hash::HmacInstance::new(tree_config.data_hmac_hash_alg, &tree_config.data_hmac_key)?;

@@ -250,6 +250,7 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
 
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,

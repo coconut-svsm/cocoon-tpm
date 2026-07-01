@@ -17,8 +17,9 @@ setting.
 In addition to its primary design focus on [strong security properties](#sec-introduction-security), the format
 implemens support for some features of particular relevance to the intended use-case, such as support for [keyless
 storage volume provisioning](#sec-introduction-online-mkfs) and robustness against service interruptions by means of a
-[journal](#sec-introduction-journal).
-
+[journal](#sec-introduction-journal). Moreover, in order to enable a wide range of external key retrieval workflows (aka
+"remote attestation") at opening time, some free-form [auxiliary metadata](#sec-introduction-aux-fs-metadata) may get
+stored with the filesystem.
 
 ### [Security properties]{#sec-introduction-security}
 The most noteworthy features distinguishing CocoonFs from common existing Full Disk Encryption (FDE) solutions designed
@@ -167,6 +168,28 @@ For example, upon update, the filesystem implementation could
 For handling any power cuts encountered after the new root digest has been sent, but before a reply has been received
 back, make the filesystem opening code to query the remote trusted party for the latest root authentication digest at
 filesystem opening time, depending on the answer either apply or cancel the pending journal.
+
+### [Auxiliary filesystem metadata]{#sec-introduction-aux-fs-metadata}
+In order to enable a wide range of external key retrieval workflows, the filesystem format has support for some
+free-form auxiliary filesystem metadata stored as plaintext. The auxiliary filesystem metadata is organized as a
+sequence of Tag-Length-Value (TLV) entries, with the tags being 128 bit UUIDS formed according to [RFC
+4122](https://datatracker.ietf.org/doc/html/rfc4122). The semantics of any such entry are at the discretion of the party
+who generated its respective associated UUID. Implementations are expected to ignore any entries with UUIDs they don't
+recognize.
+
+An example use case would be the storage of a wrapped filesystem key, which is to be sent to a remote server for
+unwrapping in the course of executing a remote attestation protocol. The designers of that protocol or, alternatively,
+anyone building a software architecture integrating the CocoonFs format with that remote attestation protocol, may
+generate an UUID for that purpose and define the payload format for storing the wrapped key in a auxiliary filesystem
+metatada entry tagged with that UUID.
+
+Typically, the auxiliary filesystem metadata would get initialized at filesystem creation time, and may subsequently get
+updated through the regular [journalling](#sec-introduction-journal) mechanism. Updates through the journal, the storage
+allocations needed for that in particular, necessarily require access to the filesystem key however. It is anticipated
+that some -- perhaps unforseen -- use cases or maintenance workflows may emerge where that requirement would pose a
+significant obstacle. Continuing on the example use case from above, that could be a transition to a different remote
+attestation server, requiring a rewrap of the filesystem key. To that end, all auxiliary filesystem metadata related
+data structures are defined in a way enabling offline updates robust against service interruptions.
 
 ### [Confidentiality of allocations and block trimming]{#sec-allocations-confidentiality}
 Ideally it should not be possible for an adversary to infer the allocation status of any blocks at any time, because
@@ -603,6 +626,9 @@ The mutable image header's format is:
 +---------------------------------------+------------------------------------------------------------------------------+
 |Length                                 |Description                                                                   |
 +=======================================+==============================================================================+
+|16B                                    |[Encoded extent pointers](#sec-enc-extent-ptr) to the [auxiliary filesystem   |
+|                                       |metadata](#sec-aux-fs-metadata) update groups' head extents.                  |
++---------------------------------------+------------------------------------------------------------------------------+
 |Digest length produced by              |The [authentication tree root HMAC digest](#sec-auth-tree-root-digest).       |
 |`auth_tree_root_hmac_hash_alg`.        |                                                                              |
 +---------------------------------------+------------------------------------------------------------------------------+
@@ -636,6 +662,10 @@ required for the actual filesystem creation and is of the following format:
 +--------------------------------+------------------------------------------------------------------------------------+
 |21                              |The set of filesystem image layout parameters, encoded in the same                  |
 |                                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
++--------------------------------+------------------------------------------------------------------------------------+
+|8                               |The length of the [auxiliary filesystem metadata](#sec-aux-fs-metadata) payload     |
+|                                |[stored alongside](#sec-aux-fs-metadata-mkfsinfo) the filesystem creation info      |
+|                                |header, encoded as a 64 bit integer in little-endian format.                        |
 +--------------------------------+------------------------------------------------------------------------------------+
 |8                               |The desired filesystem image size in units of [Allocation                           |
 |                                |Blocks](#def-allocation-block), encoded as a 64 bit integer in little-endian format.|
@@ -1088,7 +1118,8 @@ The HMAC is formed with a hash algorithm of [`auth_tree_data_hmac_hash_alg`](#de
 
 1. the [Authentication Tree Data Block's](#def-auth-tree-data-block) constituent allocated [Allocation
    Blocks](#def-allocation-block) contents, while skipping over the unallocated ones, as well as those allocated to the
-   [image header](#sec-image-header) or journal log head,
+   [image header](#sec-image-header), the [journal log head](#sec-journal-log-encryption) or any of the [auxiliary
+   filesystem metadata extents](#sec-aux-fs-metadata-formatted),
 2. and an [authentication context](#sec-auth-context) formed as follows:
    1. A 64 bit allocation bitmap word specifying the allocation status of each of the Authentication Tree Data Block's
       constituent Allocation Blocks, encoded in little-endian format.
@@ -1383,12 +1414,14 @@ the encrypted chained extents' inline authentication is set to
 3. An identifier byte of constant 1 identifying the type of authenticated associated data for the encrypted chained
    extents' inline authentication.
 
-### Journal log head extent plaintext header
+### [Journal log head extent plaintext header](#sec-journal-log-head-plaintext-header)
 The [encrypted chained extents](#sec-encryption-entity-chained-extents) encryption entity format allows for a plaintext
 header to get stored in the first head extent. For the journal log, this plaintext header comprises
 
 * a magic of `CCFSJRNL`, without a terminating zero byte, if the journal is to be considered active,
-* an [extent integrity protection section](#sec-extent-integrity) for detecting torn writes to the head extent.
+* an [extent integrity protection section](#sec-extent-integrity) for detecting torn writes to the head extent,
+* a pair of two [encoded extent pointers](#sec-enc-extent-ptr) to the auxiliary filesystem metadata update groups' head
+  extents.
 
 Note that updates of the journal log head extent on storage must follow the [fail-safe extent write
 protocol](#def-extent-integrity-fail-safe-write), as is the case for any extent subject to the [common integrity
@@ -1571,6 +1604,231 @@ journal staging copy with the specified block cipher in CBC mode and an IV obtai
    little-endian format.
 2. Truncate or pad the result at the beginning so that its length becomes equal to the block cipher block size.
 3. Encrypt the single block cipher block with the IV generation encryption key.
+
+## [Auxiliary filesystem metadata]{#sec-aux-fs-metadata}
+The [auxiliary filesystem metadata](#sec-introduction-aux-fs-metadata) payload is
+[encoded](#sec-aux-fs-metadata-encoding) as a sequence of TLV records, and stored either as a contiguous blob next to a
+[filesystem creation info header](#sec-mkfsinfo-header) or, once the filesystem has been created, distributed across one
+or more [extents](#def-extent).
+
+### [Payload encoding]{#sec-aux-fs-metadata-encoding}
+The auxiliary fileystem metadata is encoded as a sequence of records, each in format as follows:
+
++----------------+-----------------------------------------------------------------------------------------+
+|Length in bytes |Description                                                                              |
++================+=========================================================================================+
+|16              |The tag, i.e. a [RFC 4122](https://datatracker.ietf.org/doc/html/rfc4122) UUID.          |
++----------------+-----------------------------------------------------------------------------------------+
+|4               |Length of the data portion in bytes, encoded as a 32 bit integer in little-endian format.|
++----------------+-----------------------------------------------------------------------------------------+
+|variable        |The entry's associated data.                                                             |
++----------------+-----------------------------------------------------------------------------------------+
+
+The sequence ends with a special termination record with an UUID of all-zeros. The termination record's data length is
+either 0B or 8B. In the latter case its data portion contains a 64 bit integer encoded in little-endian format,
+specifying the [extra reserve capacity](#def-aux-fs-metadata-extra-reserve-capacity) to be defined further below.
+
+All of the sequence's entries up to the final termination record must be in order of lexically increasing UUIDs.
+Multiple entries with the same UUID may exist as far as the filesystem format itself is concerned.
+
+
+### [Storage as part of the filesystem creation info data]{#sec-aux-fs-metadata-mkfsinfo}
+Some initial auxiliary filesystem metadata to write at [online filesystem creation](#sec-introduction-online-mkfs) may
+get stored alongside a [filesystem creation info header](#sec-mkfsinfo-header). Remember that a [filesystem creation
+info header](#sec-mkfsinfo-header) is either found at the storage volume's beginning, or, in case of a [backup
+copy](#def-mkfsinfo-backup-header), towards its end at a location determined exclusively
+from the storage dimensions. The auxiliary filesystem metatdata, if any, is encapsulated as described below and stored
+as a contiguous blob
+
+- right after the [filesystem creation info header](#sec-mkfsinfo-header) if that is located at the storage volume's
+  beginning, or
+- right in front [filesystem creation info header](#sec-mkfsinfo-header) in case of the backup location.
+
+The length of the [plain encoded](#sec-aux-fs-metadata-encoding) auxiliary filesystem metadata payload is recorded in
+one of the [filesystem creation info header](#sec-mkfsinfo-header) fields, allowing for determining its storage location
+once the [filesystem creation info header](#sec-mkfsinfo-header) has been found and read. As a special case, if that
+value is specified as $0$, then there is no auxiliary filesystem metadata stored alongside the [filesystem creation info
+header](#sec-mkfsinfo-header).
+
+The encapsulation format is organized as follows:
+
++----------------+-------------------------------------------------------------------------------------------+
+|Length in bytes |                                                                                           |
++================+===========================================================================================+
+|8               |[Checksum](#sec-crc) over the data, including the alignment padding.                       |
++----------------+-------------------------------------------------------------------------------------------+
+|variable        |The [encoded auxiliary filesystem metadata payload](#sec-aux-fs-metadata-encoding).        |
++----------------+-------------------------------------------------------------------------------------------+
+|variable        |Padding to align the total length to the [IO Block](#def-io-block) size. Must be all-zeros.|
++----------------+-------------------------------------------------------------------------------------------+
+
+It is expected that if a [filesystem creation info header](#sec-mkfsinfo-header) passes the [integrity
+protection](#sec-extent-integrity) validation, i.e. has not suffered from torn writes in particular, then the auxiliary
+filesystem metadata stored alongside it would be valid as well. In practice that means that the auxiliary filesystem
+metadata needs to get written before the header, with a write barrier issued inbetween.
+
+Note that the [filesystem creation info header](#sec-mkfsinfo-header) backup scheme naturally lends itself to a
+fail-safe A/B type update strategy for the auxiliary filesystem metadata. For example, suppose that the filesystem
+creation info data, i.e. the [filesystem creation info header](#sec-mkfsinfo-header) and the auxiliary filesystem
+metadata stored alongside it are initially found at the primary location, i.e. at the storage volume's beginning. Then
+
+1. Make a backup copy, i.e.
+   a. Invalidate the [filesystem creation info header](#sec-mkfsinfo-header) [integrity
+      protections](#sec-extent-integrity) at the backup location by writing all-zeros. Note that this needs to be done
+      independent of whether a valid header is already stored at the backup location -- no header at this location may
+      be considered effective until after the auxiliary filesystem metadata has been written in full below.
+   b. Issue a write barrier.
+   c. Write the original auxiliary filesystem metadata to the backup location.
+   d. Issue a write barrier.
+   e. Write the original [filesystem creation info header](#sec-mkfsinfo-header) to the backup location, following the
+      [fail-safe extent write protocol](#def-extent-integrity-fail-safe-write), as is required for any [filesystem
+      creation info header](#sec-mkfsinfo-header) write.
+2. Update the primary location, i.e.
+   a. Invalidate the [filesystem creation info header](#sec-mkfsinfo-header) [integrity
+      protections](#sec-extent-integrity) at the primary location by writing all-zeros.
+   b. Issue a write barrier.
+   c. Write the updated auxiliary filesystem metadata to the primary location.
+   d. Issue a write barrier.
+   e. Write the updated [filesystem creation info header](#sec-mkfsinfo-header) to the primary location, following the
+      [fail-safe extent write protocol](#def-extent-integrity-fail-safe-write), as is required for any [filesystem
+      creation info header](#sec-mkfsinfo-header) write.
+3. Optionally, invalidate the [filesystem creation info header](#sec-mkfsinfo-header) at the backup location.
+
+### [Storage in a formatted filesystem]{#sec-aux-fs-metadata-formatted}
+Once the filesystem has been created, the auxiliary filesystem metadata is stored across a sequence of
+[extents](#def-extent) chained in a certain way and referenced from the [mutable image
+header](#sec-mutable-image-header) as well as from the [journal log head extent's plaintext
+header](#sec-journal-log-head-plaintext-header), if active.
+
+The auxililary filesystem metadata is stored in a format designed for enabling offline updates, i.e. when the filesystem
+key is unavailable, while still preserving full robustness guarantees against service interruptions encountered during
+storage writes. Details follow.
+
+The extents are tracked as allocated in the [allocation bitmap](#sec-allocation-bitmap), but considered unallocated for
+the purpose of computing [authentication tree data block digests](sec-auth-tree-data-block-digest). All extents'
+boundaries must be aligned to the larger of the [IO Block](#def-io-block) and the [Authentication Tree Data
+Block](#def-auth-tree-data-block) size. Note that the extents are constrained to be aligned to the [Authentication Tree
+Data Block](#def-auth-tree-data-block) size only for the convenience of implementations: for the purpose of computing
+[authentication tree data block digests](sec-auth-tree-data-block-digest), the auxililary filesystem metadata extents
+are to be considered as if unallocated as a special case, and letting them occupy an integral multiple of the
+[Authentication Tree Data Block](#def-auth-tree-data-block) size alleviates the need to implement range checks for
+detecting this special case when updating potentially neighboring data.
+
+The auxiliary filesystem metadata extents collectively form a directed, circular linked list, partitioned into either
+one or two [*update groups*]{#def-aux-fs-metadata-update-group}. The [mutable image header](#sec-mutable-image-header)
+as well as the [journal log head extent's plaintext header](#sec-journal-log-head-plaintext-header) contain a pair of
+[encoded extent pointers](#sec-enc-extent-ptr) to the update groups' respective head extents each. The pointer pair's
+first entry may be NIL only if the second is as well. If the first entry is NIL, then there is no auxiliary filesystem
+metadata stored in the filesystem. The update group pointed to the by the pointer pair's first entry is referred to as
+*update group 0*, the one pointed to by the second entry, if any, as *update group 1*. If there is no update group 1,
+then no offline updates are possible. If a journal log is active, the pointer pair found therein takes precedence over
+that from the [mutable image header](#sec-mutable-image-header). In fact, whenever a journal log is active, no
+assumptions must be made about the validity of the [mutable image header's](#sec-mutable-image-header) contents on
+storage.
+
+Any extent in the circular linked list contains [encoded extent pointers](#sec-enc-extent-ptr) to the next and next but
+one extent in the list and is subject to the common [extent integrity protection scheme](#sec-extent-integrity). The
+[update groups'](#def-aux-fs-metadata-update-group) head extents contain an additional boolean flag specifying whether
+the group is active or not. Altogether, the auxiliary filesystem metadata extent format is:
+
++------------------------------------------+---------------------------------------------------------------------------+
+|Length in bytes                           |Description                                                                |
++==========================================+===========================================================================+
+|8                                         |[Encoded extent pointer](#sec-enc-extent-ptr) to the next extent in the    |
+|                                          |circular list.                                                             |
++------------------------------------------+---------------------------------------------------------------------------+
+|8                                         |[Encoded extent pointer](#sec-enc-extent-ptr) to the next but one extent in|
+|                                          |the circular list.                                                         |
++------------------------------------------+---------------------------------------------------------------------------+
+|1                                         |[Update group](#def-aux-fs-metadata-update-group) active/inactive          |
+|                                          |state. Present only in [update group](#def-aux-fs-metadata-update-group)    |
+|                                          |head extents.                                                              |
++------------------------------------------+---------------------------------------------------------------------------+
+|Length of a [common extent integrity      |The [integrity protection section](#sec-extent-integrity).                 |
+|protection section](#sec-extent-integrity)|                                                                           |
++------------------------------------------+---------------------------------------------------------------------------+
+|Extent remainder                          |[Encoded auxiliary filesystem metadata](#sec-aux-fs-metadata-encoding)     |
+|                                          |payload part.                                                              |
++------------------------------------------+---------------------------------------------------------------------------+
+
+For clarity, the pointers to the subsequent extents are never NIL, as the circular list is considered to repeat itself.
+
+As it's the case with any extent subject to the [common extent integrity protection scheme](#sec-extent-integrity),
+updates to an auxiliary filesystem metadata extent must follow the [fail-safe extent write
+protocol](#def-extent-integrity-fail-safe-write). The pointers to the next and next but one extents, and, for [update
+group](#def-aux-fs-metadata-update-group) heads, the active/inactive state as well, are located in the [tier 0 integrity
+protection realm](#sec-extent-integrity-tiers). They must have correct values whenever the tier 0 integrity protection
+would validate. At most one extent in the circular chain may fail the [integrity protection](#sec-extent-integrity)
+validation at any point in time, and only if an [update group 1](#def-aux-fs-metadata-update-group) is present. Observe
+how these constraints guarantee that the complete list of extents as such can always get reconstructed, even if one of
+them suffered from a torn write. Note that this is crucial not only in the context of the auxiliary filesystem metadata
+itself, but also for the ability to maintain the [authentication tree](#sec-auth-tree), especially when [reconstructing
+it during journal replay](#sec-journal-auth-tree-updates-script), due to the auxiliary filesystem metadata extents being
+tracked as allocated in the [allocation bitmap](#sec-allocation-bitmap), but considered unallocated for the purpose of
+computing [authentication tree data block digests](sec-auth-tree-data-block-digest), as specified above.
+
+An [update group](#def-aux-fs-metadata-update-group) can be either in active or inactive state, as determined from the
+active/inactive state field stored in its head extent. The possible values are
+
++---------------------------------------------------------------+-----+-----------------------------------------+
+|Name                                                           |Value|Description                              |
++===============================================================+=====+=========================================+
+|`AUX_FS_METADATA_UPDATE_GROUP_STATE_INACTIVE`                  |0    |The [update                              |
+|                                                               |     |group](#def-aux-fs-metadata-update_group)|
+|                                                               |     |is inactive.                             |
++---------------------------------------------------------------+-----+-----------------------------------------+
+|`AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE`                    |1    |The [update                              |
+|                                                               |     |group](#def-aux-fs-metadata-update-group)|
+|                                                               |     |is active.                               |
++---------------------------------------------------------------+-----+-----------------------------------------+
+|`AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE_REALLOCATION_NEEDED`|2    |The [update                              |
+|                                                               |     |group](#def-aux-fs-metadata-update-group)|
+|                                                               |     |is active. A hint to conduct a           |
+|                                                               |     |reallocation of its backing storage once |
+|                                                               |     |possible has been set.                   |
++---------------------------------------------------------------+-----+-----------------------------------------+
+
+If active, all of the group's constituent extents are expected to be collectively coherent, and the concatenated payload
+contents to form a valid [auxiliary filesystem metadata encoding](#sec-aux-fs-metadata-encoding). In particular, all of
+the group's constituent extents are expected to pass their respective [integrity protection](#sec-extent-integrity)
+validation. At least one [update group](#def-aux-fs-metadata-update-group) must be active at any given point in time. If
+both are active, [update group 0](#def-aux-fs-metadata-update-group) takes precedence, i.e. the auxiliary filesystem
+metadata contents stored therein are considered effective.
+
+Assuming that [update group 0](#def-aux-fs-metadata-update-group) is initially active, an offline auxiliary filesystem
+metatdata update could be implemented as follows, with all the individual extent storage writes adhering to the
+[fail-safe extent write protocol](#def-extent-integrity-fail-safe-write):
+
+1. If there is some extent failing [integrity protection](#sec-extent-integrity) validation (necessarily in an inactive
+   group, i.e. group 1), repair it.
+2. If update group 1 is active, deactivate it by updating its head extent accordingly.
+3. Copy the original auxiliary filesystem metadata to update group 1 and activate it.
+   a. Write the tail extents, if any first.
+   b. Write the head extent in a final step, set the active flag.
+4. Update group 0 with the updated auxiliary filesystem metadata contents.
+   a. Write the tail extents, if any first.
+   b. Write the head extent in a final step, set the active flag.
+
+Of course, this assumes that there is an [update group 1](#def-aux-fs-metadata-update-group) in the first place, and
+that both [update groups](#def-aux-fs-metadata-update-group) have a sufficient payload storage capacity each. That is,
+preparations need to be made ahead of time at auxiliary filesystem metatdata extents allocation in order to enable
+offline updates. Whether to allocate an [update group 1](#def-aux-fs-metadata-update-group) and the amount of excess
+space to allocate in both [update groups](#def-aux-fs-metadata-update-group) depends on policy and is outside the scope
+of this specification. In order to guide any auxiliary filesystem metatdata extents (re)allocation, the [*extra reserve
+capacity*]{#def-aux-fs-metadata-extra-reserve-capacity} property may be defined. The extra reserve capacity property
+value, if any, is stored as part of the [auxiliary filesystem metadata encoding's](#sec-aux-fs-metadata-encoding)
+termination record. The termination record's encoding length determines whether an extra reserve capacity value is
+defined or not. If it is not defined, then no [update group 1](#def-aux-fs-metadata-update-group) shall be allocated at
+any subsequent extents (re)allocation. Otherwise an [update group 1](#def-aux-fs-metadata-update-group) will get
+allocated and the extra reserve capacity specifies the amount of additional payload space in units of bytes to allocate
+in both [update groups](#def-aux-fs-metadata-update-group) over the minimum required to store the auxiliary filesystem
+metadata contents defined at that time.
+
+When drawing from the [extra reserve capacity](#def-aux-fs-metadata-extra-reserve-capacity), offline updates may set the
+[update group's](#def-aux-fs-metadata-update-group) head extent's active/inactive state field to
+`AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE_REALLOCATION_NEEDED` in order to signal that a reallocation would be desired
+once possible for reestablishing [extra reserve capacity](#def-aux-fs-metadata-extra-reserve-capacity) excess
+allocation.
 
 ## Opening the filesystem (informative)
 In order to illustrate how the various pieces needed for opening the filesystem fit together, especially with respect to

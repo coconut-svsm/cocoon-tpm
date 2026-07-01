@@ -1115,7 +1115,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     cur_aligned_write_region_states_allocation_blocks_index_range,
                     cur_aligned_write_region_read_missing_fut,
                 } => {
-                    let (fs_instance, _, fs_sync_state_alloc_bitmap, _, _, _, _, _) =
+                    let (fs_instance, _, _, fs_sync_state_alloc_bitmap, _, _, _, _, _) =
                         fs_instance_sync_state.fs_instance_and_destructure_borrow();
                     match TransactionReadMissingDataFuture::poll(
                         pin::Pin::new(cur_aligned_write_region_read_missing_fut),

@@ -20,6 +20,7 @@ use crate::{
         cocoonfs::{
             FormatError, alloc_bitmap,
             auth_subject_ids::AuthSubjectDataSuffix,
+            aux_fs_metadata::{self, AuxFsMetadataEncodedExtentsPtrsPair},
             encryption_entities::{
                 EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix, EncryptedChainedExtentsDecryptionInstance,
                 EncryptedChainedExtentsEncryptionInstance, EncryptedChainedExtentsLayout, check_cbc_padding,
@@ -50,6 +51,10 @@ use crate::{
         zeroize,
     },
 };
+
+#[cfg(doc)]
+use crate::fs::cocoonfs::{aux_fs_metadata::AuxFsMetadata, integrity::extent_integrity_protections_apply};
+
 use core::{convert, mem, num, pin, task};
 
 /// Enum value of [`JournalLogFieldTag::AuthTreeExtents`].
@@ -428,6 +433,9 @@ pub struct JournalLog {
     /// with the filesystem's fixed [journal log head
     /// extent](Self::head_extent_physical_location)
     pub log_extents: extents::PhysicalExtents,
+    /// The pointers to the [`AuxFsMetadata`] update groups' heads decoded from
+    /// the journal log's plaintext header.
+    pub aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     /// Contents of the [`AuthTreeExtents`](JournalLogFieldTag::AuthTreeExtents)
     /// field.
     pub auth_tree_extents: extents::PhysicalExtents,
@@ -455,6 +463,167 @@ pub struct JournalLog {
 }
 
 impl JournalLog {
+    /// End of the integrity protections within the journal log head extent's
+    /// plaintext header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_len()`](Self::plaintext_header_len).
+    fn plaintext_header_integrity_protections_end(image_layout: &layout::ImageLayout) -> u32 {
+        // The plaintext header placed at the beginning of the Journal Log head extent
+        // is comprised of
+        // - The magic.
+        // - The head extent integrity protections.
+        // - The plaintext payload.
+        8 + extent_integrity_protections_len(
+            image_layout.io_block_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        )
+    }
+
+    /// Beginning of the payload region within the journal log head extent's
+    /// plaintext header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_len()`](Self::plaintext_header_len).
+    /// * [`PLAINTEXT_HEADER_PAYLOAD_LEN`](Self::PLAINTEXT_HEADER_PAYLOAD_LEN).
+    fn plaintext_header_payload_begin(image_layout: &layout::ImageLayout) -> Result<usize, NvFsError> {
+        // The plaintext header placed at the beginning of the Journal Log head extent
+        // is comprised of
+        // - The magic.
+        // - The head extent integrity protections.
+        // - The plaintext payload.
+        usize::try_from(Self::plaintext_header_integrity_protections_end(image_layout))
+            .map_err(|_| NvFsError::DimensionsNotSupported)
+    }
+
+    /// Length of the payload region within the journal log head extent's
+    /// plaintext header.
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_len()`](Self::plaintext_header_len).
+    const PLAINTEXT_HEADER_PAYLOAD_LEN: u32 = aux_fs_metadata::AuxFsMetadataEncodedExtentsPtrsPair::encoded_len();
+
+    /// Length of the the journal log head extent's plaintext header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`EncryptedChainedExtentsLayout::plain_data_extents_hdr_len`].
+    /// * [`PLAINTEXT_HEADER_PAYLOAD_LEN`](Self::PLAINTEXT_HEADER_PAYLOAD_LEN).
+    fn plaintext_header_len(image_layout: &layout::ImageLayout) -> u32 {
+        // The plaintext header placed at the beginning of the Journal Log head extent
+        // is comprised of
+        // - The magic.
+        // - The head extent integrity protections.
+        // - The plaintext payload.
+        Self::plaintext_header_integrity_protections_end(image_layout) + Self::PLAINTEXT_HEADER_PAYLOAD_LEN
+    }
+
+    /// Decode the pointers to the [`AuxFsMetadata`] update groups' heads, if
+    /// any, from the journal log head extent's plaintext header.
+    ///
+    /// Must get invoked only after the journal log head extent's integrity
+    /// protections have been [verified and
+    /// removed](extent_integrity_protections_verify_and_remove).
+    ///
+    /// # Arguments:
+    ///
+    /// * `plaintext_header` - The plaintext header buffers to decode from. The
+    ///   [`IoSlicesIter`](io_slices::IoSlicesIter)'s total length must not be
+    ///   less than the value of the
+    ///   [`EncryptedChainedExtentsLayout::plain_data_extents_hdr_len`] field as
+    ///   returned from
+    ///   [`extents_encryption_layout()`](Self::extents_encryption_layout).
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_encode_aux_fs_metadata_update_groups_heads()`](Self::plaintext_header_encode_aux_fs_metadata_update_groups_heads).
+    pub fn plaintext_header_decode_aux_fs_metadata_update_groups_heads<
+        'a,
+        HI: io_slices::IoSlicesIter<'a, BackendIteratorError = convert::Infallible>,
+    >(
+        mut plaintext_header: HI,
+        image_layout: &layout::ImageLayout,
+    ) -> Result<AuxFsMetadataEncodedExtentsPtrsPair, NvFsError> {
+        // The pointers to the AuxFsMetadata update groups' heads, if any, get stored at
+        // offset zero within the journal log head extent's plaintext header's
+        // payload region.
+        plaintext_header
+            .skip(Self::plaintext_header_payload_begin(image_layout)?)
+            .map_err(|e| match e {
+                io_slices::IoSlicesIterError::BackendIteratorError(e) => e.into(),
+                io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                    io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+                },
+            })?;
+        AuxFsMetadataEncodedExtentsPtrsPair::decode(plaintext_header)
+    }
+
+    /// Encode the location of the the pointers to the [`AuxFsMetadata`] update
+    /// groups' heads, if any, to the journal log head extent's plaintext
+    /// header.
+    ///
+    /// Must get invoked before the journal log head extent's integrity
+    /// protections get [applied](extent_integrity_protections_apply).
+    ///
+    /// # Arguments:
+    ///
+    /// * `plaintext_header` - The plaintext header buffers to encode into. The
+    ///   [`IoSlicesMutIter`](io_slices::IoSlicesMutIter)'s total length must
+    ///   not be less than the value of the
+    ///   [`EncryptedChainedExtentsLayout::plain_data_extents_hdr_len`] field as
+    ///   returned from
+    ///   [`extents_encryption_layout()`](Self::extents_encryption_layout).
+    /// * `aux_fs_metadata_update_groups_heads` - Pointers to the two
+    ///   [`AuxFsMetadata`] update groups' heads, if any.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_decode_aux_fs_metadata_update_groups_heads()`](Self::plaintext_header_decode_aux_fs_metadata_update_groups_heads).
+    pub fn plaintext_header_encode_aux_fs_metadata_update_groups_heads<
+        'a,
+        HI: io_slices::IoSlicesMutIter<'a, BackendIteratorError = convert::Infallible>,
+    >(
+        mut plaintext_header: HI,
+        aux_fs_metadata_update_groups_heads: &AuxFsMetadataEncodedExtentsPtrsPair,
+        image_layout: &layout::ImageLayout,
+    ) -> Result<(), NvFsError> {
+        // The pointers to the AuxFsMetadata update groups' heads, if any, get stored at
+        // offset zero within the journal log head extent's plaintext header's
+        // payload region.
+        plaintext_header
+            .skip(Self::plaintext_header_payload_begin(image_layout)?)
+            .map_err(|e| match e {
+                io_slices::IoSlicesIterError::BackendIteratorError(e) => e.into(),
+                io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                    io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+                },
+            })?;
+
+        aux_fs_metadata_update_groups_heads.encode(plaintext_header)
+    }
+
     /// Instantiate a [`EncryptedChainedExtentsLayout`] suitable for the journal
     /// log.
     ///
@@ -467,19 +636,13 @@ impl JournalLog {
     ) -> Result<EncryptedChainedExtentsLayout, NvFsError> {
         let auth_tree_data_block_allocation_blocks_log2 = image_layout.auth_tree_data_block_allocation_blocks_log2;
         let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2;
-        let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2;
         // Journal Log extents are aligned to the larger of the Authentication Tree Data
         // Block and the IO block sizes.
         let journal_block_allocation_blocks_log2 =
             auth_tree_data_block_allocation_blocks_log2.max(io_block_allocation_blocks_log2);
 
-        // The plaintext header placed at the beginning of the Journal Log head extent
-        // is comprised of
-        // - The magic.
-        // - The head extent's integrity protection section.
         let plaintext_hdr_len =
-            8 + extent_integrity_protections_len(io_block_allocation_blocks_log2, allocation_block_size_128b_log2);
-        let plaintext_hdr_len = usize::try_from(plaintext_hdr_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
+            usize::try_from(Self::plaintext_header_len(image_layout)).map_err(|_| NvFsError::DimensionsNotSupported)?;
 
         EncryptedChainedExtentsLayout::new(
             plaintext_hdr_len,
@@ -889,16 +1052,20 @@ impl JournalLog {
     /// * `log_extents` - The extents forming the journal log's encrypted
     ///   chained extents. Always starts with the filesystem's fixed [journal
     ///   log head extent](Self::head_extent_physical_location)
+    /// * `aux_fs_metadata_update_groups_heads`: The pointers to the
+    ///   [`AuxFsMetadata`] update groups' heads decoded from the journal log's
+    ///   plaintext header.
     /// * `root_key` - The filesystem's root key.
     /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
     ///   filesystem.
-    pub fn decode<
+    fn decode<
         'a,
         ST: sync_types::SyncTypes,
         SI: io_slices::PeekableIoSlicesIter<'a, BackendIteratorError = convert::Infallible>,
     >(
         mut src: SI,
         log_extents: extents::PhysicalExtents,
+        aux_fs_metadata_update_groups_heads: &AuxFsMetadataEncodedExtentsPtrsPair,
         image_layout: &layout::ImageLayout,
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<'_, ST>,
@@ -1220,6 +1387,7 @@ impl JournalLog {
 
         Ok(Self {
             log_extents,
+            aux_fs_metadata_update_groups_heads: *aux_fs_metadata_update_groups_heads,
             auth_tree_extents,
             alloc_bitmap_file_extents,
             alloc_bitmap_file_fragments_auth_digests,
@@ -1598,6 +1766,7 @@ pub struct JournalLogReadFuture<B: blkdev::NvBlkDev> {
     fut_state: JournalLogReadFutureState<B>,
     journal_log_head_integrity_state: ExtentIntegrityState,
     log_extents: extents::PhysicalExtents,
+    aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     extents_decryption_instance: Option<EncryptedChainedExtentsDecryptionInstance>,
     decrypted_journal_log_extents: Vec<zeroize::Zeroizing<Vec<u8>>>,
 }
@@ -1628,6 +1797,7 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
             fut_state: JournalLogReadFutureState::Init,
             journal_log_head_integrity_state: ExtentIntegrityState::new_indeterminate(),
             log_extents: extents::PhysicalExtents::new(),
+            aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair::new_nil(),
             extents_decryption_instance: None,
             decrypted_journal_log_extents: Vec::new(),
         }
@@ -1735,7 +1905,26 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    // The journal is active, decrypt the head extent just read from storage.
+                    // The journal is active.
+                    // First decode the head extent's plaintext header contents.
+                    // Note that the inline authentication verified further below does cover those
+                    // for homogenity reasons, but nothing relies on it.
+                    this.aux_fs_metadata_update_groups_heads =
+                        match JournalLog::plaintext_header_decode_aux_fs_metadata_update_groups_heads(
+                            io_slices::BuffersSliceIoSlicesIter::new(&[
+                                journal_log_head_extent_head.as_slice(),
+                                journal_log_head_extent_tail.as_slice(),
+                            ]),
+                            image_layout,
+                        ) {
+                            Ok(aux_fs_metadata_update_groups_heads) => aux_fs_metadata_update_groups_heads,
+                            Err(e) => {
+                                this.fut_state = JournalLogReadFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+
+                    // Decrypt the head extent just read from storage.
                     let extents_decryption_instance =
                         match JournalLog::extents_decryption_instance(image_layout, root_key, keys_cache) {
                             Ok(extents_decryption_instance) => extents_decryption_instance,
@@ -1995,6 +2184,7 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                         io_slices::BuffersSliceIoSlicesIter::new(&this.decrypted_journal_log_extents)
                             .map_infallible_err(),
                         mem::take(&mut this.log_extents),
+                        &this.aux_fs_metadata_update_groups_heads,
                         image_layout,
                         root_key,
                         keys_cache,
