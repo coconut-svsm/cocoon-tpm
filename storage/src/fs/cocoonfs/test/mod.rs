@@ -12,7 +12,7 @@ use crate::{
         self,
         cocoonfs::{
             AuxFsMetadata, CocoonFs, FsMetadata, MkFsFuture, OpenFsFuture, ReadFsMetadataFuture,
-            WriteMkFsInfoHeaderFuture, layout,
+            WriteAuxFsMetadataOfflineFuture, WriteMkFsInfoHeaderFuture, layout,
         },
     },
     nvfs_err_internal, tpm2_interface,
@@ -316,6 +316,23 @@ fn cocoonfs_test_read_fs_metadata_helper(blkdev: TestNvBlkDev) -> Result<(TestNv
     let read_fs_metadata_result = read_fs_metadata_waiter.take().unwrap();
     let (blkdev, read_fs_metadata_result) = read_fs_metadata_result.unwrap();
     read_fs_metadata_result.map(|fs_metadata| (blkdev, fs_metadata))
+}
+
+fn cocoonfs_test_write_aux_fs_metadata_offline_helper(
+    blkdev: TestNvBlkDev,
+    fs_metadata: FsMetadata,
+    updated_aux_fs_metadata: AuxFsMetadata,
+    fail_mkfsinfo_update_blkdev_resize: bool,
+    fail_final_write: bool,
+) -> (TestNvBlkDev, Result<FsMetadata, fs::NvFsError>) {
+    let mut update_aux_fs_metatdata_fut =
+        WriteAuxFsMetadataOfflineFuture::new(blkdev, fs_metadata, updated_aux_fs_metadata);
+    update_aux_fs_metatdata_fut.test_fail_final_write = fail_final_write;
+    update_aux_fs_metatdata_fut.test_fail_mkfsinfo_update_blkdev_resize = fail_mkfsinfo_update_blkdev_resize;
+    let executor = TestAsyncExecutor::new();
+    let update_aux_fs_metadata_waiter = TestAsyncExecutor::spawn(&executor, update_aux_fs_metatdata_fut);
+    TestAsyncExecutor::run_to_completion(&executor);
+    update_aux_fs_metadata_waiter.take().unwrap().unwrap()
 }
 
 fn cocoonfs_test_openfs_op_helper(

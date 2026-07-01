@@ -30,6 +30,8 @@ use crate::{
 };
 use core::{marker, mem, ops::Deref as _, pin, task};
 
+use super::layout::BlockIndex;
+
 const MAGIC_COCOONFS: &[u8; 8] = b"COCOONFS";
 const MAGIC_MKFS: &[u8; 8] = b"CCFSMKFS";
 
@@ -1844,6 +1846,102 @@ impl MkFsInfoHeader {
                 salt_len,
             ),
         )))
+    }
+
+    /// Determine the minimum possible [image size](blkdev::NvBlkDev::io_blocks)
+    /// that can accomodate for the filesystem creation info data and its
+    /// backup copy.
+    ///
+    /// # Arguments:
+    ///
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    /// * `aux_fs_metadata_len` - Length of the encoded [`AuxFsMetadata`] in
+    ///   units of Bytes.
+    /// * `salt_len` - Length of the filesystem salt to be stored in the
+    ///   [`MkFsInfoHeader`].
+    ///
+    /// # See also:
+    ///
+    /// * [`physical_backup_location()`](Self::physical_backup_location)
+    pub fn min_possible_image_size(
+        io_block_allocation_blocks_log2: u8,
+        allocation_block_size_128b_log2: u8,
+        aux_fs_metadata_len: u64,
+        salt_len: u8,
+    ) -> Result<layout::AllocBlockCount, NvFsError> {
+        // The minimum image size is determined as the minimum to accomodate for
+        // the primary mkfsinfo data and the backup copy at the same time, subject to
+        // alignment constraints. The primary data is composed of the
+        // MkFsInfoHeader, and the  AuxFsMetadata stored alongside, the backup
+        // copy of the same, but with the order of the two reversed.
+        let mkfsinfo_header_allocation_blocks = Self::io_block_aligned_encoded_len_allocation_blocks(
+            io_block_allocation_blocks_log2,
+            allocation_block_size_128b_log2,
+            salt_len,
+        );
+        let mkfsinfo_aux_fs_metadatda_allocation_blocks = AuxFsMetadata::mkfsinfo_physical_location(
+            &layout::PhysicalAllocBlockRange::from((
+                layout::PhysicalAllocBlockIndex::from(0u64),
+                mkfsinfo_header_allocation_blocks,
+            )),
+            aux_fs_metadata_len,
+            io_block_allocation_blocks_log2 as u32,
+            allocation_block_size_128b_log2 as u32,
+        )?
+        .map(|primary_mkfsinfo_aux_fs_metadata_location| primary_mkfsinfo_aux_fs_metadata_location.block_count())
+        .unwrap_or(layout::AllocBlockCount::from(0u64));
+        // The sum of mkfsinfo_header_allocation_blocks and
+        // mkfsinfo_aux_fs_metadatda_allocation_blocks in units of Bytes fits an
+        // u64, otherwise AuxFsMetadata::mkfsinfo_physical_location would have
+        // returned an error. The upper 7 bits of that sum are clear,
+        // so the upper 6 bits are clear when adding one more
+        // mkfsinfo_aux_fs_metadatda_allocation_blocks.
+        let min_backup_mkfsinfo_header_allocation_blocks_begin = layout::PhysicalAllocBlockIndex::from(0u64)
+            + mkfsinfo_header_allocation_blocks
+            + mkfsinfo_aux_fs_metadatda_allocation_blocks
+            + mkfsinfo_aux_fs_metadatda_allocation_blocks;
+        // The minimum possible backup header beginning is at 15 times the larger of
+        // 4 * 128B and the IO Block size.
+        // io_block_allocation_blocks_log2 <= 2^(63 - 7), 15 times that has the upper 4
+        // bits clear.
+        let min_backup_mkfsinfo_header_allocation_blocks_begin = min_backup_mkfsinfo_header_allocation_blocks_begin
+            .max(layout::PhysicalAllocBlockIndex::from(
+                15u64
+                    << ((io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32).max(2)
+                        - allocation_block_size_128b_log2 as u32),
+            ));
+        // Find the largest power of two, such that
+        // min_backup_mkfsinfo_header_allocation_blocks_begin >= 15 times that power of
+        // two. Note that min_backup_mkfsinfo_header_allocation_blocks_begin <
+        // 30 times that power of two then, otherwise the next larger one would
+        // have been chosen. Furthermore, that power of two is the smallest such
+        // that min_backup_mkfsinfo_header_allocation_blocks_begin < 30 times a
+        // power of two.
+        let backup_header_allocation_blocks_begin_alignment_128b_log2 =
+            (u64::from(min_backup_mkfsinfo_header_allocation_blocks_begin) / 15).ilog2();
+        debug_assert!(
+            backup_header_allocation_blocks_begin_alignment_128b_log2 >= io_block_allocation_blocks_log2 as u32
+        );
+        // Cannot overflow, because the power of two is certainly <
+        // min_backup_mkfsinfo_header_allocation_blocks_begin, so the position
+        // of the MSB does not change.
+        let backup_mkfsinfo_header_allocation_blocks_begin = min_backup_mkfsinfo_header_allocation_blocks_begin
+            .align_up(backup_header_allocation_blocks_begin_alignment_128b_log2)
+            .ok_or(NvFsError::from(FormatError::InvalidAuxFsMetadataSize))?;
+        // Cannot overflow either, the upper bits are clear.
+        let backup_mkfsinfo_header_allocation_blocks_end = backup_mkfsinfo_header_allocation_blocks_begin
+            + layout::AllocBlockCount::from(1u64 << backup_header_allocation_blocks_begin_alignment_128b_log2);
+
+        if u64::from(backup_mkfsinfo_header_allocation_blocks_end)
+            > (u64::MAX >> (allocation_block_size_128b_log2 as u32 + 7))
+        {
+            Err(NvFsError::from(FormatError::InvalidAuxFsMetadataSize))
+        } else {
+            Ok(backup_mkfsinfo_header_allocation_blocks_end - layout::PhysicalAllocBlockIndex::from(0u64))
+        }
     }
 
     /// Encode a [`MkFsInfoHeader`].

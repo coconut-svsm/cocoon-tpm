@@ -37,6 +37,9 @@ use crate::{
 };
 use core::{future, iter, marker, mem, pin, task};
 
+#[cfg(doc)]
+use crate::blkdev::NvBlkDevFuture as _;
+
 #[cfg(test)]
 use crate::fs::NvFsIoError;
 
@@ -3459,6 +3462,8 @@ impl<B: blkdev::NvBlkDev> InvalidateBackupMkFsInfoHeaderFuture<B> {
 /// Internal [`MkFsInfoHeader`](image_header::MkFsInfoHeader) writing primitive.
 struct WriteMkFsInfoHeaderDataFuture<B: blkdev::NvBlkDev> {
     fut_state: WriteMkFsInfoHeaderDataFutureState<B>,
+    #[cfg(test)]
+    test_fail_final_write: bool,
 }
 
 /// [`WriteMkFsInfoHeaderDataFuture`] state-machine state.
@@ -3514,6 +3519,8 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
     fn new(to_backup_location: bool) -> Self {
         Self {
             fut_state: WriteMkFsInfoHeaderDataFutureState::Init { to_backup_location },
+            #[cfg(test)]
+            test_fail_final_write: false,
         }
     }
 
@@ -3824,6 +3831,11 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                     mkfsinfo_header_blkdev_io_blocks_begin,
                     mkfsinfo_header_head_blkdev_io_block_buf,
                 } => {
+                    #[cfg(test)]
+                    if this.test_fail_final_write {
+                        this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::IoFailure)));
+                    }
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
                         *mkfsinfo_header_blkdev_io_blocks_begin,
@@ -4178,5 +4190,663 @@ impl<B: blkdev::NvBlkDev> future::Future for WriteMkFsInfoHeaderFuture<B> {
             }
         };
         task::Poll::Ready(Ok((blkdev, result)))
+    }
+}
+
+/// Safely update the [`AuxFsMetadata`] stored as part of the filesystem
+/// creation info data with coherence measures taken.
+///
+/// The existing filesystem creation info is updated in way that establishes
+/// consistency guarantees upon torn writes.
+///
+/// The updates are  concluded with a [write
+/// barrier](blkdev::NvBlkDev::write_barrier).
+pub struct UpdateMkFsInfoAuxFsMetadataFuture<B: blkdev::NvBlkDev> {
+    fut_state: UpdateMkFsInfoAuxFsMetadataFutureState<B>,
+    // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+    // Self.
+    fs_metadata: Option<FsMetadataMkFsInfo>,
+    updated_aux_fs_metadata: AuxFsMetadata,
+    resized_blkdev: bool,
+    #[cfg(test)]
+    pub test_fail_resize: bool,
+    #[cfg(test)]
+    pub test_fail_final_write: bool,
+}
+
+/// [`UpdateMkFsInfoAuxFsMetadataFuture`] state-machine state.
+enum UpdateMkFsInfoAuxFsMetadataFutureState<B: blkdev::NvBlkDev> {
+    Init,
+    RestorePrimaryMkFsInfoHeaderData {
+        image_size: layout::AllocBlockCount,
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+        write_primary_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
+    },
+    WriteBarrierAfterPrimaryMkFsInfoHeaderDataRestore {
+        image_size: layout::AllocBlockCount,
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+        write_barrier_fut: B::WriteBarrierFuture,
+    },
+    ResizeBlkDevPrepare {
+        image_size: layout::AllocBlockCount,
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+    },
+    ResizeBlkDev {
+        resize_fut: B::ResizeFuture,
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+    },
+    WriteBackupMkFsInfoHeaderDataPrepare {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+    },
+    WriteBackupMkFsInfoHeaderData {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+        write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
+    },
+    WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+        write_barrier_fut: B::WriteBarrierFuture,
+    },
+    WriteUpdatedPrimaryMkFsInfoHeaderDataPrepare {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+    },
+    WriteUpdatedPrimaryMkFsInfoHeaderData {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+        write_primary_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
+    },
+    WriteBarrierAfterUpdatedPrimaryMkFsInfoHeaderDataWrite {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+        write_barrier_fut: B::WriteBarrierFuture,
+    },
+    ShrinkBlkDev {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+        resize_fut: B::ResizeFuture,
+    },
+    Finish {
+        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev> UpdateMkFsInfoAuxFsMetadataFuture<B> {
+    /// Instantiate an [`UpdateMkFsInfoAuxFsMetadataFuture`].
+    ///
+    /// The [`FsMetadataMkFsInfo`] representing the current state on storage is
+    /// passed for the `fs_metadata` argument. The
+    /// [`UpdateMkFsInfoAuxFsMetadataFuture`] assumes its ownership for the
+    /// duration of the operation, it will eventually get returned back from
+    /// [`poll()`](Self::poll) upon completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `fs_metadata` - The [`FsMetadataMkFsInfo`] representing the current
+    ///   state on storage.
+    /// * `updated_aux_fs_metadata` - The updated [`AuxFsMetadata`] to store as
+    ///   part of the filesystem creation data.
+    pub fn new(fs_metatdata: FsMetadataMkFsInfo, updated_aux_fs_metadata: AuxFsMetadata) -> Self {
+        Self {
+            fut_state: UpdateMkFsInfoAuxFsMetadataFutureState::Init,
+            fs_metadata: Some(fs_metatdata),
+            updated_aux_fs_metadata,
+            resized_blkdev: false,
+            #[cfg(test)]
+            test_fail_resize: false,
+            #[cfg(test)]
+            test_fail_final_write: false,
+        }
+    }
+}
+
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for UpdateMkFsInfoAuxFsMetadataFuture<B> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// On success, the [`FsMetadataMkFsInfo`] initially passed to
+    /// [`new()`](Self::new), updated as appropriate to reflect the new
+    /// state, is returned back.
+    type Output = Result<FsMetadataMkFsInfo, NvFsError>;
+
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                UpdateMkFsInfoAuxFsMetadataFutureState::Init => {
+                    let fs_metadata = match this.fs_metadata.as_mut() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    // First verify that the filesystem with the update AuxFsMetadata could still
+                    // get created and  that the to be created filesystem structures would
+                    // not extend into the backup copy of the updated mkfsinfo data.
+                    let image_layout = &fs_metadata.header.image_layout;
+                    let image_size = fs_metadata.header.image_size;
+                    let mkfs_layout = match MkFsLayout::new(
+                        image_layout,
+                        mem::take(&mut fs_metadata.header.salt),
+                        Some(&this.updated_aux_fs_metadata),
+                        image_size,
+                    ) {
+                        Ok(mkfs_layout) => mkfs_layout,
+                        Err(e) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+                    let MkFsLayout {
+                        salt,
+                        image_size,
+                        allocated_image_allocation_blocks_end,
+                        ..
+                    } = mkfs_layout;
+                    // Return it back.
+                    fs_metadata.header.salt = salt;
+
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                    // The salt length always fits an u8, its encoded as such in a MkFsInfoHeader.
+                    let salt_len = fs_metadata.header.salt.len() as u8;
+                    let backup_mkfsinfo_header_location = match image_header::MkFsInfoHeader::physical_backup_location(
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                        salt_len,
+                        u64::from(image_size) << allocation_block_blkdev_io_blocks_log2
+                            >> blkdev_io_block_allocation_blocks_log2,
+                        blkdev_io_block_size_128b_log2,
+                    ) {
+                        Ok(backup_mkfsinfo_header_location) => backup_mkfsinfo_header_location,
+                        Err(e) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+                    let backup_mkfsinfo_data_allocation_blocks_begin = if !this.updated_aux_fs_metadata.is_trivial() {
+                        // As documented, the result of AuxFsMetadata::encoded_len() is always
+                        // representable as an u64.
+                        let backup_aux_fs_metadata_location = match AuxFsMetadata::mkfsinfo_physical_location(
+                            &backup_mkfsinfo_header_location,
+                            this.updated_aux_fs_metadata.encoded_len() as u64,
+                            image_layout.io_block_allocation_blocks_log2 as u32,
+                            allocation_block_size_128b_log2,
+                        ) {
+                            Ok(backup_mkfsinfo_aux_fs_metadata_location) => backup_mkfsinfo_aux_fs_metadata_location,
+                            Err(e) => {
+                                this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+                        backup_aux_fs_metadata_location
+                            .map(|backup_mkfsinfo_header_location| backup_mkfsinfo_header_location.begin())
+                            .unwrap_or(backup_mkfsinfo_header_location.begin())
+                    } else {
+                        backup_mkfsinfo_header_location.begin()
+                    };
+                    debug_assert!(
+                        backup_mkfsinfo_data_allocation_blocks_begin <= backup_mkfsinfo_header_location.begin()
+                    );
+                    let backup_mkfsinfo_data_location = layout::PhysicalAllocBlockRange::new(
+                        backup_mkfsinfo_data_allocation_blocks_begin,
+                        backup_mkfsinfo_header_location.end(),
+                    );
+                    if allocated_image_allocation_blocks_end > backup_mkfsinfo_data_location.begin() {
+                        this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::NoSpace));
+                    }
+
+                    // The total size is the same for the primary and the backup copies.
+                    let primary_mkfsinfo_data_allocation_blocks = backup_mkfsinfo_data_location.block_count();
+
+                    // Ok, figure out how to proceed.
+                    this.fut_state = if fs_metadata.mkfsinfo_data_location.begin()
+                        != layout::PhysicalAllocBlockIndex::from(0u64)
+                    {
+                        // The current mkfsinfo data is from the backup location. See if there's enough
+                        // room to place the new one at the beginning in front
+                        // of it.
+                        let primary_mkfsinfo_data_allocation_blocks_end =
+                            layout::PhysicalAllocBlockIndex::from(0) + primary_mkfsinfo_data_allocation_blocks;
+                        if primary_mkfsinfo_data_allocation_blocks_end <= fs_metadata.mkfsinfo_data_location.begin() {
+                            UpdateMkFsInfoAuxFsMetadataFutureState::WriteUpdatedPrimaryMkFsInfoHeaderDataPrepare {
+                                updated_primary_mkfsinfo_data_allocation_blocks:
+                                    primary_mkfsinfo_data_allocation_blocks,
+                            }
+                        } else {
+                            // Not possible. The backup copy needs to get relocated before the
+                            // updated mkfsinfo data can eventually get written to the primary location.
+                            // The first step is to restore the original mkfsinfo data at the primary
+                            // location.
+                            let write_primary_mkfsinfo_header_fut = WriteMkFsInfoHeaderDataFuture::new(false);
+                            UpdateMkFsInfoAuxFsMetadataFutureState::RestorePrimaryMkFsInfoHeaderData {
+                                image_size,
+                                updated_primary_mkfsinfo_data_allocation_blocks:
+                                    primary_mkfsinfo_data_allocation_blocks,
+                                write_primary_mkfsinfo_header_fut,
+                            }
+                        }
+                    } else {
+                        // The original mkfsinfo data lives at the primary location.  It needs to
+                        // get copied to the backup location before the updated mkfsinfo data can
+                        // get written there. See if a NvBlkDev::resize() is needed beforehand.
+                        UpdateMkFsInfoAuxFsMetadataFutureState::ResizeBlkDevPrepare {
+                            image_size,
+                            updated_primary_mkfsinfo_data_allocation_blocks: primary_mkfsinfo_data_allocation_blocks,
+                        }
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::RestorePrimaryMkFsInfoHeaderData {
+                    image_size,
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    write_primary_mkfsinfo_header_fut,
+                } => {
+                    let fs_metadata = match this.fs_metadata.as_ref() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    let original_mkfsinfo_aux_fs_metadata = &fs_metadata.aux_fs_metadata;
+                    let image_layout = &fs_metadata.header.image_layout;
+                    let salt = &fs_metadata.header.salt;
+                    match WriteMkFsInfoHeaderDataFuture::poll(
+                        pin::Pin::new(write_primary_mkfsinfo_header_fut),
+                        blkdev,
+                        image_layout,
+                        salt,
+                        original_mkfsinfo_aux_fs_metadata,
+                        fs_metadata.header.image_size,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    // Issue a write barrier for the NvBlkDev::resize() operation, if any: once the
+                    // resizing has completed, the expected backup mkfsinfo
+                    // location would have changed, meaning that the original
+                    // backup cannot be found anymore.
+                    let write_barrier_fut = match blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    this.fut_state =
+                        UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterPrimaryMkFsInfoHeaderDataRestore {
+                            image_size: *image_size,
+                            updated_primary_mkfsinfo_data_allocation_blocks:
+                                *updated_primary_mkfsinfo_data_allocation_blocks,
+                            write_barrier_fut,
+                        };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterPrimaryMkFsInfoHeaderDataRestore {
+                    image_size,
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    write_barrier_fut,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::ResizeBlkDevPrepare {
+                        image_size: *image_size,
+                        updated_primary_mkfsinfo_data_allocation_blocks:
+                            *updated_primary_mkfsinfo_data_allocation_blocks,
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::ResizeBlkDevPrepare {
+                    image_size,
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                } => {
+                    // The original mkfsinfo creation data is at the primary location now  and
+                    // needs to get copied to the backup location before the updated mkfsinfo data
+                    // can get written there. See if a NvBlkDev::resize() is needed beforehand.
+                    let fs_metadata = match this.fs_metadata.as_ref() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    // Determine the minimum possible image size to host the primary and backup
+                    // copies of the original or updated mkfsinfo data respectively.
+                    let updated_aux_fs_metadata_len = if !this.updated_aux_fs_metadata.is_trivial() {
+                        // As documented, the result of AuxFsMetadata::encoded_len() is always
+                        // representable as an u64.
+                        this.updated_aux_fs_metadata.encoded_len() as u64
+                    } else {
+                        0
+                    };
+                    let old_aux_fs_metadata_len = if !fs_metadata.aux_fs_metadata.is_trivial() {
+                        // As documented, the result of AuxFsMetadata::encoded_len() is always
+                        // representable as an u64.
+                        fs_metadata.aux_fs_metadata.encoded_len() as u64
+                    } else {
+                        0
+                    };
+
+                    let image_layout = &fs_metadata.header.image_layout;
+                    // The salt length always fits an u8, its encoded as such in a MkFsInfoHeader.
+                    let salt_len = fs_metadata.header.salt.len() as u8;
+                    let min_image_size = match image_header::MkFsInfoHeader::min_possible_image_size(
+                        image_layout.io_block_allocation_blocks_log2,
+                        image_layout.allocation_block_size_128b_log2,
+                        updated_aux_fs_metadata_len.max(old_aux_fs_metadata_len),
+                        salt_len,
+                    ) {
+                        Ok(min_image_size) => min_image_size,
+                        Err(e) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+                    // Never resize beyond the filesystem image size.
+                    if min_image_size > *image_size {
+                        this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::NoSpace));
+                    }
+
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                    let min_blkdev_io_blocks = u64::from(min_image_size) >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    this.fut_state = if min_blkdev_io_blocks > blkdev.io_blocks() {
+                        #[cfg(test)]
+                        if this.test_fail_resize {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::IoFailure)));
+                        }
+                        let resize_fut = match blkdev.resize(min_blkdev_io_blocks) {
+                            Ok(resize_fut) => resize_fut,
+                            Err(e) => {
+                                this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(match e {
+                                    NvBlkDevIoError::OperationNotSupported => NvBlkDevIoError::IoBlockOutOfRange,
+                                    _ => e,
+                                })));
+                            }
+                        };
+                        UpdateMkFsInfoAuxFsMetadataFutureState::ResizeBlkDev {
+                            updated_primary_mkfsinfo_data_allocation_blocks:
+                                *updated_primary_mkfsinfo_data_allocation_blocks,
+                            resize_fut,
+                        }
+                    } else {
+                        UpdateMkFsInfoAuxFsMetadataFutureState::WriteBackupMkFsInfoHeaderDataPrepare {
+                            updated_primary_mkfsinfo_data_allocation_blocks:
+                                *updated_primary_mkfsinfo_data_allocation_blocks,
+                        }
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::ResizeBlkDev {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    resize_fut,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(resize_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(match e {
+                                NvBlkDevIoError::OperationNotSupported => NvBlkDevIoError::IoBlockOutOfRange,
+                                _ => e,
+                            })));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.resized_blkdev = true;
+
+                    this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::WriteBackupMkFsInfoHeaderDataPrepare {
+                        updated_primary_mkfsinfo_data_allocation_blocks:
+                            *updated_primary_mkfsinfo_data_allocation_blocks,
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::WriteBackupMkFsInfoHeaderDataPrepare {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                } => {
+                    let write_backup_mkfsinfo_header_fut = WriteMkFsInfoHeaderDataFuture::new(true);
+                    this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::WriteBackupMkFsInfoHeaderData {
+                        updated_primary_mkfsinfo_data_allocation_blocks:
+                            *updated_primary_mkfsinfo_data_allocation_blocks,
+                        write_backup_mkfsinfo_header_fut,
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::WriteBackupMkFsInfoHeaderData {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    write_backup_mkfsinfo_header_fut,
+                } => {
+                    let fs_metadata = match this.fs_metadata.as_ref() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    let original_mkfsinfo_aux_fs_metadata = &fs_metadata.aux_fs_metadata;
+                    let image_layout = &fs_metadata.header.image_layout;
+                    let salt = &fs_metadata.header.salt;
+                    match WriteMkFsInfoHeaderDataFuture::poll(
+                        pin::Pin::new(write_backup_mkfsinfo_header_fut),
+                        blkdev,
+                        image_layout,
+                        salt,
+                        original_mkfsinfo_aux_fs_metadata,
+                        fs_metadata.header.image_size,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    let write_barrier_fut = match blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    this.fut_state =
+                        UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
+                            updated_primary_mkfsinfo_data_allocation_blocks:
+                                *updated_primary_mkfsinfo_data_allocation_blocks,
+                            write_barrier_fut,
+                        };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    write_barrier_fut,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    this.fut_state =
+                        UpdateMkFsInfoAuxFsMetadataFutureState::WriteUpdatedPrimaryMkFsInfoHeaderDataPrepare {
+                            updated_primary_mkfsinfo_data_allocation_blocks:
+                                *updated_primary_mkfsinfo_data_allocation_blocks,
+                        };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::WriteUpdatedPrimaryMkFsInfoHeaderDataPrepare {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                } => {
+                    #[allow(unused_mut)]
+                    let mut write_primary_mkfsinfo_header_fut = WriteMkFsInfoHeaderDataFuture::new(false);
+                    #[cfg(test)]
+                    {
+                        write_primary_mkfsinfo_header_fut.test_fail_final_write = this.test_fail_final_write;
+                    }
+
+                    this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::WriteUpdatedPrimaryMkFsInfoHeaderData {
+                        updated_primary_mkfsinfo_data_allocation_blocks:
+                            *updated_primary_mkfsinfo_data_allocation_blocks,
+                        write_primary_mkfsinfo_header_fut,
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::WriteUpdatedPrimaryMkFsInfoHeaderData {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    write_primary_mkfsinfo_header_fut,
+                } => {
+                    let fs_metadata = match this.fs_metadata.as_ref() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    let image_layout = &fs_metadata.header.image_layout;
+                    let salt = &fs_metadata.header.salt;
+                    match WriteMkFsInfoHeaderDataFuture::poll(
+                        pin::Pin::new(write_primary_mkfsinfo_header_fut),
+                        blkdev,
+                        image_layout,
+                        salt,
+                        &this.updated_aux_fs_metadata,
+                        fs_metadata.header.image_size,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    let write_barrier_fut = match blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    this.fut_state =
+                        UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterUpdatedPrimaryMkFsInfoHeaderDataWrite {
+                            updated_primary_mkfsinfo_data_allocation_blocks:
+                                *updated_primary_mkfsinfo_data_allocation_blocks,
+                            write_barrier_fut,
+                        };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterUpdatedPrimaryMkFsInfoHeaderDataWrite {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    write_barrier_fut,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    this.fut_state = if this.resized_blkdev {
+                        // We grew the block device to make room for the temporary backup mkfsinfo data.
+                        // Attempt to shrink it again
+                        let fs_metadata = match this.fs_metadata.as_ref() {
+                            Some(fs_metadata) => fs_metadata,
+                            None => {
+                                this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                                return task::Poll::Ready(Err(nvfs_err_internal!()));
+                            }
+                        };
+
+                        let image_layout = &fs_metadata.header.image_layout;
+                        let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                        let blkdev_io_block_allocation_blocks_log2 =
+                            blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                        let allocation_block_blkdev_io_blocks_log2 =
+                            allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                        let new_blkdev_io_blocks = u64::from(*updated_primary_mkfsinfo_data_allocation_blocks)
+                            >> blkdev_io_block_allocation_blocks_log2
+                            << allocation_block_blkdev_io_blocks_log2;
+                        match blkdev.resize(new_blkdev_io_blocks) {
+                            Ok(resize_fut) => UpdateMkFsInfoAuxFsMetadataFutureState::ShrinkBlkDev {
+                                updated_primary_mkfsinfo_data_allocation_blocks:
+                                    *updated_primary_mkfsinfo_data_allocation_blocks,
+                                resize_fut,
+                            },
+                            Err(_) => {
+                                // Failure to shrink is considered non-fatal.
+                                UpdateMkFsInfoAuxFsMetadataFutureState::Finish {
+                                    updated_primary_mkfsinfo_data_allocation_blocks:
+                                        *updated_primary_mkfsinfo_data_allocation_blocks,
+                                }
+                            }
+                        }
+                    } else {
+                        UpdateMkFsInfoAuxFsMetadataFutureState::Finish {
+                            updated_primary_mkfsinfo_data_allocation_blocks:
+                                *updated_primary_mkfsinfo_data_allocation_blocks,
+                        }
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::ShrinkBlkDev {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                    resize_fut,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(resize_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(_)) => {
+                            // Failure to shrink is considered non-fatal.
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Finish {
+                        updated_primary_mkfsinfo_data_allocation_blocks:
+                            *updated_primary_mkfsinfo_data_allocation_blocks,
+                    };
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::Finish {
+                    updated_primary_mkfsinfo_data_allocation_blocks,
+                } => {
+                    // Return a modified FsMetadataMkFsInfo reflecting the new state.
+                    let mut fs_metadata = match this.fs_metadata.take() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => {
+                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    fs_metadata.mkfsinfo_data_location = layout::PhysicalAllocBlockRange::from((
+                        layout::PhysicalAllocBlockIndex::from(0),
+                        *updated_primary_mkfsinfo_data_allocation_blocks,
+                    ));
+                    fs_metadata.aux_fs_metadata = mem::take(&mut this.updated_aux_fs_metadata);
+                    this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
+                    return task::Poll::Ready(Ok(fs_metadata));
+                }
+                UpdateMkFsInfoAuxFsMetadataFutureState::Done => unreachable!(),
+            }
+        }
     }
 }

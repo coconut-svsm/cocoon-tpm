@@ -24,22 +24,31 @@ use crate::{
             extents::PhysicalExtents,
             extents_layout,
             integrity::{
-                ExtentIntegrityState, extent_integrity_protections_apply, extent_integrity_protections_len,
-                extent_integrity_protections_verify_and_remove, extent_tier0_integrity_protection_verify_and_remove,
+                ExtentIntegrityProtectionsInvalidateFuture, ExtentIntegrityState, extent_integrity_protections_apply,
+                extent_integrity_protections_len, extent_integrity_protections_verify_and_remove,
+                extent_tier0_integrity_protection_verify_and_remove,
             },
             layout::{AllocBlockCount, ImageLayout, PhysicalAllocBlockIndex, PhysicalAllocBlockRange},
+            mkfs::UpdateMkFsInfoAuxFsMetadataFuture,
+            openfs::{FsMetadata, FsMetadataFormatted},
         },
     },
     nvfs_err_internal,
 };
 
-use core::{cmp, convert, default, mem, pin, task};
+use core::{cmp, convert, default, future, mem, pin, task};
 
 #[cfg(doc)]
 use crate::{
     blkdev::NvBlkDevFuture as _,
     fs::cocoonfs::{image_header, openfs::ReadFsMetadataFuture},
 };
+
+#[cfg(doc)]
+use future::Future as _;
+
+#[cfg(test)]
+use crate::fs::NvFsIoError;
 
 const UUID_LEN: usize = 16;
 
@@ -2602,6 +2611,1057 @@ impl<B: blkdev::NvBlkDev> InitializeAuxFsMetadataExtentsFuture<B> {
     }
 }
 
+/// Safely update a (formatted) filesystem's [`AuxFsMetadata`] extents with
+/// coherence measures taken.
+///
+/// The extents are written in a way that establishes consistency guarantees,
+/// i.e. that torn writes due to service interruptions will get reliably caught
+/// by means of its integrity protections and handled transparently.
+///
+/// A [write barrier](blkdev::NvBlkDev::write_barrier) is issued before any any
+/// updates commence.
+struct UpdateAuxFsMetadataExtentsFuture<B: blkdev::NvBlkDev> {
+    fut_state: UpdateAuxFsMetadataExtentsFutureState<B>,
+    updated_aux_fs_metadata: AuxFsMetadata,
+    // Populated once the ReadPreexisting step has completed.
+    aux_fs_metadata_extents: AuxFsMetadataExtents,
+    // Populated once the ReadPreexisting step has completed. Cleared when no longer needed.
+    preexisting_aux_fs_metadata: AuxFsMetadata,
+    // Populated once the ReadPreexisting step has completed.
+    updated_reallocation_needed: bool,
+    io_block_allocation_blocks_log2: u8,
+    auth_tree_data_block_allocation_blocks_log2: u8,
+    allocation_block_size_128b_log2: u8,
+    #[cfg(test)]
+    test_fail_final_write: bool,
+}
+
+/// Internal [`UpdateAuxFsMetadataExtentsFuture::poll()`]
+/// state-machine state.
+enum UpdateAuxFsMetadataExtentsFutureState<B: blkdev::NvBlkDev> {
+    Init {
+        update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
+    },
+    ReadPreexisting {
+        read_fut: DoReadAuxFsMetadataFuture<B>,
+    },
+    RepairInvalidExtent {
+        write_fut: WriteAuxFsMetadataExtentFuture<B>,
+    },
+    MirrorPreexistingPrepare,
+    MirrorPreexisting {
+        write_fut: WriteAuxFsMetadataUpdateGroupExtentsFuture<B>,
+    },
+    WriteUpdatePrepare,
+    WriteUpdate {
+        write_fut: WriteAuxFsMetadataUpdateGroupExtentsFuture<B>,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev> UpdateAuxFsMetadataExtentsFuture<B> {
+    /// Instantiate a [`UpdateAuxFsMetadataExtentsFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `aux_fs_metadata` - The [`AuxFsMetadata`] contents to write to the
+    ///   filesystem. The [`UpdateAuxFsMetadataExtentsFuture`] assumes its
+    ///   ownership for the duration of the operation, it will eventually get
+    ///   returned back from [`poll()`](Self::poll) upon completion.
+    /// * `update_groups_heads` - Pointers to the respective head extents of the
+    ///   two update groups within the circular extent chain on storage, if any.
+    ///   Both groups must be present and have a sufficient storage capacity
+    ///   each, or [`poll()`](Self::poll) will return early with
+    ///   [`NvFsError::NoSpace`].
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    fn new(
+        updated_aux_fs_metadata: AuxFsMetadata,
+        update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
+        io_block_allocation_blocks_log2: u8,
+        auth_tree_data_block_allocation_blocks_log2: u8,
+        allocation_block_size_128b_log2: u8,
+    ) -> Self {
+        Self {
+            fut_state: UpdateAuxFsMetadataExtentsFutureState::Init { update_groups_heads },
+            updated_aux_fs_metadata,
+            aux_fs_metadata_extents: AuxFsMetadataExtents::new(),
+            preexisting_aux_fs_metadata: AuxFsMetadata::new(),
+            updated_reallocation_needed: false,
+            io_block_allocation_blocks_log2,
+            auth_tree_data_block_allocation_blocks_log2,
+            allocation_block_size_128b_log2,
+            #[cfg(test)]
+            test_fail_final_write: false,
+        }
+    }
+}
+
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for UpdateAuxFsMetadataExtentsFuture<B> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// The [`AuxFsMetadata`] instance initially passed over to
+    /// [`new()`](Self::new) will get returned back alongside the operation
+    /// result upon completion.
+    type Output = (AuxFsMetadata, Result<(), NvFsError>);
+
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                UpdateAuxFsMetadataExtentsFutureState::Init { update_groups_heads } => {
+                    // AuxFsMetadataExtents::invalid_extent_index must be correct, because the
+                    // extent in invalid state, if any, must be repaired first before starting a
+                    // write to any other extent. Otherwise the extent chain might get corrupted
+                    // upon service interruptions. Always determine the state on storage from here
+                    // to be on the safe side.
+                    let read_fut = DoReadAuxFsMetadataFuture::new(
+                        *update_groups_heads,
+                        false,
+                        true,
+                        this.io_block_allocation_blocks_log2,
+                        this.auth_tree_data_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                    );
+                    this.fut_state = UpdateAuxFsMetadataExtentsFutureState::ReadPreexisting { read_fut };
+                }
+                UpdateAuxFsMetadataExtentsFutureState::ReadPreexisting { read_fut } => {
+                    (this.aux_fs_metadata_extents, this.preexisting_aux_fs_metadata) =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                            task::Poll::Ready(Ok((aux_fs_metadata_extents, aux_fs_metadata))) => {
+                                (aux_fs_metadata_extents, aux_fs_metadata)
+                            }
+                            task::Poll::Ready(Err(e)) => {
+                                this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                                return task::Poll::Ready((mem::take(&mut this.updated_aux_fs_metadata), Err(e)));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    let update_group1_extents_begin = match this.aux_fs_metadata_extents.update_group1_extents_begin {
+                        Some(update_group1_extents_begin) => update_group1_extents_begin,
+                        None => {
+                            // There's no group 1.
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((
+                                mem::take(&mut this.updated_aux_fs_metadata),
+                                Err(NvFsError::NoSpace),
+                            ));
+                        }
+                    };
+
+                    // Verify that both groups' storage allocations are large enough to store the
+                    // updated_aux_fs_metadata. The updated_aux_fs_metadata will initially get
+                    // written to group 0 only, but if group 1 cannot hold it as well, this would
+                    // render future updates impossible.
+                    let updated_encoded_len = this.updated_aux_fs_metadata.encoded_len();
+                    let updated_storage_allocation_len = if !this.updated_aux_fs_metadata.is_trivial() {
+                        this.updated_aux_fs_metadata.storage_allocation_payload_length()
+                    } else {
+                        0
+                    };
+                    let mut update_groups_total_payload_lens = [0u64, 0];
+                    let update_groups_extents_index_ranges = [
+                        0..update_group1_extents_begin,
+                        update_group1_extents_begin..this.aux_fs_metadata_extents.extents.len(),
+                    ];
+                    for g in 0..2 {
+                        let update_group_extents_index_range = &update_groups_extents_index_ranges[g];
+                        for extent_index in update_group_extents_index_range.clone() {
+                            update_groups_total_payload_lens[g] =
+                                update_groups_total_payload_lens[g].saturating_add(AuxFsMetadata::extent_payload_len(
+                                    &this.aux_fs_metadata_extents.extents.get_extent_range(extent_index),
+                                    extent_index == update_group_extents_index_range.start,
+                                    this.io_block_allocation_blocks_log2,
+                                    this.allocation_block_size_128b_log2,
+                                ));
+                        }
+                        if updated_encoded_len
+                            > usize::try_from(update_groups_total_payload_lens[g]).unwrap_or(usize::MAX)
+                        {
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((
+                                mem::take(&mut this.updated_aux_fs_metadata),
+                                Err(NvFsError::NoSpace),
+                            ));
+                        } else if updated_storage_allocation_len > update_groups_total_payload_lens[g]
+                            || (update_groups_total_payload_lens[g] - updated_storage_allocation_len)
+                                >> ((this.io_block_allocation_blocks_log2 as u32)
+                                    .max(this.auth_tree_data_block_allocation_blocks_log2 as u32)
+                                    + this.allocation_block_size_128b_log2 as u32
+                                    + 7)
+                                != 0
+                        {
+                            // Set the ActiveReallocationNeeded hint.
+                            this.updated_reallocation_needed = true;
+                        }
+                    }
+
+                    match this.aux_fs_metadata_extents.active_update_group {
+                        Some(AuxFsMetadataExtentsUpdateGroup::Group0) => {
+                            // The preexisting_aux_fs_metadata had been found in
+                            // group 0 and it must get copied to group 1 first. Verify that there's
+                            // sufficient storage.
+                            if this.preexisting_aux_fs_metadata.encoded_len()
+                                > usize::try_from(update_groups_total_payload_lens[1]).unwrap_or(usize::MAX)
+                            {
+                                this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                                return task::Poll::Ready((
+                                    mem::take(&mut this.updated_aux_fs_metadata),
+                                    Err(NvFsError::NoSpace),
+                                ));
+                            }
+                        }
+                        Some(AuxFsMetadataExtentsUpdateGroup::Group1) => {
+                            // The preexisting_aux_fs_metadata had been found in group 1.  No copy to group
+                            // 1 is needed. Release the memory.
+                            this.preexisting_aux_fs_metadata = AuxFsMetadata::new();
+                        }
+                        None => {
+                            // The preexisting_aux_fs_metadata had been read successfully, there
+                            // must be an active group.
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((
+                                mem::take(&mut this.updated_aux_fs_metadata),
+                                Err(nvfs_err_internal!()),
+                            ));
+                        }
+                    };
+
+                    // If there's an invalid extent, i.e. one which failed integrity protections
+                    // verfication, then that must get repaired first. The exception is if that
+                    // extent happens to be the head of the next group to get written anyway,
+                    // because then that head extent would get implicitly
+                    // repaired when setting the group to inactive as a first
+                    // step.
+                    this.fut_state = if let Some(invalid_extent_index) = this
+                        .aux_fs_metadata_extents
+                        .invalid_extent_index
+                        .filter(|invalid_extent_index| {
+                            !((*invalid_extent_index == 0
+                                && this.aux_fs_metadata_extents.active_update_group
+                                    == Some(AuxFsMetadataExtentsUpdateGroup::Group1))
+                                || (*invalid_extent_index == update_group1_extents_begin
+                                    && this.aux_fs_metadata_extents.active_update_group
+                                        == Some(AuxFsMetadataExtentsUpdateGroup::Group0)))
+                        }) {
+                        let extent = this
+                            .aux_fs_metadata_extents
+                            .extents
+                            .get_extent_range(invalid_extent_index);
+                        // All extents are assumed to be compatible AuxFsMetadata::extents_layout(). In
+                        // particular, their lengths in units of Bytes are
+                        // reperesentable as an usize.
+                        let extent_len = (u64::from(extent.block_count())
+                            << (this.allocation_block_size_128b_log2 as u32 + 7))
+                            as usize;
+                        let mut extent_buf = match FixedVec::new_with_default(extent_len) {
+                            Ok(extent_buf) => extent_buf,
+                            Err(e) => {
+                                this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                                return task::Poll::Ready((
+                                    mem::take(&mut this.updated_aux_fs_metadata),
+                                    Err(NvFsError::from(e)),
+                                ));
+                            }
+                        };
+                        // The active/inactive state, if any, had been implicitly set to Inactive by the
+                        // memory initialization.
+                        let is_update_group_head =
+                            invalid_extent_index == 0 || invalid_extent_index == update_group1_extents_begin;
+                        let integrity_protections_offset = AuxFsMetadataEncodedExtentsPtrsPair::encoded_len() as usize
+                            + if is_update_group_head { mem::size_of::<u8>() } else { 0 };
+                        if let Err(e) = extent_integrity_protections_apply(
+                            io_slices::SingletonIoSliceMut::new(&mut extent_buf),
+                            0,
+                            integrity_protections_offset,
+                            &ExtentIntegrityState::new_clean(),
+                            this.io_block_allocation_blocks_log2,
+                            this.allocation_block_size_128b_log2,
+                            blkdev.io_block_size_128b_log2(),
+                        ) {
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((mem::take(&mut this.updated_aux_fs_metadata), Err(e)));
+                        }
+
+                        let write_fut = WriteAuxFsMetadataExtentFuture::new(
+                            extent,
+                            extent_buf,
+                            this.allocation_block_size_128b_log2,
+                        );
+                        UpdateAuxFsMetadataExtentsFutureState::RepairInvalidExtent { write_fut }
+                    } else {
+                        UpdateAuxFsMetadataExtentsFutureState::MirrorPreexistingPrepare
+                    }
+                }
+                UpdateAuxFsMetadataExtentsFutureState::RepairInvalidExtent { write_fut } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(_extent_buf)) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((mem::take(&mut this.updated_aux_fs_metadata), Err(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = UpdateAuxFsMetadataExtentsFutureState::MirrorPreexistingPrepare;
+                }
+                UpdateAuxFsMetadataExtentsFutureState::MirrorPreexistingPrepare => {
+                    this.fut_state = if this.aux_fs_metadata_extents.active_update_group
+                        != Some(AuxFsMetadataExtentsUpdateGroup::Group0)
+                    {
+                        // Group 0 is not occupied. Proceed directly to write the
+                        // updated_aux_fs_metadata to it, without
+                        // any prior mirroring.
+                        UpdateAuxFsMetadataExtentsFutureState::WriteUpdatePrepare
+                    } else {
+                        UpdateAuxFsMetadataExtentsFutureState::MirrorPreexisting {
+                            write_fut: WriteAuxFsMetadataUpdateGroupExtentsFuture::new(
+                                this.io_block_allocation_blocks_log2,
+                                this.allocation_block_size_128b_log2,
+                            ),
+                        }
+                    };
+                }
+                UpdateAuxFsMetadataExtentsFutureState::MirrorPreexisting { write_fut } => {
+                    let update_group1_extents_begin = match this.aux_fs_metadata_extents.update_group1_extents_begin {
+                        Some(update_group1_extents_begin) => update_group1_extents_begin,
+                        None => {
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((
+                                mem::take(&mut this.updated_aux_fs_metadata),
+                                Err(nvfs_err_internal!()),
+                            ));
+                        }
+                    };
+
+                    // The preexisting AuxFsMetadata's extents_reallocation_needed state is the one
+                    // initially obtained from DoReadAuxFsMetadataFuture.
+                    match WriteAuxFsMetadataUpdateGroupExtentsFuture::poll(
+                        pin::Pin::new(write_fut),
+                        blkdev,
+                        &this.preexisting_aux_fs_metadata,
+                        &this.aux_fs_metadata_extents.extents,
+                        update_group1_extents_begin,
+                        AuxFsMetadataExtentsUpdateGroup::Group1,
+                        this.aux_fs_metadata_extents.extents_reallocation_needed,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((mem::take(&mut this.updated_aux_fs_metadata), Err(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    // No longer needed, free up ressources.
+                    this.preexisting_aux_fs_metadata = AuxFsMetadata::new();
+
+                    this.fut_state = UpdateAuxFsMetadataExtentsFutureState::WriteUpdatePrepare;
+                }
+                UpdateAuxFsMetadataExtentsFutureState::WriteUpdatePrepare => {
+                    #[allow(unused_mut)]
+                    let mut write_fut = WriteAuxFsMetadataUpdateGroupExtentsFuture::new(
+                        this.io_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                    );
+                    #[cfg(test)]
+                    {
+                        write_fut.test_fail_final_write = this.test_fail_final_write;
+                    }
+                    this.fut_state = UpdateAuxFsMetadataExtentsFutureState::WriteUpdate { write_fut };
+                }
+                UpdateAuxFsMetadataExtentsFutureState::WriteUpdate { write_fut } => {
+                    let update_group1_extents_begin = match this.aux_fs_metadata_extents.update_group1_extents_begin {
+                        Some(update_group1_extents_begin) => update_group1_extents_begin,
+                        None => {
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((
+                                mem::take(&mut this.updated_aux_fs_metadata),
+                                Err(nvfs_err_internal!()),
+                            ));
+                        }
+                    };
+
+                    match WriteAuxFsMetadataUpdateGroupExtentsFuture::poll(
+                        pin::Pin::new(write_fut),
+                        blkdev,
+                        &this.updated_aux_fs_metadata,
+                        &this.aux_fs_metadata_extents.extents,
+                        update_group1_extents_begin,
+                        AuxFsMetadataExtentsUpdateGroup::Group0,
+                        this.updated_reallocation_needed,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                            return task::Poll::Ready((mem::take(&mut this.updated_aux_fs_metadata), Err(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = UpdateAuxFsMetadataExtentsFutureState::Done;
+                    return task::Poll::Ready((mem::take(&mut this.updated_aux_fs_metadata), Ok(())));
+                }
+                UpdateAuxFsMetadataExtentsFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Safely overwrite an [`AuxFsMetadata`] update group's extents with coherence
+/// measures taken.
+///
+/// The extents are written in a way that establishes consistency guarantees,
+/// i.e. that torn writes due to service interruptions will get reliably caught
+/// by means of its integrity protections. In particular, the group is
+/// deactivated on storage before any updates to its tail extents, and activated
+/// only in a last step.
+///
+/// A [write barrier](blkdev::NvBlkDev::write_barrier) is issued before any any
+/// updates commence.
+struct WriteAuxFsMetadataUpdateGroupExtentsFuture<B: blkdev::NvBlkDev> {
+    fut_state: WriteAuxFsMetadataUpdateGroupExtentsFutureState<B>,
+    io_block_allocation_blocks_log2: u8,
+    allocation_block_size_128b_log2: u8,
+    #[cfg(test)]
+    test_fail_final_write: bool,
+}
+
+/// Internal [`WriteAuxFsMetadataUpdateGroupExtentsFuture::poll()`]
+/// state-machine state.
+enum WriteAuxFsMetadataUpdateGroupExtentsFutureState<B: blkdev::NvBlkDev> {
+    Init,
+    DeactiveGroup {
+        write_head_extent_fut: WriteAuxFsMetadataExtentFuture<B>,
+    },
+    WriteTailExtentPrepare {
+        encoding_pos: usize,
+        extent_index: usize,
+    },
+    WriteTailExtent {
+        write_fut: WriteAuxFsMetadataExtentFuture<B>,
+        next_encoding_pos: usize,
+        next_extent_index: usize,
+    },
+    WriteHeadExtentPrepare,
+    WriteHeadExtent {
+        write_fut: WriteAuxFsMetadataExtentFuture<B>,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev> WriteAuxFsMetadataUpdateGroupExtentsFuture<B> {
+    /// Instantiate a [`WriteAuxFsMetadataUpdateGroupExtentsFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `io_block_allocation_blocks_log2` - Verbatim copy of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim copy of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    /// * `salt_len` - Length of the salt stored in the static image header.
+    const fn new(io_block_allocation_blocks_log2: u8, allocation_block_size_128b_log2: u8) -> Self {
+        Self {
+            fut_state: WriteAuxFsMetadataUpdateGroupExtentsFutureState::Init,
+            io_block_allocation_blocks_log2,
+            allocation_block_size_128b_log2,
+            #[cfg(test)]
+            test_fail_final_write: false,
+        }
+    }
+
+    /// Poll the [`WriteAuxFsMetadataUpdateGroupExtentsFuture`] to completion.
+    ///
+    /// # Arguments:
+    ///
+    /// * `blkdev` - The filesystem's backing storage.
+    /// * `aux_fs_metadata` - The [`AuxFsMetadata`] to update the storage
+    ///   extents with.
+    /// * `aux_fs_metadata_extents` - The (complete sequence of) extents forming
+    ///   the circular [`AuxFsMetadata`] list in the filesystem. The update
+    ///   group identified by `update_group` must provide
+    ///   [sufficient](AuxFsMetadata::extents_allocation_request) payload
+    ///   capacity to store the `aux_fs_metadata` contents. Upon first `poll()`
+    ///   invocation, any extent other than the selected update group's head
+    ///   must be in a valid state on storage, i.e. be linked properly within
+    ///   the circular `aux_fs_metadata` chain and pass intergrity protections
+    ///   validation.
+    /// * `update_group1_extents_begin` - Starting position of update group 1
+    ///   within `aux_fs_metadata_extents`.
+    /// * `update_group` - The update group to update.
+    /// * `set_reallocation_needed` - Whether to set the
+    ///   [`AuxFsMetadataExtentsUpdateGroupState::ActiveReallocationNeeded`]
+    ///   hint.
+    /// * `cx` - The context of the asynchronous task on whose behalf the future
+    ///   is being polled.
+    #[allow(clippy::too_many_arguments)]
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        blkdev: &B,
+        aux_fs_metadata: &AuxFsMetadata,
+        aux_fs_metadata_extents: &PhysicalExtents,
+        update_group1_extents_begin: usize,
+        update_group: AuxFsMetadataExtentsUpdateGroup,
+        set_reallocation_needed: bool,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Result<(), NvFsError>> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                WriteAuxFsMetadataUpdateGroupExtentsFutureState::Init => {
+                    // First check that the update groups' extents provide enough storage
+                    // to store the AuxFsMetadata.
+                    let update_group_extents_index_range = match update_group {
+                        AuxFsMetadataExtentsUpdateGroup::Group0 => 0..update_group1_extents_begin,
+                        AuxFsMetadataExtentsUpdateGroup::Group1 => {
+                            update_group1_extents_begin..aux_fs_metadata_extents.len()
+                        }
+                    };
+                    let mut update_group_total_payload_len = 0u64;
+                    for extent_index in update_group_extents_index_range.clone() {
+                        update_group_total_payload_len =
+                            update_group_total_payload_len.saturating_add(AuxFsMetadata::extent_payload_len(
+                                &aux_fs_metadata_extents.get_extent_range(extent_index),
+                                extent_index == update_group_extents_index_range.start,
+                                this.io_block_allocation_blocks_log2,
+                                this.allocation_block_size_128b_log2,
+                            ));
+                    }
+
+                    if usize::try_from(update_group_total_payload_len).unwrap_or(usize::MAX)
+                        < aux_fs_metadata.encoded_len()
+                    {
+                        this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::NoSpace));
+                    }
+
+                    // If the update group comprises more than one extent, then deactivate it first
+                    // by flipping the active/inactive flag in its head before writing any of the
+                    // tail extents. Otherwise proceed straight to writing the
+                    // single head.
+                    this.fut_state =
+                        if update_group_extents_index_range.end - update_group_extents_index_range.start > 1 {
+                            let head_extent =
+                                aux_fs_metadata_extents.get_extent_range(update_group_extents_index_range.start);
+                            // All extents have been validated, so in particular their lengths in Bytes can
+                            // be represented in an usize.
+                            let head_extent_len = (u64::from(head_extent.block_count())
+                                << (this.allocation_block_size_128b_log2 as u32 + 7))
+                                as usize;
+                            let mut head_extent_buf = match FixedVec::new_with_default(head_extent_len) {
+                                Ok(head_extent_buf) => head_extent_buf,
+                                Err(e) => {
+                                    this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                                    return task::Poll::Ready(Err(NvFsError::from(e)));
+                                }
+                            };
+                            if let Err(e) = aux_fs_metadata_extent_encode_chain_pointers(
+                                &mut head_extent_buf,
+                                update_group_extents_index_range.start,
+                                aux_fs_metadata_extents,
+                            ) {
+                                this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                            // The active/inactive state had been implicitly set to inactive by the
+                            // memory initialization. Further note that the
+                            // WriteAuxFsMetadataExtentFuture() will take care of brining the extent
+                            // on storage into a clean integrity protections state first.
+                            if let Err(e) = extent_integrity_protections_apply(
+                                io_slices::SingletonIoSliceMut::new(&mut head_extent_buf),
+                                0,
+                                AuxFsMetadataEncodedExtentsPtrsPair::encoded_len() as usize + 1,
+                                &ExtentIntegrityState::new_clean(),
+                                this.io_block_allocation_blocks_log2,
+                                this.allocation_block_size_128b_log2,
+                                blkdev.io_block_size_128b_log2(),
+                            ) {
+                                this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                            let write_head_extent_fut = WriteAuxFsMetadataExtentFuture::new(
+                                head_extent,
+                                head_extent_buf,
+                                this.allocation_block_size_128b_log2,
+                            );
+                            WriteAuxFsMetadataUpdateGroupExtentsFutureState::DeactiveGroup { write_head_extent_fut }
+                        } else {
+                            WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteHeadExtentPrepare
+                        };
+                }
+                WriteAuxFsMetadataUpdateGroupExtentsFutureState::DeactiveGroup { write_head_extent_fut } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_head_extent_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(_)) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    let group_head_extent_index = match update_group {
+                        AuxFsMetadataExtentsUpdateGroup::Group0 => 0,
+                        AuxFsMetadataExtentsUpdateGroup::Group1 => update_group1_extents_begin,
+                    };
+                    let head_extent_payload_len = AuxFsMetadata::extent_payload_len(
+                        &aux_fs_metadata_extents.get_extent_range(group_head_extent_index),
+                        true,
+                        this.io_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                    );
+                    // All extents have been validated, so in particular their lengths in Bytes can
+                    // be represented in an usize.
+                    this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtentPrepare {
+                        encoding_pos: (head_extent_payload_len as usize).min(aux_fs_metadata.encoded.len()),
+                        extent_index: 1,
+                    };
+                }
+                WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtentPrepare {
+                    encoding_pos,
+                    extent_index,
+                } => {
+                    if *extent_index
+                        == match update_group {
+                            AuxFsMetadataExtentsUpdateGroup::Group0 => update_group1_extents_begin,
+                            AuxFsMetadataExtentsUpdateGroup::Group1 => aux_fs_metadata_extents.len(),
+                        }
+                    {
+                        // All tail extents written, write the group head.
+                        debug_assert_eq!(*encoding_pos, aux_fs_metadata.encoded.len());
+                        this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteHeadExtentPrepare;
+                        continue;
+                    }
+
+                    // All extents have been validated, so in particular their lengths in Bytes can
+                    // be represented in an usize.
+                    let extent = aux_fs_metadata_extents.get_extent_range(*extent_index);
+                    let extent_len =
+                        (u64::from(extent.block_count()) << (this.allocation_block_size_128b_log2 as u32 + 7)) as usize;
+                    let mut extent_buf = match FixedVec::new_with_default(extent_len) {
+                        Ok(extent_buf) => extent_buf,
+                        Err(e) => {
+                            this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    if let Err(e) = aux_fs_metadata_extent_encode_chain_pointers(
+                        &mut extent_buf,
+                        *extent_index,
+                        aux_fs_metadata_extents,
+                    ) {
+                        this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                        return task::Poll::Ready(Err(e));
+                    };
+                    let integrity_protections_offset = AuxFsMetadataEncodedExtentsPtrsPair::encoded_len() as usize;
+                    let integrity_protections_len = extent_integrity_protections_len(
+                        this.io_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                    );
+                    let payload_offset = integrity_protections_offset + integrity_protections_len as usize;
+                    let used_payload_len =
+                        (extent_len - payload_offset).min(aux_fs_metadata.encoded.len() - *encoding_pos);
+                    extent_buf[payload_offset..payload_offset + used_payload_len]
+                        .copy_from_slice(&aux_fs_metadata.encoded[*encoding_pos..*encoding_pos + used_payload_len]);
+                    // WriteAuxFsMetadataExtentFuture() will take care of brining the extent
+                    // on storage into a clean integrity protections state first.
+                    if let Err(e) = extent_integrity_protections_apply(
+                        io_slices::SingletonIoSliceMut::new(&mut extent_buf),
+                        0,
+                        integrity_protections_offset,
+                        &ExtentIntegrityState::new_clean(),
+                        this.io_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                        blkdev.io_block_size_128b_log2(),
+                    ) {
+                        this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                        return task::Poll::Ready(Err(e));
+                    };
+
+                    let write_fut =
+                        WriteAuxFsMetadataExtentFuture::new(extent, extent_buf, this.allocation_block_size_128b_log2);
+                    this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtent {
+                        write_fut,
+                        next_encoding_pos: *encoding_pos + used_payload_len,
+                        next_extent_index: *extent_index + 1,
+                    }
+                }
+                WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtent {
+                    write_fut,
+                    next_encoding_pos,
+                    next_extent_index,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(_)) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtentPrepare {
+                        encoding_pos: *next_encoding_pos,
+                        extent_index: *next_extent_index,
+                    };
+                }
+                WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteHeadExtentPrepare => {
+                    let group_head_extent_index = match update_group {
+                        AuxFsMetadataExtentsUpdateGroup::Group0 => 0,
+                        AuxFsMetadataExtentsUpdateGroup::Group1 => update_group1_extents_begin,
+                    };
+                    let extent = aux_fs_metadata_extents.get_extent_range(group_head_extent_index);
+                    // All extents have been validated, so in particular their lengths in Bytes can
+                    // be represented in an usize.
+                    let extent_len =
+                        (u64::from(extent.block_count()) << (this.allocation_block_size_128b_log2 as u32 + 7)) as usize;
+                    let mut extent_buf = match FixedVec::new_with_default(extent_len) {
+                        Ok(extent_buf) => extent_buf,
+                        Err(e) => {
+                            this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    if let Err(e) = aux_fs_metadata_extent_encode_chain_pointers(
+                        &mut extent_buf,
+                        group_head_extent_index,
+                        aux_fs_metadata_extents,
+                    ) {
+                        this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                        return task::Poll::Ready(Err(e));
+                    };
+                    let mut integrity_protections_offset = AuxFsMetadataEncodedExtentsPtrsPair::encoded_len() as usize;
+                    // Set the active/inactive state.
+                    extent_buf[integrity_protections_offset] = if !set_reallocation_needed {
+                        AuxFsMetadataExtentsUpdateGroupState::Active
+                    } else {
+                        AuxFsMetadataExtentsUpdateGroupState::ActiveReallocationNeeded
+                    } as u8;
+                    integrity_protections_offset += mem::size_of::<u8>();
+                    let integrity_protections_len = extent_integrity_protections_len(
+                        this.io_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                    );
+                    let payload_offset = integrity_protections_offset + integrity_protections_len as usize;
+                    let used_payload_len = (extent_len - payload_offset).min(aux_fs_metadata.encoded.len());
+                    extent_buf[payload_offset..payload_offset + used_payload_len]
+                        .copy_from_slice(&aux_fs_metadata.encoded[..used_payload_len]);
+                    // WriteAuxFsMetadataExtentFuture() will take care of brining the extent
+                    // on storage into a clean integrity protections state first.
+                    if let Err(e) = extent_integrity_protections_apply(
+                        io_slices::SingletonIoSliceMut::new(&mut extent_buf),
+                        0,
+                        integrity_protections_offset,
+                        &ExtentIntegrityState::new_clean(),
+                        this.io_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                        blkdev.io_block_size_128b_log2(),
+                    ) {
+                        this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                        return task::Poll::Ready(Err(e));
+                    };
+
+                    #[allow(unused_mut)]
+                    let mut write_fut =
+                        WriteAuxFsMetadataExtentFuture::new(extent, extent_buf, this.allocation_block_size_128b_log2);
+                    #[cfg(test)]
+                    {
+                        write_fut.test_fail_final_write = this.test_fail_final_write;
+                    }
+                    this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteHeadExtent { write_fut };
+                }
+                WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteHeadExtent { write_fut } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(_)) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done;
+                    return task::Poll::Ready(Ok(()));
+                }
+                WriteAuxFsMetadataUpdateGroupExtentsFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Safely overwrite an [`AuxFsMetadata`] extent with coherence measures taken.
+///
+/// The extent is written in a way that establishes consistency guarantees, i.e.
+/// that torn writes due to service interruptions will get reliably caught by
+/// means of its integrity protections.
+///
+/// A [write barrier](blkdev::NvBlkDev::write_barrier) is issued before the
+/// extent possibly enters an invalid state on storage, which is required to
+/// flush any prior changes to other extents forming the (circular)
+/// [`AuxFsMetadata`] extent chain -- at most one extent may be in invalid state
+/// at any given point in time.
+struct WriteAuxFsMetadataExtentFuture<B: blkdev::NvBlkDev> {
+    fut_state: WriteAuxFsMetadataExtentFutureState<B>,
+    allocation_block_size_128b_log2: u8,
+    #[cfg(test)]
+    test_fail_final_write: bool,
+}
+
+/// Internal [`WriteAuxFsMetadataExtentFuture::poll()`] state-machine state.
+enum WriteAuxFsMetadataExtentFutureState<B: blkdev::NvBlkDev> {
+    Init {
+        extent: PhysicalAllocBlockRange,
+        extent_buf: FixedVec<u8, 7>,
+    },
+    WriteBarrierBeforeIntegrityProtectionsInvalidation {
+        write_barrier_fut: B::WriteBarrierFuture,
+        extent: PhysicalAllocBlockRange,
+        extent_buf: FixedVec<u8, 7>,
+    },
+    InvalidateIntegrityProtections {
+        invalidate_fut: ExtentIntegrityProtectionsInvalidateFuture<B>,
+        extent: PhysicalAllocBlockRange,
+        extent_buf: FixedVec<u8, 7>,
+    },
+    WriteExtentTail {
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
+        extent_blkdev_io_blocks_begin: u64,
+    },
+    WriteBarrierAfterTailWrite {
+        write_barrier_fut: B::WriteBarrierFuture,
+        extent_blkdev_io_blocks_begin: u64,
+        extent_buf: FixedVec<u8, 7>,
+    },
+    WriteExtentHeadPrepare {
+        extent_blkdev_io_blocks_begin: u64,
+        extent_buf: FixedVec<u8, 7>,
+    },
+    WriteExtentHead {
+        write_fut: blkdev::helpers::NvBlkDevWriteRegionFuture<B, FixedVec<u8, 7>>,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev> WriteAuxFsMetadataExtentFuture<B> {
+    /// Instantiate a [`WriteAuxFsMetadataExtentFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `extent` - Location of the storage extent to write to.
+    /// * `extent_buf` - The contents to write. The length must be at least that
+    ///   of [`extent.block_count()`](PhysicalAllocBlockRange::block_count)
+    ///   converted to bytes. The [`WriteAuxFsMetadataExtentFuture`] assumes
+    ///   ownership of `extent_buf` for the duration of the operation, it will
+    ///   eventually get retuned back from [`poll()`](Self::poll) upon
+    ///   completion.
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    fn new(extent: PhysicalAllocBlockRange, extent_buf: FixedVec<u8, 7>, allocation_block_size_128b_log2: u8) -> Self {
+        Self {
+            fut_state: WriteAuxFsMetadataExtentFutureState::Init { extent, extent_buf },
+            allocation_block_size_128b_log2,
+            #[cfg(test)]
+            test_fail_final_write: false,
+        }
+    }
+}
+
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for WriteAuxFsMetadataExtentFuture<B> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// On success, the `extent_buf` initially passed over to
+    /// [`new()`](Self::new) will get returned back.
+    type Output = Result<FixedVec<u8, 7>, NvFsError>;
+
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                WriteAuxFsMetadataExtentFutureState::Init { extent, extent_buf } => {
+                    let write_barrier_fut = match blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
+                            this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    this.fut_state =
+                        WriteAuxFsMetadataExtentFutureState::WriteBarrierBeforeIntegrityProtectionsInvalidation {
+                            write_barrier_fut,
+                            extent: *extent,
+                            extent_buf: mem::take(extent_buf),
+                        };
+                }
+                WriteAuxFsMetadataExtentFutureState::WriteBarrierBeforeIntegrityProtectionsInvalidation {
+                    write_barrier_fut,
+                    extent,
+                    extent_buf,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    let invalidate_fut = ExtentIntegrityProtectionsInvalidateFuture::new(
+                        extent.begin(),
+                        this.allocation_block_size_128b_log2,
+                        false,
+                    );
+                    this.fut_state = WriteAuxFsMetadataExtentFutureState::InvalidateIntegrityProtections {
+                        invalidate_fut,
+                        extent: *extent,
+                        extent_buf: mem::take(extent_buf),
+                    };
+                }
+                WriteAuxFsMetadataExtentFutureState::InvalidateIntegrityProtections {
+                    invalidate_fut,
+                    extent,
+                    extent_buf,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(invalidate_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let allocation_block_size_128b_log2 = this.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                    // All AuxFsMetadata extents are aligned to the IO Block
+                    // size, hence to the device IO Block size as well.
+                    debug_assert!(
+                        (u64::from(extent.begin()) | u64::from(extent.end()))
+                            .is_aligned_pow2(blkdev_io_block_allocation_blocks_log2)
+                    );
+                    let extent_blkdev_io_blocks_begin = u64::from(extent.begin())
+                        >> blkdev_io_block_allocation_blocks_log2
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let extent_blkdev_io_blocks = (u64::from(extent.block_count())
+                        >> blkdev_io_block_allocation_blocks_log2)
+                        << allocation_block_blkdev_io_blocks_log2;
+                    let extent_tail_blkdev_io_blocks = extent_blkdev_io_blocks - 1;
+                    this.fut_state = if extent_tail_blkdev_io_blocks == 0 {
+                        WriteAuxFsMetadataExtentFutureState::WriteExtentHeadPrepare {
+                            extent_blkdev_io_blocks_begin,
+                            extent_buf: mem::take(extent_buf),
+                        }
+                    } else {
+                        let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+                            extent_blkdev_io_blocks_begin + 1,
+                            extent_tail_blkdev_io_blocks,
+                            blkdev_io_block_size_128b_log2 as u8,
+                            mem::take(extent_buf),
+                            1,
+                            blkdev_io_block_size_128b_log2 as u8,
+                        );
+                        WriteAuxFsMetadataExtentFutureState::WriteExtentTail {
+                            write_fut,
+                            extent_blkdev_io_blocks_begin,
+                        }
+                    };
+                }
+                WriteAuxFsMetadataExtentFutureState::WriteExtentTail {
+                    write_fut,
+                    extent_blkdev_io_blocks_begin,
+                } => {
+                    let extent_buf = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((extent_buf, Ok(())))) => extent_buf,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let write_barrier_fut = match blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
+                            this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    this.fut_state = WriteAuxFsMetadataExtentFutureState::WriteBarrierAfterTailWrite {
+                        write_barrier_fut,
+                        extent_blkdev_io_blocks_begin: *extent_blkdev_io_blocks_begin,
+                        extent_buf,
+                    };
+                }
+                WriteAuxFsMetadataExtentFutureState::WriteBarrierAfterTailWrite {
+                    write_barrier_fut,
+                    extent_blkdev_io_blocks_begin,
+                    extent_buf,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+                    this.fut_state = WriteAuxFsMetadataExtentFutureState::WriteExtentHeadPrepare {
+                        extent_blkdev_io_blocks_begin: *extent_blkdev_io_blocks_begin,
+                        extent_buf: mem::take(extent_buf),
+                    };
+                }
+                WriteAuxFsMetadataExtentFutureState::WriteExtentHeadPrepare {
+                    extent_blkdev_io_blocks_begin,
+                    extent_buf,
+                } => {
+                    #[cfg(test)]
+                    if this.test_fail_final_write {
+                        this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::IoFailure)));
+                    }
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
+                        *extent_blkdev_io_blocks_begin,
+                        1,
+                        blkdev_io_block_size_128b_log2 as u8,
+                        mem::take(extent_buf),
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
+                    this.fut_state = WriteAuxFsMetadataExtentFutureState::WriteExtentHead { write_fut };
+                }
+                WriteAuxFsMetadataExtentFutureState::WriteExtentHead { write_fut } => {
+                    let extent_buf = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((extent_buf, Ok(())))) => extent_buf,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                            this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    this.fut_state = WriteAuxFsMetadataExtentFutureState::Done;
+                    return task::Poll::Ready(Ok(extent_buf));
+                }
+                WriteAuxFsMetadataExtentFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
 /// Read the [`AuxFsMetadata`] stored alongside a
 /// [`MkFsInfoHeader`](image_header::MkFsInfoHeader), if any.
 pub struct ReadMkFsInfoAuxFsMetadataFuture<B: blkdev::NvBlkDev> {
@@ -2938,6 +3998,198 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoAuxFsMetadataFuture<B> {
                 }
                 WriteMkFsInfoAuxFsMetadataFutureState::Done => unreachable!(),
             }
+        }
+    }
+}
+
+/// Safely update a filesystem's [`AuxFsMetadata`] without opening it first.
+///
+/// When the filesystem key is not accessible, the [`AuxFsMetadata`] may still
+/// get updated by means of `WriteAuxFsMetadataOfflineFuture`.
+///
+/// The update works at any stage:
+/// * on a fully formatted filesystem, provided that some (possibly zero) [extra
+///   reserve capacity](AuxFsMetadata::set_extra_reserve_capacity) of sufficient
+///   size had been included in the last (re)allocation, or
+/// * on an image with a [filesystem creation info header] on it.
+///
+/// In either case the update is done in a way to establish coherence guarantees
+/// even in case of service interruptions. That is, the on-disk data structures
+/// would still be in a consistent state and the original [`AuxFsMetadata`]
+/// readable upon torn writes.
+pub struct WriteAuxFsMetadataOfflineFuture<B: blkdev::NvBlkDev> {
+    fut_state: WriteAuxFsMetadataOfflineFutureState<B>,
+    // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+    // Self.
+    blkdev: Option<B>,
+    #[cfg(test)]
+    pub test_fail_mkfsinfo_update_blkdev_resize: bool,
+    #[cfg(test)]
+    pub test_fail_final_write: bool,
+}
+
+/// Internal [`WriteAuxFsMetadataOfflineFuture::poll()`] state-machine.
+#[allow(clippy::large_enum_variant)]
+enum WriteAuxFsMetadataOfflineFutureState<B: blkdev::NvBlkDev> {
+    Init {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        fs_metadata: Option<FsMetadata>,
+        updated_aux_fs_metadata: AuxFsMetadata,
+    },
+    UpdateExtents {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable reference on
+        // Self.
+        fs_metadata: Option<FsMetadataFormatted>,
+        update_fut: UpdateAuxFsMetadataExtentsFuture<B>,
+    },
+    UpdateMkFsInfo {
+        update_fut: UpdateMkFsInfoAuxFsMetadataFuture<B>,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev> WriteAuxFsMetadataOfflineFuture<B> {
+    /// Instantiate a new [`WriteAuxFsMetadataOfflineFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `blkdev` - The filesystem's backing storage.
+    ///   [`WriteAuxFsMetadataOfflineFuture`] assumes ownership for the duration
+    ///   of the operation and eventually returns it back from
+    ///   [`poll()`](Self::poll) upon completion.
+    /// * `fs_metadata` - Representation of the current filesystem metadata
+    ///   state on storage. Typically obtained from [`ReadFsMetadataFuture`]. On
+    ///   successful completion, an update instance will get returned back.
+    /// * `updated_aux_fs_metadata` - The updated [`AuxFsMetadata`] to write.
+    ///
+    /// # See also:
+    ///
+    /// * [`ReadFsMetadataFuture`].
+    pub fn new(blkdev: B, fs_metadata: FsMetadata, updated_aux_fs_metadata: AuxFsMetadata) -> Self {
+        Self {
+            fut_state: WriteAuxFsMetadataOfflineFutureState::Init {
+                fs_metadata: Some(fs_metadata),
+                updated_aux_fs_metadata,
+            },
+            blkdev: Some(blkdev),
+            #[cfg(test)]
+            test_fail_mkfsinfo_update_blkdev_resize: false,
+            #[cfg(test)]
+            test_fail_final_write: false,
+        }
+    }
+}
+
+impl<B: blkdev::NvBlkDev> future::Future for WriteAuxFsMetadataOfflineFuture<B> {
+    /// Output type of [`poll()`](Self::poll).
+    ///
+    /// A two-level [`Result`] is returned from the
+    /// [`Future::poll()`](future::Future::poll):
+    ///
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input
+    ///   [`NvBlkDev`](blkdev::NvBlkDev) is lost.
+    /// * `Ok((blkdev, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the [`NvBlkDev`](blkdev::NvBlkDev), `blkdev`, and
+    ///   the operation result will get returned within:
+    ///   * `Ok((blkdev, Err(e)))` - In case of an error, the error reason `e`
+    ///     is returned in an [`Err`].
+    ///   * `Ok((blkdev, Ok(fs_metatdata)))` - Otherwise the updated
+    ///     [`FsMetadata`] reflecting the current state on storage is returned
+    ///     in an [`Ok`].
+    type Output = Result<(B, Result<FsMetadata, NvFsError>), NvFsError>;
+
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        let result = loop {
+            match &mut this.fut_state {
+                WriteAuxFsMetadataOfflineFutureState::Init {
+                    fs_metadata,
+                    updated_aux_fs_metadata,
+                } => {
+                    let fs_metadata = match fs_metadata.take() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => break Err(nvfs_err_internal!()),
+                    };
+
+                    this.fut_state = match fs_metadata {
+                        FsMetadata::Formatted(fs_metadata) => {
+                            let image_layout = &fs_metadata.header.image_layout;
+                            #[allow(unused_mut)]
+                            let mut update_fut = UpdateAuxFsMetadataExtentsFuture::new(
+                                mem::take(updated_aux_fs_metadata),
+                                fs_metadata.aux_fs_metadata_update_groups_heads,
+                                image_layout.io_block_allocation_blocks_log2,
+                                image_layout.auth_tree_data_block_allocation_blocks_log2,
+                                image_layout.allocation_block_size_128b_log2,
+                            );
+                            #[cfg(test)]
+                            {
+                                update_fut.test_fail_final_write = this.test_fail_final_write;
+                            }
+                            WriteAuxFsMetadataOfflineFutureState::UpdateExtents {
+                                fs_metadata: Some(fs_metadata),
+                                update_fut,
+                            }
+                        }
+                        FsMetadata::MkFsInfo(fs_metadata) => {
+                            #[allow(unused_mut)]
+                            let mut update_fut =
+                                UpdateMkFsInfoAuxFsMetadataFuture::new(fs_metadata, mem::take(updated_aux_fs_metadata));
+                            #[cfg(test)]
+                            {
+                                update_fut.test_fail_resize = this.test_fail_mkfsinfo_update_blkdev_resize;
+                                update_fut.test_fail_final_write = this.test_fail_final_write;
+                            }
+                            WriteAuxFsMetadataOfflineFutureState::UpdateMkFsInfo { update_fut }
+                        }
+                    };
+                }
+                WriteAuxFsMetadataOfflineFutureState::UpdateExtents {
+                    fs_metadata,
+                    update_fut,
+                } => {
+                    let blkdev = match this.blkdev.as_ref() {
+                        Some(blkdev) => blkdev,
+                        None => break Err(nvfs_err_internal!()),
+                    };
+                    let updated_aux_fs_metadata =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(update_fut), blkdev, cx) {
+                            task::Poll::Ready((updated_aux_fs_metadata, Ok(()))) => updated_aux_fs_metadata,
+                            task::Poll::Ready((_, Err(e))) => break Err(e),
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    let mut fs_metadata = match fs_metadata.take() {
+                        Some(fs_metadata) => fs_metadata,
+                        None => break Err(nvfs_err_internal!()),
+                    };
+                    fs_metadata.aux_fs_metadata = updated_aux_fs_metadata;
+                    break Ok(FsMetadata::Formatted(fs_metadata));
+                }
+                WriteAuxFsMetadataOfflineFutureState::UpdateMkFsInfo { update_fut } => {
+                    let blkdev = match this.blkdev.as_ref() {
+                        Some(blkdev) => blkdev,
+                        None => break Err(nvfs_err_internal!()),
+                    };
+                    let fs_metadata = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(update_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(fs_metadata)) => fs_metadata,
+                        task::Poll::Ready(Err(e)) => break Err(e),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    break Ok(FsMetadata::MkFsInfo(fs_metadata));
+                }
+                WriteAuxFsMetadataOfflineFutureState::Done => unreachable!(),
+            }
+        };
+
+        this.fut_state = WriteAuxFsMetadataOfflineFutureState::Done;
+        match this.blkdev.take() {
+            Some(blkdev) => task::Poll::Ready(Ok((blkdev, result))),
+            None => task::Poll::Ready(Err(nvfs_err_internal!())),
         }
     }
 }
