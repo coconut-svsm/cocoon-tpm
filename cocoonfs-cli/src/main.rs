@@ -28,7 +28,7 @@ use std_file_nvblkdev::StdFileNvBlkDev;
 use clap::{self, CommandFactory as _, Parser as _};
 use pollster::FutureExt as _;
 use std::{
-    fs,
+    ffi, fmt, fs,
     io::{self, Read, Write},
     path::PathBuf,
     pin::Pin,
@@ -43,106 +43,336 @@ fn cocoonfs_mk_fs_instance_ref(
     <CocoonFsSyncRcPtr as sync_types::SyncRcPtr<_>>::as_ref(fs_instance)
 }
 
-fn cli_parse_size(arg: &str) -> Result<u64, clap::error::Error> {
-    let arg = arg.trim_start();
-    let unit_pos = arg.char_indices().find(|(_pos, c)| !c.is_ascii_digit());
-    let (value, unit) = match unit_pos {
-        Some((unit_pos, _)) => {
-            let unit = &arg[unit_pos..].trim();
-            if unit.is_empty() || *unit == "B" {
-                (&arg[..unit_pos], 1u64)
-            } else if *unit == "K" {
-                (&arg[..unit_pos], 1024u64)
-            } else if *unit == "M" {
-                (&arg[..unit_pos], 1024u64 * 1024)
-            } else if *unit == "G" {
-                (&arg[..unit_pos], 1024u64 * 1024 * 1024)
-            } else {
-                return Err(clap::Error::raw(
-                    clap::error::ErrorKind::ValueValidation,
-                    "unrecognized unit, possible values: none|B, K, M, G",
-                ));
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CliSizeValue {
+    size: u64,
+}
+
+impl From<CliSizeValue> for u64 {
+    fn from(value: CliSizeValue) -> Self {
+        value.size
+    }
+}
+
+impl fmt::Display for CliSizeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (shift, unit) = if self.size >> 30 << 30 == self.size {
+            (30u32, 'G')
+        } else if self.size >> 20 << 20 == self.size {
+            (20, 'M')
+        } else if self.size >> 10 << 10 == self.size {
+            (10, 'K')
+        } else {
+            (0, 'B')
+        };
+
+        write!(f, "{}{}", self.size >> shift, unit)
+    }
+}
+
+impl clap::builder::ValueParserFactory for CliSizeValue {
+    type Parser = CliSizeValueParser;
+
+    fn value_parser() -> Self::Parser {
+        Self::Parser {}
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CliSizeValueParser {}
+
+impl clap::builder::TypedValueParser for CliSizeValueParser {
+    type Value = CliSizeValue;
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value = value.to_str().ok_or_else(|| {
+            let mut err = clap::Error::new(clap::error::ErrorKind::InvalidUtf8).with_cmd(cmd);
+            if let Some(arg) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(arg.to_string()),
+                );
             }
-        }
-        None => (arg.trim_end(), 1),
-    };
+            err
+        })?;
 
-    let value = match value.parse::<u64>() {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(clap::Error::raw(
-                clap::error::ErrorKind::ValueValidation,
-                "value too large",
-            ));
-        }
-    };
-
-    value
-        .checked_mul(unit)
-        .ok_or_else(|| clap::Error::raw(clap::error::ErrorKind::ValueValidation, "value too large"))
-}
-
-fn cli_parse_power_of_two_size_log2<const MIN_VALUE_LOG2: u32>(arg: &str) -> Result<u32, clap::error::Error> {
-    let size = cli_parse_size(arg)?;
-    if !size.is_power_of_two() {
-        Err(clap::Error::raw(
-            clap::error::ErrorKind::ValueValidation,
-            "value must be a power of two",
-        ))
-    } else if size >> MIN_VALUE_LOG2 == 0 {
-        Err(clap::Error::raw(
-            clap::error::ErrorKind::ValueValidation,
-            format!("value must be >= {}", 1u64 << MIN_VALUE_LOG2,),
-        ))
-    } else {
-        Ok(size.ilog2())
-    }
-}
-
-fn cli_parse_hexstr(arg: &str) -> Result<FixedVec<u8, 4>, clap::error::Error> {
-    fn nibble_from_hex(hexchar: u8) -> Result<u8, clap::error::Error> {
-        Ok(hexchar
-            - match hexchar {
-                b'0'..=b'9' => b'0',
-                b'a'..=b'f' => b'a' - 0xa,
-                b'A'..=b'F' => b'A' - 0xa,
-                _ => {
-                    return Err(clap::Error::raw(
-                        clap::error::ErrorKind::ValueValidation,
-                        "invalid digit in hexadecimal string",
-                    ));
+        let value = value.trim_start();
+        let unit_pos = value.char_indices().find(|(_pos, c)| !c.is_ascii_digit());
+        let (value, unit_shift) = match unit_pos {
+            Some((unit_pos, _)) => {
+                let unit = &value[unit_pos..].trim();
+                if unit.is_empty() || *unit == "B" {
+                    (&value[..unit_pos], 0u32)
+                } else if *unit == "K" {
+                    (&value[..unit_pos], 10)
+                } else if *unit == "M" {
+                    (&value[..unit_pos], 20)
+                } else if *unit == "G" {
+                    (&value[..unit_pos], 30)
+                } else {
+                    let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation).with_cmd(cmd);
+                    if let Some(arg) = arg {
+                        err.insert(
+                            clap::error::ContextKind::InvalidArg,
+                            clap::error::ContextValue::String(arg.to_string()),
+                        );
+                    }
+                    err.insert(
+                        clap::error::ContextKind::InvalidValue,
+                        clap::error::ContextValue::String(value.to_string()),
+                    );
+                    // clap currently doesn't convey this to the user, unfortunately. Still add a
+                    // meaningful message in hope it would some day.
+                    err.insert(
+                        clap::error::ContextKind::Custom,
+                        clap::error::ContextValue::String("recognized units: [B|K|M|G], default: B".to_string()),
+                    );
+                    return Err(err);
                 }
-            })
-    }
+            }
+            None => (value.trim_end(), 1),
+        };
 
-    fn byte_from_hex(hexstr: &[u8; 2]) -> Result<u8, clap::error::Error> {
-        let mut result = 0u8;
-        for hexchar in hexstr {
-            let nibble = nibble_from_hex(*hexchar)?;
-            result = result << 4 | nibble;
+        let value = clap::value_parser!(u64).parse_ref(cmd, arg, value.as_ref())?;
+
+        if value << unit_shift >> unit_shift != value {
+            let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation).with_cmd(cmd);
+            if let Some(arg) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(arg.to_string()),
+                );
+            }
+            err.insert(
+                clap::error::ContextKind::InvalidValue,
+                clap::error::ContextValue::String(value.to_string()),
+            );
+            // clap currently doesn't convey this to the user, unfortunately. Still add a
+            // meaningful message in hope it would some day.
+            err.insert(
+                clap::error::ContextKind::Custom,
+                clap::error::ContextValue::String("value too large".to_string()),
+            );
+            return Err(err);
         }
+
+        Ok(CliSizeValue {
+            size: value << unit_shift,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CliPowerOfTwoSizeValue<const MIN_VALUE_LOG2: u32> {
+    size_log2: u32,
+}
+
+impl<const MIN_VALUE_LOG2: u32> From<CliPowerOfTwoSizeValue<MIN_VALUE_LOG2>> for u32 {
+    fn from(value: CliPowerOfTwoSizeValue<MIN_VALUE_LOG2>) -> Self {
+        value.size_log2
+    }
+}
+
+impl<const MIN_VALUE_LOG2: u32> From<CliPowerOfTwoSizeValue<MIN_VALUE_LOG2>> for CliSizeValue {
+    fn from(value: CliPowerOfTwoSizeValue<MIN_VALUE_LOG2>) -> Self {
+        CliSizeValue {
+            size: 1u64 << value.size_log2,
+        }
+    }
+}
+
+impl<const MIN_VALUE_LOG2: u32> fmt::Display for CliPowerOfTwoSizeValue<MIN_VALUE_LOG2> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CliSizeValue::from(*self).fmt(f)
+    }
+}
+
+impl<const MIN_VALUE_LOG2: u32> clap::builder::ValueParserFactory for CliPowerOfTwoSizeValue<MIN_VALUE_LOG2> {
+    type Parser = CliPowerOfTwoSizeValueParser<MIN_VALUE_LOG2>;
+
+    fn value_parser() -> Self::Parser {
+        CliPowerOfTwoSizeValueParser::<MIN_VALUE_LOG2> {}
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CliPowerOfTwoSizeValueParser<const MIN_VALUE_LOG2: u32> {}
+
+impl<const MIN_VALUE_LOG2: u32> clap::builder::TypedValueParser for CliPowerOfTwoSizeValueParser<MIN_VALUE_LOG2> {
+    type Value = CliPowerOfTwoSizeValue<MIN_VALUE_LOG2>;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let size = clap::value_parser!(CliSizeValue).parse_ref(cmd, arg, value)?;
+
+        let min_size = CliSizeValue::from(CliPowerOfTwoSizeValue::<MIN_VALUE_LOG2> {
+            size_log2: MIN_VALUE_LOG2,
+        });
+        if size < min_size {
+            let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation).with_cmd(cmd);
+            if let Some(arg) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(arg.to_string()),
+                );
+            }
+            err.insert(
+                clap::error::ContextKind::InvalidValue,
+                clap::error::ContextValue::String(size.to_string()),
+            );
+            // clap currently doesn't convey this to the user, unfortunately. Still add a
+            // meaningful message in hope it would some day.
+            err.insert(
+                clap::error::ContextKind::Custom,
+                clap::error::ContextValue::String(format!("minimum value: {min_size}")),
+            );
+        } else if !size.size.is_power_of_two() {
+            let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation).with_cmd(cmd);
+            if let Some(arg) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(arg.to_string()),
+                );
+            }
+            err.insert(
+                clap::error::ContextKind::InvalidValue,
+                clap::error::ContextValue::String(size.to_string()),
+            );
+            // clap currently doesn't convey this to the user, unfortunately. Still add a
+            // meaningful message in hope it would some day.
+            err.insert(
+                clap::error::ContextKind::Custom,
+                clap::error::ContextValue::String("value must be a power of two".to_string()),
+            );
+        }
+
+        Ok(CliPowerOfTwoSizeValue {
+            size_log2: size.size.ilog2(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ByteFromHexError {
+    InvalidDigit,
+}
+fn nibble_from_hex(hexchar: u8) -> Result<u8, ByteFromHexError> {
+    Ok(hexchar
+        - match hexchar {
+            b'0'..=b'9' => b'0',
+            b'a'..=b'f' => b'a' - 0xa,
+            b'A'..=b'F' => b'A' - 0xa,
+            _ => {
+                return Err(ByteFromHexError::InvalidDigit);
+            }
+        })
+}
+
+fn byte_from_hex(hexstr: &[u8; 2]) -> Result<u8, ByteFromHexError> {
+    let mut result = 0u8;
+    for hexchar in hexstr {
+        let nibble = nibble_from_hex(*hexchar)?;
+        result = result << 4 | nibble;
+    }
+    Ok(result)
+}
+
+#[derive(Clone, Copy)]
+struct CliHexStringValueParser {}
+
+impl clap::builder::TypedValueParser for CliHexStringValueParser {
+    type Value = FixedVec<u8, 4>;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value = value.to_str().ok_or_else(|| {
+            let mut err = clap::Error::new(clap::error::ErrorKind::InvalidUtf8).with_cmd(cmd);
+            if let Some(arg) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(arg.to_string()),
+                );
+            }
+            err
+        })?;
+
+        let value = value.trim();
+        let len = value.len().div_ceil(2);
+        let mut result = FixedVec::new_with_default(len).unwrap();
+        let src = value.as_bytes();
+        let (src, dst) = if !value.len().is_multiple_of(2) {
+            // Pad with a zero nibble at the head.
+            result[0] = nibble_from_hex(src[0]).map_err(|e| {
+                match e {
+                    ByteFromHexError::InvalidDigit => {
+                        let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation).with_cmd(cmd);
+                        if let Some(arg) = arg {
+                            err.insert(
+                                clap::error::ContextKind::InvalidArg,
+                                clap::error::ContextValue::String(arg.to_string()),
+                            );
+                        }
+                        err.insert(
+                            clap::error::ContextKind::InvalidValue,
+                            clap::error::ContextValue::String(value.to_string()),
+                        );
+                        // clap currently doesn't convey this to the user, unfortunately. Still add a
+                        // meaningful message in hope it would some day.
+                        err.insert(
+                            clap::error::ContextKind::Custom,
+                            clap::error::ContextValue::String("invalid hexadecimal digit".to_string()),
+                        );
+
+                        err
+                    }
+                }
+            })?;
+            (&src[1..], &mut result[1..])
+        } else {
+            (src, &mut *result)
+        };
+
+        for (i, hexdigit_pair) in src.chunks_exact(2).enumerate() {
+            let hexdigit_pair = <&[u8; 2]>::try_from(hexdigit_pair).unwrap();
+            dst[i] = byte_from_hex(hexdigit_pair).map_err(|e| match e {
+                ByteFromHexError::InvalidDigit => {
+                    let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation).with_cmd(cmd);
+                    if let Some(arg) = arg {
+                        err.insert(
+                            clap::error::ContextKind::InvalidArg,
+                            clap::error::ContextValue::String(arg.to_string()),
+                        );
+                    }
+                    err.insert(
+                        clap::error::ContextKind::InvalidValue,
+                        clap::error::ContextValue::String(value.to_string()),
+                    );
+                    // clap currently doesn't convey this to the user, unfortunately. Still add a
+                    // meaningful message in hope it would some day.
+                    err.insert(
+                        clap::error::ContextKind::Custom,
+                        clap::error::ContextValue::String("invalid hexadecimal digit".to_string()),
+                    );
+
+                    err
+                }
+            })?;
+        }
+
         Ok(result)
     }
-
-    let arg = arg.trim();
-    let arg = arg.as_bytes();
-    let len = arg.len().div_ceil(2);
-    let mut result = FixedVec::new_with_default(len).unwrap();
-
-    let (src, dst) = if !arg.len().is_multiple_of(2) {
-        // Pad with a zero nibble at the head.
-        result[0] = nibble_from_hex(arg[0])?;
-        (&arg[1..], &mut result[1..])
-    } else {
-        (arg, &mut *result)
-    };
-
-    for (i, hexdigit_pair) in src.chunks_exact(2).enumerate() {
-        let hexdigit_pair = <&[u8; 2]>::try_from(hexdigit_pair).unwrap();
-        dst[i] = byte_from_hex(hexdigit_pair)?;
-    }
-
-    Ok(result)
 }
 
 #[derive(clap::Parser)]
@@ -303,26 +533,21 @@ struct CliMkfsInfo {
     salt: CliSaltSource,
 
     /// Filesystem image size [default: backing file's size, if available].
-    #[arg(name = "image-size", long, short = 's', value_name = "SIZE", value_parser = cli_parse_size)]
-    image_size: Option<u64>,
+    #[arg(name = "image-size", long, short = 's', value_name = "SIZE")]
+    image_size: Option<CliSizeValue>,
 
-    /// Allocation Block size [default: 128B]
+    /// Allocation Block size.
     ///
     /// Unit of allocation. Must be a power of two >= 128B.
-    #[arg(
-        name = "allocation-block-size",
-        long,
-        value_name = "SIZE",
-        value_parser = cli_parse_power_of_two_size_log2::<7>
-    )]
-    allocation_block_size_log2: Option<u32>,
+    #[arg(long, value_name = "SIZE", default_value = "128B")]
+    allocation_block_size: CliPowerOfTwoSizeValue<7>,
 
     /// IO Block size [default: max of 512B and Allocation Block size].
     ///
     /// Upper bound on the supported storage hardware's native IO size. Must be
     /// a power of two multiple <= 64 of the Allocation Block size.
-    #[arg(name = "io-block-size", long, value_name = "SIZE", value_parser = cli_parse_power_of_two_size_log2::<7>)]
-    io_block_size_log2: Option<u32>,
+    #[arg(long, value_name = "SIZE")]
+    io_block_size: Option<CliPowerOfTwoSizeValue<7>>,
 
     /// Authentication Tree Data Block size [default: IO Block size].
     ///
@@ -331,13 +556,8 @@ struct CliMkfsInfo {
     /// authentication tree height, but at the cost of making data
     /// authentication more coarse grained. Must be a power of two multiple <=
     /// 64 of the Allocation Block size.
-    #[arg(
-        name = "auth-tree-data-block-size",
-        long,
-        value_name = "SIZE",
-        value_parser = cli_parse_power_of_two_size_log2::<7>
-    )]
-    auth_tree_data_block_size_log2: Option<u32>,
+    #[arg(long, value_name = "SIZE")]
+    auth_tree_data_block_size: Option<CliPowerOfTwoSizeValue<7>>,
 
     /// Authentication Tree node size [default: max of 1024B and IO Block size].
     ///
@@ -345,39 +565,24 @@ struct CliMkfsInfo {
     /// factor: larger values decrease the authentication tree height, but
     /// at the cost of having to process larger nodes. Must be a power of
     /// two >= the IO Block size.
-    #[arg(
-        name = "auth-tree-node-size",
-        long,
-        value_name = "SIZE",
-        value_parser = cli_parse_power_of_two_size_log2::<7>
-    )]
-    auth_tree_node_size_log2: Option<u32>,
+    #[arg(long, value_name = "SIZE")]
+    auth_tree_node_size: Option<CliPowerOfTwoSizeValue<7>>,
 
     /// Inode index B+-tree leaf node size [default: Allocation Block size].
     ///
     /// Size of a leaf node in the inode index B+-tree, controlling the number
     /// of inode entries that can be stored in a leaf node. Must be a power of
     /// two multiple <= 64 of the Allocation Block size.
-    #[arg(
-        name = "inode-index-tree-leaf-node-size",
-        long,
-        value_name = "SIZE",
-        value_parser = cli_parse_power_of_two_size_log2::<7>
-    )]
-    inode_index_tree_leaf_node_size_log2: Option<u32>,
+    #[arg(long, value_name = "SIZE")]
+    inode_index_tree_leaf_node_size: Option<CliPowerOfTwoSizeValue<7>>,
 
     /// Inode index B+-tree internal node size [default: Allocation Block size].
     ///
     /// Size of a internal node in the inode index B+-tree, controlling the
     /// tree's branching factor. Must be a power of two multiple <= 64 of the
     /// Allocation Block size.
-    #[arg(
-        name = "inode-index-tree-internal-node-size",
-        long,
-        value_name = "SIZE",
-        value_parser = cli_parse_power_of_two_size_log2::<7>
-    )]
-    inode_index_tree_internal_node_size_log2: Option<u32>,
+    #[arg(long, value_name = "SIZE")]
+    inode_index_tree_internal_node_size: Option<CliPowerOfTwoSizeValue<7>>,
 
     /// Allocation bitmap block size [default: max of 512B and the
     /// Authentication Tree Data Block size].
@@ -385,13 +590,8 @@ struct CliMkfsInfo {
     /// Encryption granularity of the Allocation bitmap. Each unit stores an IV,
     /// so larger values reduce the overhead, but increase the update
     /// granularity. Must be a power of two >= the Allocation Block size.
-    #[arg(
-        name = "allocation-bitmap-block-size",
-        long,
-        value_name = "SIZE",
-        value_parser = cli_parse_power_of_two_size_log2::<7>
-    )]
-    allocation_bitmap_file_block_size_log2: Option<u32>,
+    #[arg(long, value_name = "SIZE")]
+    allocation_bitmap_file_block_size: Option<CliPowerOfTwoSizeValue<7>>,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -431,7 +631,7 @@ struct CliKeySource {
     #[arg(name = "key-file", short = 'k', long, value_name = "FILE")]
     key_file_path: Option<PathBuf>,
     /// Filesystem key provided as a hexadecimal string.
-    #[arg(name = "key", short = 'K', long, value_name = "HEX", value_parser = cli_parse_hexstr)]
+    #[arg(name = "key", short = 'K', long, value_name = "HEX", value_parser = CliHexStringValueParser{})]
     key: Option<FixedVec<u8, 4>>,
 }
 
@@ -450,18 +650,15 @@ struct CliSaltSource {
     /// The salt will be stored in the filesystem image header and may
     /// be used filesystem image identification purposes. The salt's length
     /// must not exceed 255B.
-    #[arg(name = "salt", long, short = 'I', value_name = "HEX", value_parser = cli_parse_hexstr)]
+    #[arg(name = "salt", long, short = 'I', value_name = "HEX", value_parser = CliHexStringValueParser{})]
     salt: Option<FixedVec<u8, 4>>,
 }
 
 fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
-    let allocation_block_size_128b_log2 = cli
-        .allocation_block_size_log2
-        .map(|allocation_block_size_log2| allocation_block_size_log2 - 7)
-        .unwrap_or(0);
+    let allocation_block_size_128b_log2 = cli.allocation_block_size.size_log2 - 7;
 
-    let io_block_allocation_blocks_log2 = if let Some(io_block_size_log2) = cli.io_block_size_log2 {
-        let io_block_size_128b_log2 = io_block_size_log2 - 7;
+    let io_block_allocation_blocks_log2 = if let Some(io_block_size) = cli.io_block_size {
+        let io_block_size_128b_log2 = io_block_size.size_log2 - 7;
         if io_block_size_128b_log2 < allocation_block_size_128b_log2
             || io_block_size_128b_log2 - allocation_block_size_128b_log2 > 6
         {
@@ -478,8 +675,8 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
     };
 
     let auth_tree_data_block_allocation_blocks_log2 =
-        if let Some(auth_tree_data_block_size_log2) = cli.auth_tree_data_block_size_log2 {
-            let auth_tree_data_block_size_128b_log2 = auth_tree_data_block_size_log2 - 7;
+        if let Some(auth_tree_data_block_size) = cli.auth_tree_data_block_size {
+            let auth_tree_data_block_size_128b_log2 = auth_tree_data_block_size.size_log2 - 7;
             if auth_tree_data_block_size_128b_log2 < allocation_block_size_128b_log2
                 || auth_tree_data_block_size_128b_log2 - allocation_block_size_128b_log2 > 6
             {
@@ -495,8 +692,8 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
             io_block_allocation_blocks_log2
         };
 
-    let auth_tree_node_io_blocks_log2 = if let Some(auth_tree_node_size_log2) = cli.auth_tree_node_size_log2 {
-        let auth_tree_node_size_128b_log2 = auth_tree_node_size_log2 - 7;
+    let auth_tree_node_io_blocks_log2 = if let Some(auth_tree_node_size) = cli.auth_tree_node_size {
+        let auth_tree_node_size_128b_log2 = auth_tree_node_size.size_log2 - 7;
         if auth_tree_node_size_128b_log2 < io_block_allocation_blocks_log2 + allocation_block_size_128b_log2 {
             let mut cmd = Cli::command();
             cmd.error(
@@ -511,8 +708,8 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
     };
 
     let inode_index_tree_leaf_node_allocation_blocks_log2 =
-        if let Some(inode_index_tree_leaf_node_size_log2) = cli.inode_index_tree_leaf_node_size_log2 {
-            let inode_index_tree_leaf_node_size_128b_log2 = inode_index_tree_leaf_node_size_log2 - 7;
+        if let Some(inode_index_tree_leaf_node_size) = cli.inode_index_tree_leaf_node_size {
+            let inode_index_tree_leaf_node_size_128b_log2 = inode_index_tree_leaf_node_size.size_log2 - 7;
             if inode_index_tree_leaf_node_size_128b_log2 < allocation_block_size_128b_log2
                 || inode_index_tree_leaf_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
             {
@@ -529,8 +726,8 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
         };
 
     let inode_index_tree_internal_node_allocation_blocks_log2 =
-        if let Some(inode_index_tree_internal_node_size_log2) = cli.inode_index_tree_leaf_node_size_log2 {
-            let inode_index_tree_internal_node_size_128b_log2 = inode_index_tree_internal_node_size_log2 - 7;
+        if let Some(inode_index_tree_internal_node_size) = cli.inode_index_tree_internal_node_size {
+            let inode_index_tree_internal_node_size_128b_log2 = inode_index_tree_internal_node_size.size_log2 - 7;
             if inode_index_tree_internal_node_size_128b_log2 < allocation_block_size_128b_log2
                 || inode_index_tree_internal_node_size_128b_log2 - allocation_block_size_128b_log2 > 6
             {
@@ -547,8 +744,8 @@ fn cli_mkfs_to_image_layout(cli: &CliMkfsInfo) -> ImageLayout {
         };
 
     let allocation_bitmap_file_block_allocation_blocks_log2 =
-        if let Some(allocation_bitmap_file_block_size_log2) = cli.allocation_bitmap_file_block_size_log2 {
-            let allocation_bitmap_file_block_size_128b_log2 = allocation_bitmap_file_block_size_log2 - 7;
+        if let Some(allocation_bitmap_file_block_size) = cli.allocation_bitmap_file_block_size {
+            let allocation_bitmap_file_block_size_128b_log2 = allocation_bitmap_file_block_size.size_log2 - 7;
             if allocation_bitmap_file_block_size_128b_log2 < allocation_block_size_128b_log2 {
                 let mut cmd = Cli::command();
                 cmd.error(
@@ -813,7 +1010,7 @@ fn main() {
             let rng = instantiate_rng();
             let blkdev = open_volume_file_for_mkfs(
                 &cli.volume_file_path,
-                cli_mkfs_args.mkfsinfo.image_size,
+                cli_mkfs_args.mkfsinfo.image_size.map(u64::from),
                 (cli.ignore_volume_file_io_block_size).then_some(
                     image_layout.io_block_allocation_blocks_log2 as u32
                         + image_layout.allocation_block_size_128b_log2 as u32,
@@ -824,7 +1021,7 @@ fn main() {
                 &image_layout,
                 salt,
                 AuxFsMetadata::new(),
-                cli_mkfs_args.mkfsinfo.image_size,
+                cli_mkfs_args.mkfsinfo.image_size.map(u64::from),
                 &key,
                 cli_mkfs_args.enable_trimming,
                 rng,
@@ -849,7 +1046,7 @@ fn main() {
 
             let blkdev = open_volume_file_for_mkfs(
                 &cli.volume_file_path,
-                cli_write_mkfsinfo_header_args.mkfsinfo.image_size,
+                cli_write_mkfsinfo_header_args.mkfsinfo.image_size.map(u64::from),
                 (cli.ignore_volume_file_io_block_size).then_some(
                     image_layout.io_block_allocation_blocks_log2 as u32
                         + image_layout.allocation_block_size_128b_log2 as u32,
@@ -860,7 +1057,7 @@ fn main() {
                 &image_layout,
                 salt,
                 AuxFsMetadata::new(),
-                cli_write_mkfsinfo_header_args.mkfsinfo.image_size,
+                cli_write_mkfsinfo_header_args.mkfsinfo.image_size.map(u64::from),
                 !cli_write_mkfsinfo_header_args.trim_volume_file_to_header,
             ) {
                 Ok(write_mkfsinfo_header_fut) => write_mkfsinfo_header_fut,
