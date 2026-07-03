@@ -33,7 +33,7 @@ cocoon-tpm-tpm2-interface = { version = "0.1.1", default-features = false }
 cocoon-tpm-utils-common = { version = "0.1.2", features = ["zeroize"] }
 cocoon-tpm-utils-async = { version = "0.1.2" }
 
-clap = { version = "4.5.45", features = ["derive", "wrap_help"] }
-clap_derive = "4.5.45"
+clap = { version = "4.6.1", features = ["derive", "wrap_help"] }
+clap_derive = "4.6.1"
 getrandom = "0.3.3"
 pollster = "0.4.0"
