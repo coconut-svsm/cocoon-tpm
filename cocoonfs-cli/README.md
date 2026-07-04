@@ -1,6 +1,6 @@
 # Cocoon TPM project - `cocoonfs-cli` crate
 
-CLI program to work with CocoonFS image files -- create CocoonFS images and read, write, list and remove files in
+CLI program to work with CocoonFs image files -- create CocoonFs images and read, write, list and remove files in
 existing images.
 
 CocoonFs is a special purpose filesystem format designed for the secure storage of sensitive data in e.g. a TEE
@@ -17,12 +17,12 @@ a process dump, or read from a file (specified via `-k`), which is recommended f
 be shown with the `-K` variant with a fixed hexadecimal key of `aabbcc`, to allow for a quick copy&paste when playing
 around. **Do not use in real world setups!**
 
-Furthermore, each CocoonFS filesystem instance has a maximum supported block size, the filesystem "IO Block" size,
+Furthermore, each CocoonFs filesystem instance has a maximum supported block size, the filesystem "IO Block" size,
 encoded in it, and the implementation will by default refuse to create or open a filesysten in case the underlying
 hardware's block size happens to exceeds that. The reason is that the journalling mechanism relies on that, otherwise
 power cuts or alike may lead to data loss. On Linux, the reported hardware IO Block size reported is typically
-relatively large in practice (4kB, probably due to its page cache), whereas the default CocoonFS maximum IO Block size
-is set to 512B. In practice, host filesystems, i.e. the filesystem the CocoonFS image file resides on, is likely to be
+relatively large in practice (4kB, probably due to its page cache), whereas the default CocoonFs maximum IO Block size
+is set to 512B. In practice, host filesystems, i.e. the filesystem the CocoonFs image file resides on, is likely to be
 transactional itself, so data loss is no real concern. You may use the `-f` command line flag to override `cocoonfs`'
 default behaviour and make it to ignore the block size constraint. All examples shown below will include that flag.
 
@@ -41,7 +41,7 @@ for the full details on a specific command.
 
 
 ## Filesystem creation
-There are two mutually exclusive ways of creating a CocoonFS filesystem: a "regular" one which requires access to the
+There are two mutually exclusive ways of creating a CocoonFs filesystem: a "regular" one which requires access to the
 key at filesystem creation time, and another one which does not. The latter works by writing a special "filesystem
 creation info header" to the image, and the actual filesystem formatting will then be conducted at first use, i.e. on
 the first attempt to open it. It is intended to support confidential computing setups where the entity preparing the
@@ -74,12 +74,12 @@ configuration parameters specified at first use:
 cocoonfs -i my-cocoonfs.img -f write-mkfs-info-header -H sha2 -C aes -t 128 -I 'ddeeff' -s 8M
 ```
 
-## Writing to and reading from files in the CocoonFS image
-The CocoonFS file namespace is very simple: it's flat, i.e. there is no notion of a directory hierarchy, and file
+## Writing to and reading from files in the CocoonFs image
+The CocoonFs file namespace is very simple: it's flat, i.e. there is no notion of a directory hierarchy, and file
 "names" are merely 32bit numbers starting from 6.
 
 The source data to write may be either provided from a file on the host, or from `cocoonfs`' standard input if none is
-specifed. Likewise, data read from a file in the CocoonFS image may be either written to a file on the host, or to
+specifed. Likewise, data read from a file in the CocoonFs image may be either written to a file on the host, or to
 `cocoonfs`' standard output if none is specifed.
 
 E.g. for writing "Hello world!" to file number 42:
@@ -102,7 +102,7 @@ or
 ```
 
 ## Listing and deleting files
-List all files stored in the CocoonFS image:
+List all files stored in the CocoonFs image:
 ```
 # cocoonfs -i my-cocoonfs.img -f list-files -K 'aabbcc'
 ```

@@ -1322,14 +1322,14 @@ fn open_filesystem(
     let openfs_fut = match OpenFsFuture::<StdSyncTypes, StdFileNvBlkDev>::new(blkdev, None, key, enable_trimming, rng) {
         Ok(openfs_fut) => openfs_fut,
         Err((_blkdev, _key, _rng, e)) => {
-            eprintln!("error: failed to initiate CocoonFS filesystem opening operation: error={e:?}");
+            eprintln!("error: failed to initiate CocoonFs filesystem opening operation: error={e:?}");
             std::process::exit(6);
         }
     };
     match openfs_fut.block_on() {
         Ok((rng, Ok(fs_instance))) => (fs_instance, rng),
         Ok((_, Err((_, _, e)))) | Err(e) => {
-            eprintln!("error: failed to open CocoonFS filesystem: error={e:?}");
+            eprintln!("error: failed to open CocoonFs filesystem: error={e:?}");
             std::process::exit(6);
         }
     }
@@ -1372,14 +1372,14 @@ fn main() {
             ) {
                 Ok(mkfs_fut) => mkfs_fut,
                 Err((_blkdev, _rng, e)) => {
-                    eprintln!("error: failed to initiate CocoonFS mkfs operation: error={e:?}");
+                    eprintln!("error: failed to initiate CocoonFs mkfs operation: error={e:?}");
                     std::process::exit(6);
                 }
             };
             match mkfs_fut.block_on() {
                 Ok((_rng, Ok(_fs_instance))) => (),
                 Ok((_, Err((_, e)))) | Err(e) => {
-                    eprintln!("error: CocoonFS mkfs operation failed: error={e:?}");
+                    eprintln!("error: CocoonFs mkfs operation failed: error={e:?}");
                     std::process::exit(6);
                 }
             }
@@ -1416,14 +1416,14 @@ fn main() {
             ) {
                 Ok(write_mkfsinfo_header_fut) => write_mkfsinfo_header_fut,
                 Err((_blkdev, e)) => {
-                    eprintln!("error: failed to initiate CocoonFS mkfsinfo header write operation: error={e:?}");
+                    eprintln!("error: failed to initiate CocoonFs mkfsinfo header write operation: error={e:?}");
                     std::process::exit(6);
                 }
             };
             match write_mkfsinfo_header_fut.block_on() {
                 Ok((_blkdev, Ok(()))) => (),
                 Ok((_, Err(e))) | Err(e) => {
-                    eprintln!("error: CocoonFS mkfsinfo header write operation failed: error={e:?}");
+                    eprintln!("error: CocoonFs mkfsinfo header write operation failed: error={e:?}");
                     std::process::exit(6);
                 }
             }
@@ -1433,14 +1433,14 @@ fn main() {
             let read_fs_metadata_fut = match ReadFsMetadataFuture::new(blkdev) {
                 Ok(read_fs_metadata_fut) => read_fs_metadata_fut,
                 Err((_blkdev, e)) => {
-                    eprintln!("error: failed to initiate CocoonFS metadata read operation: error={e:?}");
+                    eprintln!("error: failed to initiate CocoonFs metadata read operation: error={e:?}");
                     std::process::exit(6);
                 }
             };
             let (blkdev, fs_metadata) = match read_fs_metadata_fut.block_on() {
                 Ok((blkdev, Ok(fs_metadata))) => (blkdev, fs_metadata),
                 Ok((_, Err(e))) | Err(e) => {
-                    eprintln!("error: failed to read CocoonFS metadata: error={e:?}");
+                    eprintln!("error: failed to read CocoonFs metadata: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1556,7 +1556,7 @@ fn main() {
                             {
                                 Ok((rng, Ok(transaction))) => (transaction, rng),
                                 Ok((_, Err(e))) | Err(e) => {
-                                    eprintln!("error: failed to start CocoonFS transaction: error={e:?}");
+                                    eprintln!("error: failed to start CocoonFs transaction: error={e:?}");
                                     std::process::exit(6);
                                 }
                             };
@@ -1575,7 +1575,7 @@ fn main() {
                                 Ok((rng, (_updated_aux_fs_metadata, Ok((transaction, Ok(())))))) => (transaction, rng),
                                 Ok((_, (_, Ok((_, Err(e)))))) | Ok((_, (_, Err(e)))) | Err(e) => {
                                     eprintln!(
-                                        "error: failed to stage auxiliary fileystem metadata update at CocoonFS transaction: error={e:?}"
+                                        "error: failed to stage auxiliary fileystem metadata update at CocoonFs transaction: error={e:?}"
                                     );
                                     std::process::exit(6);
                                 }
@@ -1596,11 +1596,11 @@ fn main() {
                             {
                                 Ok((_rng, Ok(()))) => (),
                                 Ok((_rng, Err(e))) => {
-                                    eprintln!("error: failed to commit CocoonFS transaction: error={e:?}");
+                                    eprintln!("error: failed to commit CocoonFs transaction: error={e:?}");
                                     std::process::exit(6);
                                 }
                                 Err(e) => {
-                                    eprintln!("error: failed to commit CocoonFS transaction: error={e:?}");
+                                    eprintln!("error: failed to commit CocoonFs transaction: error={e:?}");
                                     std::process::exit(6);
                                 }
                             }
@@ -1660,7 +1660,7 @@ fn main() {
             {
                 Ok((rng, Ok(transaction))) => (transaction, rng),
                 Ok((_, Err(e))) | Err(e) => {
-                    eprintln!("error: failed to start CocoonFS transaction: error={e:?}");
+                    eprintln!("error: failed to start CocoonFs transaction: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1681,7 +1681,7 @@ fn main() {
             {
                 Ok((rng, (_data, Ok((transaction, Ok(())))))) => (transaction, rng),
                 Ok((_, (_, Ok((_, Err(e)))))) | Ok((_, (_, Err(e)))) | Err(e) => {
-                    eprintln!("error: failed to stage file write at CocoonFS transaction: error={e:?}");
+                    eprintln!("error: failed to stage file write at CocoonFs transaction: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1701,11 +1701,11 @@ fn main() {
             {
                 Ok((_rng, Ok(()))) => (),
                 Ok((_rng, Err(e))) => {
-                    eprintln!("error: failed to commit CocoonFS transaction: error={e:?}");
+                    eprintln!("error: failed to commit CocoonFs transaction: error={e:?}");
                     std::process::exit(6);
                 }
                 Err(e) => {
-                    eprintln!("error: failed to commit CocoonFS transaction: error={e:?}");
+                    eprintln!("error: failed to commit CocoonFs transaction: error={e:?}");
                     std::process::exit(6);
                 }
             }
@@ -1733,7 +1733,7 @@ fn main() {
             {
                 Ok((_rng, Ok((_read_seq, Ok(result))))) => result,
                 Ok((_, Ok((_, Err(e))))) | Ok((_, Err(e))) | Err(e) => {
-                    eprintln!("error: failed to read CocoonFS inode data: error={e:?}");
+                    eprintln!("error: failed to read CocoonFs inode data: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1741,7 +1741,7 @@ fn main() {
             let data = match result {
                 Some(result) => result.1,
                 None => {
-                    eprintln!("error: CocoonFS inode doesn't exist");
+                    eprintln!("error: CocoonFs inode doesn't exist");
                     std::process::exit(6);
                 }
             };
@@ -1780,7 +1780,7 @@ fn main() {
             {
                 Ok((rng, Ok(consistent_read_sequence))) => (consistent_read_sequence, rng),
                 Ok((_, Err(e))) | Err(e) => {
-                    eprintln!("error: failed to start consistent CocoonFS read sequence: error={e:?}");
+                    eprintln!("error: failed to start consistent CocoonFs read sequence: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1794,7 +1794,7 @@ fn main() {
             ) {
                 Ok(Ok(enumerate_cursor)) => enumerate_cursor,
                 Ok(Err((_, e))) | Err(e) => {
-                    eprintln!("error: failed to instantiate CocoonFS enumeration cursor: error={e:?}");
+                    eprintln!("error: failed to instantiate CocoonFs enumeration cursor: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1805,7 +1805,7 @@ fn main() {
                     match NvFsFutureAsCoreFuture::new(fs_instance.clone(), enumerate_cursor.next(), rng).block_on() {
                         Ok((rng, Ok((enumerate_cursor, Ok(inode))))) => (enumerate_cursor, rng, inode),
                         Ok((_, Ok((_, Err(e))))) | Ok((_, Err(e))) | Err(e) => {
-                            eprintln!("error: failed to advance CocoonFS enumeration cursor: error={e:?}");
+                            eprintln!("error: failed to advance CocoonFs enumeration cursor: error={e:?}");
                             std::process::exit(6);
                         }
                     };
@@ -1838,7 +1838,7 @@ fn main() {
             {
                 Ok((rng, Ok(transaction))) => (transaction, rng),
                 Ok((_, Err(e))) | Err(e) => {
-                    eprintln!("error: failed to start CocoonFS transaction: error={e:?}");
+                    eprintln!("error: failed to start CocoonFs transaction: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1850,7 +1850,7 @@ fn main() {
             ) {
                 Ok(Ok(unlink_cursor)) => unlink_cursor,
                 Ok(Err((_, e))) | Err(e) => {
-                    eprintln!("error: failed to instantiate CocoonFS unlink cursor: error={e:?}");
+                    eprintln!("error: failed to instantiate CocoonFs unlink cursor: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1861,7 +1861,7 @@ fn main() {
                     match NvFsFutureAsCoreFuture::new(fs_instance.clone(), unlink_cursor.next(), rng).block_on() {
                         Ok((rng, Ok((unlink_cursor, Ok(inode))))) => (unlink_cursor, rng, inode),
                         Ok((_, Ok((_, Err(e))))) | Ok((_, Err(e))) | Err(e) => {
-                            eprintln!("error: failed to advance CocoonFS unlink cursor: error={e:?}");
+                            eprintln!("error: failed to advance CocoonFs unlink cursor: error={e:?}");
                             std::process::exit(6);
                         }
                     };
@@ -1876,7 +1876,7 @@ fn main() {
                     {
                         Ok((rng, Ok((unlink_cursor, Ok(()))))) => (unlink_cursor, rng),
                         Ok((_, Ok((_, Err(e))))) | Ok((_, Err(e))) | Err(e) => {
-                            eprintln!("error: failed to stage inode removal at CocoonFS transaction: error={e:?}");
+                            eprintln!("error: failed to stage inode removal at CocoonFs transaction: error={e:?}");
                             std::process::exit(6);
                         }
                     };
@@ -1885,7 +1885,7 @@ fn main() {
             let transaction = match unlink_cursor.into_transaction() {
                 Ok(transaction) => transaction,
                 Err(e) => {
-                    eprintln!("error: failed to retrieve transaction from CocoonFS unlink cursor: error={e:?}");
+                    eprintln!("error: failed to retrieve transaction from CocoonFs unlink cursor: error={e:?}");
                     std::process::exit(6);
                 }
             };
@@ -1905,11 +1905,11 @@ fn main() {
             {
                 Ok((_rng, Ok(()))) => (),
                 Ok((_rng, Err(e))) => {
-                    eprintln!("error: failed to commit CocoonFS transaction: error={e:?}");
+                    eprintln!("error: failed to commit CocoonFs transaction: error={e:?}");
                     std::process::exit(6);
                 }
                 Err(e) => {
-                    eprintln!("error: failed to commit CocoonFS transaction: error={e:?}");
+                    eprintln!("error: failed to commit CocoonFs transaction: error={e:?}");
                     std::process::exit(6);
                 }
             }
