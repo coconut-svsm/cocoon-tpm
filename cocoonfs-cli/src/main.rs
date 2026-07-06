@@ -745,7 +745,7 @@ struct CliWriteFileArgs {
     enable_trimming: bool,
 
     /// Inode number of the file to write to.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(16..))]
     inode: u64,
 
     /// Flags value to set for the inode.
@@ -767,7 +767,7 @@ struct CliReadFileArgs {
     enable_trimming: bool,
 
     /// Inode number of the file to read from.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(16..))]
     inode: u64,
 }
 
@@ -791,7 +791,7 @@ struct CliRemoveFile {
     enable_trimming: bool,
 
     /// Inode number to delete.
-    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(6..))]
+    #[arg(value_name="INODE-NUMBER", value_parser = clap::value_parser!(u64).range(16..))]
     inode: u64,
 }
 

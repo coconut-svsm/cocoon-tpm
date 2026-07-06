@@ -257,17 +257,17 @@ The core CocoonFs metadata structures are:
 * The [inode index](#sec-inode-index), organized as a B+-tree.
 * The [journal](#sec-journal).
 
-Inodes 0 to 5 (inclusive) are reserved for CocoonFs internal use. The [authentication tree](#sec-auth-tree), the
+Inodes 0 to 15 (inclusive) are reserved for CocoonFs internal use. The [authentication tree](#sec-auth-tree), the
 [allocation bitmap](#sec-allocation-bitmap) and the [inode index](#sec-inode-index) root have entries in the inode index
 and are assigned inode numbers 1, 2 and 3 respectively. The [journal log](#sec-journal) has inode number 5 associated
 with it, but there's no explicit entry for it in the inode index -- the number is used only for key derivation subject
 purposes.
 
-For completeness in this context: inode number 0 is reserved for a special "no inode" value, inode number 4 is currently
-not allocated and reserved. Note that the minimum inode index B+-tree leaf node fill-level is such that inodes 1 to 3
-will always be found in the leftmost leaf, which is referred to as the [*inode index entry leaf
-node*](#def-inode-index-entry-leaf-node). The location of the inode index entry leaf node is referenced from the
-[mutable image header](#sec-mutable-image-header) and enables discovering all the other metadata structures at
+For completeness in this context: inode number 0 is reserved for a special "no inode" value, inode number 4 as well as
+the range 6-15 (inclusive) are currently not allocated and reserved. Note that the minimum inode index B+-tree leaf node
+fill-level is such that inodes 1 to 3 will always be found in the leftmost leaf, which is referred to as the [*inode
+index entry leaf node*](#def-inode-index-entry-leaf-node). The location of the inode index entry leaf node is referenced
+from the [mutable image header](#sec-mutable-image-header) and enables discovering all the other metadata structures at
 filesystem opening time.
 
 An [*extent*]{#def-extent} is a **non-empty**, physically contiguous range on storage. Any inode, except for the special

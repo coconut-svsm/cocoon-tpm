@@ -64,10 +64,11 @@ pub enum SpecialInode {
     #[allow(dead_code)]
     Reserved = 4,
     JournalLog = 5, // Virtual inode used for key derivation.
+    ReservedLast = 15,
 }
 
 /// Maximum value allocated to [`SpecialInode`]s.
-pub const SPECIAL_INODE_MAX: u64 = SpecialInode::JournalLog as u64;
+pub const SPECIAL_INODE_MAX: u64 = SpecialInode::ReservedLast as u64;
 
 /// [Subdomain](keys::KeyId) identifiers used for key derivation in the context
 /// of some inode.
