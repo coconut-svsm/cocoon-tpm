@@ -1516,13 +1516,18 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             auth_tree_data_block_index,
                             auth_tree_leaf_node_load_fut,
                         } => {
-                            let (auth_tree_config, auth_tree_root_hmac_digest, mut auth_tree_node_cache) =
-                                fs_sync_state_auth_tree.destructure_borrow();
+                            let (
+                                auth_tree_config,
+                                auth_tree_root_hmac_digest,
+                                auth_tree_encrypted_filesystem_update_counter,
+                                mut auth_tree_node_cache,
+                            ) = fs_sync_state_auth_tree.destructure_borrow();
                             let leaf_node = match auth_tree::AuthTreeNodeLoadFuture::poll(
                                 pin::Pin::new(auth_tree_leaf_node_load_fut),
                                 blkdev,
                                 auth_tree_config,
                                 auth_tree_root_hmac_digest,
+                                auth_tree_encrypted_filesystem_update_counter,
                                 &mut auth_tree_node_cache,
                                 cx,
                             ) {

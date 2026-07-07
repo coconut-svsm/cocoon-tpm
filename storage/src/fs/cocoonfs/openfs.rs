@@ -9,7 +9,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     blkdev,
-    crypto::rng,
+    crypto::{rng, symcipher},
     fs::{
         self, NvFsError,
         cocoonfs::{
@@ -19,7 +19,7 @@ use crate::{
                 DetermineAuxFsMetadataExtentsReallocationNeededStateFuture,
             },
             extent_ptr, extents,
-            fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
+            fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState, CocoonFsSyncStateFilesystemUpdateCounter},
             image_header::{self, FsMetadataMkFsInfo},
             inode_extents_list, inode_index,
             integrity::ExtentIntegrityState,
@@ -28,7 +28,7 @@ use crate::{
             read_buffer,
         },
     },
-    nvfs_err_internal,
+    nvfs_err_internal, tpm2_interface,
     utils_async::sync_types,
     utils_common::{
         fixed_vec::FixedVec,
@@ -577,6 +577,10 @@ where
     root_hmac_digest: FixedVec<u8, 5>,
 
     // Initialized after the static + mutable image headers have been read.
+    // Gets moved into the AuthTree once constructed.
+    encrypted_filesystem_update_counter: FixedVec<u8, 4>,
+
+    // Initialized after the static + mutable image headers have been read.
     // Gets moved into the InodeIndex once constructed.
     inode_index_entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
 
@@ -826,6 +830,7 @@ where
             fs_config: None,
             aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair::new_nil(),
             root_hmac_digest: FixedVec::new_empty(),
+            encrypted_filesystem_update_counter: FixedVec::new_empty(),
             inode_index_entry_leaf_node_preauth_cca_protection_digest: FixedVec::new_empty(),
             image_size: layout::AllocBlockCount::from(0u64),
             auth_tree: None,
@@ -1153,12 +1158,14 @@ where
                     let image_header::MutableImageHeader {
                         aux_fs_metadata_update_groups_heads,
                         root_hmac_digest,
+                        encrypted_filesystem_update_counter,
                         inode_index_entry_leaf_node_preauth_cca_protection_digest,
                         inode_index_entry_leaf_node_block_ptr,
                         image_size,
                     } = mutable_image_header;
                     this.aux_fs_metadata_update_groups_heads = aux_fs_metadata_update_groups_heads;
                     this.root_hmac_digest = root_hmac_digest;
+                    this.encrypted_filesystem_update_counter = encrypted_filesystem_update_counter;
                     this.inode_index_entry_leaf_node_preauth_cca_protection_digest =
                         inode_index_entry_leaf_node_preauth_cca_protection_digest;
                     this.image_size = image_size;
@@ -1462,6 +1469,7 @@ where
                         auth_tree_extents,
                         &alloc_bitmap_extents,
                         mem::take(&mut this.root_hmac_digest),
+                        mem::take(&mut this.encrypted_filesystem_update_counter),
                     ) {
                         Ok(auth_tree) => auth_tree,
                         Err(e) => break e,
@@ -1616,6 +1624,73 @@ where
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    // The encrypted filesystem update counter got authenticated now as a
+                    // side-effect of verifying the Authentication Tree Root HMAC at least once in
+                    // the course of bootstrapping the inode index. Decrypt it.
+                    let filesystem_update_counter_encryption_key =
+                        match fs_config.root_key.derive_key(&keys::KeyId::new(
+                            inode_index::SpecialInode::FilesystemUpdateCounter as u64,
+                            inode_index::InodeKeySubdomain::InodeData as u32,
+                            keys::KeyPurpose::Encryption,
+                        )) {
+                            Ok(filesystem_update_counter_encryption_key) => filesystem_update_counter_encryption_key,
+                            Err(e) => break e,
+                        };
+                    let filesystem_update_counter_decryption_instance =
+                        match symcipher::SymBlockCipherModeDecryptionInstance::new(
+                            tpm2_interface::TpmiAlgCipherMode::Cbc,
+                            &fs_config.image_layout.block_cipher_alg,
+                            &filesystem_update_counter_encryption_key,
+                        ) {
+                            Ok(filesystem_update_counter_decryption_instance) => {
+                                filesystem_update_counter_decryption_instance
+                            }
+                            Err(e) => break NvFsError::from(e),
+                        };
+                    let encrypted_filesystem_update_counter = auth_tree.get_encrypted_filesystem_update_counter();
+                    let mut decrypted_filesystem_update_counter =
+                        match FixedVec::<u8, 4>::new_with_default(encrypted_filesystem_update_counter.len()) {
+                            Ok(decrypted_filesystem_update_counter) => decrypted_filesystem_update_counter,
+                            Err(e) => break NvFsError::from(e),
+                        };
+                    // The filesystem update counter always gets encrypted with an all-zeros IV.
+                    let all_zeros_iv = match FixedVec::<u8, 4>::new_with_default(
+                        filesystem_update_counter_decryption_instance.iv_len(),
+                    ) {
+                        Ok(all_zeros_iv) => all_zeros_iv,
+                        Err(e) => break NvFsError::from(e),
+                    };
+                    if let Err(e) = filesystem_update_counter_decryption_instance.decrypt(
+                        &all_zeros_iv,
+                        io_slices::SingletonIoSliceMut::new(&mut decrypted_filesystem_update_counter)
+                            .map_infallible_err(),
+                        io_slices::SingletonIoSlice::new(encrypted_filesystem_update_counter).map_infallible_err(),
+                        None,
+                    ) {
+                        break NvFsError::from(e);
+                    }
+                    // The counter in little-endian representation is taken modulo 2^128.
+                    let mut filesystem_update_counter_value =
+                        [0u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize];
+                    filesystem_update_counter_value.copy_from_slice(
+                        &decrypted_filesystem_update_counter[..image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
+                    );
+                    drop(decrypted_filesystem_update_counter);
+                    drop(all_zeros_iv);
+                    drop(filesystem_update_counter_decryption_instance);
+                    let filesystem_update_counter_encryption_instance =
+                        match symcipher::SymBlockCipherModeEncryptionInstance::new(
+                            tpm2_interface::TpmiAlgCipherMode::Cbc,
+                            &fs_config.image_layout.block_cipher_alg,
+                            &filesystem_update_counter_encryption_key,
+                        ) {
+                            Ok(filesystem_update_counter_encryption_instance) => {
+                                filesystem_update_counter_encryption_instance
+                            }
+                            Err(e) => break NvFsError::from(e),
+                        };
+                    drop(filesystem_update_counter_encryption_key);
+
                     // All done, construct the CocoonFs instance and return it.
                     let fs_config = match this.fs_config.take() {
                         Some(fs_config) => fs_config,
@@ -1654,6 +1729,10 @@ where
                         alloc_bitmap,
                         alloc_bitmap_file,
                         auth_tree,
+                        filesystem_update_counter: CocoonFsSyncStateFilesystemUpdateCounter {
+                            encryption_instance: filesystem_update_counter_encryption_instance,
+                            value: filesystem_update_counter_value,
+                        },
                         read_buffer,
                         inode_index,
                         keys_cache: ST::RwLock::from(keys_cache),

@@ -90,6 +90,7 @@ enum TransactionWriteJournalFutureState<ST: sync_types::SyncTypes, B: blkdev::Nv
         collect_auth_digests_fut: TransactionCollectExtentsCoveringAuthDigestsFuture<B>,
     },
     PrepareAuthTreeUpdates {
+        transaction_encrypted_filesystem_update_counter: FixedVec<u8, 4>,
         prepare_auth_tree_updates_fut:
             auth_tree::AuthTreePrepareUpdatesFuture<ST, B, TransactionAuthTreeDataBlocksDigestsUpdatesIterator<ST, B>>,
     },
@@ -295,6 +296,46 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         alloc_bitmap::SparseAllocBitmap::new(),
                     );
 
+                    // Prepare the filesystem update counter increment.
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let image_layout = &fs_instance.fs_config.image_layout;
+                    transaction.filesystem_update_counter =
+                        u128::from_le_bytes(fs_instance_sync_state.filesystem_update_counter.value)
+                            .wrapping_add(1)
+                            .to_le_bytes();
+                    transaction.encrypted_filesystem_update_counter = match FixedVec::<u8, 4>::new_with_default(
+                        image_header::MutableImageHeader::encrypted_filesystem_update_counter_len(image_layout)
+                            as usize,
+                    ) {
+                        Ok(encrypted_filesystem_update_counter) => encrypted_filesystem_update_counter,
+                        Err(e) => break (false, Some(transaction), NvFsError::from(e)),
+                    };
+                    transaction.encrypted_filesystem_update_counter
+                        [..image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize]
+                        .copy_from_slice(&transaction.filesystem_update_counter);
+                    // The filesystem update counter always gets encrypted with an all-zeros IV.
+                    let all_zeros_iv = match FixedVec::<u8, 4>::new_with_default(
+                        fs_instance_sync_state
+                            .filesystem_update_counter
+                            .encryption_instance
+                            .iv_len(),
+                    ) {
+                        Ok(all_zeros_iv) => all_zeros_iv,
+                        Err(e) => break (false, Some(transaction), NvFsError::from(e)),
+                    };
+                    if let Err(e) = fs_instance_sync_state
+                        .filesystem_update_counter
+                        .encryption_instance
+                        .encrypt_in_place(
+                            &all_zeros_iv,
+                            io_slices::SingletonIoSliceMut::new(&mut transaction.encrypted_filesystem_update_counter)
+                                .map_infallible_err(),
+                            None,
+                        )
+                    {
+                        break (false, Some(transaction), NvFsError::from(e));
+                    }
+
                     this.fut_state = TransactionWriteJournalFutureState::InodeIndexApplyStagedUpdates {
                         update_root_inode_fut: inode_index::InodeIndexUpdateRootNodeInodeFuture::new(transaction),
                     };
@@ -320,6 +361,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
                         _fs_sync_state_auth_tree,
+                        _fs_sync_state_filesystem_update_counter,
                         fs_sync_state_inode_index,
                         _fs_sync_state_read_buffer,
                         mut fs_sync_state_keys_cache,
@@ -355,6 +397,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         fs_sync_state_alloc_bitmap,
                         fs_sync_state_alloc_bitmap_file,
                         _fs_sync_state_auth_tree,
+                        _fs_sync_state_filesystem_update_counter,
                         _fs_sync_state_inode_index,
                         _fs_sync_state_read_buffer,
                         mut fs_sync_state_keys_cache,
@@ -646,7 +689,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     collect_auth_digests_fut,
                 } => {
                     let (
-                        transaction,
+                        mut transaction,
                         encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction,
                         encoded_alloc_bitmap_file_auth_digests_for_auth_tree_reconstruction_len,
                     ) = match TransactionCollectExtentsCoveringAuthDigestsFuture::poll(
@@ -675,6 +718,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
 
                     let fs_instance = fs_instance_sync_state.get_fs_ref();
                     let fs_config = &fs_instance.fs_config;
+                    // Temporarily stash the transaction's encrypted_filesystem_update_counter away.
+                    let transaction_encrypted_filesystem_update_counter =
+                        mem::take(&mut transaction.encrypted_filesystem_update_counter);
                     let transaction_auth_tree_data_blocks_digests_updates_iter =
                         TransactionAuthTreeDataBlocksDigestsUpdatesIterator::new(
                             transaction,
@@ -685,10 +731,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         transaction_auth_tree_data_blocks_digests_updates_iter,
                     );
                     this.fut_state = TransactionWriteJournalFutureState::PrepareAuthTreeUpdates {
+                        transaction_encrypted_filesystem_update_counter,
                         prepare_auth_tree_updates_fut,
                     };
                 }
                 TransactionWriteJournalFutureState::PrepareAuthTreeUpdates {
+                    transaction_encrypted_filesystem_update_counter,
                     prepare_auth_tree_updates_fut,
                 } => {
                     // Note: this steals the Authentication Tree Data Block digests from the
@@ -698,7 +746,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         match CocoonFsSyncStateReadFuture::poll(
                             pin::Pin::new(prepare_auth_tree_updates_fut),
                             &mut CocoonFsSyncStateMemberRef::from(&mut fs_instance_sync_state),
-                            &mut (),
+                            &mut transaction_encrypted_filesystem_update_counter.as_slice(),
                             cx,
                         ) {
                             task::Poll::Ready(Ok((
@@ -725,6 +773,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         updated_root_hmac_digest: updated_auth_tree_root_hmac_digest,
                         pending_nodes_updates: pending_auth_tree_nodes_updates,
                     };
+                    // Restore.
+                    transaction.encrypted_filesystem_update_counter =
+                        mem::take(transaction_encrypted_filesystem_update_counter);
 
                     // Now that the updated Authentication Tree Root digest is available, prepare
                     // updates to the mutable image header.
@@ -790,6 +841,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                             &fs_instance_sync_state.aux_fs_metadata_update_groups_heads
                         },
                         &transaction.pending_auth_tree_updates.updated_root_hmac_digest,
+                        &transaction.encrypted_filesystem_update_counter,
                         inode_index_entry_leaf_node_preauth_cca_protection_digest,
                         &fs_config.inode_index_entry_leaf_node_block_ptr,
                         fs_instance_sync_state.image_size,
@@ -970,6 +1022,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         fs_sync_state_alloc_bitmap,
                         fs_sync_state_alloc_bitmap_file,
                         fs_sync_state_auth_tree,
+                        _fs_sync_state_filesystem_update_counter,
                         _fs_sync_state_inode_index,
                         _fs_sync_state_read_buffer,
                         mut fs_sync_state_keys_cache,
@@ -1813,18 +1866,24 @@ impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> 
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
                         mut fs_sync_state_auth_tree,
+                        _fs_sync_state_filesystem_update_counter,
                         _fs_sync_state_inode_index,
                         _fs_sync_state_read_buffer,
                         _fs_sync_state_keys_cache,
                     ) = fs_instance_sync_state.fs_instance_and_destructure_borrow();
 
-                    let (auth_tree_config, auth_tree_root_hmac_digest, mut auth_tree_node_cache) =
-                        fs_sync_state_auth_tree.destructure_borrow();
+                    let (
+                        auth_tree_config,
+                        auth_tree_root_hmac_digest,
+                        auth_tree_encrypted_filesystem_update_counter,
+                        mut auth_tree_node_cache,
+                    ) = fs_sync_state_auth_tree.destructure_borrow();
                     let leaf_node = match auth_tree::AuthTreeNodeLoadFuture::poll(
                         pin::Pin::new(auth_tree_leaf_node_load_fut),
                         &fs_instance.blkdev,
                         auth_tree_config,
                         auth_tree_root_hmac_digest,
+                        auth_tree_encrypted_filesystem_update_counter,
                         &mut auth_tree_node_cache,
                         cx,
                     ) {
