@@ -11,10 +11,13 @@ use crate::{
     blkdev,
     crypto::rng,
     fs::{
-        NvFsError,
+        self, NvFsError,
         cocoonfs::{
             FormatError, alloc_bitmap, auth_tree,
-            aux_fs_metadata::{self, AuxFsMetadata, AuxFsMetadataEncodedExtentsPtrsPair},
+            aux_fs_metadata::{
+                self, AuxFsMetadata, AuxFsMetadataEncodedExtentsPtrsPair,
+                DetermineAuxFsMetadataExtentsReallocationNeededStateFuture,
+            },
             extent_ptr, extents,
             fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState},
             image_header::{self, FsMetadataMkFsInfo},
@@ -597,6 +600,10 @@ where
     // Self.
     keys_cache: Option<keys::KeyCache>,
 
+    // Initialized either from the input FsMetadataFormatted::aux_fs_metadata_extents_reallocation_needed, if any,
+    // or determined from storage.
+    aux_fs_metadata_extents_reallocation_needed: Option<bool>,
+
     #[cfg(test)]
     pub(super) test_fail_apply_mkfsinfo_header: bool,
 
@@ -678,6 +685,14 @@ where
     },
     BootstrapInodeIndex {
         bootstrap_inode_index_fut: inode_index::InodeIndexBootstrapFuture<ST, B>,
+    },
+    DetermineAuxFsMetadataReallocationNeededState {
+        determine_state_fut: DetermineAuxFsMetadataExtentsReallocationNeededStateFuture<B>,
+        fs_instance: CocoonFsSyncRcPtrType<ST, B>,
+    },
+    ReallocateAuxFsMetadataExtents {
+        reallocate_fut: OpenFsReallocateAuxFsMetadataExtentsFuture<ST, B>,
+        fs_instance: CocoonFsSyncRcPtrType<ST, B>,
     },
     Done,
 }
@@ -796,6 +811,13 @@ where
             }
         };
 
+        let aux_fs_metadata_extents_reallocation_needed =
+            if let Some(FsMetadata::Formatted(metadata)) = metadata.as_ref() {
+                Some(metadata.aux_fs_metadata_extents_reallocation_needed)
+            } else {
+                None
+            };
+
         Ok(Self {
             blkdev: Some(blkdev),
             rng: Some(rng),
@@ -811,6 +833,7 @@ where
             read_buffer: None,
             alloc_bitmap: None,
             keys_cache: Some(keys_cache),
+            aux_fs_metadata_extents_reallocation_needed,
             #[cfg(test)]
             test_fail_apply_mkfsinfo_header: false,
             fut_state: match metadata {
@@ -1636,11 +1659,6 @@ where
                         keys_cache: ST::RwLock::from(keys_cache),
                     };
 
-                    let rng = match this.rng.take() {
-                        Some(rng) => rng,
-                        None => break nvfs_err_internal!(),
-                    };
-
                     let fs = match <ST::SyncRcPtrFactory as sync_types::SyncRcPtrFactory>::try_new_with(|| {
                         let blkdev = match this.blkdev.take() {
                             Some(blkdev) => blkdev,
@@ -1650,7 +1668,6 @@ where
                     }) {
                         Ok((fs, _)) => fs,
                         Err(sync_types::SyncRcPtrTryNewWithError::TryNewError(e)) => {
-                            this.rng = Some(rng);
                             break match e {
                                 sync_types::SyncRcPtrTryNewError::AllocationFailure => {
                                     NvFsError::MemoryAllocationFailure
@@ -1658,14 +1675,111 @@ where
                             };
                         }
                         Err(sync_types::SyncRcPtrTryNewWithError::WithError(e)) => {
-                            this.rng = Some(rng);
                             break e;
                         }
                     };
 
                     // Safety: the fs is new and never moved out from again.
-                    let fs = unsafe { pin::Pin::new_unchecked(fs) };
-                    return task::Poll::Ready(Ok((rng, Ok(fs))));
+                    let fs_instance = unsafe { pin::Pin::new_unchecked(fs) };
+
+                    // Finally do some maintenance work to be conducted at filesystem opening time,
+                    // if any.
+                    match this.aux_fs_metadata_extents_reallocation_needed {
+                        Some(false) => {
+                            // The AuxFsMetadata extents are known to not need a reallocation,
+                            // as per the result from a prior ReadFsMetadataFuture. All done.
+                            let rng = match this.rng.take() {
+                                Some(rng) => rng,
+                                None => break nvfs_err_internal!(),
+                            };
+                            this.fut_state = OpenFsFutureState::Done;
+                            return task::Poll::Ready(Ok((rng, Ok(fs_instance))));
+                        }
+                        Some(true) => {
+                            let reallocate_fut = OpenFsReallocateAuxFsMetadataExtentsFuture::Init {
+                                aux_fs_metadata_update_groups_heads: this.aux_fs_metadata_update_groups_heads,
+                            };
+                            this.fut_state = OpenFsFutureState::ReallocateAuxFsMetadataExtents {
+                                reallocate_fut,
+                                fs_instance,
+                            };
+                        }
+                        None => {
+                            // It's not known yet whether the AuxFsMetadata extents need a reallocation
+                            // perhaps. Figure it out.
+                            let image_layout = &fs_instance.fs_config.image_layout;
+                            let determine_state_fut = DetermineAuxFsMetadataExtentsReallocationNeededStateFuture::new(
+                                this.aux_fs_metadata_update_groups_heads,
+                                image_layout.io_block_allocation_blocks_log2,
+                                image_layout.auth_tree_data_block_allocation_blocks_log2,
+                                image_layout.allocation_block_size_128b_log2,
+                            );
+                            this.fut_state = OpenFsFutureState::DetermineAuxFsMetadataReallocationNeededState {
+                                determine_state_fut,
+                                fs_instance,
+                            };
+                        }
+                    }
+                }
+                OpenFsFutureState::DetermineAuxFsMetadataReallocationNeededState {
+                    determine_state_fut,
+                    fs_instance,
+                } => {
+                    let aux_fs_metadata_extents_reallocation_needed =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(determine_state_fut), &fs_instance.blkdev, cx)
+                        {
+                            task::Poll::Ready(Ok(aux_fs_metadata_extents_reallocation_needed)) => {
+                                aux_fs_metadata_extents_reallocation_needed
+                            }
+                            task::Poll::Ready(Err(e)) => break e,
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    if !aux_fs_metadata_extents_reallocation_needed {
+                        let rng = match this.rng.take() {
+                            Some(rng) => rng,
+                            None => break nvfs_err_internal!(),
+                        };
+                        let fs_instance = fs_instance.clone();
+                        this.fut_state = OpenFsFutureState::Done;
+                        return task::Poll::Ready(Ok((rng, Ok(fs_instance))));
+                    } else {
+                        let reallocate_fut = OpenFsReallocateAuxFsMetadataExtentsFuture::Init {
+                            aux_fs_metadata_update_groups_heads: this.aux_fs_metadata_update_groups_heads,
+                        };
+                        this.fut_state = OpenFsFutureState::ReallocateAuxFsMetadataExtents {
+                            reallocate_fut,
+                            fs_instance: fs_instance.clone(),
+                        };
+                    }
+                }
+                OpenFsFutureState::ReallocateAuxFsMetadataExtents {
+                    reallocate_fut,
+                    fs_instance,
+                } => {
+                    let rng = match this.rng.as_mut() {
+                        Some(rng) => rng,
+                        None => break nvfs_err_internal!(),
+                    };
+                    // Deliberately ignore errors. A failure to reallocate the AuxFsMetadata extents
+                    // should not prevent the filesystem from getting opened.
+                    match fs::NvFsFuture::poll(
+                        pin::Pin::new(reallocate_fut),
+                        &sync_types::SyncRcPtr::as_ref(fs_instance),
+                        rng.as_mut(),
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok(()) | Err(_)) => (),
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+
+                    let rng = match this.rng.take() {
+                        Some(rng) => rng,
+                        None => break nvfs_err_internal!(),
+                    };
+                    let fs_instance = fs_instance.clone();
+                    this.fut_state = OpenFsFutureState::Done;
+                    return task::Poll::Ready(Ok((rng, Ok(fs_instance))));
                 }
                 OpenFsFutureState::Done => unreachable!(),
             }
@@ -1722,6 +1836,136 @@ impl convert::From<image_header::ReadCoreImageHeaderFutureResult> for OpenFsFutu
                 journal_state: None,
             },
             image_header::ReadCoreImageHeaderFutureResult::MkFsInfoHeader(mkfsinfo) => Self::MkFsInfo(mkfsinfo),
+        }
+    }
+}
+
+/// Helper for the [`OpenFsFuture`] implementation for doing the
+/// [`AuxFsMetadata`] reallocation work, if needed.
+enum OpenFsReallocateAuxFsMetadataExtentsFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    Init {
+        aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
+    },
+    ReadAuxFsMetadata {
+        read_aux_fs_metadata_fut: aux_fs_metadata::ReadAuxFsMetadataFuture<B>,
+    },
+    StartTransaction {
+        aux_fs_metadata: AuxFsMetadata,
+        start_transaction_fut: <CocoonFs<ST, B> as fs::NvFs>::StartTransactionFut,
+    },
+    WriteAuxFsMetadata {
+        write_aux_fs_metadata_fut: super::fs::WriteAuxFsMetadataFuture<ST, B>,
+    },
+    CommitTransaction {
+        commit_transaction_fut: <CocoonFs<ST, B> as fs::NvFs>::CommitTransactionFut,
+    },
+    Done,
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
+    for OpenFsReallocateAuxFsMetadataExtentsFuture<ST, B>
+{
+    type Output = Result<(), NvFsError>;
+
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        fs_instance: &<CocoonFs<ST, B> as fs::NvFs>::SyncRcPtrRef<'_>,
+        rng: &mut dyn rng::RngCoreDispatchable,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+        loop {
+            match this {
+                Self::Init {
+                    aux_fs_metadata_update_groups_heads,
+                } => {
+                    let read_aux_fs_metadata_fut = aux_fs_metadata::ReadAuxFsMetadataFuture::new(
+                        *aux_fs_metadata_update_groups_heads,
+                        &fs_instance.fs_config.image_layout,
+                    );
+                    *this = Self::ReadAuxFsMetadata {
+                        read_aux_fs_metadata_fut,
+                    };
+                }
+                Self::ReadAuxFsMetadata {
+                    read_aux_fs_metadata_fut,
+                } => {
+                    let aux_fs_metadata = match blkdev::NvBlkDevFuture::poll(
+                        pin::Pin::new(read_aux_fs_metadata_fut),
+                        &fs_instance.blkdev,
+                        cx,
+                    ) {
+                        task::Poll::Ready(Ok((
+                            _aux_fs_metadata_extents,
+                            _aux_fs_metadata_extents_reallocation_needed,
+                            aux_fs_metadata,
+                        ))) => aux_fs_metadata,
+                        task::Poll::Ready(Err(e)) => {
+                            *this = Self::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let start_transaction_fut = <CocoonFs<ST, B> as fs::NvFs>::start_transaction(fs_instance, None);
+                    *this = Self::StartTransaction {
+                        aux_fs_metadata,
+                        start_transaction_fut,
+                    };
+                }
+                Self::StartTransaction {
+                    aux_fs_metadata,
+                    start_transaction_fut,
+                } => {
+                    let transaction =
+                        match fs::NvFsFuture::poll(pin::Pin::new(start_transaction_fut), fs_instance, rng, cx) {
+                            task::Poll::Ready(Ok(transaction)) => transaction,
+                            task::Poll::Ready(Err(e)) => {
+                                *this = Self::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    // Simply write out the AuxFsMetadata through a transaction. That will
+                    // reallocate as a side-effect.
+                    let write_aux_fs_metadata_fut =
+                        CocoonFs::<ST, B>::write_aux_fs_metadata(fs_instance, transaction, mem::take(aux_fs_metadata));
+                    *this = Self::WriteAuxFsMetadata {
+                        write_aux_fs_metadata_fut,
+                    };
+                }
+                Self::WriteAuxFsMetadata {
+                    write_aux_fs_metadata_fut,
+                } => {
+                    let transaction =
+                        match fs::NvFsFuture::poll(pin::Pin::new(write_aux_fs_metadata_fut), fs_instance, rng, cx) {
+                            task::Poll::Ready((_aux_fs_metadata, Ok((transaction, Ok(()))))) => transaction,
+                            task::Poll::Ready((_aux_fs_metadata, Ok((_, Err(e))) | Err(e))) => {
+                                *this = Self::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    let commit_transaction_fut =
+                        <CocoonFs<ST, B> as fs::NvFs>::commit_transaction(fs_instance, transaction, None, None, false);
+                    *this = Self::CommitTransaction { commit_transaction_fut }
+                }
+                Self::CommitTransaction { commit_transaction_fut } => {
+                    match fs::NvFsFuture::poll(pin::Pin::new(commit_transaction_fut), fs_instance, rng, cx) {
+                        task::Poll::Ready(result) => {
+                            *this = Self::Done;
+                            return task::Poll::Ready(result.map_err(|e| match e {
+                                fs::TransactionCommitError::LogStateClean { reason }
+                                | fs::TransactionCommitError::LogStateIndeterminate { reason } => reason,
+                            }));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    }
+                }
+                Self::Done => unreachable!(),
+            }
         }
     }
 }

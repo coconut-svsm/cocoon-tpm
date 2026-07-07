@@ -582,3 +582,92 @@ fn write_journal_replay_overwritten_read() {
         }
     }
 }
+
+#[test]
+fn extra_reserve_capacity_openfs_reallocation() {
+    for test_config in CocoonFsTestConfigs::new() {
+        for enable_trimming in [false, true] {
+            let journal_block_allocation_blocks_log2 = (test_config.layout.io_block_allocation_blocks_log2 as u32)
+                .max(test_config.layout.auth_tree_data_block_allocation_blocks_log2 as u32);
+            let journal_block_size = 1usize
+                << (journal_block_allocation_blocks_log2
+                    + test_config.layout.allocation_block_size_128b_log2 as u32
+                    + 7);
+            let mut initial_aux_fs_metadata = AuxFsMetadata::new();
+            initial_aux_fs_metadata
+                .set_extra_reserve_capacity(Some(journal_block_size as u64 / 2))
+                .unwrap();
+
+            let fs_instance = cocoonfs_test_mkfs_op_helper(
+                &test_config,
+                Some(initial_aux_fs_metadata),
+                3usize << 18,
+                enable_trimming,
+            )
+            .unwrap();
+
+            // Close and exhaust the reserve capacity.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            let (blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            let mut aux_fs_metadata = AuxFsMetadata::new();
+            aux_fs_metadata
+                .set_extra_reserve_capacity(Some(journal_block_size as u64 / 2))
+                .unwrap();
+            aux_fs_metadata
+                .add_entry(
+                    &mk_test_uuid(1),
+                    &(0..journal_block_size / 2 - 20).map(|v| v as u8).collect::<Vec<u8>>(),
+                )
+                .unwrap();
+
+            let (blkdev, result) = cocoonfs_test_write_aux_fs_metadata_offline_helper(
+                blkdev,
+                fs_metadata,
+                aux_fs_metadata.try_clone().unwrap(),
+                false,
+                false,
+            );
+            let fs_metadata = result.unwrap();
+
+            // Now increase the size and try again. It should fail.
+            aux_fs_metadata
+                .add_entry(
+                    &mk_test_uuid(1),
+                    &(0..journal_block_size / 2 - 20).map(|v| v as u8).collect::<Vec<u8>>(),
+                )
+                .unwrap();
+            let (blkdev, result) = cocoonfs_test_write_aux_fs_metadata_offline_helper(
+                blkdev,
+                fs_metadata,
+                aux_fs_metadata.try_clone().unwrap(),
+                false,
+                false,
+            );
+            match result {
+                Ok(_) => assert!(false),
+                Err(e) => assert_eq!(e, NvFsError::NoSpace),
+            }
+
+
+            // Now open the filesystem. This should reallocate the AuxFsMetadata extents in order to
+            // reestablish the extra reserve capacity as part of its maintenance work.
+            let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();
+            // Close again.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            // Try again.
+            let (blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            let (blkdev, result) = cocoonfs_test_write_aux_fs_metadata_offline_helper(
+                blkdev,
+                fs_metadata,
+                aux_fs_metadata.try_clone().unwrap(),
+                false,
+                false,
+            );
+            result.unwrap();
+
+            // And verify the final result.
+            let (_blkdev, fs_metadata) = cocoonfs_test_read_fs_metadata_helper(blkdev).unwrap();
+            assert_eq!(fs_metadata.get_aux(), &aux_fs_metadata);
+        }
+    }
+}

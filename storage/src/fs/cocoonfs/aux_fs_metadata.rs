@@ -1111,6 +1111,10 @@ enum AuxFsMetadataExtentsUpdateGroupState {
     /// Set from [offline updates], i.e. updates without the filesystem key, as
     /// a hint that a reallocation is needed in order to reestablish the
     /// [extra reserve capacity](AuxFsMetadata::set_extra_reserve_capacity).
+    ///
+    /// # See also:
+    ///
+    /// * [`DetermineAuxFsMetadataExtentsReallocationNeededStateFuture`].
     ActiveReallocationNeeded = 2u8,
 }
 
@@ -4611,5 +4615,180 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 }),
             ),
         })
+    }
+}
+
+/// Determine whether the [`AuxFsMetadata`] storage extents might possibly need
+/// a reallocation.
+///
+/// # See also:
+///
+/// * [`AuxFsMetadataExtentsUpdateGroupState::ActiveReallocationNeeded`].
+pub struct DetermineAuxFsMetadataExtentsReallocationNeededStateFuture<B: blkdev::NvBlkDev> {
+    fut_state: DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState<B>,
+    io_block_allocation_blocks_log2: u8,
+    auth_tree_data_block_allocation_blocks_log2: u8,
+    allocation_block_size_128b_log2: u8,
+}
+
+/// Internal [`DetermineAuxFsMetadataExtentsReallocationNeededStateFuture::poll()`] state-machine
+/// state.
+enum DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState<B: blkdev::NvBlkDev> {
+    Init {
+        update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
+    },
+    ReadGroup0HeadExtent {
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev> DetermineAuxFsMetadataExtentsReallocationNeededStateFuture<B> {
+    /// Instantiate a
+    /// [`DetermineAuxFsMetadataExtentsReallocationNeededStateFuture`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `update_groups_heads` - Pointers to the respective head extents of the
+    ///   two update groups within the circular extent chain on storage, if any.
+    /// * `io_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::io_block_allocation_blocks_log2`].
+    /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
+    ///   [`ImageLayout::auth_tree_data_block_allocation_blocks_log2`].
+    /// * `allocation_block_size_128b_log2` - Verbatim value of
+    ///   [`ImageLayout::allocation_block_size_128b_log2`].
+    pub fn new(
+        update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
+        io_block_allocation_blocks_log2: u8,
+        auth_tree_data_block_allocation_blocks_log2: u8,
+        allocation_block_size_128b_log2: u8,
+    ) -> Self {
+        Self {
+            fut_state: DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Init { update_groups_heads },
+            io_block_allocation_blocks_log2,
+            auth_tree_data_block_allocation_blocks_log2,
+            allocation_block_size_128b_log2,
+        }
+    }
+}
+
+impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for DetermineAuxFsMetadataExtentsReallocationNeededStateFuture<B> {
+    type Output = Result<bool, NvFsError>;
+
+    fn poll(self: pin::Pin<&mut Self>, blkdev: &B, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Init { update_groups_heads } => {
+                    let update_groups_heads = match AuxFsMetadataExtentsPtrsPair::decode(
+                        update_groups_heads,
+                        this.io_block_allocation_blocks_log2,
+                        this.auth_tree_data_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                    ) {
+                        Ok(update_groups_heads) => update_groups_heads,
+                        Err(e) => {
+                            this.fut_state = DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+
+                    // If there is only one update group, then an offline update setting the
+                    // AuxFsMetadataExtentsUpdateGroupState::ActiveReallocationNeeded
+                    // could not have happened.
+                    if update_groups_heads.ptrs[1].is_none() {
+                        this.fut_state = DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done;
+                        return task::Poll::Ready(Ok(false));
+                    }
+
+                    let group0_head_extent = match update_groups_heads.ptrs[0] {
+                        Some(group0_head_extent) => group0_head_extent,
+                        None => {
+                            this.fut_state = DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done;
+                            return task::Poll::Ready(Ok(false));
+                        }
+                    };
+
+                    let extent_buf = match FixedVec::new_with_default(
+                        (u64::from(group0_head_extent.block_count())
+                            << (this.allocation_block_size_128b_log2 as u32 + 7)) as usize,
+                    ) {
+                        Ok(extent_buf) => extent_buf,
+                        Err(e) => {
+                            this.fut_state = DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(group0_head_extent.begin()),
+                        u64::from(group0_head_extent.block_count()),
+                        this.allocation_block_size_128b_log2,
+                        extent_buf,
+                        0,
+                        this.io_block_allocation_blocks_log2
+                            .max(this.auth_tree_data_block_allocation_blocks_log2)
+                            + this.allocation_block_size_128b_log2,
+                    );
+
+                    this.fut_state =
+                        DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::ReadGroup0HeadExtent {
+                            read_fut,
+                        };
+                }
+                DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::ReadGroup0HeadExtent { read_fut } => {
+                    let mut extent_buf = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok((extent_buf, Ok(())))) => extent_buf,
+                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
+                            this.fut_state = DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let integrity_protections_offset =
+                        AuxFsMetadataEncodedExtentsPtrsPair::encoded_len() as usize + mem::size_of::<u8>();
+
+                    let is_coherent = match extent_integrity_protections_verify_and_remove(
+                        io_slices::SingletonIoSliceMut::new(&mut extent_buf),
+                        0,
+                        integrity_protections_offset,
+                        None,
+                        this.io_block_allocation_blocks_log2,
+                        this.allocation_block_size_128b_log2,
+                        blkdev.io_block_size_128b_log2(),
+                    ) {
+                        Ok((is_coherent, _)) => is_coherent,
+                        Err(e) => {
+                            this.fut_state = DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+
+                    this.fut_state = DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done;
+                    if is_coherent {
+                        let update_group_state = match AuxFsMetadataExtentsUpdateGroupState::try_from(
+                            extent_buf[AuxFsMetadataEncodedExtentsPtrsPair::encoded_len() as usize],
+                        ) {
+                            Ok(update_group_state) => update_group_state,
+                            Err(e) => return task::Poll::Ready(Err(e)),
+                        };
+                        // If group 0 is inactive, then group 1 must be active , and that can be in
+                        // either the Active or ActiveReallocationNeeded
+                        // AuxFsMetadataExtentsUpdateGroupState state. Don't bother figuring it out,
+                        // simply invoke a reallocation then (which will make group 0 the active
+                        // one).
+                        return task::Poll::Ready(Ok(
+                            update_group_state != AuxFsMetadataExtentsUpdateGroupState::Active
+                        ));
+                    } else {
+                        // The group 0 head extent is not valid, then group 1 must be active. Invoke
+                        // a reallocation then, with the same reasoning as above.
+                        return task::Poll::Ready(Ok(true));
+                    }
+                }
+                DetermineAuxFsMetadataExtentsReallocationNeededStateFutureState::Done => unreachable!(),
+            }
+        }
     }
 }
