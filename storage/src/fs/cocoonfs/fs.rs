@@ -10,7 +10,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     blkdev::{self, NvBlkDevFuture},
-    crypto::rng,
+    crypto::{rng, symcipher},
     fs::{
         self, NvFsError,
         cocoonfs::{
@@ -18,7 +18,7 @@ use crate::{
             aux_fs_metadata::{
                 self, AuxFsMetadata, AuxFsMetadataEncodedExtentsPtrsPair, TransactionWriteAuxFsMetadataFuture,
             },
-            extent_ptr, extents, inode_index,
+            extent_ptr, extents, image_header, inode_index,
             integrity::ExtentIntegrityState,
             keys, layout, read_buffer,
             read_inode_data::ReadInodeDataFuture,
@@ -136,9 +136,16 @@ pub(super) struct CocoonFsSyncState<ST: sync_types::SyncTypes> {
     pub alloc_bitmap: alloc_bitmap::AllocBitmap,
     pub alloc_bitmap_file: alloc_bitmap::AllocBitmapFile,
     pub auth_tree: auth_tree::AuthTree<ST>,
+    pub filesystem_update_counter: CocoonFsSyncStateFilesystemUpdateCounter,
     pub read_buffer: read_buffer::ReadBuffer<ST>,
     pub inode_index: inode_index::InodeIndex<ST>,
     pub keys_cache: ST::RwLock<keys::KeyCache>,
+}
+
+/// [`CocoonFsSyncState`] portion related to the filesystem update counter.
+pub(super) struct CocoonFsSyncStateFilesystemUpdateCounter {
+    pub encryption_instance: symcipher::SymBlockCipherModeEncryptionInstance,
+    pub value: [u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
 }
 
 impl<ST: sync_types::SyncTypes> CocoonFsSyncState<ST> {
@@ -599,6 +606,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         &'b alloc_bitmap::AllocBitmap,
         &'b alloc_bitmap::AllocBitmapFile,
         auth_tree::AuthTreeRef<'b, ST>,
+        &'b CocoonFsSyncStateFilesystemUpdateCounter,
         &'b inode_index::InodeIndex<ST>,
         &'b read_buffer::ReadBuffer<ST>,
         keys::KeyCacheRef<'b, ST>,
@@ -615,6 +623,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
                     auth_tree::AuthTreeRef::Ref {
                         tree: &sync_state_read_guard.auth_tree,
                     },
+                    &sync_state_read_guard.filesystem_update_counter,
                     &sync_state_read_guard.inode_index,
                     &sync_state_read_guard.read_buffer,
                     keys::KeyCacheRef::Ref {
@@ -636,6 +645,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
                     auth_tree::AuthTreeRef::MutRef {
                         tree: &mut sync_state.auth_tree,
                     },
+                    &sync_state.filesystem_update_counter,
                     &sync_state.inode_index,
                     &sync_state.read_buffer,
                     keys::KeyCacheRef::MutRef {
@@ -743,6 +753,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         &'b mut alloc_bitmap::AllocBitmap,
         &'b mut alloc_bitmap::AllocBitmapFile,
         &'b mut auth_tree::AuthTree<ST>,
+        &'b mut CocoonFsSyncStateFilesystemUpdateCounter,
         &'b mut inode_index::InodeIndex<ST>,
         &'b mut read_buffer::ReadBuffer<ST>,
         &'b mut keys::KeyCache,
@@ -758,6 +769,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
             &mut sync_state.alloc_bitmap,
             &mut sync_state.alloc_bitmap_file,
             &mut sync_state.auth_tree,
+            &mut sync_state.filesystem_update_counter,
             &mut sync_state.inode_index,
             &mut sync_state.read_buffer,
             sync_state.keys_cache.get_mut(),

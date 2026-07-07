@@ -384,7 +384,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     remaining_states_index_range_offsets_transform,
                     read_authenticate_data_fut,
                 } => {
-                    let (fs_instance, _, _, fs_sync_state_alloc_bitmap, _, mut fs_sync_state_auth_tree, _, _, _) =
+                    let (fs_instance, _, _, fs_sync_state_alloc_bitmap, _, mut fs_sync_state_auth_tree, _, _, _, _) =
                         fs_instance_sync_state.fs_instance_and_destructure_borrow();
                     let (transaction, subrange_states_index_range_offsets, result) =
                         match TransactionReadAuthenticateDataFuture::poll(

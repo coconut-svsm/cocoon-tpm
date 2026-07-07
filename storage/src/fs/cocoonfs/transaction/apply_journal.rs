@@ -263,6 +263,7 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
                         fs_sync_state_auth_tree,
+                        fs_sync_state_filesystem_update_counter,
                         _fs_sync_state_inode_index,
                         _fs_sync_state_read_buffer,
                         _fs_sync_state_keys_cache,
@@ -272,6 +273,7 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         &fs_instance.blkdev,
                         fs_sync_state_auth_tree,
                         &transaction.pending_auth_tree_updates.updated_root_hmac_digest,
+                        &transaction.encrypted_filesystem_update_counter,
                         cx,
                     ) {
                         task::Poll::Ready((pending_auth_tree_nodes_updates, result)) => {
@@ -296,6 +298,10 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
 
                                 break (Some(transaction), e);
                             }
+
+                            // The filesystem instance's encrypted filesystem update counter got
+                            // updated now. Copy the plaintext copy as well.
+                            fs_sync_state_filesystem_update_counter.value = transaction.filesystem_update_counter;
                         }
                         task::Poll::Pending => {
                             *fut_transaction = Some(transaction);

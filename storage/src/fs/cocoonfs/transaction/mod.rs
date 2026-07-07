@@ -88,11 +88,22 @@ pub struct Transaction {
     /// at the [`Transaction`], if any.
     pub(super) aux_fs_metadata_update: Option<aux_fs_metadata::TransactionStagedAuxFsMetatdataUpdate>,
 
+    /// Incremented filesystem update counter.
+    ///
+    /// Populated at [`Transaction`] commit and applied once the journal has been written.
+    filesystem_update_counter: [u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
+
+    /// Encrypted [`filesystem_update_counter`](Self::filesystem_update_counter).
+    ///
+    /// Populated at [`Transaction`] commit and applied once the journal has been written.
+    encrypted_filesystem_update_counter: FixedVec<u8, 4>,
+
     /// Pending updates to the authentication tree.
     ///
     /// Populated at [`Transaction`] commit and applied to the authentication
     /// tree once the journal has been written.
     pending_auth_tree_updates: TransactionPendingAuthTreeUpdates,
+
 
     /// The extents allocated to the journal log's chained encrypted extents'
     /// tail.
@@ -154,6 +165,8 @@ impl Transaction {
             is_primary_pending,
             inode_index_updates: inode_index::TransactionInodeIndexUpdates::new(&fs_instance_sync_state.inode_index),
             aux_fs_metadata_update: None,
+            filesystem_update_counter: [0u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
+            encrypted_filesystem_update_counter: FixedVec::new_empty(),
             pending_auth_tree_updates: TransactionPendingAuthTreeUpdates::new(),
             journal_log_tail_extents: extents::PhysicalExtents::new(),
             #[cfg(test)]
@@ -691,3 +704,5 @@ pub(super) use apply_journal::TransactionApplyJournalFuture;
 pub(super) use auth_tree_updates::TransactionJournalUpdateAuthDigestsScriptIterator;
 pub(super) use cleanup::{TransactionAbortJournalFuture, TransactionCleanupPreCommitCancelledFuture};
 pub(super) use write_journal::TransactionWriteJournalFuture;
+
+use super::image_header;

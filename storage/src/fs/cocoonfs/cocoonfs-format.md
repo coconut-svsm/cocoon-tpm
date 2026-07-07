@@ -19,7 +19,8 @@ implemens support for some features of particular relevance to the intended use-
 storage volume provisioning](#sec-introduction-online-mkfs) and robustness against service interruptions by means of a
 [journal](#sec-introduction-journal). Moreover, in order to enable a wide range of external key retrieval workflows (aka
 "remote attestation") at opening time, some free-form [auxiliary metadata](#sec-introduction-aux-fs-metadata) may get
-stored with the filesystem.
+stored with the filesystem. Lastly, for supporting the design of rollback protection protocols, a [filesystem update
+counter](#sec-update-counter) cryptographically bound to the filesystem's contents is maintained.
 
 ### [Security properties]{#sec-introduction-security}
 The most noteworthy features distinguishing CocoonFs from common existing Full Disk Encryption (FDE) solutions designed
@@ -93,8 +94,7 @@ guaranteed a globally coherent view. Note that in particular, that would allow f
 a software TPM's current time value, into a dedicated file, thereby avoiding the need to write out the complete, mostly
 unchanged state upon each and every update. Furthermore, having a single root authentication digest for the whole
 CocoonFs image available might perhaps serve as a basis for interesting future research projects in the area of rollback
-protection protocols: any digest updates could get sent to and recorded at a trusted remote party (with the journal to
-be introduced later providing a means to reliably recover from lost ACKs due to network failures).
+protection protocols, c.f. the [filesystem update counter](#sec-update-counter) in this context.
 
 It's expected that the storage backing CocoonFs deployments will typically be relatively small, i.e. that the height of
 the Merkle tree will remain within affordable bounds. To get a rough idea on the numbers: five levels with an assumed
@@ -257,17 +257,17 @@ The core CocoonFs metadata structures are:
 * The [inode index](#sec-inode-index), organized as a B+-tree.
 * The [journal](#sec-journal).
 
-Inodes 0 to 5 (inclusive) are reserved for CocoonFs internal use. The [authentication tree](#sec-auth-tree), the
+Inodes 0 to 15 (inclusive) are reserved for CocoonFs internal use. The [authentication tree](#sec-auth-tree), the
 [allocation bitmap](#sec-allocation-bitmap) and the [inode index](#sec-inode-index) root have entries in the inode index
-and are assigned inode numbers 1, 2 and 3 respectively. The [journal log](#sec-journal) has inode number 5 associated
-with it, but there's no explicit entry for it in the inode index -- the number is used only for key derivation subject
-purposes.
+and are assigned inode numbers 1, 2 and 3 respectively. The [journal log](#sec-journal) and the [filesystem update
+counter](#sec-update-counter) have inodes 5 and 6 associated with them respectively, but there's no explicit entry for
+either in the inode index -- the numbers are used only for key derivation subject purposes.
 
-For completeness in this context: inode number 0 is reserved for a special "no inode" value, inode number 4 is currently
-not allocated and reserved. Note that the minimum inode index B+-tree leaf node fill-level is such that inodes 1 to 3
-will always be found in the leftmost leaf, which is referred to as the [*inode index entry leaf
-node*](#def-inode-index-entry-leaf-node). The location of the inode index entry leaf node is referenced from the
-[mutable image header](#sec-mutable-image-header) and enables discovering all the other metadata structures at
+For completeness in this context: inode number 0 is reserved for a special "no inode" value, inode number 4 as well as
+the range 7-15 (inclusive) are currently not allocated and reserved. Note that the minimum inode index B+-tree leaf node
+fill-level is such that inodes 1 to 3 will always be found in the leftmost leaf, which is referred to as the [*inode
+index entry leaf node*](#def-inode-index-entry-leaf-node). The location of the inode index entry leaf node is referenced
+from the [mutable image header](#sec-mutable-image-header) and enables discovering all the other metadata structures at
 filesystem opening time.
 
 An [*extent*]{#def-extent} is a **non-empty**, physically contiguous range on storage. Any inode, except for the special
@@ -632,6 +632,10 @@ The mutable image header's format is:
 |Digest length produced by              |The [authentication tree root HMAC digest](#sec-auth-tree-root-digest).       |
 |`auth_tree_root_hmac_hash_alg`.        |                                                                              |
 +---------------------------------------+------------------------------------------------------------------------------+
+|16B aligned upwards to a multiple of   |The encrypted [filesystem update counter](#sec-update-counter).               |
+|the [block cipher block                |                                                                              |
+|size](#sec-static-image-header)        |                                                                              |
++---------------------------------------+------------------------------------------------------------------------------+
 |Digest length produced by              |[HMAC digest over the inode index entry leaf                                  |
 |`preauth_cca_protection_hmac_hash_alg`.|node](#sec-inode-index-entry-leaf-node-preauth-digest), used for maintaining  |
 |                                       |IND-CCA security when first decrypting the node at filesystem opening time.   |
@@ -646,6 +650,28 @@ The mutable image header's format is:
 |variable                               |Padding to align the mutable image header's length to a multiple of the       |
 |                                       |[Allocation Block](#def-allocation-block) size.                               |
 +---------------------------------------+------------------------------------------------------------------------------+
+
+##### [Filesystem update counter]{#sec-update-counter}
+In order to facilitate the implementation of rollback protection protocols, a *filesystem update counter* is maintained.
+It starts at a random offset to be initialized at filesystem creation time, and is incremented modulo $2^{128}$ upon
+each update of the filesystem's contents, i.e. upon each update of the [authentication tree](#sec-auth-tree). A remote
+ledger would track the minimum update counter ever reported to it and prohibit going back to earlier values. For any
+$x$, values in the range $[x + 2^{128}, x - 1] (\textrm{mod} 2^{128})$ are considered to come before $x$.
+
+The filesystem update counter gets serialized in little-endian format, padded with zeros to align to a multiple
+of the filesystem's [block cipher block size](#sec-static-image-header) and encrypted
+
+* with a [a subkey derived from the root key](#sec-key-derivation-subkey) with the domain parameter set to 6, i.e. the
+  (virtual) inode number allocated to it, a subdomain value of `INODE_KEY_SUBDOMAIN_DATA`, and a key purpose of
+  [`KEY_PURPOSE_ENCRYPTION`](#sec-key-derivation),
+* in CBC mode with the IV set to all-zeros.
+
+For the choice of a constant all-zeros IV, note that due to the representation in little-endian format, an increment in
+the plaintext counter value will affect all blocks in the ciphertext, and, as the counter is strictly monotonic
+increasing, the same plaintext wouldn't get encrypted twice.
+
+In order to cryptographically bind the state of the filesystem contents to the update counter, the encrypted filesystem
+update counter gets included in the [authentication tree root node digest](#sec-auth-tree-root-digest).
 
 #### [Filesystem creation info header]{#sec-mkfsinfo-header}
 As discussed in the introductionary section about [online filesystem creation support](#sec-introduction-online-mkfs),
@@ -1149,7 +1175,7 @@ The digest over a child node is produced by computing the (regular) hash with [`
    3. An authentication context subject identifier byte of constant
       [`AUTH_SUBJECT_ID_AUTH_TREE_DESCENDANT_NODE`](#def-auth-subject-id) identifying the authenticated subject.
 
-### [Authentication tree root node digest](#sec-auth-tree-root-digest)
+### [Authentication tree root node digest]{#sec-auth-tree-root-digest}
 The authentication tree root digest is created by computing a HMAC with an underlying hash of
 [`auth_tree_root_hmac_hash_alg`](#def-image-layout) and a [a subkey derived from the root
 key](#sec-key-derivation-subkey) with the domain parameter set to 1, i.e. the authentication tree's associated inode
@@ -1160,9 +1186,10 @@ number, a subdomain value of 0, and a key purpose of [`KEY_PURPOSE_AUTH_ROOT`](#
    1. The index in the [Authentication Tree Data Block index domain](#def-auth-tree-data-block-index-domain) of the root
       node's last entry's associated data region's beginning modulo $2^{64}$, encoded as a 64 bit integer in
       little-endian format. Observe that this uniquely fixes the position of the root node in the tree.
-   2. The "image context", a digest over filesystem configuration parameters computed as described below.
-   3. An authentication context format version identifier byte of constant 0.
-   4. An authentication context subject identifier byte of constant
+   2. The encrypted [filesystem update counter](#sec-update-counter).
+   3. The "image context", a digest over filesystem configuration parameters computed as described below.
+   4. An authentication context format version identifier byte of constant 0.
+   5. An authentication context subject identifier byte of constant
       [`AUTH_SUBJECT_ID_AUTH_TREE_ROOT_NODE`](#def-auth-subject-id) identifying the authenticated subject.
 
 The image context digest is produced by forming a HMAC with same hash algorithm and subkey as for the root node above

@@ -305,12 +305,17 @@ impl StaticImageHeader {
     }
 }
 
+/// Length of the filesystem update counter in bytes.
+pub const FILESYSTEM_UPDATE_COUNTER_LEN: u32 = 16;
+
 /// Mutable image header.
 pub struct MutableImageHeader {
     /// Pointers to the two [`AuxFsMetadata`] update groups' heads, if any.
     pub aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     /// The current authentication tree root digest.
     pub root_hmac_digest: FixedVec<u8, 5>,
+    /// The encrypted filesystem update counter.
+    pub encrypted_filesystem_update_counter: FixedVec<u8, 4>,
     /// The current inode index entry leaf node preauthentication CCA protection
     /// digest.
     pub inode_index_entry_leaf_node_preauth_cca_protection_digest: FixedVec<u8, 5>,
@@ -334,6 +339,8 @@ impl MutableImageHeader {
         let mut encoded_len = AuxFsMetadataEncodedExtentsPtrsPair::encoded_len();
         // The root hmac.
         encoded_len += hash::hash_alg_digest_len(image_layout.auth_tree_root_hmac_hash_alg) as u32;
+        // The encrypted filesystem_update counter.
+        encoded_len += Self::encrypted_filesystem_update_counter_len(image_layout);
         // The inode index entry node pre-authentication CCA protection digest.
         encoded_len += hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as u32;
         // The inode index entry leaf node pointer.
@@ -383,6 +390,9 @@ impl MutableImageHeader {
     /// * `root_hmac_digest` - The current authentication tree root digest. Its
     ///   length must match that of digests produced by
     ///   [`ImageLayout::auth_tree_root_hmac_hash_alg`] exactly.
+    /// * `encrypted_fielsystem_update_counter` - The encrypted filesystem
+    ///   update counter. Its length must be equal to
+    ///   [`encrypted_filesystem_update_counter_len()`](Self::encrypted_filesystem_update_counter_len).
     /// * `inode_index_entry_leaf_node_preauth_cca_protection_digest` - The
     ///   current inode index entry leaf node preauthentication CCA protection
     ///   digest. Its length must match that of digests produced by
@@ -394,6 +404,7 @@ impl MutableImageHeader {
         mut dst: DI,
         aux_fs_metadata_update_groups_heads: &AuxFsMetadataEncodedExtentsPtrsPair,
         root_hmac_digest: &[u8],
+        encrypted_filesystem_update_counter: &[u8],
         inode_index_entry_leaf_node_preauth_cca_protection_digest: &[u8],
         inode_index_entry_leaf_node_block_ptr: &extent_ptr::EncodedBlockPtr,
         image_size: layout::AllocBlockCount,
@@ -403,6 +414,13 @@ impl MutableImageHeader {
         let mut root_hmac_digest = io_slices::SingletonIoSlice::new(root_hmac_digest).map_infallible_err();
         dst.copy_from_iter(&mut root_hmac_digest)?;
         if !root_hmac_digest.is_empty()? {
+            return Err(nvfs_err_internal!());
+        }
+
+        let mut encrypted_filesystem_update_counter =
+            io_slices::SingletonIoSlice::new(encrypted_filesystem_update_counter).map_infallible_err();
+        dst.copy_from_iter(&mut encrypted_filesystem_update_counter)?;
+        if !encrypted_filesystem_update_counter.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
@@ -452,6 +470,18 @@ impl MutableImageHeader {
             io_slices::SingletonIoSliceMut::new(&mut root_hmac_digest).map_infallible_err();
         root_hmac_digest_io_slice.copy_from_iter(&mut src)?;
         if !root_hmac_digest_io_slice.is_empty()? {
+            return Err(nvfs_err_internal!());
+        }
+
+        // The encrypted filesystem update counter.
+        let encrypted_filesystem_update_counter_len =
+            Self::encrypted_filesystem_update_counter_len(image_layout) as usize;
+        let mut encrypted_filesystem_update_counter =
+            FixedVec::new_with_default(encrypted_filesystem_update_counter_len)?;
+        let mut encrypted_filesystem_update_counter_io_slice =
+            io_slices::SingletonIoSliceMut::new(&mut encrypted_filesystem_update_counter).map_infallible_err();
+        encrypted_filesystem_update_counter_io_slice.copy_from_iter(&mut src)?;
+        if !encrypted_filesystem_update_counter_io_slice.is_empty()? {
             return Err(nvfs_err_internal!());
         }
 
@@ -506,10 +536,26 @@ impl MutableImageHeader {
         Ok(Self {
             aux_fs_metadata_update_groups_heads,
             root_hmac_digest,
+            encrypted_filesystem_update_counter,
             inode_index_entry_leaf_node_preauth_cca_protection_digest,
             inode_index_entry_leaf_node_block_ptr,
             image_size,
         })
+    }
+
+    /// Length of the encrypted filesystem update counter in bytes.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's [`ImageLayout`].
+    pub fn encrypted_filesystem_update_counter_len(image_layout: &layout::ImageLayout) -> u32 {
+        let block_cipher_block_len = image_layout.block_cipher_alg.block_len() as u32;
+        if block_cipher_block_len.is_power_of_two() {
+            FILESYSTEM_UPDATE_COUNTER_LEN
+                + (FILESYSTEM_UPDATE_COUNTER_LEN.wrapping_neg() & (block_cipher_block_len - 1))
+        } else {
+            FILESYSTEM_UPDATE_COUNTER_LEN.next_multiple_of(block_cipher_block_len)
+        }
     }
 
     /// Decode only the pointers to the [`AuxFsMetadata`] update

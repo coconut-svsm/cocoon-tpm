@@ -1916,6 +1916,8 @@ impl AuthTreeConfig {
     /// * `root_hmac_digest_dst` - Buffer receiving the computed digest. Its
     ///   size must match the digest length of
     ///   [`root_hmac_hash_alg`](Self::root_hmac_hash_alg) exactly.
+    /// * `encrypted_filesystem_update_counter` - The encrypted filesystem
+    ///   update counter.
     /// * `root_node_id` - The [`AuthTreeNodeId`] identifying the tree's root
     ///   node.
     /// * `digest_entries_iterator` - [`Iterator`] over the digests stored in
@@ -1924,6 +1926,7 @@ impl AuthTreeConfig {
     fn hmac_root_node_into<'a, DEI: Iterator<Item = &'a [u8]>>(
         &self,
         root_hmac_digest_dst: &mut [u8],
+        encrypted_filesystem_update_counter: &[u8],
         root_node_id: &AuthTreeNodeId,
         digest_entries_iterator: DEI,
     ) -> Result<(), NvFsError> {
@@ -1948,6 +1951,7 @@ impl AuthTreeConfig {
         h.update(
             io_slices::BuffersSliceIoSlicesIter::new(&[
                 node_id.as_slice(),
+                encrypted_filesystem_update_counter,
                 self.image_context_digest.as_slice(),
                 auth_context_subject_id_suffix.as_slice(),
             ])
@@ -1962,6 +1966,8 @@ impl AuthTreeConfig {
     ///
     /// # Arguments:
     ///
+    /// * `encrypted_filesystem_update_counter` - The encrypted filesystem
+    ///   update counter.
     /// * `root_node_id` - The [`AuthTreeNodeId`] identifying the tree's root
     ///   node.
     /// * `digest_entries_iterator` - [`Iterator`] over the digests stored in
@@ -1969,12 +1975,18 @@ impl AuthTreeConfig {
     ///   included.
     fn hmac_root_node<'a, DEI: Iterator<Item = &'a [u8]>>(
         &self,
+        encrypted_filesystem_update_counter: &[u8],
         root_node_id: &AuthTreeNodeId,
         digest_entries_iterator: DEI,
     ) -> Result<zeroize::Zeroizing<FixedVec<u8, 5>>, NvFsError> {
         let root_hmac_digest_len = hash::hash_alg_digest_len(self.root_hmac_hash_alg) as usize;
         let mut root_hmac_digest = zeroize::Zeroizing::new(FixedVec::new_with_default(root_hmac_digest_len)?);
-        self.hmac_root_node_into(&mut root_hmac_digest, root_node_id, digest_entries_iterator)?;
+        self.hmac_root_node_into(
+            &mut root_hmac_digest,
+            encrypted_filesystem_update_counter,
+            root_node_id,
+            digest_entries_iterator,
+        )?;
         Ok(root_hmac_digest)
     }
 
@@ -1987,6 +1999,8 @@ impl AuthTreeConfig {
     ///   as usually stored in [`MutableImageHeader::root_hmac_digest`].  Its
     ///   size must match the digest length of
     ///   [`root_hmac_hash_alg`](Self::root_hmac_hash_alg) exactly.
+    /// * `encrypted_filesystem_update_counter` - The encrypted filesystem
+    ///   update counter.
     /// * `root_node_id` - The [`AuthTreeNodeId`] identifying the tree's root
     ///   node.
     /// * `node_data` - Buffer containing the raw root node data to get
@@ -1995,6 +2009,7 @@ impl AuthTreeConfig {
     fn authenticate_root_node(
         &self,
         expected_root_hmac_digest: &[u8],
+        encrypted_filesystem_update_counter: &[u8],
         root_node_id: &AuthTreeNodeId,
         node_data: &[u8],
     ) -> Result<(), NvFsError> {
@@ -2009,6 +2024,7 @@ impl AuthTreeConfig {
         };
         debug_assert!(node_data.len() >= digest_entry_len << digest_entries_in_node_log2);
         let root_hmac_digest = self.hmac_root_node(
+            encrypted_filesystem_update_counter,
             root_node_id,
             node_data
                 .chunks_exact(digest_entry_len)
@@ -2521,6 +2537,7 @@ impl AuthTreeDigestDataBlockContext {
 pub struct AuthTree<ST: sync_types::SyncTypes> {
     config: AuthTreeConfig,
     root_hmac_digest: FixedVec<u8, 5>,
+    encrypted_filesystem_update_counter: FixedVec<u8, 4>,
     node_cache: ST::RwLock<AuthTreeNodeCache>,
 }
 
@@ -2541,6 +2558,9 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
     ///   file.
     /// * `root_hmac_digest` - The filesystem's root digest, as found in
     ///   [`MutableImageHeader::root_hmac_digest`].
+    /// * `encrypted_filesystem_update_counter` - The encrypted filesystem
+    ///   update counter.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         root_key: &keys::RootKey,
         image_layout: &layout::ImageLayout,
@@ -2549,6 +2569,7 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
         auth_tree_extents: extents::LogicalExtents,
         allocation_bitmap_extents: &extents::PhysicalExtents,
         root_hmac_digest: FixedVec<u8, 5>,
+        encrypted_filesystem_update_counter: FixedVec<u8, 4>,
     ) -> Result<Self, NvFsError> {
         let config = AuthTreeConfig::new(
             root_key,
@@ -2567,6 +2588,7 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
         Ok(Self {
             config,
             root_hmac_digest,
+            encrypted_filesystem_update_counter,
             node_cache,
         })
     }
@@ -2578,16 +2600,20 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
     /// * `config` - The [`AuthTree`]'s assoicated [`AuthTreeConfig`].
     /// * `root_hmac_digest` - The filesystem's root digest, as found in
     ///   [`MutableImageHeader::root_hmac_digest`].
+    /// * `encrypted_filesystem_update_counter` - The encrypted filesystem
+    ///   update counter.
     /// * `node_cache` - The authentication tree node cached, possibly
     ///   containing some (authenticated) nodes already.
     pub fn new_from_parts(
         config: AuthTreeConfig,
         root_hmac_digest: FixedVec<u8, 5>,
+        encrypted_filesystem_update_counter: FixedVec<u8, 4>,
         node_cache: AuthTreeNodeCache,
     ) -> Self {
         Self {
             config,
             root_hmac_digest,
+            encrypted_filesystem_update_counter,
             node_cache: ST::RwLock::from(node_cache),
         }
     }
@@ -2600,6 +2626,11 @@ impl<ST: sync_types::SyncTypes> AuthTree<ST> {
     /// Access the authentication tree's current root HMAC digest.
     pub fn get_root_hmac_digest(&self) -> &[u8] {
         &self.root_hmac_digest
+    }
+
+    /// Access the encrypted filesystem update counter.
+    pub fn get_encrypted_filesystem_update_counter(&self) -> &[u8] {
+        &self.encrypted_filesystem_update_counter
     }
 
     /// Clear all caches.
@@ -2641,11 +2672,14 @@ impl<'a, ST: sync_types::SyncTypes> AuthTreeRef<'a, ST> {
 
     /// Destructure into references to the [`AuthTree`]'s constituent
     /// components.
-    pub fn destructure_borrow<'b>(&'b mut self) -> (&'b AuthTreeConfig, &'b [u8], AuthTreeNodeCacheRef<'b, ST>) {
+    pub fn destructure_borrow<'b>(
+        &'b mut self,
+    ) -> (&'b AuthTreeConfig, &'b [u8], &'b [u8], AuthTreeNodeCacheRef<'b, ST>) {
         match self {
             Self::Ref { tree } => (
                 &tree.config,
                 &tree.root_hmac_digest,
+                &tree.encrypted_filesystem_update_counter,
                 AuthTreeNodeCacheRef::Ref {
                     cache: &tree.node_cache,
                 },
@@ -2653,6 +2687,7 @@ impl<'a, ST: sync_types::SyncTypes> AuthTreeRef<'a, ST> {
             Self::MutRef { tree } => (
                 &tree.config,
                 &tree.root_hmac_digest,
+                &tree.encrypted_filesystem_update_counter,
                 AuthTreeNodeCacheRef::MutRef {
                     cache: tree.node_cache.get_mut(),
                 },
@@ -2918,6 +2953,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeLoadFuture<B> {
     /// * `blkdev` - The filesystem image backing storage.
     /// * `tree_config` - The filesystem's [`AuthTree`]'s [`AuthTreeConfig`].
     /// * `root_hmac_digest` - The filesystem's [`AuthTree`]'s root digest.
+    /// * `encrypted_filesystem_update_counter` - The encrypted filesystem
+    ///   update counter.
     /// * `node_cache` - The filesystem's [`AuthTree`]'s [`AuthTreeNodeCache`].
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
@@ -2926,6 +2963,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeLoadFuture<B> {
         blkdev: &B,
         tree_config: &AuthTreeConfig,
         root_hmac_digest: &[u8],
+        encrypted_filesystem_update_counter: &[u8],
         node_cache: &'a mut AuthTreeNodeCacheRef<'b, ST>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<AuthTreeNodeCacheEntryRef<'a, ST>, NvFsError>> {
@@ -3038,7 +3076,12 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeLoadFuture<B> {
                         tree_config.authenticate_descendant_node(cur_node_expected_digest, cur_node_id, &cur_node_data)
                     } else {
                         // It is the root node.
-                        tree_config.authenticate_root_node(root_hmac_digest, cur_node_id, &cur_node_data)
+                        tree_config.authenticate_root_node(
+                            root_hmac_digest,
+                            encrypted_filesystem_update_counter,
+                            cur_node_id,
+                            &cur_node_data,
+                        )
                     } {
                         this.fut_state = AuthTreeNodeLoadFutureState::Done;
                         return task::Poll::Ready(Err(e));
@@ -3633,12 +3676,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
     ///       digest and the [`AuthTreePendingNodesUpdates`] instance will get
     ///       returned wrapped in an `Ok`.
     type Output = Result<(DUI, Result<(FixedVec<u8, 5>, AuthTreePendingNodesUpdates), NvFsError>), NvFsError>;
-    type AuxPollData<'a> = ();
+
+    /// Auxiliary data provided to [`poll()`](Self::poll).
+    ///
+    /// The new encrypted filesystem update counter must get passed for the
+    /// `AuxPollData`.
+    type AuxPollData<'a> = &'a [u8];
 
     fn poll<'a>(
         self: pin::Pin<&mut Self>,
         fs_instance_sync_state: &mut CocoonFsSyncStateMemberRef<'_, ST, B>,
-        _aux_data: &mut Self::AuxPollData<'a>,
+        updated_encrypted_filesystem_update_counter: &mut Self::AuxPollData<'a>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Self::Output> {
         let this = pin::Pin::into_inner(self);
@@ -3700,15 +3748,29 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                                 }
                             }
                             None => {
-                                // There is no change at all, copy the existing root hmac and
-                                // return.
-                                let root_hmac_digest = &fs_instance_sync_state.auth_tree.root_hmac_digest;
-                                let mut root_hmac_copy = match FixedVec::new_with_default(root_hmac_digest.len()) {
-                                    Ok(root_hmac_copy) => root_hmac_copy,
-                                    Err(e) => break Err((NvFsError::from(e), None)),
-                                };
-                                root_hmac_copy.copy_from_slice(root_hmac_digest);
-                                break Ok(root_hmac_copy);
+                                // There is no change to the authenticated data at all. Proceeed to
+                                // redigesting the root node with the
+                                // updated_encrypted_filesystem_update_counter.
+                                if let Err(e) = this
+                                    .pending_nodes_updates
+                                    .nodes_updates
+                                    .try_reserve_exact(1)
+                                    .and_then(|_| this.cursor.try_reserve_exact(1))
+                                {
+                                    break Err((NvFsError::from(e), None));
+                                }
+                                this.pending_nodes_updates
+                                    .nodes_updates
+                                    .push(AuthTreePendingNodeUpdates {
+                                        node_id: AuthTreeNodeId::new(
+                                            AuthTreeDataBlockIndex::from(0u64),
+                                            tree_config.auth_tree_levels - 1,
+                                            tree_config.node_digests_per_node_log2,
+                                            tree_config.data_digests_per_node_log2,
+                                        ),
+                                        updated_entries: Vec::new(),
+                                    });
+                                this.cursor.push(0);
                             }
                         };
                     }
@@ -3813,11 +3875,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                                 } else {
                                     // At the root, compute the HMAC over the root node and be done.
                                     match tree_config.hmac_root_node(
+                                        updated_encrypted_filesystem_update_counter,
                                         &popped_node_pending_updates.node_id,
                                         popped_node_updated_digests,
                                     ) {
                                         Ok(mut root_hmac) => {
-                                            break 'outer Ok(mem::take(&mut root_hmac));
+                                            break 'outer Ok(mem::take(&mut *root_hmac));
                                         }
                                         Err(e) => {
                                             break 'outer Err((e, next_updated_data_block));
@@ -3872,17 +3935,23 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
                         mut fs_sync_state_auth_tree,
+                        _fs_sync_state_filesystem_update_counter,
                         _fs_sync_state_inode_index,
                         _fs_sync_state_read_buffer,
                         _fs_sync_state_keys_cache,
                     ) = fs_instance_sync_state.fs_instance_and_destructure_borrow();
-                    let (auth_tree_config, auth_tree_root_hmac_digest, mut auth_tree_node_cache) =
-                        fs_sync_state_auth_tree.destructure_borrow();
+                    let (
+                        auth_tree_config,
+                        auth_tree_root_hmac_digest,
+                        auth_tree_encrypted_filesystem_update_counter,
+                        mut auth_tree_node_cache,
+                    ) = fs_sync_state_auth_tree.destructure_borrow();
                     let popped_node_original = match AuthTreeNodeLoadFuture::poll(
                         pin::Pin::new(load_original_node_fut),
                         &fs_instance.blkdev,
                         auth_tree_config,
                         auth_tree_root_hmac_digest,
+                        auth_tree_encrypted_filesystem_update_counter,
                         &mut auth_tree_node_cache,
                         cx,
                     ) {
@@ -3941,6 +4010,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                         debug_assert!(next_updated_data_block.is_none());
                         if let Err(e) = auth_tree_config.hmac_root_node_into(
                             &mut popped_node_digest_dst,
+                            updated_encrypted_filesystem_update_counter,
                             &popped_node_pending_updates.node_id,
                             popped_node_updated_digests,
                         ) {
@@ -4127,6 +4197,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     /// * `tree` - Exclusive reference to the filesystem's [`AuthTree`]
     ///   instance.
     /// * `updated_root_hmac_digest` - The updated root digest.
+    /// * `updated_encrypted_filesystem_update_counter` - The updated encrypted
+    ///   filesystem update counter.
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
     pub fn poll<ST: sync_types::SyncTypes>(
@@ -4134,6 +4206,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
         blkdev: &B,
         tree: &mut AuthTree<ST>,
         updated_root_hmac_digest: &[u8],
+        updated_encrypted_filesystem_update_counter: &[u8],
         cx: &mut task::Context<'_>,
     ) -> task::Poll<(AuthTreePendingNodesUpdates, Result<(), NvFsError>)> {
         let this = pin::Pin::into_inner(self);
@@ -4142,6 +4215,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                 AuthTreeApplyUpdatesFutureState::Init { node_data_buf } => {
                     if this.cur_pending_nodes_updates_index == this.pending_nodes_updates.nodes_updates.len() {
                         tree.root_hmac_digest.copy_from_slice(updated_root_hmac_digest);
+                        tree.encrypted_filesystem_update_counter
+                            .copy_from_slice(updated_encrypted_filesystem_update_counter);
                         break Ok(());
                     }
 
@@ -5513,6 +5588,8 @@ impl AuthTreeInitializationCursor {
     ///   size must match the
     ///   [`root_hmac_hash_alg`](AuthTreeConfig::root_hmac_hash_alg) digest
     ///   length exactly.
+    /// * `encrypted_filesystem_update_counter` - The encrypted filesystem
+    ///   update counter.
     /// * `tree_config` - The to be created filesystem's [`AuthTreeConfig`].
     /// * `node_cache` - An [`AuthTreeNodeCache`] instance to store the root
     ///   node into.
@@ -5520,6 +5597,7 @@ impl AuthTreeInitializationCursor {
     pub fn finalize_into(
         mut self: Box<Self>,
         root_hmac_digest_dst: &mut [u8],
+        encrypted_filesystem_update_counter: &[u8],
         tree_config: &AuthTreeConfig,
         node_cache: Option<&mut AuthTreeNodeCache>,
     ) -> Result<(), NvFsError> {
@@ -5547,6 +5625,7 @@ impl AuthTreeInitializationCursor {
 
         tree_config.hmac_root_node_into(
             root_hmac_digest_dst,
+            encrypted_filesystem_update_counter,
             &root_node_id,
             (0..(1usize << (digest_entries_in_root_node_log2 as u32)))
                 .map(|i| root_node.get_digest(i, digest_entry_in_root_node_len as usize)),

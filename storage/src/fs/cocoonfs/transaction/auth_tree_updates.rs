@@ -206,6 +206,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
                         mut fs_sync_state_auth_tree,
+                        _fs_sync_state_filesystem_update_counter,
                         _fs_sync_state_inode_index,
                         fs_sync_state_read_buffer,
                         _fs_sync_state_keys_cache,
