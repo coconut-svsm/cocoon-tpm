@@ -6,6 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <title>cocoonfs-format</title>
   <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
     html {
       color: #1a1a1a;
       background-color: #fdfdfd;
@@ -166,7 +169,7 @@
       vertical-align: middle;
     }
   </style>
-  <script
+  <script defer=""
   src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"
   type="text/javascript"></script>
 </head>
@@ -185,6 +188,10 @@ id="sec-introduction-security">Security properties</span></a></li>
 model</a></li>
 <li><a href="#journal" id="toc-journal"><span
 id="sec-introduction-journal">Journal</span></a></li>
+<li><a href="#auxiliary-filesystem-metadata"
+id="toc-auxiliary-filesystem-metadata"><span
+id="sec-introduction-aux-fs-metadata">Auxiliary filesystem
+metadata</span></a></li>
 <li><a href="#confidentiality-of-allocations-and-block-trimming"
 id="toc-confidentiality-of-allocations-and-block-trimming"><span
 id="sec-allocations-confidentiality">Confidentiality of allocations and
@@ -207,6 +214,8 @@ id="sec-auth-context">Authentication contexts</span></a></li>
 id="toc-encryption-entity-formats">Encryption entity formats</a></li>
 <li><a href="#image-header" id="toc-image-header"><span
 id="sec-image-header">Image header</span></a></li>
+<li><a href="#integrity-protections"
+id="toc-integrity-protections">Integrity protections</a></li>
 <li><a href="#key-derivation-1" id="toc-key-derivation-1"><span
 id="sec-key-derivation">Key derivation</span></a></li>
 </ul></li>
@@ -224,8 +233,9 @@ id="toc-authentication-tree-non-root-node-digests"><span
 id="sec-auth-tree-descendant-node-digest">Authentication tree non-root
 node digests</span></a></li>
 <li><a href="#authentication-tree-root-node-digest"
-id="toc-authentication-tree-root-node-digest">Authentication tree root
-node digest</a></li>
+id="toc-authentication-tree-root-node-digest"><span
+id="sec-auth-tree-root-digest">Authentication tree root node
+digest</span></a></li>
 <li><a href="#organization-of-the-authentication-tree-storage"
 id="toc-organization-of-the-authentication-tree-storage">Organization of
 the authentication tree storage</a></li>
@@ -252,22 +262,35 @@ id="toc-regular-file-encryption">Regular file encryption</a></li>
 <li><a href="#journal-1" id="toc-journal-1"><span
 id="sec-journal">Journal</span></a>
 <ul>
-<li><a href="#allocation-bitmap-file-fragments-authentication-digests"
-id="toc-allocation-bitmap-file-fragments-authentication-digests">Allocation
-bitmap file fragments’ authentication digests</a></li>
-<li><a href="#writes-application-script"
-id="toc-writes-application-script"><span
-id="sec-journal-apply-writes-script-script">Writes application
-script</span></a></li>
-<li><a href="#authentication-tree-update-script"
-id="toc-authentication-tree-update-script"><span
-id="sec-journal-auth-tree-updates-script">Authentication tree update
-script</span></a></li>
-<li><a href="#trim-script" id="toc-trim-script">Trim script</a></li>
+<li><a href="#journal-log-encryption"
+id="toc-journal-log-encryption"><span
+id="sec-journal-log-encryption">Journal log encryption</span></a></li>
+<li><a href="#journal-log-head-extent-plaintext-header"
+id="toc-journal-log-head-extent-plaintext-header">Journal log head
+extent plaintext header</a></li>
+<li><a href="#journal-log-payload-contents"
+id="toc-journal-log-payload-contents"><span
+id="sec-journal-log-payload-contents">Journal log payload
+contents</span></a></li>
 <li><a href="#journal-staging-copy-disguising"
 id="toc-journal-staging-copy-disguising"><span
 id="sec-journal-staging-copy-disguise">Journal staging copy
 disguising</span></a></li>
+</ul></li>
+<li><a href="#auxiliary-filesystem-metadata-1"
+id="toc-auxiliary-filesystem-metadata-1"><span
+id="sec-aux-fs-metadata">Auxiliary filesystem metadata</span></a>
+<ul>
+<li><a href="#payload-encoding" id="toc-payload-encoding"><span
+id="sec-aux-fs-metadata-encoding">Payload encoding</span></a></li>
+<li><a href="#storage-as-part-of-the-filesystem-creation-info-data"
+id="toc-storage-as-part-of-the-filesystem-creation-info-data"><span
+id="sec-aux-fs-metadata-mkfsinfo">Storage as part of the filesystem
+creation info data</span></a></li>
+<li><a href="#storage-in-a-formatted-filesystem"
+id="toc-storage-in-a-formatted-filesystem"><span
+id="sec-aux-fs-metadata-formatted">Storage in a formatted
+filesystem</span></a></li>
 </ul></li>
 <li><a href="#opening-the-filesystem-informative"
 id="toc-opening-the-filesystem-informative">Opening the filesystem
@@ -282,7 +305,7 @@ body { max-width: 72em !important; }
 </style>
 <h1 id="cocoonfs-format-specification">CocoonFs format
 specification</h1>
-<p>Copyright 2023-2025 SUSE LLC</p>
+<p>Copyright 2023-2026 SUSE LLC</p>
 <p>Licensed under CC BY-SA 4.0</p>
 <h2 id="introduction"><span
 id="sec-introduction">Introduction</span></h2>
@@ -296,7 +319,14 @@ format implemens support for some features of particular relevance to
 the intended use-case, such as support for <a
 href="#sec-introduction-online-mkfs">keyless storage volume
 provisioning</a> and robustness against service interruptions by means
-of a <a href="#sec-introduction-journal">journal</a>.</p>
+of a <a href="#sec-introduction-journal">journal</a>. Moreover, in order
+to enable a wide range of external key retrieval workflows (aka “remote
+attestation”) at opening time, some free-form <a
+href="#sec-introduction-aux-fs-metadata">auxiliary metadata</a> may get
+stored with the filesystem. Lastly, for supporting the design of
+rollback protection protocols, a <a
+href="#sec-update-counter">filesystem update counter</a>
+cryptographically bound to the filesystem’s contents is maintained.</p>
 <h3 id="security-properties"><span
 id="sec-introduction-security">Security properties</span></h3>
 <p>The most noteworthy features distinguishing CocoonFs from common
@@ -399,10 +429,9 @@ file, thereby avoiding the need to write out the complete, mostly
 unchanged state upon each and every update. Furthermore, having a single
 root authentication digest for the whole CocoonFs image available might
 perhaps serve as a basis for interesting future research projects in the
-area of rollback protection protocols: any digest updates could get sent
-to and recorded at a trusted remote party (with the journal to be
-introduced later providing a means to reliably recover from lost ACKs
-due to network failures).</p>
+area of rollback protection protocols, c.f. the <a
+href="#sec-update-counter">filesystem update counter</a> in this
+context.</p>
 <p>It’s expected that the storage backing CocoonFs deployments will
 typically be relatively small, i.e. that the height of the Merkle tree
 will remain within affordable bounds. To get a rough idea on the
@@ -442,19 +471,23 @@ the other algorithms as found in the image header as additional
 input.</p>
 <h3 id="filesystem-model">Filesystem model</h3>
 <p>The filesystem model implemented by CocoonFs is a very limited one:
-there’s no directory hierarchy and “file names” are simply 32 bit
+there’s no directory hierarchy and “file names” are simply 64 bit
 integers, i.e. inode numbers.</p>
 <p>It is expected that some inode numbers or ranges thereof get
 statically assigned to a specific application purpose. For example, when
-storing a software TPM’s state, it would be natural to reserve the
-ranges 0x01000000-0x01ffffff for the storage of NV indices and
-0x81000000-0x81ffffff for persistent objects, c.f. [<a
-href="#bib-tcgtpm19b">TCGTPM19B</a>].</p>
+storing a software TPM’s state, it would be natural to reserve e.g. the
+ranges <code>0x54504d00_01000000-0x54504d00_01ffffff</code> for the
+storage of NV indices and
+<code>0x54504d00_81000000-0x54504d00_81ffffff</code> for persistent
+objects, c.f. [<a href="#bib-tcgtpm19b">TCGTPM19B</a>].</p>
 <p>Note that for the anticipated CocoonFs usage scenarios, i.e. the
 storage of core TEE state, it will likely always be possible to make
 such static assignments at development time and thus, it is certainly
 desirable to avoid the overhead of updating directory metadata
 structures.</p>
+<p>In addition to the data itself, a set of flags is associated with
+each allocated inode, 8 of which are freely available for application
+use.</p>
 <h3 id="journal"><span id="sec-introduction-journal">Journal</span></h3>
 <p>For robustness against service interruptions, e.g. power cuts,
 crashes and alike, CocoonFs implements a journal.</p>
@@ -490,6 +523,38 @@ been sent, but before a reply has been received back, make the
 filesystem opening code to query the remote trusted party for the latest
 root authentication digest at filesystem opening time, depending on the
 answer either apply or cancel the pending journal.</p>
+<h3 id="auxiliary-filesystem-metadata"><span
+id="sec-introduction-aux-fs-metadata">Auxiliary filesystem
+metadata</span></h3>
+<p>In order to enable a wide range of external key retrieval workflows,
+the filesystem format has support for some free-form auxiliary
+filesystem metadata stored as plaintext. The auxiliary filesystem
+metadata is organized as a sequence of Tag-Length-Value (TLV) entries,
+with the tags being 128 bit UUIDS formed according to <a
+href="https://datatracker.ietf.org/doc/html/rfc4122">RFC 4122</a>. The
+semantics of any such entry are at the discretion of the party who
+generated its respective associated UUID. Implementations are expected
+to ignore any entries with UUIDs they don’t recognize.</p>
+<p>An example use case would be the storage of a wrapped filesystem key,
+which is to be sent to a remote server for unwrapping in the course of
+executing a remote attestation protocol. The designers of that protocol
+or, alternatively, anyone building a software architecture integrating
+the CocoonFs format with that remote attestation protocol, may generate
+an UUID for that purpose and define the payload format for storing the
+wrapped key in a auxiliary filesystem metatada entry tagged with that
+UUID.</p>
+<p>Typically, the auxiliary filesystem metadata would get initialized at
+filesystem creation time, and may subsequently get updated through the
+regular <a href="#sec-introduction-journal">journalling</a> mechanism.
+Updates through the journal, the storage allocations needed for that in
+particular, necessarily require access to the filesystem key however. It
+is anticipated that some – perhaps unforseen – use cases or maintenance
+workflows may emerge where that requirement would pose a significant
+obstacle. Continuing on the example use case from above, that could be a
+transition to a different remote attestation server, requiring a rewrap
+of the filesystem key. To that end, all auxiliary filesystem metadata
+related data structures are defined in a way enabling offline updates
+robust against service interruptions.</p>
 <h3 id="confidentiality-of-allocations-and-block-trimming"><span
 id="sec-allocations-confidentiality">Confidentiality of allocations and
 block trimming</span></h3>
@@ -581,21 +646,23 @@ filesystem image.</li>
 B+-tree.</li>
 <li>The <a href="#sec-journal">journal</a>.</li>
 </ul>
-<p>Inodes 0 to 5 (inclusive) are reserved for CocoonFs internal use. The
-<a href="#sec-auth-tree">authentication tree</a>, the <a
+<p>Inodes 0 to 15 (inclusive) are reserved for CocoonFs internal use.
+The <a href="#sec-auth-tree">authentication tree</a>, the <a
 href="#sec-allocation-bitmap">allocation bitmap</a> and the <a
 href="#sec-inode-index">inode index</a> root have entries in the inode
 index and are assigned inode numbers 1, 2 and 3 respectively. The <a
-href="#sec-journal">journal log</a> has inode number 5 associated with
-it, but there’s no explicit entry for it in the inode index – the number
-is used only for key derivation subject purposes.</p>
+href="#sec-journal">journal log</a> and the <a
+href="#sec-update-counter">filesystem update counter</a> have inodes 5
+and 6 associated with them respectively, but there’s no explicit entry
+for either in the inode index – the numbers are used only for key
+derivation subject purposes.</p>
 <p>For completeness in this context: inode number 0 is reserved for a
-special “no inode” value, inode number 4 is currently not allocated and
-reserved. Note that the minimum inode index B+-tree node fill-level is
-such that inodes 1 to 4 will always be found in the leftmost leaf, which
-is referred to as the <a
-href="#def-inode-index-entry-leaf-node"><em>inode index entry leaf
-node</em></a>. The location of the inode index entry leaf node is
+special “no inode” value, inode number 4 as well as the range 7-15
+(inclusive) are currently not allocated and reserved. Note that the
+minimum inode index B+-tree leaf node fill-level is such that inodes 1
+to 3 will always be found in the leftmost leaf, which is referred to as
+the <a href="#def-inode-index-entry-leaf-node"><em>inode index entry
+leaf node</em></a>. The location of the inode index entry leaf node is
 referenced from the <a href="#sec-mutable-image-header">mutable image
 header</a> and enables discovering all the other metadata structures at
 filesystem opening time.</p>
@@ -919,9 +986,10 @@ conduct the filesystem creation upon encountering such one, eventually
 replacing the header with a <a href="#sec-filesystem-header">regular
 CocoonFs filesystem header</a> in the course.</li>
 </ul>
-<p>Both header types are protected by a checksum each. If no valid
-header of either type passing checksum verification is found at the
-storage’s beginning when attempting to open a filesystem,
+<p>Both header types are protected by the <a
+href="#sec-extent-integrity">common integrity protection scheme</a>. If
+no valid header of either type passing integrity verification is found
+at the storage’s beginning when attempting to open a filesystem,
 implementations are expected to check for the presence of a filesystem
 creation info header <a href="#def-mkfsinfo-backup-header">backup
 copy</a> at a specific location determined exclusively from the backing
@@ -948,8 +1016,8 @@ image header</span></h5>
 <p>The static image header starts at offset zero, its format is:</p>
 <table>
 <colgroup>
-<col style="width: 17%" />
-<col style="width: 83%" />
+<col style="width: 42%" />
+<col style="width: 57%" />
 </colgroup>
 <thead>
 <tr>
@@ -965,10 +1033,10 @@ byte).</td>
 </tr>
 <tr>
 <td>1</td>
-<td>The filesystem format version. Fixed to 0.</td>
+<td>The filesystem format version. Fixed to 1.</td>
 </tr>
 <tr>
-<td>20</td>
+<td>21</td>
 <td>The set of filesystem image layout parameters, c.f. further
 below.</td>
 </tr>
@@ -977,24 +1045,37 @@ below.</td>
 <td>The salt length.</td>
 </tr>
 <tr>
+<td>Length of a <a href="#sec-extent-integrity">common extent integrity
+protection section</a>.</td>
+<td>The <a href="#sec-extent-integrity">integrity protection
+section</a>.</td>
+</tr>
+<tr>
 <td>variable</td>
 <td>The salt.</td>
 </tr>
 <tr>
-<td>4</td>
-<td>Cyclic redundancy checksum over the header.</td>
-</tr>
-<tr>
-<td>4</td>
-<td>Cyclic redundancy checksum over the header with any two neighboring
-bits swapped.</td>
+<td>variable</td>
+<td>Alignment padding.</td>
 </tr>
 </tbody>
 </table>
-<p>After the static image header, some padding is inserted up to the
-next <a href="#def-io-block">IO Block</a> alignment boundary. None of
-the IO Blocks overlapping with the static image header, including that
-padding, may ever get written to.</p>
+<p>Some alignment padding up to the next <a href="#def-io-block">IO
+Block</a> boundary is inserted at the end of the static image header.
+None of the IO Blocks overlapping with the static image header,
+including that padding, may ever get written to after the filesystem has
+been created on storage.</p>
+<p>The static image header, including its alignment padding, is subject
+to the <a href="#sec-extent-integrity">common extent integrity
+protection</a>. It is expected that writes to the static image header
+storage location follow the <a
+href="#def-extent-integrity-fail-safe-write">fail-safe extent write
+protocol</a>. Note that the length of the integrity protection section
+is a function of the filesystem image layout parameters. These are
+located within the <a href="#sec-extent-integrity-tiers">tier 0
+integrity protection realm</a> though, so that their integrity can get
+verified independently prior to determine the integrity protection
+section’s total length.</p>
 <p>The set of filesystem configuration parameters, referred to as the
 <span id="def-image-layout"><em>image layout</em></span>, is encoded as
 follows:</p>
@@ -1004,14 +1085,12 @@ follows:</p>
 <col style="width: 45%" />
 <col style="width: 47%" />
 </colgroup>
-<thead>
-<tr>
-<th>Encoded length in bytes</th>
-<th>Name</th>
-<th>Description</th>
-</tr>
-</thead>
 <tbody>
+<tr>
+<td>Encoded length in bytes</td>
+<td>Name</td>
+<td>Description</td>
+</tr>
 <tr>
 <td>1</td>
 <td><code>allocation_block_size_128b_log2</code></td>
@@ -1022,7 +1101,7 @@ specified as the base-2 logarithm of the size in units of 128B.</td>
 <td>1</td>
 <td><code>io_block_allocation_blocks_log2</code></td>
 <td>Size of an <a href="#def-io-block">IO Block</a>, specified as the
-base-2 logarithm in units of Allocation Blocks.</td>
+base-2 logarithm in units of Allocation Blocks. Must be &lt;= 6.</td>
 </tr>
 <tr>
 <td>1</td>
@@ -1046,10 +1125,17 @@ blocks.</td>
 </tr>
 <tr>
 <td>1</td>
-<td><code>index_tree_node_allocation_blocks_log2</code></td>
-<td>Size of an <a href="#sec-inode-index">inode index</a> B+-tree node,
-specified as the base-2 logarithm in units of Allocation blocks. Must be
-&lt;= 64.</td>
+<td><code>index_tree_leaf_node_allocation_blocks_log2</code></td>
+<td>Size of an <a href="#sec-inode-index">inode index</a> B+-tree leaf
+node, specified as the base-2 logarithm in units of Allocation blocks.
+Must be &lt;= 6.</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>index_tree_internal_node_allocation_blocks_log2</code></td>
+<td>Size of an <a href="#sec-inode-index">inode index</a> B+-tree
+internal node, specified as the base-2 logarithm in units of Allocation
+blocks. Must be &lt;= 6.</td>
 </tr>
 <tr>
 <td>2</td>
@@ -1104,12 +1190,246 @@ two 16 bit integers in big-endian format each.</td>
 </tr>
 </tbody>
 </table>
-<h6 id="cyclic-redundancy-checksum-crc-computation"><span
-id="sec-crc">Cyclic redundancy checksum (CRC) computation</span></h6>
-<p>The static image header is integrity protected by a pair two CRC-32s:
-one over the plain header data from the magic to the salt, both
-inclusive, and another one over the same data but with any two
-neighboring bits swapped.</p>
+<h5 id="mutable-image-header"><span
+id="sec-mutable-image-header">Mutable image header</span></h5>
+<p>The mutable image header is located at the first <a
+href="#def-io-block">IO Block</a> aligned boundary following the static
+image header. It gets updated through the general journalling mechanics,
+hence it may be in an inconsistent state at filesystem opening time.</p>
+<p>The mutable image header’s format is:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 66%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>16B</td>
+<td><a href="#sec-enc-extent-ptr">Encoded extent pointers</a> to the <a
+href="#sec-aux-fs-metadata">auxiliary filesystem metadata</a> update
+groups’ head extents.</td>
+</tr>
+<tr>
+<td>Digest length produced by
+<code>auth_tree_root_hmac_hash_alg</code>.</td>
+<td>The <a href="#sec-auth-tree-root-digest">authentication tree root
+HMAC digest</a>.</td>
+</tr>
+<tr>
+<td>16B aligned upwards to a multiple of the <a
+href="#sec-static-image-header">block cipher block size</a></td>
+<td>The encrypted <a href="#sec-update-counter">filesystem update
+counter</a>.</td>
+</tr>
+<tr>
+<td>Digest length produced by
+<code>preauth_cca_protection_hmac_hash_alg</code>.</td>
+<td><a href="#sec-inode-index-entry-leaf-node-preauth-digest">HMAC
+digest over the inode index entry leaf node</a>, used for maintaining
+IND-CCA security when first decrypting the node at filesystem opening
+time.</td>
+</tr>
+<tr>
+<td>8B</td>
+<td><a href="#sec-enc-block-ptr">Encoded block pointer</a> to the <a
+href="#def-inode-index-entry-leaf-node">inode index entry leaf
+node</a>.</td>
+</tr>
+<tr>
+<td>8B</td>
+<td>The filesystem image size in units of <a
+href="#def-allocation-block">Allocation Blocks</a>, encoded as a 64 bit
+integer in little-endian format.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>Padding to align the mutable image header’s length to a multiple of
+the <a href="#def-allocation-block">Allocation Block</a> size.</td>
+</tr>
+</tbody>
+</table>
+<h5 id="filesystem-update-counter"><span
+id="sec-update-counter">Filesystem update counter</span></h5>
+<p>In order to facilitate the implementation of rollback protection
+protocols, a <em>filesystem update counter</em> is maintained. It starts
+at a random offset to be initialized at filesystem creation time, and is
+incremented modulo <span class="math inline">\(2^{128}\)</span> upon
+each update of the filesystem’s contents, i.e. upon each update of the
+<a href="#sec-auth-tree">authentication tree</a>. A remote ledger would
+track the minimum update counter ever reported to it and prohibit going
+back to earlier values. For any <span class="math inline">\(x\)</span>,
+values in the range <span class="math inline">\([x + 2^{128}, x - 1]
+(\textrm{mod} 2^{128})\)</span> are considered to come before <span
+class="math inline">\(x\)</span>.</p>
+<p>The filesystem update counter gets serialized in little-endian
+format, padded with zeros to align to a multiple of the filesystem’s <a
+href="#sec-static-image-header">block cipher block size</a> and
+encrypted</p>
+<ul>
+<li>with a <a href="#sec-key-derivation-subkey">a subkey derived from
+the root key</a> with the domain parameter set to 6, i.e. the (virtual)
+inode number allocated to it, a subdomain value of
+<code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
+href="#sec-key-derivation"><code>KEY_PURPOSE_ENCRYPTION</code></a>,</li>
+<li>in CBC mode with the IV set to all-zeros.</li>
+</ul>
+<p>For the choice of a constant all-zeros IV, note that due to the
+representation in little-endian format, an increment in the plaintext
+counter value will affect all blocks in the ciphertext, and, as the
+counter is strictly monotonic increasing, the same plaintext wouldn’t
+get encrypted twice.</p>
+<p>In order to cryptographically bind the state of the filesystem
+contents to the update counter, the encrypted filesystem update counter
+gets included in the <a href="#sec-auth-tree-root-digest">authentication
+tree root node digest</a>.</p>
+<h4 id="filesystem-creation-info-header"><span
+id="sec-mkfsinfo-header">Filesystem creation info header</span></h4>
+<p>As discussed in the introductionary section about <a
+href="#sec-introduction-online-mkfs">online filesystem creation
+support</a>, parties not in possession of the root key may mark a
+storage volume for formatting with a CocoonFs instance upon first use by
+writing a special filesystem creation info header to its beginning. This
+header provides all the information required for the actual filesystem
+creation and is of the following format:</p>
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 72%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length in bytes</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td>Magic string <code>'CCFSMKFS'</code> (without a terminating zero
+byte).</td>
+</tr>
+<tr>
+<td>1</td>
+<td>The filesystem creation info header format version. Fixed to 1.</td>
+</tr>
+<tr>
+<td>21</td>
+<td>The set of filesystem image layout parameters, encoded in the same
+<a href="#def-image-layout">format</a> as for the regular filesystem
+header’s static part.</td>
+</tr>
+<tr>
+<td>8</td>
+<td>The length of the <a href="#sec-aux-fs-metadata">auxiliary
+filesystem metadata</a> payload <a
+href="#sec-aux-fs-metadata-mkfsinfo">stored alongside</a> the filesystem
+creation info header, encoded as a 64 bit integer in little-endian
+format.</td>
+</tr>
+<tr>
+<td>8</td>
+<td>The desired filesystem image size in units of <a
+href="#def-allocation-block">Allocation Blocks</a>, encoded as a 64 bit
+integer in little-endian format.</td>
+</tr>
+<tr>
+<td>1</td>
+<td>The salt length.</td>
+</tr>
+<tr>
+<td>Length of a <a href="#sec-extent-integrity">common extent integrity
+protection section</a>.</td>
+<td>The <a href="#sec-extent-integrity">integrity protection
+section</a>.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>The salt.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>Alignment padding.</td>
+</tr>
+</tbody>
+</table>
+<p>Some alignment padding up to the next <a href="#def-io-block">IO
+Block</a> boundary is inserted at the end of the filesystem creation
+info header.</p>
+<p>The filesystem creation info header, including its alignment padding,
+is subject to the <a href="#sec-extent-integrity">common extent
+integrity protection</a>. It is expected that writes to a fileystem
+creation info header storage location follow the <a
+href="#def-extent-integrity-fail-safe-write">fail-safe extent write
+protocol</a>. Note that the length of the integrity protection section
+is a function of the filesystem image layout parameters. These are
+located within the <a href="#sec-extent-integrity-tiers">tier 0
+integrity protection realm</a> though, so that their integrity can get
+verified independently prior to determine the integrity protection
+section’s total length.</p>
+<p>Upon encountering such a filesystem creation header passing the
+integrity verification at the storage volume’s beginning when attempting
+to open a filesystem, implementations are supposed to conduct the
+filesystem creation.</p>
+<p>The filesystem creation process inevitably involves a replacement of
+the filesystem creation info header at the storage’s beginning with the
+<a href="#sec-filesystem-header">regular CocoonFs image header</a> at
+some point. For robustness against service interruptions encountered
+during that write, a <span id="def-mkfsinfo-backup-header">backup
+copy</span> of the former is made at a specific location on storage
+beforehand. The location is determined exlusively from the storage
+volume’s dimensions as follows: find the largest possible power of two
+not less than the larger of <span class="math inline">\(4\cdot
+128\textrm{B}\)</span> and the <a href="#def-io-block">IO Block</a> size
+such that the storage volume accomodates at least <span
+class="math inline">\(16\)</span> units of that size and place the
+backup filesystem creation info header copy at the beginning of the last
+such. For clarity, the minimum storage volume size required for
+supporting online filesystem creation by means of a filesystem creation
+info header is the larger of <span class="math inline">\(16\cdot 4\cdot
+128\textrm{B} = 8192\textrm{B}\)</span> and <span
+class="math inline">\(16\)</span> <a href="#def-io-block">IO Blocks</a>.
+Note that this scheme has been chosen such that the backup copy will get
+placed towards the storage volume’s end, while still preserving a
+relatively large alignment at the same time: having it stored near the
+end prevents it from intefering with any of the filesystem’s initial
+metadata structures’ placement and the large alignment will enable
+meaningful error reporting in case the underlying hardware is not
+compatible with the selected <a href="#def-io-block">IO Block</a>
+size.</p>
+<p>In either case, if no valid <a href="#sec-image-header">image
+header</a> of either type passing the respective integrity protection
+verification is found at the storage volume’s beginning when attempting
+to open a filesystem, neither a <a
+href="#sec-static-image-header">regular CocoonFs static image header</a>
+nor a filesystem creation info header, then implementations are expected
+to check for the presence of a filesystem creation info header backup
+copy at the specified location. If one is found, and it passes its
+integrity verification, then the online filesystem creation procedure is
+supposed to get restarted from scratch.</p>
+<h3 id="integrity-protections">Integrity protections</h3>
+<p>Once the CocoonFs image has been opened and the <a
+href="#sec-auth-tree">authentication</a> is fully operational, integrity
+protection is provided implicitly through the (keyed) authentication.
+However, some core filesystem entities like the <a
+href="#sec-static-image-header">image header</a> must get examined in
+the course of the bootstrapping procedure itself, and therefore have
+dedicated integrity protections in place.</p>
+<p>The CocoonFs format defines two mechanisms for integrity protections:
+a bare <a href="#sec-crc">checksum scheme</a> and, as checksums are
+inherently prone to collisions, a common <a
+href="#sec-extent-integrity">extent protection scheme</a> designed to
+provide additional robustness against torn writes for certain extent
+types subject to this protection.</p>
+<h4 id="sec-crc">Checksum scheme</h4>
+<p>The checksum is formed by concatenating a pair of two CRC-32 values:
+one over the plain data, and another one over the same data but with the
+bits at odd and even positions swapped. The rationale follows below.</p>
 <p>The CRC polynomial used in either case is the standard CRC-32 one,
 with a corresponding 32 bit integer representation of
 <code>0x04c11db71</code>, where the arithmetically most significant bit
@@ -1124,25 +1444,64 @@ to terms of increasing polynomial degree. The final residual
 polynomial’s coefficient are inverted and serialized with the same
 association between polynomial terms and bits on storage as just
 described for the data.</p>
-<p>The distribution of the CRC algorithm output over uniformly
-distributed data is again uniform, so in this idealized case the
-probability of not detecting random errors with a single CRC-32 is <span
-class="math inline">\(1:2^{32}\)</span>. One of the checksum’s primary
-purposes is to detect incomplete writes issued from an interrupted
-filesystem creation operation – the only point in time the static image
-header is getting actively written to. A chance of <span
+<h5 id="rationale">Rationale</h5>
+<p>In principle, it would have been possible to (re)use some
+cryptographic hash function needed for the authentication anyway to also
+provide integrity protection in these contexts. However, there might be
+use-cases where an implementation would examine (and possibly even
+alter) only the filesystem metadata, but not attempt to run a full
+filesystem opening procedure. If cryptographic hashes were used for the
+integrity protections, such implementations would have to implement
+support for any such algorithm possibly to be encountered – something
+which external policies and regulations might prohibit. For this reason,
+a dedicated checksumming scheme is used instead, which should be
+unproblematic and universally available. The checksum scheme used to
+provide integrity protections for CocoonFs is based on the well-known
+Cyclic Redundancy Checksum (CRC) class of checksums.</p>
+<p>The features of a particular CRC instance, most notably the checksum
+length, are determined exclusively by the chosen CRC polynomial. The
+most commonly used ones are either <span
+class="math inline">\(32\)</span> or <span
+class="math inline">\(64\)</span> bits in length. In general, longer
+polynomials/checksums provide better protection, obviously. More
+specifically, CRCs computed over uniformly distributed data are again
+uniform and in this idealized case, the probability of not detecting
+random errors is either <span class="math inline">\(1:2^{32}\)</span> or
+<span class="math inline">\(1:2^{64}\)</span>, depending on whether the
+chosen CRC polynomial is of degree <span
+class="math inline">\(32\)</span> or <span
+class="math inline">\(64\)</span>. One of the checksums’ primary
+purposes in the context of CocoonFs is to detect incomplete writes
+issued from an interrupted filesystem creation operation – the only
+point in time the <a href="#sec-static-image-header">static image
+header</a> is getting actively written to. A chance of <span
 class="math inline">\(1:2^{32}\)</span> for missing header corruptions
-may well be considered too unreliable, and a 64 bit checksum should be
-used instead. The most straightforward solution would be to use a CRC-64
-variant. However, in practice, this would double the size of a CRC
-implementation’s internal lookup tables, which is undesirable. So a
-different approach is taken instead: a 64 bit checksum is formed by
-combining one CRC-32 over the header’s data with another over the same
-data, but with any two neighboring bits swapped. Because the CRC-32
-polynomial is irreducible – hence the ring of its residue classes is a
-field, this is equivalent to computing two independent CRC-32 values
-over the bits at odd and even positions in the input data each.
-Therefore, the probability of missing uniformly random corruptions is
+may well be considered too unreliable, and a <span
+class="math inline">\(64\)</span> bit checksum should be used
+instead.</p>
+<p>However, CRC polynomials of larger degree tend to be more demanding
+in terms of runtime resources, e.g. of internal lookup tables’ sizes.
+Moreover, implementations for the widely adopted standard CRC-32
+polynomial are more generally available, both for hard- and software.
+Therefore, a hybrid approach yielding a <span
+class="math inline">\(64\)</span> bit checksum of the desired properties
+exclusively from the CRC-32 primitive has been chosen for CocoonFs. The
+checksum is formed from a pair of two CRC-32 values: one over the
+protected data, and another one over that same data, but with the bits
+at odd and even positions swapped each.</p>
+<h5 id="checksum-properties">Checksum properties</h5>
+<p>The CRC-32 polynomial is irreducible, hence the ring of its residue
+classes forms a field. Therefore, the following two are equivalent in
+the sense that one uniquely determines the other:</p>
+<ul>
+<li>the pair of CRC-32 values computed as described above to form the
+checksum, i.e. one over the plain data and another one over the data
+with the bits at odd and even positions swapped,</li>
+<li>a pair of CRC-32 values, one computed exclusively from the bits at
+odd positions, and the other one exclusively from the bits at even
+positions.</li>
+</ul>
+<p>In particular, the chance of missing a random data corruption is
 <span class="math inline">\(1:2^{64}\)</span>.</p>
 <p>The well-known feature of CRC-64 that burst errors of length up to 64
 bits are detected reliably also applies to this method of combining the
@@ -1190,161 +1549,199 @@ Finally, because <span class="math inline">\(\mathcal{c}\)</span> is
 irreducible (and <span class="math inline">\(\mathbb{F}_2\)</span>’s
 only unit is <span class="math inline">\(1\)</span>), it follows that
 <span class="math inline">\(\mathcal{\bar{c}}=\mathcal{c}\)</span>.</p>
-<h5 id="mutable-image-header"><span
-id="sec-mutable-image-header">Mutable image header</span></h5>
-<p>The mutable image header is located at the first <a
-href="#def-io-block">IO Block</a> aligned boundary following the static
-image header. It gets updated through the general journalling mechanics,
-hence it may be in an inconsistent state at filesystem opening time.</p>
-<p>The mutable image header’s format is:</p>
+<h4 id="common-extent-integrity-protection-scheme"><span
+id="sec-extent-integrity">Common extent integrity protection
+scheme</span></h4>
+<p>The common extent integrity protection scheme only applies to certain
+<a href="#def-extent">extent</a> types whose boundaries are aligned to
+multiples of a <a href="#def-io-block">filesystem IO Block</a> on
+storage. It transforms the protected extent’s contents – conceptually
+the integrity protections are applied last after encoding any of the
+higher-level data structures and right before writing the extent to
+storage. Conversely, the integrity protections are removed again and the
+contents restored to their original state right after reading the
+protected extent from storage and before decoding any of the
+higher-level data structures.</p>
+<p>For what follows, the backing hardware device’s minimum IO
+granularity is referred to a a <span id="def-dev-io-block"><em>device IO
+Block</em></span>. A <a href="#def-dev-io-block">device IO Block</a> is
+never larger than the <a href="#def-io-block">filesystem’s IO Block</a>
+size attribute, as per the definition of the latter. In particular, a
+write to one <a href="#def-dev-io-block">device IO Block</a> is assumed
+to never affect the contents of any other <a
+href="#def-dev-io-block">device IO Block</a>, at any stage of the
+write.</p>
+<p>For the purpose of the discussion that follows, the <a
+href="#def-extent">extent</a> is split into two logical parts:</p>
+<ul>
+<li>its first <a href="#def-dev-io-block">device IO Block</a></li>
+<li>and its tail remainder.</li>
+</ul>
+<p>Implementations are expected to proceed according to the following
+<span id="def-extent-integrity-fail-safe-write"><em>fail-safe extent
+write protocol</em></span> when updating an integrity protected extent
+on storage, semantically equivalent behavior is permitted.</p>
+<ol type="1">
+<li>Invalidate the extent’s first <a href="#def-dev-io-block">device IO
+Block</a> on storage by writing all-zeros to it.</li>
+<li>Issue a write barrier.</li>
+<li>Update the extent’s tail on storage, if any.</li>
+<li>If the tail is non-trivial, issue a write barrier.</li>
+<li>Update the extent’s first <a href="#def-dev-io-block">device IO
+Block</a> on storage.</li>
+</ol>
+<p>The semantics of the write barrier must be such that any writes
+issued after it must not become effective on storage, not even
+partially, before any writes prior to it have become fully
+effective.</p>
+<p>To handle service interruptions encountered during the final write of
+the extent’s first <a href="#def-dev-io-block">device IO Block</a>,
+integrity protections are applied to the first <a
+href="#def-io-block">filesystem IO Block</a> (which always contains the
+first <a href="#def-dev-io-block">device IO Block</a>). In general, the
+contents of a <a href="#def-dev-io-block">device IO Block</a> following
+a service interruption encountered during a write, aka a “torn write”,
+can be in any state. Note that in practice however, hardware typically
+exhibits either of two behaviors, sometimes implemented only as a
+“best-effort” guarantee: the data is either all-old or all-new, or
+alternatively, there’s a pivot point somewhere within the <a
+href="#def-dev-io-block">device IO Block</a> partitioning it into an
+all-old and an all-new region each. Observe that the former behavior is
+a special case of the latter.</p>
+<p>Two complementary integrity protection mechanisms are applied to the
+first <a href="#def-io-block">filesystem IO Block</a>:</p>
+<ul>
+<li>common <a href="#sec-crc">checksum</a> protection and,</li>
+<li>to improve reliability on devices implementing the typical “old-new”
+<a href="#def-dev-io-block">device IO Block</a> partitioning behavior on
+torn writes as described above, special write completion marker values
+are written to certain checkpoint locations within the extent’s first <a
+href="#def-io-block">filesystem IO Block</a>.</li>
+</ul>
+<p>Due do the possibility of collisions, the checksum based protection
+scheme might fail to detect corruptions, even though the probability of
+<span class="math inline">\(1:2^{64}\)</span> of that happening is
+generally considered to be negligible in practice. The write completion
+marker based mechanism is guaranteed to always detect partial writes
+reliably on hardware implementing the common “old-new” partitioning
+behavior on torn writes.</p>
+<p>An extent’s integrity protection data section format is an invariant
+of the filesystem, the <a href="#def-io-block">filesystem IO Block</a>
+size to be more specific, and organized as follows:</p>
 <table>
 <colgroup>
-<col style="width: 33%" />
-<col style="width: 66%" />
+<col style="width: 58%" />
+<col style="width: 41%" />
 </colgroup>
-<thead>
-<tr>
-<th>Length</th>
-<th>Description</th>
-</tr>
-</thead>
 <tbody>
 <tr>
-<td>Digest length produced by
-<code>auth_tree_root_hmac_hash_alg</code>.</td>
-<td>The <a href="#sec-auth-tree-root-digest">authentication tree root
-HMAC digest</a>.</td>
+<td>Length</td>
+<td>Description</td>
 </tr>
-<tr>
-<td>Digest length produced by
-<code>preauth_cca_protection_hmac_hash_alg</code>.</td>
-<td><a href="#sec-inode-index-entry-leaf-node-preauth-digest">HMAC
-digest over the inode index entry leaf node</a>, used for maintaining
-IND-CCA security when first decrypting the node at filesystem opening
-time.</td>
-</tr>
-<tr>
-<td>8B</td>
-<td><a href="#sec-enc-block-ptr">Encoded block pointer</a> to the <a
-href="#def-inode-index-entry-leaf-node">inode index entry leaf
-node</a>.</td>
-</tr>
-<tr>
-<td>8B</td>
-<td>The filesystem image size in units of <a
-href="#def-allocation-block">Allocation Blocks</a>, encoded as a 64 bit
-integer in little-endian format.</td>
-</tr>
-<tr>
-<td>variable</td>
-<td>Padding to align the mutable image header’s length to a multiple of
-the <a href="#def-allocation-block">Allocation Block</a> size.</td>
-</tr>
-</tbody>
-</table>
-<h4 id="filesystem-creation-info-header"><span
-id="sec-mkfsinfo-header">Filesystem creation info header</span></h4>
-<p>As discussed in the introductionary section about <a
-href="#sec-introduction-online-mkfs">online filesystem creation
-support</a>, parties not in possession of the root key may mark a
-storage volume for formatting with a CocoonFs instance upon first use by
-writing a special filesystem creation info header to its beginning. This
-header provides all the information required for the actual filesystem
-creation and is of the following format:</p>
-<table>
-<colgroup>
-<col style="width: 16%" />
-<col style="width: 83%" />
-</colgroup>
-<thead>
-<tr>
-<th>Length in bytes</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
 <tr>
 <td>8</td>
-<td>Magic string <code>'CCFSMKFS'</code> (without a terminating zero
-byte).</td>
+<td>Commit ID, derived from the checksum.</td>
 </tr>
 <tr>
 <td>1</td>
-<td>The filesystem creation info header format version. Fixed to 0.</td>
+<td>XOR mask.</td>
 </tr>
 <tr>
-<td>20</td>
-<td>The set of filesystem image layout parameters, encoded in the same
-<a href="#def-image-layout">format</a> as for the regular filesystem
-header’s static part.</td>
-</tr>
-<tr>
-<td>8</td>
-<td>The desired filesystem image size in units of <a
-href="#def-allocation-block">Allocation Blocks</a>, encoded as a 64 bit
-integer in little-endian format.</td>
-</tr>
-<tr>
-<td>1</td>
-<td>The salt length.</td>
-</tr>
-<tr>
-<td>variable</td>
-<td>The salt.</td>
-</tr>
-<tr>
-<td>4</td>
-<td>Cyclic redundancy checksum over the header.</td>
-</tr>
-<tr>
-<td>4</td>
-<td>Cyclic redundancy checksum over the header with any two neighboring
-bits swapped.</td>
+<td><span
+class="math inline">\(8\cdot(\texttt{io\_block\_allocation\_blocks\_log2}
++
+\texttt{allocation\_block\_size\_128b\_log2})\)</span></td>
+<td>Checkpoint locations data save area.</td>
 </tr>
 </tbody>
 </table>
-<p>The filesystem creation info header is protected by a pair of two
-CRC-32s: one over the plain header data from the magic to the salt, both
-inclusive, and another one over the same data but with any two
-neighboring bits swapped, just in line with the regular filesystem
-header’s <a href="#sec-crc">checksum computation</a>.</p>
-<p>Upon encountering such a filesystem creation header passing the
-checksum verification at the storage volume’s beginning when attempting
-to open a filesystem, implementations are supposed to conduct the
-filesystem creation.</p>
-<p>The filesystem creation process inevitably involves a replacement of
-the filesystem creation info header at the storage’s beginning with the
-<a href="#sec-filesystem-header">regular CocoonFs image header</a> at
-some point. For robustness against service interruptions encountered
-during that write, a <span id="def-mkfsinfo-backup-header">backup
-copy</span> of the former is made at a specific location on storage
-beforehand. The location is determined exlusively from the storage
-volume’s dimensions as follows: find the largest possible power of two
-not less than <span class="math inline">\(4\cdot 128\textrm{B}\)</span>
-such that the storage volume accomodates at least <span
-class="math inline">\(16\)</span> units of that size and place the
-backup filesystem creation info header copy at the beginning of the last
-such. For clarity, the minimum storage volume size required for
-supporting online filesystem creation by means of a filesystem creation
-info header is <span class="math inline">\(16\cdot 4\cdot 128\textrm{B}
-= 8192\textrm{B}\)</span>. Note that this scheme has been chosen such
-that the backup copy will get placed towards the storage volume’s end,
-while still preserving a relatively large alignment at the same time:
-having it stored near the end prevents it from intefering with any of
-the filesystem’s initial metadata structures’ placement and the large
-alignment will enable meaningful error reporting in case the underlying
-hardware is not compatible with the selected <a href="#def-io-block">IO
-Block</a> size.</p>
-<p>In either case, if no valid <a href="#sec-image-header">image
-header</a> of either type passing the respective checksum verification
-is found at the storage volume’s beginning when attempting to open a
-filesystem, neither a <a href="#sec-static-image-header">regular
-CocoonFs static image header</a> nor a filesystem creation info header,
-then implementations are expected to check for the presence of a
-filesystem creation info header backup copy at the specified location.
-If one is found, and it passes its checksum verification, then the
-online filesystem creation procedure is supposed to get restarted from
-scratch.</p>
+<p>Observe that the checkpoint locations data save area’s length is
+given by the base-2 logarithm of the <a href="#def-io-block">filesystem
+IO Block</a> size in units of <span
+class="math inline">\(128\textrm{B}\)</span>, mutiplied by the <a
+href="#sec-crc">checksum</a> length.</p>
+<p>The offset at which integrity protection data section is stored
+within an extent depends on the extent type, with the constraint that
+its first <span class="math inline">\((8 + 1)\textrm{B}\)</span> always
+are located within the extent’s first <span
+class="math inline">\(128\textrm{B}\)</span>. That is the offset is
+always $<span class="math inline">\(128\textrm{B} - (8 +
+1)\textrm{B}\)</span>.</p>
+<p>The <a href="#sec-crc">checksum</a> is computed over all of the
+extent’s original data, before any of the write completion markers have
+been written to it. For the purpose of the checksum computation, all of
+the extent’s integrity protection data section is set to zero.</p>
+<p>The write completion marker based mechanism is divided into two <span
+id="sec-extent-integrity-tiers">tiers</span>: tier 0 protects the first
+<span class="math inline">\(128\textrm{B}\)</span>, tier 1 the first <a
+href="#def-io-block">filesystem IO Block’s</a> remainder. Tier 1 may
+reach into the tier 0 region and is described first.</p>
+<p>The <em>commit ID</em> value is derived from the <a
+href="#sec-crc">checksum</a> as described further below and gets written
+as a write completion marker to certain checkpoint locations withing the
+first <a href="#def-io-block">filesystem IO Block</a>:</p>
+<ul>
+<li>once to its designated slot within the extent’s integrity protection
+data section,</li>
+<li>to every possible <a href="#def-dev-io-block">device IO Block</a>
+end for any <a href="#def-dev-io-block">device IO Block</a> larger than
+<span class="math inline">\(128\textrm{B}\)</span>. That is, right
+before any power-of-two boundary within the containing <a
+href="#def-io-block">filesystem IO Block</a>, starting at <span
+class="math inline">\(256\textrm{B}\)</span>.</li>
+</ul>
+<p>The data originally found at the respective checkpoint locations
+<span class="math inline">\(&gt;128\textrm{B}\)</span> gets copied
+back-to-back to a <em>checkpoint locations data save area</em> within
+the extent’s integrity protection data section before overwriting it
+with the write completion marker value respectively. For definiteness in
+case the checkpoint locations data save area contains a checkpoint
+location itself (which is possible only for an unreasonably large <a
+href="#def-io-block">filesystem IO Block</a> size): the copying is
+supposed to be done in order from the highest checkpoint location to
+lowest.</p>
+<p>If at filesystem opening time the values found at these checkpoint
+locations are not all equal, then the extent is considered to have been
+written only partially and is dismissed. Observe that, under the assumed
+torn write hardware behavior, the write completion markers protect any
+of of the data region spanning from the beginning of the extent’s
+integrity protection data section all the way to the end of the first <a
+href="#def-io-block">filesystem IO Block</a>, i.e. any data at offset
+<span class="math inline">\(\geq 128\textrm{B}\)</span> in
+particular.</p>
+<p>To cover the range <span class="math inline">\(\lt
+128\textrm{B}\)</span>, the extent’s first <span
+class="math inline">\(128\textrm{B}\)</span> are XOR-masked with a byte
+value chosen such that the results are all non-zero, possibly skipping
+over some of its leading bytes storing an extent type dependent magic.
+If any of the bytes in this <span
+class="math inline">\(128\textrm{B}\)</span> range are found to equal
+zero at verification time, then the extent is considered to have been
+written only partially and is dismissed.</p>
+<p>For clarity, the XOR-mask is chosen and applied</p>
+<ul>
+<li>after the original data from the checkpoint locations at offsets
+<span class="math inline">\(&gt;128\textrm{B}\)</span> has been opied
+over to the checkpoint locations data save area and</li>
+<li>before the commit ID and the XOR-mask value get stored at their
+respective locations within the extent’s integrity protection data
+section. For the purpose of selecting the XOR-mask value, these
+locations may be assumed to be identical to zero.</li>
+</ul>
+<p>The commit ID is defined to equal the <a href="#sec-crc">checksum</a>
+with the XOR-mask applied and stored as such at offset <span
+class="math inline">\(0\)</span> within the extent’s integrity
+protection data section, and is therefore contained within the extent’s
+first <span class="math inline">\(128\textrm{B}\)</span>. The XOR-mask
+byte value itself is stored at offset <span
+class="math inline">\(8\)</span> within the extent’s integrity
+protection data section, therefore is contained within the first <span
+class="math inline">\(128\textrm{B}\)</span> as well. As both are
+contained within the first <span
+class="math inline">\(128\textrm{B}\)</span>, they must not contain any
+zero bytes. That is, the XOR-mask byte value must be chosen under the
+additional constraint that it’s non-zero and different from any of the
+bytes in the <a href="#sec-crc">checksum</a>.</p>
 <h3 id="key-derivation-1"><span id="sec-key-derivation">Key
 derivation</span></h3>
 <p>As outlined in the <a href="#sec-introduction">introduction</a>, the
@@ -1436,7 +1833,7 @@ Registry</a> identifier of SHA-512, i.e. <code>TPM_ALG_SHA512</code> or
 <ol type="1">
 <li>The magic string <code>'COCOONFS'</code>, without a terminating zero
 byte.</li>
-<li>The image format version, fixed to 0, encoded as a single byte.</li>
+<li>The image format version, fixed to 1, encoded as a single byte.</li>
 <li><a href="#def-image-layout"><code>kdf_hash_alg</code></a> encoded as
 a 16 bit integer in big-endian format.</li>
 <li><a
@@ -1467,7 +1864,7 @@ derivation</span></h4>
 <ul>
 <li>The derived key’s cryptographic purpose, i.e. one of the constants
 defined in the table above.</li>
-<li>A pair of two 32 bit integers specifying a “domain” and
+<li>A pair of a 64 bit and a 32 bit integer, specifying a “domain” and
 “subdomain”.</li>
 </ul>
 <p>Unless otherwise noted, the domain is set to an inode number
@@ -1509,8 +1906,8 @@ key material as described in the previous section above.</p></li>
 <li><p><code>label</code> - A single byte set to the desired key purpose
 input as a parameter to the subkey derivation.</p></li>
 <li><p><code>context</code> - The concatenation of the input “domain”
-and “subdomain” values, encoded as 32 bit integers in little-endian
-format each.</p></li>
+and “subdomain” values, encoded as 64 and 32 bit integers in
+little-endian format respectively.</p></li>
 <li><p><code>bits</code> - A key size suitable for the specified
 cryptographic purpose and determined as follows:</p>
 <table>
@@ -1712,7 +2109,10 @@ over</p>
 Block’s</a> constituent allocated <a
 href="#def-allocation-block">Allocation Blocks</a> contents, while
 skipping over the unallocated ones, as well as those allocated to the <a
-href="#sec-image-header">image header</a> or journal log head,</li>
+href="#sec-image-header">image header</a>, the <a
+href="#sec-journal-log-encryption">journal log head</a> or any of the <a
+href="#sec-aux-fs-metadata-formatted">auxiliary filesystem metadata
+extents</a>,</li>
 <li>and an <a href="#sec-auth-context">authentication context</a> formed
 as follows:
 <ol type="1">
@@ -1764,9 +2164,9 @@ href="#def-auth-subject-id"><code>AUTH_SUBJECT_ID_AUTH_TREE_DESCENDANT_NODE</cod
 identifying the authenticated subject.</li>
 </ol></li>
 </ol>
-<h3 id="authentication-tree-root-node-digest"><a
-href="#sec-auth-tree-root-digest">Authentication tree root node
-digest</a></h3>
+<h3 id="authentication-tree-root-node-digest"><span
+id="sec-auth-tree-root-digest">Authentication tree root node
+digest</span></h3>
 <p>The authentication tree root digest is created by computing a HMAC
 with an underlying hash of <a
 href="#def-image-layout"><code>auth_tree_root_hmac_hash_alg</code></a>
@@ -1787,6 +2187,8 @@ Block index domain</a> of the root node’s last entry’s associated data
 region’s beginning modulo <span class="math inline">\(2^{64}\)</span>,
 encoded as a 64 bit integer in little-endian format. Observe that this
 uniquely fixes the position of the root node in the tree.</li>
+<li>The encrypted <a href="#sec-update-counter">filesystem update
+counter</a>.</li>
 <li>The “image context”, a digest over filesystem configuration
 parameters computed as described below.</li>
 <li>An authentication context format version identifier byte of constant
@@ -1802,7 +2204,7 @@ algorithm and subkey as for the root node above over</p>
 <li>The magic <code>'COCOONFS'</code>, without a terminating zero
 byte.</li>
 <li>A single byte filesystem format version identifier of constant
-0.</li>
+1.</li>
 <li>The <a href="#def-image-layout">encoded image layout</a>.</li>
 <li>The <a href="#sec-enc-block-ptr">encoded block pointer</a> to the <a
 href="#def-inode-index-entry-leaf-node">inode index entry leaf node</a>,
@@ -1889,19 +2291,26 @@ href="#def-allocation-block">Allocation Blocks</a> is representable as a
 64 bit integer.</li>
 </ul>
 <h2 id="inode-index"><span id="sec-inode-index">Inode index</span></h2>
-<p>Inodes are identified by positive 32 bit integers. The inode index
-tracks the allocated inodes and their associated locations on storage
-each, either by means of a direct <a href="#sec-enc-extent-ptr">encoded
-extent pointer</a> or by an “indirect” pointer pointing to the head of
-some <a href="#sec-encryption-entity-chained-extents">chained
-extents</a> storing the inode’s <a href="#sec-enc-extents-list">extents
+<p>Inodes are identified by positive 64 bit integers. The inode index
+tracks the allocated inodes and a set of associated flags as well as the
+locations of inode data on storage each. The inode flags are stored as
+32 bit integers in little-endian format, of which the least significant
+8 bits are freely available for application use, and the remaining 24
+bits are reserved and constant zero. The location of each inode’s data
+on storage is represented either by means of a direct <a
+href="#sec-enc-extent-ptr">encoded extent pointer</a> or by an
+“indirect” pointer pointing to the head of some <a
+href="#sec-encryption-entity-chained-extents">chained extents</a>
+storing the inode’s <a href="#sec-enc-extents-list">extents
 list</a>.</p>
-<p>The inode index is organized as a B+-tree, with a node size as
+<p>The inode index is organized as a B+-tree, with node sizes as
 specified by the <a
-href="#def-image-layout"><code>index_tree_node_allocation_blocks_log2</code></a>
-filesystem configuration parameter.</p>
-<p>The minimum leaf node fill level is constrained to be &gt;= 4, so
-that inodes 1-4 are always found in the leftmost leaf node, the <span
+href="#def-image-layout"><code>index_tree_leaf_node_allocation_blocks_log2</code></a>
+and <a
+href="#def-image-layout"><code>index_tree_internal_node_allocation_blocks_log2</code></a>
+filesystem configuration parameters respectively.</p>
+<p>The minimum leaf node fill level is constrained to be &gt;= 3, so
+that inodes 1-3 are always found in the leftmost leaf node, the <span
 id="def-inode-index-entry-leaf-node"><em>inode index entry leaf
 node</em></span>. The location of the inode index entry leaf node is
 specified in the <a href="#sec-mutable-image-header">mutable image
@@ -1918,18 +2327,19 @@ associated inode number, a subdomain value of
 <code>INODE_KEY_SUBDOMAIN_DATA</code>, and a key purpose of <a
 href="#sec-key-derivation"><code>KEY_PURPOSE_ENCRYPTION</code></a>.</p>
 <h3 id="inode-index-leaf-node-format">Inode index leaf node format</h3>
-<p>Let <span class="math inline">\(B\)</span> denote a decrypted index
-node’s maximum possible payload size in units of bytes. The maximum
-number of entries in a leaf node is then given by <span
-class="math inline">\(M_{\textrm{leaf}} = \left\lfloor\frac{B -
-12}{12}\right\rfloor\)</span>. The minimum leaf node fill level is set
-to <span class="math inline">\(m_\textrm{leaf} =
+<p>Let <span class="math inline">\(B_{\textrm{leaf}}\)</span> denote a
+decrypted index leaf node’s maximum possible payload size in units of
+bytes. The maximum number of entries in a leaf node is then given by
+<span class="math inline">\(M_{\textrm{leaf}} =
+\left\lfloor\frac{B_{\textrm{leaf}} - 12}{20}\right\rfloor\)</span>. The
+minimum leaf node fill level is set to <span
+class="math inline">\(m_\textrm{leaf} =
 \left\lceil\frac{M_\textrm{leaf}}{2}\right\rceil\)</span>. <span
-class="math inline">\(B\)</span> must be large enough so that the
-constraint <span class="math inline">\(m_\textrm{leaf} &gt;= 4\)</span>
-holds. Note that with a minimum inode index block size of 128B, and a
-maximum IV length of 32B, the <span
-class="math inline">\(m_\textrm{leaf} &gt;= 4\)</span> is automatically
+class="math inline">\(B_{\textrm{leaf}}\)</span> must be large enough so
+that the constraint <span class="math inline">\(m_\textrm{leaf} &gt;=
+3\)</span> holds. Note that with a minimum inode index leaf node block
+size of 128B, and a maximum IV length of 16B, the <span
+class="math inline">\(m_\textrm{leaf} &gt;= 3\)</span> is automatically
 fulfilled.</p>
 <p>The leaf node format is as follows:</p>
 <table>
@@ -1953,50 +2363,60 @@ leaf node in tree order, if any, or NIL otherwise.</td>
 <tr>
 <td><span class="math inline">\(8\)</span> to <span
 class="math inline">\(8 + 8\cdot M_\textrm{leaf}\)</span></td>
-<td>The inode entries associated <a href="#sec-enc-extent-ptr">encoded
+<td>The inode entries’ associated <a href="#sec-enc-extent-ptr">encoded
 extent pointers</a>.</td>
 </tr>
 <tr>
 <td><span class="math inline">\(8 + 8\cdot M_\textrm{leaf}\)</span> to
-<span class="math inline">\(8 + 12\cdot M_\textrm{leaf}\)</span></td>
-<td>The inode entries associated keys, i.e. the inode numbers, encoded
-as 32 bit integers in little endian format.</td>
+<span class="math inline">\(8 + 16\cdot M_\textrm{leaf}\)</span></td>
+<td>The inode entries’ associated keys, i.e. the inode numbers, encoded
+as 64 bit integers in little endian format.</td>
 </tr>
 <tr>
-<td><span class="math inline">\(8 + 12\cdot M_\textrm{leaf}\)</span> to
-<span class="math inline">\(12 + 12\cdot M_\textrm{leaf}\)</span></td>
+<td><span class="math inline">\(8 + 16\cdot M_\textrm{leaf}\)</span> to
+<span class="math inline">\(8 + 20\cdot M_\textrm{leaf}\)</span></td>
+<td>The inode entries’ associated flags, encoded as 32 bit integers in
+little-endian format.</td>
+</tr>
+<tr>
+<td><span class="math inline">\(8 + 20\cdot M_\textrm{leaf}\)</span> to
+<span class="math inline">\(12 + 20\cdot M_\textrm{leaf}\)</span></td>
 <td>The node level, fixed to 1 for leaf nodes, encoded as a 32 bit
 integer in little-endian format.</td>
 </tr>
 </tbody>
 </table>
 <p>For <span class="math inline">\(i\in\{0\ldots M_\textrm{leaf} -
-1\}\)</span>, the i’th <a href="#sec-enc-extent-ptr">encoded extent
-pointer</a> is associated with the i’th key. Unoccupied entries have a
-key value of 0, i.e. the special “no inode” value, and an encoded extent
-pointer value of NIL. The unoccupied slots must all be at the tail. The
-occupied entries must be sorted by the inode number. No leaf node with
-less than <span class="math inline">\(m_\textrm{leaf}\)</span> nodes may
-exist, except for possibly at the tree root.</p>
+1\}\)</span>, the i’th inode flags entry and i’th <a
+href="#sec-enc-extent-ptr">encoded extent pointer</a> are associated
+with the i’th key respectively. Unoccupied entries have a key value of
+0, i.e. the special “no inode” value, the inode flags all unset and an
+encoded extent pointer value of NIL. The unoccupied slots must all be at
+the tail. The occupied entries must be sorted by the inode number. No
+leaf node with less than <span
+class="math inline">\(m_\textrm{leaf}\)</span> nodes may exist, except
+for possibly at the tree root.</p>
 <h3 id="inode-index-internal-node-format">Inode index internal node
 format</h3>
-<p>Let <span class="math inline">\(B\)</span> denote a decrypted index
-node’s maximum possible payload size in units of bytes again. The
-maximum number of entries, i.e. separating keys, in an internal node is
-then given by <span class="math inline">\(M_{\textrm{internal}} =
-\left\lfloor\frac{B -
-12}{12}\right\rfloor\)</span>. The minimum internal node fill level is
-set to <span class="math inline">\(m_\textrm{internal} =
-\left\lfloor\frac{M_\textrm{internal} - 1}{2}\right\rfloor\)</span>.</p>
+<p>Let <span class="math inline">\(B_{\textrm{internal}}\)</span> denote
+a decrypted index internal node’s maximum possible payload size in units
+of bytes. The maximum number of entries, i.e. separating keys, in an
+internal node is then given by <span
+class="math inline">\(M_{\textrm{internal}} =
+\left\lfloor\frac{B_{\textrm{internal}} - 12}{12}\right\rfloor\)</span>.
+The minimum internal node fill level is set to <span
+class="math inline">\(m_\textrm{internal} =
+\left\lfloor\frac{M_\textrm{internal} - 1}{2}\right\rfloor\)</span>.
+<span class="math inline">\(B_{\textrm{internal}}\)</span> must be large
+enough so that the constraint <span
+class="math inline">\(m_\textrm{leaf} &gt;= 1\)</span> holds. Note that
+with a minimum inode index internal node block size of 128B, and a
+maximum IV length of 16B, the <span
+class="math inline">\(m_\textrm{internal} &gt;= 1\)</span> is
+automatically fulfilled.</p>
 <p>Implementations might want to preemptively split full nodes or merge
 pairs of nodes at minimum fill level when walking down a path from the
-root for insertion or deletion. By coincidence, <span
-class="math inline">\(M_\textrm{internal} = M_\textrm{leaf}\)</span> and
-from the constraint <span class="math inline">\(m_\textrm{leaf} &gt;=
-4\)</span>, it follows that <span
-class="math inline">\(M_\textrm{internal} = M_\textrm{leaf} &gt;= 7 &gt;
-2\)</span>, as is required for supporting preemptive node splitting of
-full nodes. Note that <span
+root for insertion or deletion.Note that <span
 class="math inline">\(m_\textrm{internal}\)</span> has been defined
 specifically in a way to enable preemptive splitting of full nodes as
 well as merging nodes at the minimum fill level, even for even values of
@@ -2023,7 +2443,7 @@ node’s children.</td>
 <td><span class="math inline">\(8 + 8\cdot M_\textrm{internal}\)</span>
 to <span class="math inline">\(8 + 12\cdot
 M_\textrm{internal}\)</span></td>
-<td>The separator keys, encoded as 32 bit integers in little-endian
+<td>The separator keys, encoded as 64 bit integers in little-endian
 format.</td>
 </tr>
 <tr>
@@ -2073,7 +2493,7 @@ href="#sec-key-derivation"><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code><
 over</p>
 <ol type="1">
 <li>the encrypted entry leaf node’s data, of size as determined by <a
-href="#def-image-layout"><code>index_tree_node_allocation_blocks_log2</code></a></li>
+href="#def-image-layout"><code>index_tree_leaf_node_allocation_blocks_log2</code></a></li>
 <li>and an <a href="#sec-auth-context">authentication context</a> formed
 as follows:
 <ol type="1">
@@ -2119,7 +2539,7 @@ href="#sec-key-derivation"><code>KEY_PURPOSE_PREAUTH_CCA_PROTECTION_AUTH</code><
 The authenticated associated data for the encrypted chained extents’
 inline authentication is set to</p>
 <ol type="1">
-<li>The inode number as a 32 bit integer, encoded in little-endian
+<li>The inode number as a 64 bit integer, encoded in little-endian
 format.</li>
 <li>A format version identifier byte of constant 0.</li>
 <li>An identifier byte of constant 2 identifying the type of
@@ -2145,6 +2565,8 @@ of the to be written data at <a href="#def-io-block">IO block</a>
 granularity and a log specifying what needs to get written where as well
 as information about which parts of the the <a
 href="#sec-auth-tree">authentication tree</a> need a reconstruction.</p>
+<h3 id="journal-log-encryption"><span
+id="sec-journal-log-encryption">Journal log encryption</span></h3>
 <p>The journal log is stored in a list of <a
 href="#sec-encryption-entity-chained-extents">encrypted chained
 extents</a>, with the head extent, the <a
@@ -2197,30 +2619,45 @@ inline authentication is set to</p>
 authenticated associated data for the encrypted chained extents’ inline
 authentication.</li>
 </ol>
+<h3 id="journal-log-head-extent-plaintext-header"><a
+href="#sec-journal-log-head-plaintext-header">Journal log head extent
+plaintext header</a></h3>
+<p>The <a href="#sec-encryption-entity-chained-extents">encrypted
+chained extents</a> encryption entity format allows for a plaintext
+header to get stored in the first head extent. For the journal log, this
+plaintext header comprises</p>
+<ul>
+<li>a magic of <code>CCFSJRNL</code>, without a terminating zero byte,
+if the journal is to be considered active,</li>
+<li>an <a href="#sec-extent-integrity">extent integrity protection
+section</a> for detecting torn writes to the head extent,</li>
+<li>a pair of two <a href="#sec-enc-extent-ptr">encoded extent
+pointers</a> to the auxiliary filesystem metadata update groups’ head
+extents.</li>
+</ul>
+<p>Note that updates of the journal log head extent on storage must
+follow the <a href="#def-extent-integrity-fail-safe-write">fail-safe
+extent write protocol</a>, as is the case for any extent subject to the
+<a href="#sec-extent-integrity">common integrity protection
+scheme</a>.</p>
 <p>The journal is to be considered non-empty and to get applied upon the
 next filesystem opening following a possible service interruption
 whenever its head extent begins with a magic of <code>'CCFSJRNL'</code>,
-without a terminating zero byte, and the head extent’s inline
-authentication digest successfully verifies its contents. Note that the
-head extent’s inline authentication digest serves as an integrity
-protection measure here, in particular it is not an error if the head
-extent’s authentication fails – in this case the journal is simply
-considered as having been only partially written and is disregarded.</p>
-<p>It is expected that implementations would write all of the journal’s
-data before the journal log head extent, issuing write barriers as is
-appropriate for the underlying hardware device inbetween. Similarly,
-after the journal has been applied, either online or following a service
-interruption, it is expected that implementations would first invalidate
-the journal log head extent before proceeding to reusing any of the
-storage areas occupied by the journal’s remainder, likewise issuing
-write barriers as needed. In particular failure to authenticate a
-journal log tail extent when the head authenticated successfully is a
-fatal error.</p>
-<p>The journal log plaintext is organized as sequence of
-tag-length-value (TLV) encoded fields. The tag and length are encoded as
-unsigned integers in LEB128 format, the format of the value depends on
-the field. The fields must be stored in the journal in the order induced
-by increasing tag values. The defined tag values are:</p>
+without a terminating zero byte, and the head <a
+href="#sec-extent-integrity">extent’s integrity protections</a> can get
+successfully verified. The magic is exempt from the <a
+href="#sec-extent-integrity">extent integrity protection’s</a>
+transformations.</p>
+<h3 id="journal-log-payload-contents"><span
+id="sec-journal-log-payload-contents">Journal log payload
+contents</span></h3>
+<p>The journal log payload, subject to encryption in the <a
+href="#sec-encryption-entity-chained-extents">encrypted chained
+extents</a> format, is organized as sequence of tag-length-value (TLV)
+encoded fields. The tag and length are encoded as unsigned integers in
+LEB128 format, the format of the value depends on the field. The fields
+must be stored in the journal in the order induced by increasing tag
+values. The defined tag values are:</p>
 <table style="width:99%;">
 <colgroup>
 <col style="width: 54%" />
@@ -2277,9 +2714,9 @@ data staging copies.</td>
 </tr>
 </tbody>
 </table>
-<h3
+<h4
 id="allocation-bitmap-file-fragments-authentication-digests">Allocation
-bitmap file fragments’ authentication digests</h3>
+bitmap file fragments’ authentication digests</h4>
 <p>Whenever <a href="#sec-journal-auth-tree-updates-script">replaying
 any authentication tree node entry update</a> from the journal at
 filesystem opening time, the complete node must get reconstructed in
@@ -2357,9 +2794,9 @@ encoded as a single byte.</li>
 </ol></li>
 </ol></li>
 </ol>
-<h3 id="writes-application-script"><span
+<h4 id="writes-application-script"><span
 id="sec-journal-apply-writes-script-script">Writes application
-script</span></h3>
+script</span></h4>
 <p>The journal log contains instructions how to apply pending data
 updates, more specifically which journal staging copies to write to
 which target location. This information is encoded in a journal log
@@ -2387,9 +2824,9 @@ consecutive zero bytes.</p>
 <p>No target region may overlap with any source region, with the
 exception that the two may be equal for a given record, in which case
 implementations must skip it.</p>
-<h3 id="authentication-tree-update-script"><span
+<h4 id="authentication-tree-update-script"><span
 id="sec-journal-auth-tree-updates-script">Authentication tree update
-script</span></h3>
+script</span></h4>
 <p>The journal log field with tag
 <code>JOURNAL_LOG_FIELD_TAG_UPDATE_AUTH_DIGESTS_SCRIPT</code> contains
 all information needed to update the authentication tree, namely a list
@@ -2424,7 +2861,7 @@ consecutive zero bytes.</p>
 any modified authentication tree node from scratch when replaying the
 journal: a previous attempt to write to it might have failed and the
 contents must therefore be assumed to be in an indeterminate state.</p>
-<h3 id="trim-script">Trim script</h3>
+<h4 id="trim-script">Trim script</h4>
 <p>A journal log may contain an optional field of tag
 <code>JOURNAL_LOG_FIELD_TAG_TRIM_SCRIPT</code> for specifying a sequence
 of ranges to issue trim commands on after the journal has been replayed
@@ -2495,6 +2932,416 @@ becomes equal to the block cipher block size.</li>
 <li>Encrypt the single block cipher block with the IV generation
 encryption key.</li>
 </ol>
+<h2 id="auxiliary-filesystem-metadata-1"><span
+id="sec-aux-fs-metadata">Auxiliary filesystem metadata</span></h2>
+<p>The <a href="#sec-introduction-aux-fs-metadata">auxiliary filesystem
+metadata</a> payload is <a
+href="#sec-aux-fs-metadata-encoding">encoded</a> as a sequence of TLV
+records, and stored either as a contiguous blob next to a <a
+href="#sec-mkfsinfo-header">filesystem creation info header</a> or, once
+the filesystem has been created, distributed across one or more <a
+href="#def-extent">extents</a>.</p>
+<h3 id="payload-encoding"><span
+id="sec-aux-fs-metadata-encoding">Payload encoding</span></h3>
+<p>The auxiliary fileystem metadata is encoded as a sequence of records,
+each in format as follows:</p>
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 84%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length in bytes</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>16</td>
+<td>The tag, i.e. a <a
+href="https://datatracker.ietf.org/doc/html/rfc4122">RFC 4122</a>
+UUID.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Length of the data portion in bytes, encoded as a 32 bit integer in
+little-endian format.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>The entry’s associated data.</td>
+</tr>
+</tbody>
+</table>
+<p>The sequence ends with a special termination record with an UUID of
+all-zeros. The termination record’s data length is either 0B or 8B. In
+the latter case its data portion contains a 64 bit integer encoded in
+little-endian format, specifying the <a
+href="#def-aux-fs-metadata-extra-reserve-capacity">extra reserve
+capacity</a> to be defined further below.</p>
+<p>All of the sequence’s entries up to the final termination record must
+be in order of lexically increasing UUIDs. Multiple entries with the
+same UUID may exist as far as the filesystem format itself is
+concerned.</p>
+<h3 id="storage-as-part-of-the-filesystem-creation-info-data"><span
+id="sec-aux-fs-metadata-mkfsinfo">Storage as part of the filesystem
+creation info data</span></h3>
+<p>Some initial auxiliary filesystem metadata to write at <a
+href="#sec-introduction-online-mkfs">online filesystem creation</a> may
+get stored alongside a <a href="#sec-mkfsinfo-header">filesystem
+creation info header</a>. Remember that a <a
+href="#sec-mkfsinfo-header">filesystem creation info header</a> is
+either found at the storage volume’s beginning, or, in case of a <a
+href="#def-mkfsinfo-backup-header">backup copy</a>, towards its end at a
+location determined exclusively from the storage dimensions. The
+auxiliary filesystem metatdata, if any, is encapsulated as described
+below and stored as a contiguous blob</p>
+<ul>
+<li>right after the <a href="#sec-mkfsinfo-header">filesystem creation
+info header</a> if that is located at the storage volume’s beginning,
+or</li>
+<li>right in front <a href="#sec-mkfsinfo-header">filesystem creation
+info header</a> in case of the backup location.</li>
+</ul>
+<p>The length of the <a href="#sec-aux-fs-metadata-encoding">plain
+encoded</a> auxiliary filesystem metadata payload is recorded in one of
+the <a href="#sec-mkfsinfo-header">filesystem creation info header</a>
+fields, allowing for determining its storage location once the <a
+href="#sec-mkfsinfo-header">filesystem creation info header</a> has been
+found and read. As a special case, if that value is specified as <span
+class="math inline">\(0\)</span>, then there is no auxiliary filesystem
+metadata stored alongside the <a href="#sec-mkfsinfo-header">filesystem
+creation info header</a>.</p>
+<p>The encapsulation format is organized as follows:</p>
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 84%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length in bytes</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td><a href="#sec-crc">Checksum</a> over the data, including the
+alignment padding.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>The <a href="#sec-aux-fs-metadata-encoding">encoded auxiliary
+filesystem metadata payload</a>.</td>
+</tr>
+<tr>
+<td>variable</td>
+<td>Padding to align the total length to the <a href="#def-io-block">IO
+Block</a> size. Must be all-zeros.</td>
+</tr>
+</tbody>
+</table>
+<p>It is expected that if a <a href="#sec-mkfsinfo-header">filesystem
+creation info header</a> passes the <a
+href="#sec-extent-integrity">integrity protection</a> validation,
+i.e. has not suffered from torn writes in particular, then the auxiliary
+filesystem metadata stored alongside it would be valid as well. In
+practice that means that the auxiliary filesystem metadata needs to get
+written before the header, with a write barrier issued inbetween.</p>
+<p>Note that the <a href="#sec-mkfsinfo-header">filesystem creation info
+header</a> backup scheme naturally lends itself to a fail-safe A/B type
+update strategy for the auxiliary filesystem metadata. For example,
+suppose that the filesystem creation info data, i.e. the <a
+href="#sec-mkfsinfo-header">filesystem creation info header</a> and the
+auxiliary filesystem metadata stored alongside it are initially found at
+the primary location, i.e. at the storage volume’s beginning. Then</p>
+<ol type="1">
+<li>Make a backup copy, i.e.
+<ol type="a">
+<li>Invalidate the <a href="#sec-mkfsinfo-header">filesystem creation
+info header</a> <a href="#sec-extent-integrity">integrity
+protections</a> at the backup location by writing all-zeros. Note that
+this needs to be done independent of whether a valid header is already
+stored at the backup location – no header at this location may be
+considered effective until after the auxiliary filesystem metadata has
+been written in full below.</li>
+<li>Issue a write barrier.</li>
+<li>Write the original auxiliary filesystem metadata to the backup
+location.</li>
+<li>Issue a write barrier.</li>
+<li>Write the original <a href="#sec-mkfsinfo-header">filesystem
+creation info header</a> to the backup location, following the <a
+href="#def-extent-integrity-fail-safe-write">fail-safe extent write
+protocol</a>, as is required for any <a
+href="#sec-mkfsinfo-header">filesystem creation info header</a>
+write.</li>
+</ol></li>
+<li>Update the primary location, i.e.
+<ol type="a">
+<li>Invalidate the <a href="#sec-mkfsinfo-header">filesystem creation
+info header</a> <a href="#sec-extent-integrity">integrity
+protections</a> at the primary location by writing all-zeros.</li>
+<li>Issue a write barrier.</li>
+<li>Write the updated auxiliary filesystem metadata to the primary
+location.</li>
+<li>Issue a write barrier.</li>
+<li>Write the updated <a href="#sec-mkfsinfo-header">filesystem creation
+info header</a> to the primary location, following the <a
+href="#def-extent-integrity-fail-safe-write">fail-safe extent write
+protocol</a>, as is required for any <a
+href="#sec-mkfsinfo-header">filesystem creation info header</a>
+write.</li>
+</ol></li>
+<li>Optionally, invalidate the <a href="#sec-mkfsinfo-header">filesystem
+creation info header</a> at the backup location.</li>
+</ol>
+<h3 id="storage-in-a-formatted-filesystem"><span
+id="sec-aux-fs-metadata-formatted">Storage in a formatted
+filesystem</span></h3>
+<p>Once the filesystem has been created, the auxiliary filesystem
+metadata is stored across a sequence of <a
+href="#def-extent">extents</a> chained in a certain way and referenced
+from the <a href="#sec-mutable-image-header">mutable image header</a> as
+well as from the <a
+href="#sec-journal-log-head-plaintext-header">journal log head extent’s
+plaintext header</a>, if active.</p>
+<p>The auxililary filesystem metadata is stored in a format designed for
+enabling offline updates, i.e. when the filesystem key is unavailable,
+while still preserving full robustness guarantees against service
+interruptions encountered during storage writes. Details follow.</p>
+<p>The extents are tracked as allocated in the <a
+href="#sec-allocation-bitmap">allocation bitmap</a>, but considered
+unallocated for the purpose of computing <a
+href="sec-auth-tree-data-block-digest">authentication tree data block
+digests</a>. All extents’ boundaries must be aligned to the larger of
+the <a href="#def-io-block">IO Block</a> and the <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a>
+size. Note that the extents are constrained to be aligned to the <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a> size
+only for the convenience of implementations: for the purpose of
+computing <a href="sec-auth-tree-data-block-digest">authentication tree
+data block digests</a>, the auxililary filesystem metadata extents are
+to be considered as if unallocated as a special case, and letting them
+occupy an integral multiple of the <a
+href="#def-auth-tree-data-block">Authentication Tree Data Block</a> size
+alleviates the need to implement range checks for detecting this special
+case when updating potentially neighboring data.</p>
+<p>The auxiliary filesystem metadata extents collectively form a
+directed, circular linked list, partitioned into either one or two <span
+id="def-aux-fs-metadata-update-group"><em>update groups</em></span>. The
+<a href="#sec-mutable-image-header">mutable image header</a> as well as
+the <a href="#sec-journal-log-head-plaintext-header">journal log head
+extent’s plaintext header</a> contain a pair of <a
+href="#sec-enc-extent-ptr">encoded extent pointers</a> to the update
+groups’ respective head extents each. The pointer pair’s first entry may
+be NIL only if the second is as well. If the first entry is NIL, then
+there is no auxiliary filesystem metadata stored in the filesystem. The
+update group pointed to the by the pointer pair’s first entry is
+referred to as <em>update group 0</em>, the one pointed to by the second
+entry, if any, as <em>update group 1</em>. If there is no update group
+1, then no offline updates are possible. If a journal log is active, the
+pointer pair found therein takes precedence over that from the <a
+href="#sec-mutable-image-header">mutable image header</a>. In fact,
+whenever a journal log is active, no assumptions must be made about the
+validity of the <a href="#sec-mutable-image-header">mutable image
+header’s</a> contents on storage.</p>
+<p>Any extent in the circular linked list contains <a
+href="#sec-enc-extent-ptr">encoded extent pointers</a> to the next and
+next but one extent in the list and is subject to the common <a
+href="#sec-extent-integrity">extent integrity protection scheme</a>. The
+<a href="#def-aux-fs-metadata-update-group">update groups’</a> head
+extents contain an additional boolean flag specifying whether the group
+is active or not. Altogether, the auxiliary filesystem metadata extent
+format is:</p>
+<table style="width:99%;">
+<colgroup>
+<col style="width: 35%" />
+<col style="width: 62%" />
+<col style="width: 0%" />
+</colgroup>
+<thead>
+<tr>
+<th>Length in bytes</th>
+<th>Description</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td><a href="#sec-enc-extent-ptr">Encoded extent pointer</a> to the next
+extent in the circular list.</td>
+<td></td>
+</tr>
+<tr>
+<td>8</td>
+<td><a href="#sec-enc-extent-ptr">Encoded extent pointer</a> to the next
+but one extent in the circular list.</td>
+<td></td>
+</tr>
+<tr>
+<td>1</td>
+<td colspan="2"><a href="#def-aux-fs-metadata-update-group">Update
+group</a> active/inactive | state. Present only in <a
+href="#def-aux-fs-metadata-update-group">update group</a> head extents.
+|</td>
+</tr>
+<tr>
+<td>Length of a <a href="#sec-extent-integrity">common extent integrity
+protection section</a></td>
+<td>The <a href="#sec-extent-integrity">integrity protection
+section</a>.</td>
+<td></td>
+</tr>
+<tr>
+<td>Extent remainder</td>
+<td><a href="#sec-aux-fs-metadata-encoding">Encoded auxiliary filesystem
+metadata</a> payload part.</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>For clarity, the pointers to the subsequent extents are never NIL, as
+the circular list is considered to repeat itself.</p>
+<p>As it’s the case with any extent subject to the <a
+href="#sec-extent-integrity">common extent integrity protection
+scheme</a>, updates to an auxiliary filesystem metadata extent must
+follow the <a href="#def-extent-integrity-fail-safe-write">fail-safe
+extent write protocol</a>. The pointers to the next and next but one
+extents, and, for <a href="#def-aux-fs-metadata-update-group">update
+group</a> heads, the active/inactive state as well, are located in the
+<a href="#sec-extent-integrity-tiers">tier 0 integrity protection
+realm</a>. They must have correct values whenever the tier 0 integrity
+protection would validate. At most one extent in the circular chain may
+fail the <a href="#sec-extent-integrity">integrity protection</a>
+validation at any point in time, and only if an <a
+href="#def-aux-fs-metadata-update-group">update group 1</a> is present.
+Observe how these constraints guarantee that the complete list of
+extents as such can always get reconstructed, even if one of them
+suffered from a torn write. Note that this is crucial not only in the
+context of the auxiliary filesystem metadata itself, but also for the
+ability to maintain the <a href="#sec-auth-tree">authentication
+tree</a>, especially when <a
+href="#sec-journal-auth-tree-updates-script">reconstructing it during
+journal replay</a>, due to the auxiliary filesystem metadata extents
+being tracked as allocated in the <a
+href="#sec-allocation-bitmap">allocation bitmap</a>, but considered
+unallocated for the purpose of computing <a
+href="sec-auth-tree-data-block-digest">authentication tree data block
+digests</a>, as specified above.</p>
+<p>An <a href="#def-aux-fs-metadata-update-group">update group</a> can
+be either in active or inactive state, as determined from the
+active/inactive state field stored in its head extent. The possible
+values are</p>
+<table style="width:99%;">
+<colgroup>
+<col style="width: 56%" />
+<col style="width: 5%" />
+<col style="width: 37%" />
+</colgroup>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AUX_FS_METADATA_UPDATE_GROUP_STATE_INACTIVE</code></td>
+<td>0</td>
+<td>The <a href="#def-aux-fs-metadata-update_group">update group</a> is
+inactive.</td>
+</tr>
+<tr>
+<td><code>AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE</code></td>
+<td>1</td>
+<td>The <a href="#def-aux-fs-metadata-update-group">update group</a> is
+active.</td>
+</tr>
+<tr>
+<td><code>AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE_REALLOCATION_NEEDED</code></td>
+<td>2</td>
+<td>The <a href="#def-aux-fs-metadata-update-group">update group</a> is
+active. A hint to conduct a reallocation of its backing storage once
+possible has been set.</td>
+</tr>
+</tbody>
+</table>
+<p>If active, all of the group’s constituent extents are expected to be
+collectively coherent, and the concatenated payload contents to form a
+valid <a href="#sec-aux-fs-metadata-encoding">auxiliary filesystem
+metadata encoding</a>. In particular, all of the group’s constituent
+extents are expected to pass their respective <a
+href="#sec-extent-integrity">integrity protection</a> validation. At
+least one <a href="#def-aux-fs-metadata-update-group">update group</a>
+must be active at any given point in time. If both are active, <a
+href="#def-aux-fs-metadata-update-group">update group 0</a> takes
+precedence, i.e. the auxiliary filesystem metadata contents stored
+therein are considered effective.</p>
+<p>Assuming that <a href="#def-aux-fs-metadata-update-group">update
+group 0</a> is initially active, an offline auxiliary filesystem
+metatdata update could be implemented as follows, with all the
+individual extent storage writes adhering to the <a
+href="#def-extent-integrity-fail-safe-write">fail-safe extent write
+protocol</a>:</p>
+<ol type="1">
+<li>If there is some extent failing <a
+href="#sec-extent-integrity">integrity protection</a> validation
+(necessarily in an inactive group, i.e. group 1), repair it.</li>
+<li>If update group 1 is active, deactivate it by updating its head
+extent accordingly.</li>
+<li>Copy the original auxiliary filesystem metadata to update group 1
+and activate it.
+<ol type="a">
+<li>Write the tail extents, if any first.</li>
+<li>Write the head extent in a final step, set the active flag.</li>
+</ol></li>
+<li>Update group 0 with the updated auxiliary filesystem metadata
+contents.
+<ol type="a">
+<li>Write the tail extents, if any first.</li>
+<li>Write the head extent in a final step, set the active flag.</li>
+</ol></li>
+</ol>
+<p>Of course, this assumes that there is an <a
+href="#def-aux-fs-metadata-update-group">update group 1</a> in the first
+place, and that both <a href="#def-aux-fs-metadata-update-group">update
+groups</a> have a sufficient payload storage capacity each. That is,
+preparations need to be made ahead of time at auxiliary filesystem
+metatdata extents allocation in order to enable offline updates. Whether
+to allocate an <a href="#def-aux-fs-metadata-update-group">update group
+1</a> and the amount of excess space to allocate in both <a
+href="#def-aux-fs-metadata-update-group">update groups</a> depends on
+policy and is outside the scope of this specification. In order to guide
+any auxiliary filesystem metatdata extents (re)allocation, the <span
+id="def-aux-fs-metadata-extra-reserve-capacity"><em>extra reserve
+capacity</em></span> property may be defined. The extra reserve capacity
+property value, if any, is stored as part of the <a
+href="#sec-aux-fs-metadata-encoding">auxiliary filesystem metadata
+encoding’s</a> termination record. The termination record’s encoding
+length determines whether an extra reserve capacity value is defined or
+not. If it is not defined, then no <a
+href="#def-aux-fs-metadata-update-group">update group 1</a> shall be
+allocated at any subsequent extents (re)allocation. Otherwise an <a
+href="#def-aux-fs-metadata-update-group">update group 1</a> will get
+allocated and the extra reserve capacity specifies the amount of
+additional payload space in units of bytes to allocate in both <a
+href="#def-aux-fs-metadata-update-group">update groups</a> over the
+minimum required to store the auxiliary filesystem metadata contents
+defined at that time.</p>
+<p>When drawing from the <a
+href="#def-aux-fs-metadata-extra-reserve-capacity">extra reserve
+capacity</a>, offline updates may set the <a
+href="#def-aux-fs-metadata-update-group">update group’s</a> head
+extent’s active/inactive state field to
+<code>AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE_REALLOCATION_NEEDED</code>
+in order to signal that a reallocation would be desired once possible
+for reestablishing <a
+href="#def-aux-fs-metadata-extra-reserve-capacity">extra reserve
+capacity</a> excess allocation.</p>
 <h2 id="opening-the-filesystem-informative">Opening the filesystem
 (informative)</h2>
 <p>In order to illustrate how the various pieces needed for opening the
@@ -2524,7 +3371,7 @@ preauthentication CCA protection digest and decrypt it.</p></li>
 <a href="#sec-allocation-bitmap">allocation bitmap file</a> inodes in
 the decrypted inode index entry leaf node. Remember that the minimum
 inode index B+-tree minimum leaf node fill level is defined so that
-inodes 1-4 will always be found in that node.</p></li>
+inodes 1-3 will always be found in that node.</p></li>
 <li><p>If the inode index entries for the authentication tree or
 allocation bitmap files contain indirect references to <a
 href="#sec-enc-extents-list">extents lists</a>, stored in the inline
