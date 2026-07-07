@@ -1704,7 +1704,7 @@ impl AuthTreeConfig {
         h.update(
             io_slices::BuffersSliceIoSlicesIter::new(&[
                 b"COCOONFS".as_slice(),
-                0u8.to_le_bytes().as_slice(),
+                1u8.to_le_bytes().as_slice(),
                 image_layout.encode()?.as_slice(),
                 inode_index_entry_leaf_node_block_ptr.deref().as_slice(),
                 u64::from(image_size).to_le_bytes().as_slice(),

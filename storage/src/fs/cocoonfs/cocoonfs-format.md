@@ -516,7 +516,7 @@ The static image header starts at offset zero, its format is:
 +================================================+==================================================================+
 |8                                               |Magic string `'COCOONFS'` (without a terminating zero byte).      |
 +------------------------------------------------+------------------------------------------------------------------+
-|1                                               |The filesystem format version. Fixed to 0.                        |
+|1                                               |The filesystem format version. Fixed to 1.                        |
 +------------------------------------------------+------------------------------------------------------------------+
 |21                                              |The set of filesystem image layout parameters, c.f. further below.|
 +------------------------------------------------+------------------------------------------------------------------+
@@ -684,7 +684,7 @@ required for the actual filesystem creation and is of the following format:
 +================================+====================================================================================+
 |8                               |Magic string `'CCFSMKFS'` (without a terminating zero byte).                        |
 +--------------------------------+------------------------------------------------------------------------------------+
-|1                               |The filesystem creation info header format version. Fixed to 0.                     |
+|1                               |The filesystem creation info header format version. Fixed to 1.                     |
 +--------------------------------+------------------------------------------------------------------------------------+
 |21                              |The set of filesystem image layout parameters, encoded in the same                  |
 |                                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
@@ -988,7 +988,7 @@ The root key is derived from the externally supplied key material by invoking `K
 * `label` - Constant `KEY_PURPOSE_DERIVATION`.
 * `context` - The concatenation of
    1. The magic string `'COCOONFS'`, without a terminating zero byte.
-   2. The image format version, fixed to 0, encoded as a single byte.
+   2. The image format version, fixed to 1, encoded as a single byte.
    3. [`kdf_hash_alg`](#def-image-layout) encoded as a 16 bit integer in big-endian format.
    4. [`auth_tree_root_hmac_hash_alg`](#def-image-layout) encoded as a 16 bit integer in big-endian format.
    5. [`auth_tree_node_hash_alg`](#def-image-layout) encoded as a 16 bit integer in big-endian format.
@@ -1196,7 +1196,7 @@ The image context digest is produced by forming a HMAC with same hash algorithm 
 over
 
 1. The magic `'COCOONFS'`, without a terminating zero byte.
-2. A single byte filesystem format version identifier of constant 0.
+2. A single byte filesystem format version identifier of constant 1.
 3. The [encoded image layout](#def-image-layout).
 4. The [encoded block pointer](#sec-enc-block-ptr) to the [inode index entry leaf
    node](#def-inode-index-entry-leaf-node), as found in the [mutable image header](#sec-mutable-image-header).

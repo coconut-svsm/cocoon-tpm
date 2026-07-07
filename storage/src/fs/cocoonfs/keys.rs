@@ -450,7 +450,7 @@ impl RootKey {
         // The context passed to KDFa for derivation of the root_key will be, in this
         // order,
         // - The magic 'COCOONFS', without a null terminator.
-        // - the image format version, as an u8, fixed to zero for now,
+        // - the image format version, as an u8, fixed to 1 for now,
         // - the kdf_hash_alg, as a u16,
         // - the auth_tree_root_hmac_hash_alg, as a u16,
         // - the auth_tree_node_hash_alg, as a u16,
@@ -470,7 +470,8 @@ impl RootKey {
         let buf = context_head.as_mut_slice();
         buf[..8].copy_from_slice(b"COCOONFS");
         let buf = &mut buf[8..];
-        let buf = tpm2_interface::marshal_u8(buf, 0).map_err(|_| nvfs_err_internal!())?;
+        buf[0] = 1;
+        let buf = &mut buf[1..];
         let buf = kdf_hash_alg.marshal(buf).map_err(|_| nvfs_err_internal!())?;
         let buf = auth_tree_root_hmac_hash_alg
             .marshal(buf)

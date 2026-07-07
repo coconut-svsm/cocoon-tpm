@@ -91,7 +91,7 @@ impl MinStaticImageHeader {
         // The from_le_bytes() is a nop for an u8, but this mirrors the encoding part.
         let version =
             u8::from_le_bytes(*<&[u8; mem::size_of::<u8>()]>::try_from(version).map_err(|_| nvfs_err_internal!())?);
-        if version != 0 {
+        if version != 1 {
             return Err(NvFsError::from(FormatError::UnsupportedFormatVersion));
         }
 
@@ -247,7 +247,7 @@ impl StaticImageHeader {
             return Err(nvfs_err_internal!());
         }
 
-        let version = 0u8.to_le_bytes();
+        let version = 1u8.to_le_bytes();
         let mut version = io_slices::SingletonIoSlice::new(version.as_slice()).map_infallible_err();
         encoding_dst.copy_from_iter(&mut version)?;
         if !version.is_empty()? {
@@ -1574,7 +1574,7 @@ impl MinMkFsInfoHeader {
         // The from_le_bytes() is a nop for an u8, but this mirrors the encoding part.
         let version =
             u8::from_le_bytes(*<&[u8; mem::size_of::<u8>()]>::try_from(version).map_err(|_| nvfs_err_internal!())?);
-        if version != 0 {
+        if version != 1 {
             return Err(NvFsError::from(FormatError::UnsupportedFormatVersion));
         }
 
@@ -2019,7 +2019,7 @@ impl MkFsInfoHeader {
             return Err(nvfs_err_internal!());
         }
 
-        let version = 0u8.to_le_bytes();
+        let version = 1u8.to_le_bytes();
         let mut version = io_slices::SingletonIoSlice::new(version.as_slice()).map_infallible_err();
         encoding_dst.copy_from_iter(&mut version)?;
         if !version.is_empty()? {
