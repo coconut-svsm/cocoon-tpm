@@ -17,8 +17,9 @@ setting.
 In addition to its primary design focus on [strong security properties](#sec-introduction-security), the format
 implemens support for some features of particular relevance to the intended use-case, such as support for [keyless
 storage volume provisioning](#sec-introduction-online-mkfs) and robustness against service interruptions by means of a
-[journal](#sec-introduction-journal).
-
+[journal](#sec-introduction-journal). Moreover, in order to enable a wide range of external key retrieval workflows (aka
+"remote attestation") at opening time, some free-form [auxiliary metadata](#sec-introduction-aux-fs-metadata) may get
+stored with the filesystem.
 
 ### [Security properties]{#sec-introduction-security}
 The most noteworthy features distinguishing CocoonFs from common existing Full Disk Encryption (FDE) solutions designed
@@ -167,6 +168,28 @@ For example, upon update, the filesystem implementation could
 For handling any power cuts encountered after the new root digest has been sent, but before a reply has been received
 back, make the filesystem opening code to query the remote trusted party for the latest root authentication digest at
 filesystem opening time, depending on the answer either apply or cancel the pending journal.
+
+### [Auxiliary filesystem metadata]{#sec-introduction-aux-fs-metadata}
+In order to enable a wide range of external key retrieval workflows, the filesystem format has support for some
+free-form auxiliary filesystem metadata stored as plaintext. The auxiliary filesystem metadata is organized as a
+sequence of Tag-Length-Value (TLV) entries, with the tags being 128 bit UUIDS formed according to [RFC
+4122](https://datatracker.ietf.org/doc/html/rfc4122). The semantics of any such entry are at the discretion of the party
+who generated its respective associated UUID. Implementations are expected to ignore any entries with UUIDs they don't
+recognize.
+
+An example use case would be the storage of a wrapped filesystem key, which is to be sent to a remote server for
+unwrapping in the course of executing a remote attestation protocol. The designers of that protocol or, alternatively,
+anyone building a software architecture integrating the CocoonFs format with that remote attestation protocol, may
+generate an UUID for that purpose and define the payload format for storing the wrapped key in a auxiliary filesystem
+metatada entry tagged with that UUID.
+
+Typically, the auxiliary filesystem metadata would get initialized at filesystem creation time, and may subsequently get
+updated through the regular [journalling](#sec-introduction-journal) mechanism. Updates through the journal, the storage
+allocations needed for that in particular, necessarily require access to the filesystem key however. It is anticipated
+that some -- perhaps unforseen -- use cases or maintenance workflows may emerge where that requirement would pose a
+significant obstacle. Continuing on the example use case from above, that could be a transition to a different remote
+attestation server, requiring a rewrap of the filesystem key. To that end, all auxiliary filesystem metadata related
+data structures are defined in a way enabling offline updates robust against service interruptions.
 
 ### [Confidentiality of allocations and block trimming]{#sec-allocations-confidentiality}
 Ideally it should not be possible for an adversary to infer the allocation status of any blocks at any time, because
@@ -468,11 +491,11 @@ beginning:
   filesystem creation upon encountering such one, eventually replacing the header with a [regular CocoonFs
   filesystem header](#sec-filesystem-header) in the course.
 
-Both header types are protected by a checksum each. If no valid header of either type passing checksum verification is
-found at the storage's beginning when attempting to open a filesystem, implementations are expected to check for the
-presence of a filesystem creation info header [backup copy](#def-mkfsinfo-backup-header) at a specific location
-determined exclusively from the backing storage volume's dimensions, and proceed with the online filesystem creation if
-one is found.
+Both header types are protected by the [common integrity protection scheme](#sec-extent-integrity). If no valid header
+of either type passing integrity verification is found at the storage's beginning when attempting to open a filesystem,
+implementations are expected to check for the presence of a filesystem creation info header [backup
+copy](#def-mkfsinfo-backup-header) at a specific location determined exclusively from the backing storage volume's
+dimensions, and proceed with the online filesystem creation if one is found.
 
 #### [Regular CocoonFs filesystem header]{#sec-filesystem-header}
 The regular CocoonFs filesystem image header is split into two parts: a [static](#sec-static-image-header) and a
@@ -488,27 +511,35 @@ tree root hash.
 ##### [Static image header]{#sec-static-image-header}
 The static image header starts at offset zero, its format is:
 
-+----------------+----------------------------------------------------------------------------------+
-|Length in bytes |Description                                                                       |
-+================+==================================================================================+
-|8               |Magic string `'COCOONFS'` (without a terminating zero byte).                      |
-+----------------+----------------------------------------------------------------------------------+
-|1               |The filesystem format version. Fixed to 0.                                        |
-+----------------+----------------------------------------------------------------------------------+
-|21              |The set of filesystem image layout parameters, c.f. further below.                |
-+----------------+----------------------------------------------------------------------------------+
-|1               |The salt length.                                                                  |
-+----------------+----------------------------------------------------------------------------------+
-|variable        |The salt.                                                                         |
-+----------------+----------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header.                                       |
-+----------------+----------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header with any two neighboring bits swapped. |
-+----------------+----------------------------------------------------------------------------------+
++------------------------------------------------+------------------------------------------------------------------+
+|Length in bytes                                 |Description                                                       |
++================================================+==================================================================+
+|8                                               |Magic string `'COCOONFS'` (without a terminating zero byte).      |
++------------------------------------------------+------------------------------------------------------------------+
+|1                                               |The filesystem format version. Fixed to 0.                        |
++------------------------------------------------+------------------------------------------------------------------+
+|21                                              |The set of filesystem image layout parameters, c.f. further below.|
++------------------------------------------------+------------------------------------------------------------------+
+|1                                               |The salt length.                                                  |
++------------------------------------------------+------------------------------------------------------------------+
+|Length of a [common extent integrity protection |The [integrity protection section](#sec-extent-integrity).        |
+|section](#sec-extent-integrity).                |                                                                  |
++------------------------------------------------+------------------------------------------------------------------+
+|variable                                        |The salt.                                                         |
++------------------------------------------------+------------------------------------------------------------------+
+|variable                                        |Alignment padding.                                                |
++------------------------------------------------+------------------------------------------------------------------+
 
-After the static image header, some padding is inserted up to the next [IO Block](#def-io-block) alignment
-boundary. None of the IO Blocks overlapping with the static image header, including that padding, may ever get written
-to.
+Some alignment padding up to the next [IO Block](#def-io-block) boundary is inserted at the end of the static image
+header. None of the IO Blocks overlapping with the static image header, including that padding, may ever get written to
+after the filesystem has been created on storage.
+
+The static image header, including its alignment padding, is subject to the [common extent integrity
+protection](#sec-extent-integrity). It is expected that writes to the static image header storage location follow the
+[fail-safe extent write protocol](#def-extent-integrity-fail-safe-write). Note that the length of the integrity
+protection section is a function of the filesystem image layout parameters. These are located within the [tier 0
+integrity protection realm](#sec-extent-integrity-tiers) though, so that their integrity can get verified independently
+prior to determine the integrity protection section's total length.
 
 The set of filesystem configuration parameters, referred to as the [*image layout*]{#def-image-layout}, is encoded as
 follows:
@@ -524,7 +555,8 @@ follows:
 |       |                                                     |of 128B.                                                |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 | 1     |`io_block_allocation_blocks_log2`                    |Size of an [IO Block](#def-io-block), specified as the  |
-|       |                                                     |base-2 logarithm in units of Allocation Blocks.         |
+|       |                                                     |base-2 logarithm in units of Allocation Blocks. Must be |
+|       |                                                     |<= 6.                                                   |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 | 1     |`auth_tree_node_io_blocks_log2`                      |Size of an [authentication tree node](#sec-auth-tree),  |
 |       |                                                     |specified as the base-2 logarithm in units of IO Blocks.|
@@ -584,49 +616,6 @@ follows:
 |       |                                                     |big-endian format each.                                 |
 +-------+-----------------------------------------------------+--------------------------------------------------------+
 
-###### [Cyclic redundancy checksum (CRC) computation]{#sec-crc}
-The static image header is integrity protected by a pair two CRC-32s: one over the plain header data from the magic to
-the salt, both inclusive, and another one over the same data but with any two neighboring bits swapped.
-
-The CRC polynomial used in either case is the standard CRC-32 one, with a corresponding 32 bit integer representation of
-`0x04c11db71`, where the arithmetically most significant bit specifies the coefficient to the term of degree $31$, and
-the least signigicant bit the constant term. A string of $32$ $1$-bits is prepended to the data before the CRC
-computation starts. Successive bytes in the data correspond to terms of decreasing degree in the to be reduced data
-polynomial, and within each byte, bits of decreasing arithmetic significance correspond to terms of increasing
-polynomial degree. The final residual polynomial's coefficient are inverted and serialized with the same association
-between polynomial terms and bits on storage as just described for the data.
-
-The distribution of the CRC algorithm output over uniformly distributed data is again uniform, so in this idealized case
-the probability of not detecting random errors with a single CRC-32 is $1:2^{32}$. One of the checksum's primary
-purposes is to detect incomplete writes issued from an interrupted filesystem creation operation -- the only point in
-time the static image header is getting actively written to. A chance of $1:2^{32}$ for missing header corruptions may
-well be considered too unreliable, and a 64 bit checksum should be used instead. The most straightforward solution would
-be to use a CRC-64 variant. However, in practice, this would double the size of a CRC implementation's internal lookup
-tables, which is undesirable. So a different approach is taken instead: a 64 bit checksum is formed by combining one
-CRC-32 over the header's data with another over the same data, but with any two neighboring bits swapped. Because the
-CRC-32 polynomial is irreducible -- hence the ring of its residue classes is a field, this is equivalent to computing
-two independent CRC-32 values over the bits at odd and even positions in the input data each. Therefore, the probability
-of missing uniformly random corruptions is $1:2^{64}$.
-
-The well-known feature of CRC-64 that burst errors of length up to 64 bits are detected reliably also applies to this
-method of combining the two CRC-32 checksums. To see this, consider the polynomial ring $\mathbb{F}_2[X]$ with
-coefficients in the binary field $\mathbb{F}_2$. Denote the CRC polynomial in this ring by $\mathcal{c}$. The ability to
-detect burst errors up to a length of 64 bits translates to requiring that the only polynomial of degree less than 64
-with its terms of odd degree all zero and a residue $\mathrm{mod}\mathcal{c}$ of zero is the zero polynomial. Note that
-$\mathrm{char}(\mathbb{F}_2)=2$, and $\phi: p\mapsto p^2$ is a ring endomorphism on $\mathbb{F}_2[X]$. In particular
-$\phi(X)=X^2$. The image of $\phi$ is exactly the set of polynomials with their terms of odd degree all zero. Observe
-that $\phi(\mathcal{c})=\mathcal{c}^2$ yields such a polynomial with a residue $\mathrm{mod}\mathcal{c}$ of $0$. It has
-degree $64$ though, and it remains to be shown that this is the polynomial of least degree with these
-properties. Consider the composition of maps $\psi\circ\phi$, where $\psi$ denotes the canonical map
-$\mathbb{F}_2[X]\rightarrow \mathbb{F}_2[X]/(\mathcal{c})$ into the residue class ring.  The
-$\mathrm{kern}(\psi\circ\phi)$ is an ideal in $\mathbb{F}_2[X]$, and is prinicipal, because $\mathbb{F}_2[X]$ is a
-principal ideal ring. That is, $\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$ for some
-$\bar{\mathcal{c}}\in\mathbb{F}_2[X]$, and $\phi(\bar{\mathcal{c}})$ is a polynomial of minimum degree in
-$\mathrm{kern}(\psi)$ with its terms of odd degree all zero. By what has been said above, it is already known that
-$\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$. Finally, because $\mathcal{c}$ is irreducible (and
-$\mathbb{F}_2$'s only unit is $1$), it follows that $\mathcal{\bar{c}}=\mathcal{c}$.
-
-
 ##### [Mutable image header]{#sec-mutable-image-header}
 The mutable image header is located at the first [IO Block](#def-io-block) aligned boundary following the static image
 header. It gets updated through the general journalling mechanics, hence it may be in an inconsistent state at
@@ -637,6 +626,9 @@ The mutable image header's format is:
 +---------------------------------------+------------------------------------------------------------------------------+
 |Length                                 |Description                                                                   |
 +=======================================+==============================================================================+
+|16B                                    |[Encoded extent pointers](#sec-enc-extent-ptr) to the [auxiliary filesystem   |
+|                                       |metadata](#sec-aux-fs-metadata) update groups' head extents.                  |
++---------------------------------------+------------------------------------------------------------------------------+
 |Digest length produced by              |The [authentication tree root HMAC digest](#sec-auth-tree-root-digest).       |
 |`auth_tree_root_hmac_hash_alg`.        |                                                                              |
 +---------------------------------------+------------------------------------------------------------------------------+
@@ -661,55 +653,267 @@ parties not in possession of the root key may mark a storage volume for formatti
 use by writing a special filesystem creation info header to its beginning. This header provides all the information
 required for the actual filesystem creation and is of the following format:
 
-+----------------+------------------------------------------------------------------------------------+
-|Length in bytes |Description                                                                         |
-+================+====================================================================================+
-|8               |Magic string `'CCFSMKFS'` (without a terminating zero byte).                        |
-+----------------+------------------------------------------------------------------------------------+
-|1               |The filesystem creation info header format version. Fixed to 0.                     |
-+----------------+------------------------------------------------------------------------------------+
-|21              |The set of filesystem image layout parameters, encoded in the same                  |
-|                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
-+----------------+------------------------------------------------------------------------------------+
-|8               |The desired filesystem image size in units of [Allocation                           |
-|                |Blocks](#def-allocation-block), encoded as a 64 bit integer in little-endian format.|
-+----------------+------------------------------------------------------------------------------------+
-|1               |The salt length.                                                                    |
-+----------------+------------------------------------------------------------------------------------+
-|variable        |The salt.                                                                           |
-+----------------+------------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header.                                         |
-+----------------+------------------------------------------------------------------------------------+
-|4               |Cyclic redundancy checksum over the header with any two neighboring bits swapped.   |
-+----------------+------------------------------------------------------------------------------------+
++--------------------------------+------------------------------------------------------------------------------------+
+|Length in bytes                 |Description                                                                         |
++================================+====================================================================================+
+|8                               |Magic string `'CCFSMKFS'` (without a terminating zero byte).                        |
++--------------------------------+------------------------------------------------------------------------------------+
+|1                               |The filesystem creation info header format version. Fixed to 0.                     |
++--------------------------------+------------------------------------------------------------------------------------+
+|21                              |The set of filesystem image layout parameters, encoded in the same                  |
+|                                |[format](#def-image-layout) as for the regular filesystem header's static part.     |
++--------------------------------+------------------------------------------------------------------------------------+
+|8                               |The length of the [auxiliary filesystem metadata](#sec-aux-fs-metadata) payload     |
+|                                |[stored alongside](#sec-aux-fs-metadata-mkfsinfo) the filesystem creation info      |
+|                                |header, encoded as a 64 bit integer in little-endian format.                        |
++--------------------------------+------------------------------------------------------------------------------------+
+|8                               |The desired filesystem image size in units of [Allocation                           |
+|                                |Blocks](#def-allocation-block), encoded as a 64 bit integer in little-endian format.|
++--------------------------------+------------------------------------------------------------------------------------+
+|1                               |The salt length.                                                                    |
++--------------------------------+------------------------------------------------------------------------------------+
+|Length of a [common extent      |The [integrity protection section](#sec-extent-integrity).                          |
+|integrity protection            |                                                                                    |
+|section](#sec-extent-integrity).|                                                                                    |
++--------------------------------+------------------------------------------------------------------------------------+
+|variable                        |The salt.                                                                           |
++--------------------------------+------------------------------------------------------------------------------------+
+|variable                        |Alignment padding.                                                                  |
++--------------------------------+------------------------------------------------------------------------------------+
 
-The filesystem creation info header is protected by a pair of two CRC-32s: one over the plain header data from the magic
-to the salt, both inclusive, and another one over the same data but with any two neighboring bits swapped, just in line
-with the regular filesystem header's [checksum computation](#sec-crc).
+Some alignment padding up to the next [IO Block](#def-io-block) boundary is inserted at the end of the filesystem
+creation info header.
 
-Upon encountering such a filesystem creation header passing the checksum verification at the storage volume's beginning
+The filesystem creation info header, including its alignment padding, is subject to the [common extent integrity
+protection](#sec-extent-integrity). It is expected that writes to a fileystem creation info header storage location
+follow the [fail-safe extent write protocol](#def-extent-integrity-fail-safe-write). Note that the length of the
+integrity protection section is a function of the filesystem image layout parameters. These are located within the [tier
+0 integrity protection realm](#sec-extent-integrity-tiers) though, so that their integrity can get verified
+independently prior to determine the integrity protection section's total length.
+
+Upon encountering such a filesystem creation header passing the integrity verification at the storage volume's beginning
 when attempting to open a filesystem, implementations are supposed to conduct the filesystem creation.
 
 The filesystem creation process inevitably involves a replacement of the filesystem creation info header at the
 storage's beginning with the [regular CocoonFs image header](#sec-filesystem-header) at some point. For robustness
 against service interruptions encountered during that write, a [backup copy]{#def-mkfsinfo-backup-header} of the former
 is made at a specific location on storage beforehand. The location is determined exlusively from the storage volume's
-dimensions as follows: find the largest possible power of two not less than $4\cdot 128\textrm{B}$ such that the storage
-volume accomodates at least $16$ units of that size and place the backup filesystem creation info header copy at the
-beginning of the last such. For clarity, the minimum storage volume size required for supporting online filesystem
-creation by means of a filesystem creation info header is $16\cdot 4\cdot 128\textrm{B} = 8192\textrm{B}$. Note that
-this scheme has been chosen such that the backup copy will get placed towards the storage volume's end, while still
-preserving a relatively large alignment at the same time: having it stored near the end prevents it from intefering with
-any of the filesystem's initial metadata structures' placement and the large alignment will enable meaningful error
-reporting in case the underlying hardware is not compatible with the selected [IO Block](#def-io-block) size.
+dimensions as follows: find the largest possible power of two not less than the larger of $4\cdot 128\textrm{B}$ and the
+[IO Block](#def-io-block) size such that the storage volume accomodates at least $16$ units of that size and place the
+backup filesystem creation info header copy at the beginning of the last such. For clarity, the minimum storage volume
+size required for supporting online filesystem creation by means of a filesystem creation info header is the larger of
+$16\cdot 4\cdot 128\textrm{B} = 8192\textrm{B}$ and $16$ [IO Blocks](#def-io-block). Note that this scheme has been
+chosen such that the backup copy will get placed towards the storage volume's end, while still preserving a relatively
+large alignment at the same time: having it stored near the end prevents it from intefering with any of the filesystem's
+initial metadata structures' placement and the large alignment will enable meaningful error reporting in case the
+underlying hardware is not compatible with the selected [IO Block](#def-io-block) size.
 
-In either case, if no valid [image header](#sec-image-header) of either type passing the respective checksum
+In either case, if no valid [image header](#sec-image-header) of either type passing the respective integrity protection
 verification is found at the storage volume's beginning when attempting to open a filesystem, neither a [regular
 CocoonFs static image header](#sec-static-image-header) nor a filesystem creation info header, then implementations are
 expected to check for the presence of a filesystem creation info header backup copy at the specified location. If one is
-found, and it passes its checksum verification, then the online filesystem creation procedure is supposed to get
+found, and it passes its integrity verification, then the online filesystem creation procedure is supposed to get
 restarted from scratch.
 
+### Integrity protections
+Once the CocoonFs image has been opened and the [authentication](#sec-auth-tree) is fully operational, integrity
+protection is provided implicitly through the (keyed) authentication. However, some core filesystem entities like the
+[image header](#sec-static-image-header) must get examined in the course of the bootstrapping procedure itself, and
+therefore have dedicated integrity protections in place.
+
+The CocoonFs format defines two mechanisms for integrity protections: a bare [checksum scheme](#sec-crc) and, as
+checksums are inherently prone to collisions, a common [extent protection scheme](#sec-extent-integrity) designed to
+provide additional robustness against torn writes for certain extent types subject to this protection.
+
+#### Checksum scheme{#sec-crc}
+The checksum is formed by concatenating a pair of two CRC-32 values: one over the plain data, and another one over the
+same data but with the bits at odd and even positions swapped. The rationale follows below.
+
+The CRC polynomial used in either case is the standard CRC-32 one, with a corresponding 32 bit integer representation of
+`0x04c11db71`, where the arithmetically most significant bit specifies the coefficient to the term of degree $31$, and
+the least signigicant bit the constant term. A string of $32$ $1$-bits is prepended to the data before the CRC
+computation starts. Successive bytes in the data correspond to terms of decreasing degree in the to be reduced data
+polynomial, and within each byte, bits of decreasing arithmetic significance correspond to terms of increasing
+polynomial degree. The final residual polynomial's coefficient are inverted and serialized with the same association
+between polynomial terms and bits on storage as just described for the data.
+
+##### Rationale
+In principle, it would have been possible to (re)use some cryptographic hash function needed for the authentication
+anyway to also provide integrity protection in these contexts. However, there might be use-cases where an implementation
+would examine (and possibly even alter) only the filesystem metadata, but not attempt to run a full filesystem opening
+procedure. If cryptographic hashes were used for the integrity protections, such implementations would have to implement
+support for any such algorithm possibly to be encountered -- something which external policies and regulations might
+prohibit. For this reason, a dedicated checksumming scheme is used instead, which should be unproblematic and
+universally available. The checksum scheme used to provide integrity protections for CocoonFs is based on the well-known
+Cyclic Redundancy Checksum (CRC) class of checksums.
+
+The features of a particular CRC instance, most notably the checksum length, are determined exclusively by the chosen
+CRC polynomial. The most commonly used ones are either $32$ or $64$ bits in length. In general, longer
+polynomials/checksums provide better protection, obviously. More specifically, CRCs computed over uniformly distributed
+data are again uniform and in this idealized case, the probability of not detecting random errors is either $1:2^{32}$
+or $1:2^{64}$, depending on whether the chosen CRC polynomial is of degree $32$ or $64$.  One of the checksums'
+primary purposes in the context of CocoonFs is to detect incomplete writes issued from an interrupted filesystem
+creation operation -- the only point in time the [static image header](#sec-static-image-header) is getting actively
+written to. A chance of $1:2^{32}$ for missing header corruptions may well be considered too unreliable, and a $64$ bit
+checksum should be used instead.
+
+However, CRC polynomials of larger degree tend to be more demanding in terms of runtime resources, e.g. of internal
+lookup tables' sizes. Moreover, implementations for the widely adopted standard CRC-32 polynomial are more generally
+available, both for hard- and software. Therefore, a hybrid approach yielding a $64$ bit checksum of the desired
+properties exclusively from the CRC-32 primitive has been chosen for CocoonFs. The checksum is formed from a pair of two
+CRC-32 values: one over the protected data, and another one over that same data, but with the bits at odd and even
+positions swapped each.
+
+##### Checksum properties
+The CRC-32 polynomial is irreducible, hence the ring of its residue classes forms a field. Therefore,
+the following two are equivalent in the sense that one uniquely determines the other:
+
+* the pair of CRC-32 values computed as described above to form the checksum, i.e. one over the plain data and another
+  one over the data with the bits at odd and even positions swapped,
+* a pair of CRC-32 values, one computed exclusively from the bits at odd positions, and the other one exclusively from
+  the bits at even positions.
+
+In particular, the chance of missing a random data corruption is $1:2^{64}$.
+
+The well-known feature of CRC-64 that burst errors of length up to 64 bits are detected reliably also applies to this
+method of combining the two CRC-32 checksums. To see this, consider the polynomial ring $\mathbb{F}_2[X]$ with
+coefficients in the binary field $\mathbb{F}_2$. Denote the CRC polynomial in this ring by $\mathcal{c}$. The ability to
+detect burst errors up to a length of 64 bits translates to requiring that the only polynomial of degree less than 64
+with its terms of odd degree all zero and a residue $\mathrm{mod}\mathcal{c}$ of zero is the zero polynomial. Note that
+$\mathrm{char}(\mathbb{F}_2)=2$, and $\phi: p\mapsto p^2$ is a ring endomorphism on $\mathbb{F}_2[X]$. In particular
+$\phi(X)=X^2$. The image of $\phi$ is exactly the set of polynomials with their terms of odd degree all zero. Observe
+that $\phi(\mathcal{c})=\mathcal{c}^2$ yields such a polynomial with a residue $\mathrm{mod}\mathcal{c}$ of $0$. It has
+degree $64$ though, and it remains to be shown that this is the polynomial of least degree with these
+properties. Consider the composition of maps $\psi\circ\phi$, where $\psi$ denotes the canonical map
+$\mathbb{F}_2[X]\rightarrow \mathbb{F}_2[X]/(\mathcal{c})$ into the residue class ring.  The
+$\mathrm{kern}(\psi\circ\phi)$ is an ideal in $\mathbb{F}_2[X]$, and is prinicipal, because $\mathbb{F}_2[X]$ is a
+principal ideal ring. That is, $\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$ for some
+$\bar{\mathcal{c}}\in\mathbb{F}_2[X]$, and $\phi(\bar{\mathcal{c}})$ is a polynomial of minimum degree in
+$\mathrm{kern}(\psi)$ with its terms of odd degree all zero. By what has been said above, it is already known that
+$\mathcal{c}\in\mathrm{kern}(\psi\circ\phi)=(\bar{\mathcal{c}})$. Finally, because $\mathcal{c}$ is irreducible (and
+$\mathbb{F}_2$'s only unit is $1$), it follows that $\mathcal{\bar{c}}=\mathcal{c}$.
+
+#### [Common extent integrity protection scheme]{#sec-extent-integrity}
+The common extent integrity protection scheme only applies to certain [extent](#def-extent) types whose boundaries are
+aligned to multiples of a [filesystem IO Block](#def-io-block) on storage. It transforms the protected extent's contents
+-- conceptually the integrity protections are applied last after encoding any of the higher-level data structures and
+right before writing the extent to storage. Conversely, the integrity protections are removed again and the contents
+restored to their original state right after reading the protected extent from storage and before decoding any of the
+higher-level data structures.
+
+For what follows, the backing hardware device's minimum IO granularity is referred to a a [*device IO
+Block*]{#def-dev-io-block}. A [device IO Block](#def-dev-io-block) is never larger than the [filesystem's IO
+Block](#def-io-block) size attribute, as per the definition of the latter. In particular, a write to one [device IO
+Block](#def-dev-io-block) is assumed to never affect the contents of any other [device IO Block](#def-dev-io-block), at
+any stage of the write.
+
+For the purpose of the discussion that follows, the [extent](#def-extent) is split into two logical parts:
+
+- its first [device IO Block](#def-dev-io-block)
+- and its tail remainder.
+
+Implementations are expected to proceed according to the following [*fail-safe extent write
+protocol*]{#def-extent-integrity-fail-safe-write} when updating an integrity protected extent on storage, semantically
+equivalent behavior is permitted.
+
+1. Invalidate the extent's first [device IO Block](#def-dev-io-block) on storage by writing all-zeros to it.
+2. Issue a write barrier.
+3. Update the extent's tail on storage, if any.
+4. If the tail is non-trivial, issue a write barrier.
+5. Update the extent's first [device IO Block](#def-dev-io-block) on storage.
+
+The semantics of the write barrier must be such that any writes issued after it must not become effective on storage,
+not even partially, before any writes prior to it have become fully effective.
+
+To handle service interruptions encountered during the final write of the extent's first [device IO
+Block](#def-dev-io-block), integrity protections are applied to the first [filesystem IO Block](#def-io-block) (which
+always contains the first [device IO Block](#def-dev-io-block)). In general, the contents of a
+[device IO Block](#def-dev-io-block) following a service interruption encountered during a write, aka a "torn write",
+can be in any state. Note that in practice however, hardware typically exhibits either of two behaviors, sometimes
+implemented only as a "best-effort" guarantee: the data is either all-old or all-new, or alternatively, there's a pivot
+point somewhere within the [device IO Block](#def-dev-io-block) partitioning it into an all-old and an all-new region
+each. Observe that the former behavior is a special case of the latter.
+
+Two complementary integrity protection mechanisms are applied to the first [filesystem IO Block](#def-io-block):
+
+* common [checksum](#sec-crc) protection and,
+* to improve reliability on devices implementing the typical "old-new" [device IO Block](#def-dev-io-block) partitioning
+  behavior on torn writes as described above, special write completion marker values are written to certain checkpoint
+  locations within the extent's first [filesystem IO Block](#def-io-block).
+
+Due do the possibility of collisions, the checksum based protection scheme might fail to detect corruptions, even though
+the probability of $1:2^{64}$ of that happening is generally considered to be negligible in practice. The write
+completion marker based mechanism is guaranteed to always detect partial writes reliably on hardware implementing the
+common "old-new" partitioning behavior on torn writes.
+
+An extent's integrity protection data section format is an invariant of the filesystem, the [filesystem IO
+Block](#def-io-block) size to be more specific, and organized as follows:
+
++-------------------------------------------------------+---------------------------------------+
+|Length                                                 |Description                            |
++-------------------------------------------------------+---------------------------------------+
+|8                                                      |Commit ID, derived from the checksum.  |
++-------------------------------------------------------+---------------------------------------+
+|1                                                      |XOR mask.                              |
++-------------------------------------------------------+---------------------------------------+
+|$8\cdot(\texttt{io\_block\_allocation\_blocks\_log2} + |Checkpoint locations data save area.   |
+|\texttt{allocation\_block\_size\_128b\_log2})$         |                                       |
++-------------------------------------------------------+---------------------------------------+
+
+Observe that the checkpoint locations data save area's length is given by the base-2 logarithm of the [filesystem IO
+Block](#def-io-block) size in units of $128\textrm{B}$, mutiplied by the [checksum](#sec-crc) length.
+
+The offset at which integrity protection data section is stored within an extent depends on the extent type, with the
+constraint that its first $(8 + 1)\textrm{B}$ always are located within the extent's first $128\textrm{B}$. That is the
+offset is always $\leq $128\textrm{B} - (8 + 1)\textrm{B}$.
+
+The [checksum](#sec-crc) is computed over all of the extent's original data, before any of the write completion markers
+have been written to it. For the purpose of the checksum computation, all of the extent's integrity protection data
+section is set to zero.
+
+The write completion marker based mechanism is divided into two [tiers]{#sec-extent-integrity-tiers}: tier 0 protects
+the first $128\textrm{B}$, tier 1 the first [filesystem IO Block's](#def-io-block) remainder. Tier 1 may reach into the
+tier 0 region and is described first.
+
+The *commit ID* value is derived from the [checksum](#sec-crc) as described further below and gets written as a write
+completion marker to certain checkpoint locations withing the first [filesystem IO Block](#def-io-block):
+
+* once to its designated slot within the extent's integrity protection data section,
+* to every possible [device IO Block](#def-dev-io-block) end for any [device IO Block](#def-dev-io-block) larger than
+  $128\textrm{B}$. That is, right before any power-of-two boundary within the containing [filesystem IO
+  Block](#def-io-block), starting at $256\textrm{B}$.
+
+The data originally found at the respective checkpoint locations $>128\textrm{B}$ gets copied back-to-back to a
+*checkpoint locations data save area* within the extent's integrity protection data section before overwriting it with
+the write completion marker value respectively. For definiteness in case the checkpoint locations data save area
+contains a checkpoint location itself (which is possible only for an unreasonably large [filesystem IO
+Block](#def-io-block) size): the copying is supposed to be done in order from the highest checkpoint location to lowest.
+
+If at filesystem opening time the values found at these checkpoint locations are not all equal, then the extent is
+considered to have been written only partially and is dismissed. Observe that, under the assumed torn write hardware
+behavior, the write completion markers protect any of of the data region spanning from the beginning of the extent's
+integrity protection data section all the way to the end of the first [filesystem IO Block](#def-io-block), i.e. any
+data at offset $\geq 128\textrm{B}$ in particular.
+
+To cover the range $\lt 128\textrm{B}$, the extent's first $128\textrm{B}$ are XOR-masked with a byte value chosen such
+that the results are all non-zero, possibly skipping over some of its leading bytes storing an extent type dependent
+magic. If any of the bytes in this $128\textrm{B}$ range are found to equal zero at verification time, then the extent
+is considered to have been written only partially and is dismissed.
+
+For clarity, the XOR-mask is chosen and applied
+
+- after the original data from the checkpoint locations at offsets $>128\textrm{B}$ has been opied over to the
+  checkpoint locations data save area and
+- before the commit ID and the XOR-mask value get stored at their respective locations within the extent's integrity
+  protection data section. For the purpose of selecting the XOR-mask value, these locations may be assumed to be
+  identical to zero.
+
+The commit ID is defined to equal the [checksum](#sec-crc) with the XOR-mask applied and stored as such at offset $0$
+within the extent's integrity protection data section, and is therefore contained within the extent's first
+$128\textrm{B}$. The XOR-mask byte value itself is stored at offset $8$ within the extent's integrity protection data
+section, therefore is contained within the first $128\textrm{B}$ as well. As both are contained within the first
+$128\textrm{B}$, they must not contain any zero bytes. That is, the XOR-mask byte value must be chosen under the
+additional constraint that it's non-zero and different from any of the bytes in the [checksum](#sec-crc).
 
 ### [Key derivation]{#sec-key-derivation}
 As outlined in the [introduction](#sec-introduction), the root key gets processed once through the TCG
@@ -914,7 +1118,8 @@ The HMAC is formed with a hash algorithm of [`auth_tree_data_hmac_hash_alg`](#de
 
 1. the [Authentication Tree Data Block's](#def-auth-tree-data-block) constituent allocated [Allocation
    Blocks](#def-allocation-block) contents, while skipping over the unallocated ones, as well as those allocated to the
-   [image header](#sec-image-header) or journal log head,
+   [image header](#sec-image-header), the [journal log head](#sec-journal-log-encryption) or any of the [auxiliary
+   filesystem metadata extents](#sec-aux-fs-metadata-formatted),
 2. and an [authentication context](#sec-auth-context) formed as follows:
    1. A 64 bit allocation bitmap word specifying the allocation status of each of the Authentication Tree Data Block's
       constituent Allocation Blocks, encoded in little-endian format.
@@ -1178,6 +1383,7 @@ service interruption. From a high level, it consists of *staging copies* of the 
 block](#def-io-block) granularity and a log specifying what needs to get written where as well as information about
 which parts of the the [authentication tree](#sec-auth-tree) need a reconstruction.
 
+### [Journal log encryption]{#sec-journal-log-encryption}
 The journal log is stored in a list of [encrypted chained extents](#sec-encryption-entity-chained-extents), with the
 head extent, the [*journal log head*](#def-journal-log-head), being located at a fixed position in the filesystem image,
 which can get determined from the information provided in the [static image header](#sec-static-image-header). More
@@ -1208,23 +1414,30 @@ the encrypted chained extents' inline authentication is set to
 3. An identifier byte of constant 1 identifying the type of authenticated associated data for the encrypted chained
    extents' inline authentication.
 
+### [Journal log head extent plaintext header](#sec-journal-log-head-plaintext-header)
+The [encrypted chained extents](#sec-encryption-entity-chained-extents) encryption entity format allows for a plaintext
+header to get stored in the first head extent. For the journal log, this plaintext header comprises
+
+* a magic of `CCFSJRNL`, without a terminating zero byte, if the journal is to be considered active,
+* an [extent integrity protection section](#sec-extent-integrity) for detecting torn writes to the head extent,
+* a pair of two [encoded extent pointers](#sec-enc-extent-ptr) to the auxiliary filesystem metadata update groups' head
+  extents.
+
+Note that updates of the journal log head extent on storage must follow the [fail-safe extent write
+protocol](#def-extent-integrity-fail-safe-write), as is the case for any extent subject to the [common integrity
+protection scheme](#sec-extent-integrity).
+
 The journal is to be considered non-empty and to get applied upon the next filesystem opening following a possible
 service interruption whenever its head extent begins with a magic of `'CCFSJRNL'`, without a terminating zero byte, and
-the head extent's inline authentication digest successfully verifies its contents. Note that the head extent's inline
-authentication digest serves as an integrity protection measure here, in particular it is not an error if the head
-extent's authentication fails -- in this case the journal is simply considered as having been only partially written and
-is disregarded.
+the head [extent's integrity protections](#sec-extent-integrity) can get successfully verified. The magic is exempt from
+the [extent integrity protection's](#sec-extent-integrity) transformations.
 
-It is expected that implementations would write all of the journal's data before the journal log head extent, issuing
-write barriers as is appropriate for the underlying hardware device inbetween. Similarly, after the journal has been
-applied, either online or following a service interruption, it is expected that implementations would first invalidate
-the journal log head extent before proceeding to reusing any of the storage areas occupied by the journal's remainder,
-likewise issuing write barriers as needed. In particular failure to authenticate a journal log tail extent when the head
-authenticated successfully is a fatal error.
-
-The journal log plaintext is organized as sequence of tag-length-value (TLV) encoded fields. The tag and length are
-encoded as unsigned integers in LEB128 format, the format of the value depends on the field. The fields must be stored
-in the journal in the order induced by increasing tag values. The defined tag values are:
+### [Journal log payload contents]{#sec-journal-log-payload-contents}
+The journal log payload, subject to encryption in the [encrypted chained
+extents](#sec-encryption-entity-chained-extents) format, is organized as sequence of tag-length-value (TLV) encoded
+fields. The tag and length are encoded as unsigned integers in LEB128 format, the format of the value depends on the
+field. The fields must be stored in the journal in the order induced by increasing tag values. The defined tag values
+are:
 
 +----------------------------------------------------------------+-----+-----------------------------------------------+
 |Name                                                            |Value|Description                                    |
@@ -1251,7 +1464,7 @@ in the journal in the order induced by increasing tag values. The defined tag va
 |                                                                |     |disguising the journal's data staging copies.  |
 +----------------------------------------------------------------+-----+-----------------------------------------------+
 
-### Allocation bitmap file fragments' authentication digests
+#### Allocation bitmap file fragments' authentication digests
 Whenever [replaying any authentication tree node entry update](#sec-journal-auth-tree-updates-script) from the journal
 at filesystem opening time, the complete node must get reconstructed in full from scratch: the nodes' boundaries are
 aligned to the [IO Block](#def-io-block) size each, but some previous attempt to apply the journal might have failed and
@@ -1301,7 +1514,7 @@ The field's value contents is constructed by concatenating
 	  3. A format version identifier byte of constant 0 identifying the outer "envelope" format.
       4. The value of [`AUTH_SUBJECT_ID_JOURNAL_LOG_FIELD`](#sec-auth-context) encoded as a single byte.
 	  
-### [Writes application script]{#sec-journal-apply-writes-script-script}
+#### [Writes application script]{#sec-journal-apply-writes-script-script}
 The journal log contains instructions how to apply pending data updates, more specifically which journal staging copies
 to write to which target location. This information is encoded in a journal log field with a tag value of
 `JOURNAL_LOG_FIELD_TAG_APPLY_WRITES_SCRIPT` as a sequence of records, each one consisting of
@@ -1320,7 +1533,7 @@ The sequence is terminated with a termination records of three consecutive zero 
 No target region may overlap with any source region, with the exception that the two may be equal for a given record, in
 which case implementations must skip it.
 
-### [Authentication tree update script]{#sec-journal-auth-tree-updates-script}
+#### [Authentication tree update script]{#sec-journal-auth-tree-updates-script}
 The journal log field with tag `JOURNAL_LOG_FIELD_TAG_UPDATE_AUTH_DIGESTS_SCRIPT` contains all information needed to
 update the authentication tree, namely a list of [Authentication Tree Data Blocks](#def-auth-tree-data-block) whose
 [digests](#sec-auth-tree-data-block-digest) have changed -- either because their contents got updated or because some of
@@ -1345,7 +1558,7 @@ It should be stressed that implementations must always reconstruct any modified 
 when replaying the journal: a previous attempt to write to it might have failed and the contents must therefore be
 assumed to be in an indeterminate state.
 
-### Trim script
+#### Trim script
 A journal log may contain an optional field of tag `JOURNAL_LOG_FIELD_TAG_TRIM_SCRIPT` for specifying a sequence of
 ranges to issue trim commands on after the journal has been replayed and the journal log head invalidated.
 
@@ -1391,6 +1604,231 @@ journal staging copy with the specified block cipher in CBC mode and an IV obtai
    little-endian format.
 2. Truncate or pad the result at the beginning so that its length becomes equal to the block cipher block size.
 3. Encrypt the single block cipher block with the IV generation encryption key.
+
+## [Auxiliary filesystem metadata]{#sec-aux-fs-metadata}
+The [auxiliary filesystem metadata](#sec-introduction-aux-fs-metadata) payload is
+[encoded](#sec-aux-fs-metadata-encoding) as a sequence of TLV records, and stored either as a contiguous blob next to a
+[filesystem creation info header](#sec-mkfsinfo-header) or, once the filesystem has been created, distributed across one
+or more [extents](#def-extent).
+
+### [Payload encoding]{#sec-aux-fs-metadata-encoding}
+The auxiliary fileystem metadata is encoded as a sequence of records, each in format as follows:
+
++----------------+-----------------------------------------------------------------------------------------+
+|Length in bytes |Description                                                                              |
++================+=========================================================================================+
+|16              |The tag, i.e. a [RFC 4122](https://datatracker.ietf.org/doc/html/rfc4122) UUID.          |
++----------------+-----------------------------------------------------------------------------------------+
+|4               |Length of the data portion in bytes, encoded as a 32 bit integer in little-endian format.|
++----------------+-----------------------------------------------------------------------------------------+
+|variable        |The entry's associated data.                                                             |
++----------------+-----------------------------------------------------------------------------------------+
+
+The sequence ends with a special termination record with an UUID of all-zeros. The termination record's data length is
+either 0B or 8B. In the latter case its data portion contains a 64 bit integer encoded in little-endian format,
+specifying the [extra reserve capacity](#def-aux-fs-metadata-extra-reserve-capacity) to be defined further below.
+
+All of the sequence's entries up to the final termination record must be in order of lexically increasing UUIDs.
+Multiple entries with the same UUID may exist as far as the filesystem format itself is concerned.
+
+
+### [Storage as part of the filesystem creation info data]{#sec-aux-fs-metadata-mkfsinfo}
+Some initial auxiliary filesystem metadata to write at [online filesystem creation](#sec-introduction-online-mkfs) may
+get stored alongside a [filesystem creation info header](#sec-mkfsinfo-header). Remember that a [filesystem creation
+info header](#sec-mkfsinfo-header) is either found at the storage volume's beginning, or, in case of a [backup
+copy](#def-mkfsinfo-backup-header), towards its end at a location determined exclusively
+from the storage dimensions. The auxiliary filesystem metatdata, if any, is encapsulated as described below and stored
+as a contiguous blob
+
+- right after the [filesystem creation info header](#sec-mkfsinfo-header) if that is located at the storage volume's
+  beginning, or
+- right in front [filesystem creation info header](#sec-mkfsinfo-header) in case of the backup location.
+
+The length of the [plain encoded](#sec-aux-fs-metadata-encoding) auxiliary filesystem metadata payload is recorded in
+one of the [filesystem creation info header](#sec-mkfsinfo-header) fields, allowing for determining its storage location
+once the [filesystem creation info header](#sec-mkfsinfo-header) has been found and read. As a special case, if that
+value is specified as $0$, then there is no auxiliary filesystem metadata stored alongside the [filesystem creation info
+header](#sec-mkfsinfo-header).
+
+The encapsulation format is organized as follows:
+
++----------------+-------------------------------------------------------------------------------------------+
+|Length in bytes |                                                                                           |
++================+===========================================================================================+
+|8               |[Checksum](#sec-crc) over the data, including the alignment padding.                       |
++----------------+-------------------------------------------------------------------------------------------+
+|variable        |The [encoded auxiliary filesystem metadata payload](#sec-aux-fs-metadata-encoding).        |
++----------------+-------------------------------------------------------------------------------------------+
+|variable        |Padding to align the total length to the [IO Block](#def-io-block) size. Must be all-zeros.|
++----------------+-------------------------------------------------------------------------------------------+
+
+It is expected that if a [filesystem creation info header](#sec-mkfsinfo-header) passes the [integrity
+protection](#sec-extent-integrity) validation, i.e. has not suffered from torn writes in particular, then the auxiliary
+filesystem metadata stored alongside it would be valid as well. In practice that means that the auxiliary filesystem
+metadata needs to get written before the header, with a write barrier issued inbetween.
+
+Note that the [filesystem creation info header](#sec-mkfsinfo-header) backup scheme naturally lends itself to a
+fail-safe A/B type update strategy for the auxiliary filesystem metadata. For example, suppose that the filesystem
+creation info data, i.e. the [filesystem creation info header](#sec-mkfsinfo-header) and the auxiliary filesystem
+metadata stored alongside it are initially found at the primary location, i.e. at the storage volume's beginning. Then
+
+1. Make a backup copy, i.e.
+   a. Invalidate the [filesystem creation info header](#sec-mkfsinfo-header) [integrity
+      protections](#sec-extent-integrity) at the backup location by writing all-zeros. Note that this needs to be done
+      independent of whether a valid header is already stored at the backup location -- no header at this location may
+      be considered effective until after the auxiliary filesystem metadata has been written in full below.
+   b. Issue a write barrier.
+   c. Write the original auxiliary filesystem metadata to the backup location.
+   d. Issue a write barrier.
+   e. Write the original [filesystem creation info header](#sec-mkfsinfo-header) to the backup location, following the
+      [fail-safe extent write protocol](#def-extent-integrity-fail-safe-write), as is required for any [filesystem
+      creation info header](#sec-mkfsinfo-header) write.
+2. Update the primary location, i.e.
+   a. Invalidate the [filesystem creation info header](#sec-mkfsinfo-header) [integrity
+      protections](#sec-extent-integrity) at the primary location by writing all-zeros.
+   b. Issue a write barrier.
+   c. Write the updated auxiliary filesystem metadata to the primary location.
+   d. Issue a write barrier.
+   e. Write the updated [filesystem creation info header](#sec-mkfsinfo-header) to the primary location, following the
+      [fail-safe extent write protocol](#def-extent-integrity-fail-safe-write), as is required for any [filesystem
+      creation info header](#sec-mkfsinfo-header) write.
+3. Optionally, invalidate the [filesystem creation info header](#sec-mkfsinfo-header) at the backup location.
+
+### [Storage in a formatted filesystem]{#sec-aux-fs-metadata-formatted}
+Once the filesystem has been created, the auxiliary filesystem metadata is stored across a sequence of
+[extents](#def-extent) chained in a certain way and referenced from the [mutable image
+header](#sec-mutable-image-header) as well as from the [journal log head extent's plaintext
+header](#sec-journal-log-head-plaintext-header), if active.
+
+The auxililary filesystem metadata is stored in a format designed for enabling offline updates, i.e. when the filesystem
+key is unavailable, while still preserving full robustness guarantees against service interruptions encountered during
+storage writes. Details follow.
+
+The extents are tracked as allocated in the [allocation bitmap](#sec-allocation-bitmap), but considered unallocated for
+the purpose of computing [authentication tree data block digests](sec-auth-tree-data-block-digest). All extents'
+boundaries must be aligned to the larger of the [IO Block](#def-io-block) and the [Authentication Tree Data
+Block](#def-auth-tree-data-block) size. Note that the extents are constrained to be aligned to the [Authentication Tree
+Data Block](#def-auth-tree-data-block) size only for the convenience of implementations: for the purpose of computing
+[authentication tree data block digests](sec-auth-tree-data-block-digest), the auxililary filesystem metadata extents
+are to be considered as if unallocated as a special case, and letting them occupy an integral multiple of the
+[Authentication Tree Data Block](#def-auth-tree-data-block) size alleviates the need to implement range checks for
+detecting this special case when updating potentially neighboring data.
+
+The auxiliary filesystem metadata extents collectively form a directed, circular linked list, partitioned into either
+one or two [*update groups*]{#def-aux-fs-metadata-update-group}. The [mutable image header](#sec-mutable-image-header)
+as well as the [journal log head extent's plaintext header](#sec-journal-log-head-plaintext-header) contain a pair of
+[encoded extent pointers](#sec-enc-extent-ptr) to the update groups' respective head extents each. The pointer pair's
+first entry may be NIL only if the second is as well. If the first entry is NIL, then there is no auxiliary filesystem
+metadata stored in the filesystem. The update group pointed to the by the pointer pair's first entry is referred to as
+*update group 0*, the one pointed to by the second entry, if any, as *update group 1*. If there is no update group 1,
+then no offline updates are possible. If a journal log is active, the pointer pair found therein takes precedence over
+that from the [mutable image header](#sec-mutable-image-header). In fact, whenever a journal log is active, no
+assumptions must be made about the validity of the [mutable image header's](#sec-mutable-image-header) contents on
+storage.
+
+Any extent in the circular linked list contains [encoded extent pointers](#sec-enc-extent-ptr) to the next and next but
+one extent in the list and is subject to the common [extent integrity protection scheme](#sec-extent-integrity). The
+[update groups'](#def-aux-fs-metadata-update-group) head extents contain an additional boolean flag specifying whether
+the group is active or not. Altogether, the auxiliary filesystem metadata extent format is:
+
++------------------------------------------+---------------------------------------------------------------------------+
+|Length in bytes                           |Description                                                                |
++==========================================+===========================================================================+
+|8                                         |[Encoded extent pointer](#sec-enc-extent-ptr) to the next extent in the    |
+|                                          |circular list.                                                             |
++------------------------------------------+---------------------------------------------------------------------------+
+|8                                         |[Encoded extent pointer](#sec-enc-extent-ptr) to the next but one extent in|
+|                                          |the circular list.                                                         |
++------------------------------------------+---------------------------------------------------------------------------+
+|1                                         |[Update group](#def-aux-fs-metadata-update-group) active/inactive          |
+|                                          |state. Present only in [update group](#def-aux-fs-metadata-update-group)    |
+|                                          |head extents.                                                              |
++------------------------------------------+---------------------------------------------------------------------------+
+|Length of a [common extent integrity      |The [integrity protection section](#sec-extent-integrity).                 |
+|protection section](#sec-extent-integrity)|                                                                           |
++------------------------------------------+---------------------------------------------------------------------------+
+|Extent remainder                          |[Encoded auxiliary filesystem metadata](#sec-aux-fs-metadata-encoding)     |
+|                                          |payload part.                                                              |
++------------------------------------------+---------------------------------------------------------------------------+
+
+For clarity, the pointers to the subsequent extents are never NIL, as the circular list is considered to repeat itself.
+
+As it's the case with any extent subject to the [common extent integrity protection scheme](#sec-extent-integrity),
+updates to an auxiliary filesystem metadata extent must follow the [fail-safe extent write
+protocol](#def-extent-integrity-fail-safe-write). The pointers to the next and next but one extents, and, for [update
+group](#def-aux-fs-metadata-update-group) heads, the active/inactive state as well, are located in the [tier 0 integrity
+protection realm](#sec-extent-integrity-tiers). They must have correct values whenever the tier 0 integrity protection
+would validate. At most one extent in the circular chain may fail the [integrity protection](#sec-extent-integrity)
+validation at any point in time, and only if an [update group 1](#def-aux-fs-metadata-update-group) is present. Observe
+how these constraints guarantee that the complete list of extents as such can always get reconstructed, even if one of
+them suffered from a torn write. Note that this is crucial not only in the context of the auxiliary filesystem metadata
+itself, but also for the ability to maintain the [authentication tree](#sec-auth-tree), especially when [reconstructing
+it during journal replay](#sec-journal-auth-tree-updates-script), due to the auxiliary filesystem metadata extents being
+tracked as allocated in the [allocation bitmap](#sec-allocation-bitmap), but considered unallocated for the purpose of
+computing [authentication tree data block digests](sec-auth-tree-data-block-digest), as specified above.
+
+An [update group](#def-aux-fs-metadata-update-group) can be either in active or inactive state, as determined from the
+active/inactive state field stored in its head extent. The possible values are
+
++---------------------------------------------------------------+-----+-----------------------------------------+
+|Name                                                           |Value|Description                              |
++===============================================================+=====+=========================================+
+|`AUX_FS_METADATA_UPDATE_GROUP_STATE_INACTIVE`                  |0    |The [update                              |
+|                                                               |     |group](#def-aux-fs-metadata-update_group)|
+|                                                               |     |is inactive.                             |
++---------------------------------------------------------------+-----+-----------------------------------------+
+|`AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE`                    |1    |The [update                              |
+|                                                               |     |group](#def-aux-fs-metadata-update-group)|
+|                                                               |     |is active.                               |
++---------------------------------------------------------------+-----+-----------------------------------------+
+|`AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE_REALLOCATION_NEEDED`|2    |The [update                              |
+|                                                               |     |group](#def-aux-fs-metadata-update-group)|
+|                                                               |     |is active. A hint to conduct a           |
+|                                                               |     |reallocation of its backing storage once |
+|                                                               |     |possible has been set.                   |
++---------------------------------------------------------------+-----+-----------------------------------------+
+
+If active, all of the group's constituent extents are expected to be collectively coherent, and the concatenated payload
+contents to form a valid [auxiliary filesystem metadata encoding](#sec-aux-fs-metadata-encoding). In particular, all of
+the group's constituent extents are expected to pass their respective [integrity protection](#sec-extent-integrity)
+validation. At least one [update group](#def-aux-fs-metadata-update-group) must be active at any given point in time. If
+both are active, [update group 0](#def-aux-fs-metadata-update-group) takes precedence, i.e. the auxiliary filesystem
+metadata contents stored therein are considered effective.
+
+Assuming that [update group 0](#def-aux-fs-metadata-update-group) is initially active, an offline auxiliary filesystem
+metatdata update could be implemented as follows, with all the individual extent storage writes adhering to the
+[fail-safe extent write protocol](#def-extent-integrity-fail-safe-write):
+
+1. If there is some extent failing [integrity protection](#sec-extent-integrity) validation (necessarily in an inactive
+   group, i.e. group 1), repair it.
+2. If update group 1 is active, deactivate it by updating its head extent accordingly.
+3. Copy the original auxiliary filesystem metadata to update group 1 and activate it.
+   a. Write the tail extents, if any first.
+   b. Write the head extent in a final step, set the active flag.
+4. Update group 0 with the updated auxiliary filesystem metadata contents.
+   a. Write the tail extents, if any first.
+   b. Write the head extent in a final step, set the active flag.
+
+Of course, this assumes that there is an [update group 1](#def-aux-fs-metadata-update-group) in the first place, and
+that both [update groups](#def-aux-fs-metadata-update-group) have a sufficient payload storage capacity each. That is,
+preparations need to be made ahead of time at auxiliary filesystem metatdata extents allocation in order to enable
+offline updates. Whether to allocate an [update group 1](#def-aux-fs-metadata-update-group) and the amount of excess
+space to allocate in both [update groups](#def-aux-fs-metadata-update-group) depends on policy and is outside the scope
+of this specification. In order to guide any auxiliary filesystem metatdata extents (re)allocation, the [*extra reserve
+capacity*]{#def-aux-fs-metadata-extra-reserve-capacity} property may be defined. The extra reserve capacity property
+value, if any, is stored as part of the [auxiliary filesystem metadata encoding's](#sec-aux-fs-metadata-encoding)
+termination record. The termination record's encoding length determines whether an extra reserve capacity value is
+defined or not. If it is not defined, then no [update group 1](#def-aux-fs-metadata-update-group) shall be allocated at
+any subsequent extents (re)allocation. Otherwise an [update group 1](#def-aux-fs-metadata-update-group) will get
+allocated and the extra reserve capacity specifies the amount of additional payload space in units of bytes to allocate
+in both [update groups](#def-aux-fs-metadata-update-group) over the minimum required to store the auxiliary filesystem
+metadata contents defined at that time.
+
+When drawing from the [extra reserve capacity](#def-aux-fs-metadata-extra-reserve-capacity), offline updates may set the
+[update group's](#def-aux-fs-metadata-update-group) head extent's active/inactive state field to
+`AUX_FS_METADATA_UPDATE_GROUP_STATE_ACTIVE_REALLOCATION_NEEDED` in order to signal that a reallocation would be desired
+once possible for reestablishing [extra reserve capacity](#def-aux-fs-metadata-extra-reserve-capacity) excess
+allocation.
 
 ## Opening the filesystem (informative)
 In order to illustrate how the various pieces needed for opening the filesystem fit together, especially with respect to

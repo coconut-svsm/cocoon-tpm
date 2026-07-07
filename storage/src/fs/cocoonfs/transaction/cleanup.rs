@@ -15,7 +15,7 @@ use crate::{
         NvFsError,
         cocoonfs::{
             alloc_bitmap,
-            fs::CocoonFsSyncStateMemberMutRef,
+            fs::{CocoonFsPendingTransactionsSyncState, CocoonFsSyncStateMemberMutRef},
             journal,
             layout::{self, BlockCount as _},
         },
@@ -28,6 +28,9 @@ use core::{pin, task};
 
 #[cfg(doc)]
 use super::auth_tree_data_blocks_update_states::AuthTreeDataBlockUpdateState;
+
+#[cfg(doc)]
+use crate::fs::cocoonfs::fs::CocoonFs;
 
 /// [Trim](blkdev::NvBlkDev::trim) any [IO
 /// Block](layout::ImageLayout::io_block_allocation_blocks_log2) occupied by the
@@ -43,9 +46,6 @@ pub(super) struct TransactionTrimJournalFuture<B: blkdev::NvBlkDev> {
 /// [`TransactionTrimJournalFuture`] state-machine state.
 enum TransactionTrimJournalFutureState<B: blkdev::NvBlkDev> {
     Init,
-    WriteBarrier {
-        write_barrier_fut: B::WriteBarrierFuture,
-    },
     TrimJournalStagingCopyRegionPrepare {
         next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex,
     },
@@ -60,17 +60,10 @@ enum TransactionTrimJournalFutureState<B: blkdev::NvBlkDev> {
         region_trim_fut: B::TrimFuture,
         next_extent_index: usize,
     },
-    TrimAbandonedJournalStagingCopyPrepare {
-        next_abandandoned_journal_staging_copy_block_index: usize,
-    },
-    TrimAbandonedJournalStagingCopy {
-        region_trim_fut: B::TrimFuture,
-        next_abandandoned_journal_staging_copy_block_index: usize,
-    },
-    TrimPendingTransactionsSyncStateAllocsPrepare {
+    TrimAbandonedJournalAllocsPrepare {
         next_io_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     },
-    TrimPendingTransactionsSyncStateAllocs {
+    TrimAbandonedJournalAllocs {
         region_trim_fut: B::TrimFuture,
         next_io_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
     },
@@ -166,27 +159,6 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                         }
                     };
 
-                    // Sort the abandoned Journal Staging Copy blocks to enable larger trim
-                    // requests.
-                    transaction.abandoned_journal_staging_copy_blocks.sort();
-
-                    // Remove from the grabbed CocoonFsPendingTransactionsSyncState's tracked
-                    // allocations anything included in the transaction's
-                    // journal allocations in order to avoid redundant trims.
-                    transaction
-                        .accumulated_fs_instance_pending_transactions_sync_state
-                        .pending_allocs
-                        .subtract(&transaction.allocs.journal_allocs);
-
-                    // Remove from the grabbed CocoonFsPendingTransactionsSyncState's tracked
-                    // allocations anything included in the transaction's "real" allocations in
-                    // order to not trim data written in-place through that, and also, to avoid
-                    // redundant trims.
-                    transaction
-                        .accumulated_fs_instance_pending_transactions_sync_state
-                        .pending_allocs
-                        .subtract(&transaction.allocs.pending_allocs);
-
                     // Now figure whether any trim might actually be needed and issue a write
                     // barrier before the subsequent trims if so.
                     if transaction
@@ -198,44 +170,17 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                                 .is_none()
                         })
                         && transaction.journal_log_tail_extents.is_empty()
-                        && transaction.abandoned_journal_staging_copy_blocks.is_empty()
-                        && transaction
-                            .accumulated_fs_instance_pending_transactions_sync_state
-                            .pending_allocs
-                            .is_empty()
+                        && transaction.allocs.journal_frees.is_empty()
                     {
                         this.fut_state = TransactionTrimJournalFutureState::Done;
                         return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
                     }
 
-                    let write_barrier_fut = match fs_instance.blkdev.write_barrier() {
-                        Ok(write_barrier_fut) => write_barrier_fut,
-                        Err(_) => {
-                            // Can't trim without a write barrier, but failure to trim is considered
-                            // non-fatal. Simply return.
-                            this.fut_state = TransactionTrimJournalFutureState::Done;
-                            return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
-                        }
+                    this.fut_state = TransactionTrimJournalFutureState::TrimJournalStagingCopyRegionPrepare {
+                        next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex::from(0usize),
                     };
+                }
 
-                    this.fut_state = TransactionTrimJournalFutureState::WriteBarrier { write_barrier_fut };
-                }
-                TransactionTrimJournalFutureState::WriteBarrier { write_barrier_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), &fs_instance.blkdev, cx) {
-                        task::Poll::Pending => return task::Poll::Pending,
-                        task::Poll::Ready(Ok(_)) => {
-                            this.fut_state = TransactionTrimJournalFutureState::TrimJournalStagingCopyRegionPrepare {
-                                next_update_states_index: AuthTreeDataBlocksUpdateStatesIndex::from(0usize),
-                            };
-                        }
-                        task::Poll::Ready(Err(_)) => {
-                            // Can't trim without a write barrier, but failure to trim is considered
-                            // non-fatal, so simply return.
-                            this.fut_state = TransactionTrimJournalFutureState::Done;
-                            return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
-                        }
-                    }
-                }
                 TransactionTrimJournalFutureState::TrimJournalStagingCopyRegionPrepare {
                     next_update_states_index,
                 } => {
@@ -403,8 +348,8 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                     };
 
                     if *next_extent_index == transaction.journal_log_tail_extents.len() {
-                        this.fut_state = TransactionTrimJournalFutureState::TrimAbandonedJournalStagingCopyPrepare {
-                            next_abandandoned_journal_staging_copy_block_index: 0,
+                        this.fut_state = TransactionTrimJournalFutureState::TrimAbandonedJournalAllocsPrepare {
+                            next_io_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex::from(0),
                         };
                         continue;
                     }
@@ -455,111 +400,7 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                         }
                     }
                 }
-                TransactionTrimJournalFutureState::TrimAbandonedJournalStagingCopyPrepare {
-                    next_abandandoned_journal_staging_copy_block_index,
-                } => {
-                    let transaction = match this.transaction.as_ref() {
-                        Some(transaction) => transaction,
-                        None => {
-                            this.fut_state = TransactionTrimJournalFutureState::Done;
-                            return task::Poll::Ready(Err(nvfs_err_internal!()));
-                        }
-                    };
-                    let abandoned_journal_staging_copy_blocks = &transaction.abandoned_journal_staging_copy_blocks;
-
-                    if *next_abandandoned_journal_staging_copy_block_index
-                        == abandoned_journal_staging_copy_blocks.len()
-                    {
-                        this.fut_state =
-                            TransactionTrimJournalFutureState::TrimPendingTransactionsSyncStateAllocsPrepare {
-                                next_io_block_allocation_blocks_begin: layout::PhysicalAllocBlockIndex::from(0),
-                            };
-                        continue;
-                    }
-
-                    let trim_region_allocation_blocks_begin =
-                        abandoned_journal_staging_copy_blocks[*next_abandandoned_journal_staging_copy_block_index];
-                    *next_abandandoned_journal_staging_copy_block_index += 1;
-                    let mut last_abandoned_journal_block_allocation_blocks_begin = trim_region_allocation_blocks_begin;
-                    while *next_abandandoned_journal_staging_copy_block_index
-                        != abandoned_journal_staging_copy_blocks.len()
-                    {
-                        let cur_abandoned_journal_block_allocation_blocks_begin =
-                            abandoned_journal_staging_copy_blocks[*next_abandandoned_journal_staging_copy_block_index];
-                        if u64::from(
-                            cur_abandoned_journal_block_allocation_blocks_begin
-                                - last_abandoned_journal_block_allocation_blocks_begin,
-                        ) >> journal_block_allocation_blocks_log2
-                            != 1
-                        {
-                            // There's a gap. Stop and process what's been accumulated so far.
-                            break;
-                        }
-
-                        if (u64::from(last_abandoned_journal_block_allocation_blocks_begin)
-                            ^ u64::from(cur_abandoned_journal_block_allocation_blocks_begin))
-                            >> preferred_bulk_allocation_blocks_log2
-                            != 0
-                        {
-                            // Crossing a preferred IO block boundary, stop for
-                            // now and process what's been accumulated.
-                            break;
-                        }
-
-                        last_abandoned_journal_block_allocation_blocks_begin =
-                            cur_abandoned_journal_block_allocation_blocks_begin;
-                        *next_abandandoned_journal_staging_copy_block_index += 1;
-                    }
-
-                    let trim_region_allocation_blocks_count = last_abandoned_journal_block_allocation_blocks_begin
-                        - trim_region_allocation_blocks_begin
-                        + layout::AllocBlockCount::from(1u64 << journal_block_allocation_blocks_log2);
-                    let trim_region_blkdev_io_blocks_begin = u64::from(trim_region_allocation_blocks_begin)
-                        >> blkdev_io_block_allocation_blocks_log2
-                        << allocation_block_blkdev_io_blocks_log2;
-                    let trim_region_blkdev_io_blocks_count = u64::from(trim_region_allocation_blocks_count)
-                        >> blkdev_io_block_allocation_blocks_log2
-                        << allocation_block_blkdev_io_blocks_log2;
-                    let region_trim_fut = match fs_instance
-                        .blkdev
-                        .trim(trim_region_blkdev_io_blocks_begin, trim_region_blkdev_io_blocks_count)
-                    {
-                        Ok(region_trim_fut) => region_trim_fut,
-                        Err(e) => {
-                            // Failure to trim is considered non-fatal. Simply proceed to the next
-                            // region, unless the storage backend indicates that trimming is not
-                            // supported at all.
-                            if e == NvBlkDevIoError::OperationNotSupported {
-                                this.fut_state = TransactionTrimJournalFutureState::Done;
-                                return task::Poll::Ready(this.transaction.take().ok_or_else(|| nvfs_err_internal!()));
-                            }
-                            continue;
-                        }
-                    };
-                    this.fut_state = TransactionTrimJournalFutureState::TrimAbandonedJournalStagingCopy {
-                        region_trim_fut,
-                        next_abandandoned_journal_staging_copy_block_index:
-                            *next_abandandoned_journal_staging_copy_block_index,
-                    };
-                }
-                TransactionTrimJournalFutureState::TrimAbandonedJournalStagingCopy {
-                    region_trim_fut,
-                    next_abandandoned_journal_staging_copy_block_index,
-                } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(region_trim_fut), &fs_instance.blkdev, cx) {
-                        task::Poll::Pending => return task::Poll::Pending,
-                        task::Poll::Ready(Ok(_)) | task::Poll::Ready(Err(_)) => {
-                            // Failure to trim is considered non-fatal. So proceed to the next
-                            // region without even examining the result.
-                            this.fut_state =
-                                TransactionTrimJournalFutureState::TrimAbandonedJournalStagingCopyPrepare {
-                                    next_abandandoned_journal_staging_copy_block_index:
-                                        *next_abandandoned_journal_staging_copy_block_index,
-                                };
-                        }
-                    }
-                }
-                TransactionTrimJournalFutureState::TrimPendingTransactionsSyncStateAllocsPrepare {
+                TransactionTrimJournalFutureState::TrimAbandonedJournalAllocsPrepare {
                     next_io_block_allocation_blocks_begin,
                 } => {
                     let transaction = match this.transaction.as_ref() {
@@ -569,14 +410,14 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                             return task::Poll::Ready(Err(nvfs_err_internal!()));
                         }
                     };
-                    let mut pending_allocs_io_blocks_iter = transaction
-                        .accumulated_fs_instance_pending_transactions_sync_state
-                        .pending_allocs
+                    let mut journal_frees_io_blocks_iter = transaction
+                        .allocs
+                        .journal_frees
                         .block_iter_at(*next_io_block_allocation_blocks_begin, io_block_allocation_blocks_log2);
                     let allocated_io_block_allocs_bitmap_word_value =
                         alloc_bitmap::BitmapWord::trailing_bits_mask(1u32 << io_block_allocation_blocks_log2);
                     let first_io_block_allocation_blocks_begin = loop {
-                        match pending_allocs_io_blocks_iter.next() {
+                        match journal_frees_io_blocks_iter.next() {
                             Some((cur_io_block_allocation_blocks_begin, cur_io_block_allocs_bitmap_word)) => {
                                 if cur_io_block_allocs_bitmap_word == allocated_io_block_allocs_bitmap_word_value {
                                     break cur_io_block_allocation_blocks_begin;
@@ -592,7 +433,7 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                     let trim_region_allocation_blocks_begin = first_io_block_allocation_blocks_begin;
                     let mut last_io_block_allocation_blocks_begin = first_io_block_allocation_blocks_begin;
                     for (cur_io_block_allocation_blocks_begin, cur_io_block_allocs_bitmap_word) in
-                        pending_allocs_io_blocks_iter
+                        journal_frees_io_blocks_iter
                     {
                         if u64::from(cur_io_block_allocation_blocks_begin - last_io_block_allocation_blocks_begin)
                             >> io_block_allocation_blocks_log2
@@ -643,12 +484,12 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                             continue;
                         }
                     };
-                    this.fut_state = TransactionTrimJournalFutureState::TrimPendingTransactionsSyncStateAllocs {
+                    this.fut_state = TransactionTrimJournalFutureState::TrimAbandonedJournalAllocs {
                         region_trim_fut,
                         next_io_block_allocation_blocks_begin: *next_io_block_allocation_blocks_begin,
                     };
                 }
-                TransactionTrimJournalFutureState::TrimPendingTransactionsSyncStateAllocs {
+                TransactionTrimJournalFutureState::TrimAbandonedJournalAllocs {
                     region_trim_fut,
                     next_io_block_allocation_blocks_begin,
                 } => {
@@ -657,10 +498,9 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                         task::Poll::Ready(Ok(_)) | task::Poll::Ready(Err(_)) => {
                             // Failure to trim is considered non-fatal. So proceed to the next
                             // region without even examining the result.
-                            this.fut_state =
-                                TransactionTrimJournalFutureState::TrimPendingTransactionsSyncStateAllocsPrepare {
-                                    next_io_block_allocation_blocks_begin: *next_io_block_allocation_blocks_begin,
-                                };
+                            this.fut_state = TransactionTrimJournalFutureState::TrimAbandonedJournalAllocsPrepare {
+                                next_io_block_allocation_blocks_begin: *next_io_block_allocation_blocks_begin,
+                            };
                         }
                     }
                 }
@@ -688,7 +528,31 @@ impl<B: blkdev::NvBlkDev> TransactionCleanupPreCommitCancelledFuture<B> {
     /// # Arguments:
     ///
     /// * `transaction` - The [`Transaction`] after which to cleanup.
-    pub fn new(transaction: Box<Transaction>) -> Self {
+    /// * `accumulated_pending_transactions_sync_state` - The accumulated
+    ///   [`CocoonFsPendingTransactionsSyncState`] taken from
+    ///   [`CocoonFs::pending_transactions_sync_state`] upon starting the commit
+    ///   process for `transaction`, if not processed yet.
+    pub fn new(
+        mut transaction: Box<Transaction>,
+        accumulated_pending_transactions_sync_state: Option<CocoonFsPendingTransactionsSyncState>,
+    ) -> Self {
+        if let Some(mut accumulated_pending_transactions_sync_state) = accumulated_pending_transactions_sync_state {
+            // Remove from the the grabbed CocoonFsPendingTransactionsSyncState's tracked
+            // allocations any tracked as allocated in this Transaction.
+            accumulated_pending_transactions_sync_state
+                .pending_allocs
+                .subtract(&transaction.allocs.pending_allocs);
+            accumulated_pending_transactions_sync_state
+                .pending_allocs
+                .subtract(&transaction.allocs.journal_allocs);
+
+            // Now the
+            // accumulated_fs_instance_pending_transactions_sync_state.pending_allocs
+            // contains allocations from all other concurrenly executing transactions
+            // cancelled by now, as well as this transaction's
+            // journal_frees. Make journal_frees the superset of that.
+            transaction.allocs.journal_frees = accumulated_pending_transactions_sync_state.pending_allocs;
+        }
         Self {
             trim_journal_fut: TransactionTrimJournalFuture::new(transaction, false),
         }
@@ -790,7 +654,7 @@ impl<B: blkdev::NvBlkDev> TransactionAbortJournalFuture<B> {
     #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
-        fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
+        mut fs_instance_sync_state: CocoonFsSyncStateMemberMutRef<'_, ST, B>,
         cx: &mut task::Context<'_>,
     ) -> task::Poll<Result<(), (Option<Box<Transaction>>, NvFsError)>> {
         let this = pin::Pin::into_inner(self);
@@ -835,6 +699,11 @@ impl<B: blkdev::NvBlkDev> TransactionAbortJournalFuture<B> {
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
+
+                    drop(fs_instance);
+                    fs_instance_sync_state.journal_log_head_integrity_state.record_clear();
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let fs_config = &fs_instance.fs_config;
 
                     if !fs_config.enable_trimming {
                         this.fut_state = TransactionAbortJournalFutureState::Done;

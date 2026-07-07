@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! [`CocoonFs`] -- a secure [`NvFs`](crate::fs::NvFs) implementation.
@@ -19,6 +19,8 @@
 mod alloc_bitmap;
 mod auth_subject_ids;
 mod auth_tree;
+mod aux_fs_metadata;
+mod checksum;
 mod crc32;
 mod encryption_entities;
 mod extent_ptr;
@@ -28,6 +30,7 @@ mod fs;
 mod image_header;
 mod inode_extents_list;
 mod inode_index;
+mod integrity;
 mod journal;
 mod keys;
 mod layout;
@@ -40,7 +43,6 @@ mod read_inode_data;
 mod read_preauth;
 mod set_assoc_cache;
 mod transaction;
-mod write_blocks;
 mod write_inode_data;
 
 #[cfg(test)]
@@ -53,55 +55,62 @@ use core::convert;
 /// errors](crate::fs::NvFsError::FsFormatError).
 pub enum FormatError {
     InvalidDeviceParameter = 1,
-    InvalidImageHeaderFormat = 2,
-    InvalidImageHeaderMagic = 3,
-    UnsupportedFormatVersion = 4,
-    InvalidImageHeaderChecksum = 5,
-    InvalidImageLayoutConfig = 6,
-    UnsupportedImageLayoutConfig = 7,
-    UnsupportedCryptoAlgorithm = 8,
-    InvalidSaltLength = 9,
-    IoBlockSizeNotSupportedByDevice = 10,
-    InvalidImageSize = 11,
-    InvalidAuthTreeConfig = 12,
-    UnsupportedAuthTreeConfig = 13,
-    UnalignedAuthTreeExtents = 14,
-    InvalidAuthTreeDimensions = 15,
-    InvalidAllocationBitmapFileConfig = 16,
-    UnalignedAllocationBitmapFileExtents = 17,
-    InvalidAllocationBitmapFileSize = 18,
-    InconsistentAllocBitmapFileExtents = 19,
-    InvalidDigestLength = 20,
-    InvalidFileSize = 21,
-    BlockOutOfRange = 22,
-    InvalidExtents = 23,
-    InvalidPadding = 24,
-    InvalidIndexConfig = 25,
-    InvalidIndexNode = 26,
-    InvalidIndexRootExtents = 27,
-    SpecialInodeMissing = 28,
-    UnalignedJournalExtents = 29,
+    InvalidImageHeader = 2,
+    UnsupportedFormatVersion = 3,
+    InvalidImageLayoutConfig = 4,
+    UnsupportedImageLayoutConfig = 5,
+    UnsupportedCryptoAlgorithm = 6,
+    InconsistentBackupMkFsInfoHeader = 7,
+    InvalidAuxFsMetadataChecksum = 8,
+    InvalidAuxFsMetadataSize = 9,
+    InvalidAuxFsMetadataExtent = 10,
+    UnalignedAuxFsMetadataExtent = 11,
+    IncoherentAuxFsMetadataExtents = 12,
+    InconsistentAuxFsMetadataExtentsChain = 13,
+    InvalidAuxFsMetadataExtentFormat = 14,
+    InvalidAuxFsMetadataFormat = 15,
+    InvalidSaltLength = 16,
+    IoBlockSizeNotSupportedByDevice = 17,
+    InvalidImageSize = 18,
+    InvalidAuthTreeConfig = 19,
+    UnsupportedAuthTreeConfig = 20,
+    UnalignedAuthTreeExtents = 21,
+    InvalidAuthTreeDimensions = 22,
+    InvalidAllocationBitmapFileConfig = 23,
+    UnalignedAllocationBitmapFileExtents = 24,
+    InvalidAllocationBitmapFileSize = 25,
+    InconsistentAllocBitmapFileExtents = 26,
+    InvalidDigestLength = 27,
+    InvalidFileSize = 28,
+    BlockOutOfRange = 29,
+    InvalidExtents = 30,
+    InvalidPadding = 31,
+    InvalidIndexConfig = 32,
+    InvalidIndexNode = 33,
+    InvalidIndexRootExtents = 34,
+    SpecialInodeMissing = 35,
+    UnalignedJournalExtents = 36,
 
-    InvalidJournalLogFieldTagEncoding = 30,
-    InvalidJournalLogFieldLengthEncoding = 31,
-    InvalidJournalLogFieldTag = 32,
-    JournalLogFieldLengthOverflow = 33,
+    InvalidJournalLogFieldTagEncoding = 37,
+    InvalidJournalLogFieldLengthEncoding = 38,
+    InvalidJournalLogFieldTag = 39,
+    JournalLogFieldLengthOverflow = 40,
 
-    IncompleteJournalLog = 34,
-    UnexpectedJournalLogField = 35,
-    JournalLogFieldLengthOutOfBounds = 36,
-    ExcessJournalLogFieldLength = 37,
+    IncompleteJournalLog = 41,
+    UnexpectedJournalLogField = 42,
+    JournalLogFieldLengthOutOfBounds = 43,
+    ExcessJournalLogFieldLength = 44,
 
-    InvalidJournalExtentsCoveringAuthDigestsFormat = 38,
-    InvalidJournalExtentsCoveringAuthDigestsEntry = 39,
-    UnexpectedJournalExtentsCoveringAuthDigestsEntry = 40,
+    InvalidJournalExtentsCoveringAuthDigestsFormat = 45,
+    InvalidJournalExtentsCoveringAuthDigestsEntry = 46,
+    UnexpectedJournalExtentsCoveringAuthDigestsEntry = 47,
 
-    InvalidJournalApplyWritesScriptFormat = 41,
-    InvalidJournalApplyWritesScriptEntry = 42,
-    InvalidJournalUpdateAuthDigestsScriptFormat = 43,
-    InvalidJournalUpdateAuthDigestsScriptEntry = 44,
-    InvalidJournalTrimsScriptFormat = 45,
-    InvalidJournalTrimsScriptEntry = 46,
+    InvalidJournalApplyWritesScriptFormat = 48,
+    InvalidJournalApplyWritesScriptEntry = 49,
+    InvalidJournalUpdateAuthDigestsScriptFormat = 50,
+    InvalidJournalUpdateAuthDigestsScriptEntry = 51,
+    InvalidJournalTrimsScriptFormat = 52,
+    InvalidJournalTrimsScriptEntry = 53,
 }
 
 impl convert::From<FormatError> for NvFsError {
@@ -110,7 +119,9 @@ impl convert::From<FormatError> for NvFsError {
     }
 }
 
-pub use fs::CocoonFs;
+pub use aux_fs_metadata::{AuxFsMetadata, AuxFsMetadataIter, AuxFsMetadataPushError, WriteAuxFsMetadataOfflineFuture};
+pub use fs::{CocoonFs, ReadAuxFsMetadataFuture, WriteAuxFsMetadataFuture};
+pub use image_header::FsMetadataMkFsInfo;
 pub use layout::ImageLayout;
 pub use mkfs::{MkFsFuture, WriteMkFsInfoHeaderFuture};
-pub use openfs::OpenFsFuture;
+pub use openfs::{FsMetadata, FsMetadataFormatted, OpenFsFuture, ReadFsMetadataFuture};

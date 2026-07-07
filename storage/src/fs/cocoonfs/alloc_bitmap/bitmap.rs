@@ -1335,6 +1335,9 @@ impl AllocBitmap {
     ///    size and alignment in units of [Allocation
     ///    Blocks](layout::ImageLayout::allocation_block_size_128b_log2). Must
     ///    be less than or equal to [`BitmapWord::BITS`].
+    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually
+    ///    as having been allocated, independent of the current state in the
+    ///    [`AllocBitmap`].
     ///  * `allocated_fullword_chunks` - List of extents to consider virtually
     ///    as having been allocated, independent of the current state in the
     ///    [`AllocBitmap`].
@@ -1356,7 +1359,8 @@ impl AllocBitmap {
     pub fn find_free_block<const AN: usize, const FN: usize>(
         &self,
         block_allocation_blocks_log2: u32,
-        mut allocated_fullword_chunks: Option<&extents::PhysicalExtents>,
+        allocated_blocks: &[layout::PhysicalAllocBlockIndex],
+        allocated_fullword_chunks: Option<&extents::PhysicalExtents>,
         pending_allocs: &SparseAllocBitmapUnion<'_, AN>,
         pending_frees: &SparseAllocBitmapUnion<'_, FN>,
         image_size: layout::AllocBlockCount,
@@ -1366,7 +1370,13 @@ impl AllocBitmap {
         let block_allocations_blocks = 1u32 << block_allocation_blocks_log2;
         debug_assert!(block_allocations_blocks <= BitmapWord::BITS);
         if block_allocations_blocks == BitmapWord::BITS {
-            return self.find_free_fullword_block(allocated_fullword_chunks, pending_allocs, pending_frees, image_size);
+            return self.find_free_fullword_block(
+                allocated_blocks,
+                allocated_fullword_chunks,
+                pending_allocs,
+                pending_frees,
+                image_size,
+            );
         }
 
         // The addition does not overflow, image_size is in units of Allocation Blocks,
@@ -1413,12 +1423,27 @@ impl AllocBitmap {
             search_begin_bitmap_word_index,
         )
         .take(usize::try_from(image_bitmap_words - search_begin_bitmap_word_index).unwrap_or(usize::MAX));
+        debug_assert!(allocated_blocks.is_sorted());
+        let mut allocated_blocks_index = allocated_blocks.partition_point(|allocated_block_allocation_blocks_begin| {
+            (u64::from(*allocated_block_allocation_blocks_begin) >> BITMAP_WORD_BITS_LOG2)
+                < search_begin_bitmap_word_index
+        });
         while let Some((bitmap_word_index, mut bitmap_word)) = bitmaps_words_iter.next() {
             remaining_optimization_search_distance -= 1;
             if remaining_optimization_search_distance == 0 {
                 // Placement optimization search distance exhausted. Return what we have.
                 debug_assert!(optimize_placement && best.is_some());
                 break;
+            }
+
+            // Always consider the blocks from allocated_blocks[] as allocated.
+            while allocated_blocks_index != allocated_blocks.len()
+                && u64::from(allocated_blocks[allocated_blocks_index]) >> BITMAP_WORD_BITS_LOG2 == bitmap_word_index
+            {
+                bitmap_word |= BitmapWord::trailing_bits_mask(1u32 << block_allocation_blocks_log2)
+                    << (u64::from(allocated_blocks[allocated_blocks_index])
+                        & u64::trailing_bits_mask(BITMAP_WORD_BITS_LOG2)) as u32;
+                allocated_blocks_index += 1;
             }
 
             if bitmap_word_index + 1 == image_bitmap_words {
@@ -1432,6 +1457,7 @@ impl AllocBitmap {
                     bitmaps_words_iter =
                         AllocBitmapWordIterator::new_at_bitmap_word_index(self, pending_allocs, pending_frees, 0)
                             .take(usize::try_from(search_begin_bitmap_word_index).unwrap_or(usize::MAX));
+                    allocated_blocks_index = 0;
                 }
             }
 
@@ -1464,9 +1490,6 @@ impl AllocBitmap {
                         {
                             continue;
                         }
-                    } else {
-                        // No more extents at or after the current position, avoid another search..
-                        allocated_fullword_chunks = None;
                     }
 
                     if !optimize_placement {
@@ -1898,6 +1921,9 @@ impl AllocBitmap {
     ///
     /// # Arguments:
     ///
+    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually
+    ///    as having been allocated, independent of the current state in the
+    ///    [`AllocBitmap`].
     ///  * `allocated_fullword_chunks` - List of extents to consider virtually
     ///    as having been allocated, independent of the current state in the
     ///    [`AllocBitmap`].
@@ -1910,6 +1936,7 @@ impl AllocBitmap {
     ///    it will be considered for the allocation.
     fn find_free_fullword_block<const AN: usize, const FN: usize>(
         &self,
+        allocated_blocks: &[layout::PhysicalAllocBlockIndex],
         allocated_fullword_chunks: Option<&extents::PhysicalExtents>,
         pending_allocs: &SparseAllocBitmapUnion<'_, AN>,
         pending_frees: &SparseAllocBitmapUnion<'_, FN>,
@@ -1919,13 +1946,31 @@ impl AllocBitmap {
         let bitmaps_words_iter =
             AllocBitmapWordIterator::new_at_bitmap_word_index(self, pending_allocs, pending_frees, 0);
         let mut next_allocated_fullword_chunk: Option<layout::PhysicalAllocBlockRange> = None;
+        let mut allocated_blocks_index = 0;
         for (bitmap_word_index, bitmap_word) in
             bitmaps_words_iter.take(usize::try_from(image_bitmap_words).unwrap_or(usize::MAX))
         {
             if bitmap_word == 0 {
-                // Check if the bitmap word is really free or has perhaps been previously
-                // allocated as part of a preceeding fullword chunks allocation
-                // round for processing the very same request.
+                // Check if the bitmap word is really free or has perhaps been previously allocated
+                // as part of a preceeding block (in case of a multi-block allocation) or fullword
+                // chunks allocation round for processing the very same request.
+                if loop {
+                    if allocated_blocks_index == allocated_blocks.len() {
+                        break false;
+                    }
+                    match (u64::from(allocated_blocks[allocated_blocks_index]) >> BITMAP_WORD_BITS_LOG2)
+                        .cmp(&bitmap_word_index)
+                    {
+                        cmp::Ordering::Less => allocated_blocks_index += 1,
+                        cmp::Ordering::Equal => {
+                            allocated_blocks_index += 1;
+                            break true;
+                        }
+                        cmp::Ordering::Greater => break false,
+                    }
+                } {
+                    continue;
+                }
                 next_allocated_fullword_chunk = next_allocated_fullword_chunk
                     .filter(|next_allocated_fullword_chunk| {
                         u64::from(next_allocated_fullword_chunk.end()) >> BITMAP_WORD_BITS_LOG2 > bitmap_word_index
@@ -2013,6 +2058,7 @@ impl AllocBitmap {
         if containing_block_allocation_blocks == chunk_allocation_blocks {
             return self.find_free_block(
                 containing_block_allocation_blocks_log2,
+                &[],
                 allocated_fullword_chunks,
                 pending_allocs,
                 pending_frees,

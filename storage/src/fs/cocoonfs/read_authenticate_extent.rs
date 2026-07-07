@@ -311,6 +311,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -350,7 +351,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     update_states_allocation_blocks_range,
                     read_fut,
                 } => {
-                    let (fs_instance, _, fs_sync_state_alloc_bitmap, _, mut fs_sync_state_auth_tree, _, _, _) =
+                    let (fs_instance, _, _, fs_sync_state_alloc_bitmap, _, mut fs_sync_state_auth_tree, _, _, _) =
                         fs_instance_sync_state.fs_instance_and_destructure_borrow();
                     match TransactionReadAuthenticateDataFuture::poll(
                         pin::Pin::new(read_fut),

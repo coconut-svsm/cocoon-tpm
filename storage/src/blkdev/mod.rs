@@ -15,6 +15,7 @@ pub use chunked_io_region::{
     ChunkedIoRegion, ChunkedIoRegionAlignedBlockChunksRangesIterator, ChunkedIoRegionAlignedBlocksIterator,
     ChunkedIoRegionChunkIndex, ChunkedIoRegionChunkRange, ChunkedIoRegionError,
 };
+pub mod helpers;
 
 pub mod test;
 
@@ -159,22 +160,22 @@ pub trait NvBlkDevFuture<B: ?Sized + NvBlkDev>: marker::Send {
 /// The following coherence rules apply for any sequence of operations initiated
 /// from the same power cycle, in order of their priority:
 ///
-/// * *Superseding pending writes* - Polling a [write
-///   barrier](Self::WriteBarrierFuture) to completion implicitly completes all
-///   pending [write](Self::WriteBarrierFuture) or [trim](Self::TrimFuture)
-///   operations initiated prior to it with unspecified result. Note that this
-///   only affects the aforementioned total order within a power-cycle for the
-///   rules that follow, no promises are being made regarding the state of the
-///   physical backing storage. Polling further on a [write](Self::WriteFuture)
-///   or [trim](Self::TrimFuture) future implicitly completed this way results
-///   in implementation defined behavior -- that is, it's an `unreachable()`
-///   condition.
-/// * *Conflicting writes* - In the absence of any [write
-///   barriers](Self::write_barrier), [initiating a write](Self::write) to a
-///   region overlapping with an already pending
-///   [write](Self::WriteBarrierFuture) or [trim](Self::TrimFuture) not yet
-///   polled to completion results in implementation defined behavior. That is,
+/// * *Superseding pending writes* - Polling a [write queue flushing
+///   operation](Self::FlushQueuedWritesFuture) to completion implicitly
+///   completes all pending [write](Self::WriteFuture) or
+///   [trim](Self::TrimFuture) operations initiated prior to it with unspecified
+///   result. Note that this only affects the aforementioned total order within
+///   a power-cycle for the rules that follow, no promises are being made
+///   regarding the state of the physical backing storage. Polling further on a
+///   [write](Self::WriteFuture) or [trim](Self::TrimFuture) future implicitly
+///   completed this way results in implementation defined behavior -- that is,
 ///   it's an `unreachable()` condition.
+/// * *Conflicting writes* - In the absence of any [write queue
+///   flushes](Self::flush_queued_writes), [initiating a write](Self::write) to
+///   a region overlapping with an already pending [write](Self::WriteFuture) or
+///   [trim](Self::TrimFuture) not yet polled to completion results in
+///   implementation defined behavior. That is, it's an `unreachable()`
+///   condition.
 /// * *Read-write conflicts* - Further polling on a [read
 ///   future](Self::ReadFuture) after a [write](Self::write) or
 ///   [trim](Self::trim) to some region overlapping with it has been initiated
@@ -207,31 +208,31 @@ pub trait NvBlkDevFuture<B: ?Sized + NvBlkDev>: marker::Send {
 /// It is assumed that the minimum unit of IO, i.e. a ["Device IO
 /// Block"](Self::io_block_size_128b_log2), has the following semantics:
 /// * [Writes](Self::write) to or [trims](Self::trim) of one ["Device IO
-///   Block"](Self::io_block_size_128b_log2) do not affect any other [Device
-///   IO Blocks](Self::io_block_size_128b_log2).
+///   Block"](Self::io_block_size_128b_log2) do not affect any other [Device IO
+///   Blocks](Self::io_block_size_128b_log2).
 /// * [Writes](Self::write) to a single [Device IO
-///   Block](Self::io_block_size_128b_log2) are not necessarily atomic, but
-///   -- assuming the absence of any power cycling events -- there is a point in
+///   Block](Self::io_block_size_128b_log2) are not necessarily atomic, but --
+///   assuming the absence of any power cycling events -- there is a point in
 ///   time when its physical state fully reflects the to be written state. It is
 ///   said that "a write becomes effective on physical storage" at that point in
 ///   time. Starting from when a write was initiatied up to when it possibly
 ///   becomes effective on physical storage, the [Device IO
-///   Block](Self::io_block_size_128b_log2) "is under write". In
-///   particular, if a [Device IO Block](Self::io_block_size_128b_log2) is
-///   under write at the time a power cycle event happens, it remains so until
-///   eventually overwritten again (or trimmed) in a later power cycle.
+///   Block](Self::io_block_size_128b_log2) "is under write". In particular, if
+///   a [Device IO Block](Self::io_block_size_128b_log2) is under write at the
+///   time a power cycle event happens, it remains so until eventually
+///   overwritten again (or trimmed) in a later power cycle.
 /// * [Trim](Self::trim) requests are at some point getting transmitted to the
 ///   physical storage backend, from when on they're said to have "commenced".
-/// * For a single given [Device IO Block](Self::io_block_size_128b_log2),
-///   there is a total order on the writes and trims. That is a given [Device IO
-///   Block](Self::io_block_size_128b_log2) can be either under write, a
-///   write to it may have become effective on physical storage or a trim may
-///   have commenced.
+/// * For a single given [Device IO Block](Self::io_block_size_128b_log2), there
+///   is a total order on the writes and trims. That is a given [Device IO
+///   Block](Self::io_block_size_128b_log2) can be either under write, a write
+///   to it may have become effective on physical storage or a trim may have
+///   commenced.
 /// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) under
 ///   write results in arbitrary data to be returned.
-/// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) for
-///   which a trim has commenced results in implementation defined behavior.
-///   That is, it's an `unreachable()` condition.
+/// * Reading from a [Device IO Block](Self::io_block_size_128b_log2) for which
+///   a trim has commenced results in implementation defined behavior. That is,
+///   it's an `unreachable()` condition.
 /// * Power cycle events behave as if a virtual [write
 ///   barrier](Self::write_barrier) had been issued and polled to completion at
 ///   that point.
@@ -241,8 +242,8 @@ pub trait NvBlkDevFuture<B: ?Sized + NvBlkDev>: marker::Send {
 ///   completion, it is guaranteed that any writes initiated prior to it have
 ///   become effective on physical storage.
 /// * In the absence of any [write barrier](Self::write_barrier), writes to and
-///   trims of *different* [Device IO Block](Self::io_block_size_128b_log2)
-///   may become effective on physical storage or commence respectively in any
+///   trims of *different* [Device IO Block](Self::io_block_size_128b_log2) may
+///   become effective on physical storage or commence respectively in any
 ///   order.
 ///   - [Writes](Self::write) issued after a [write
 ///     barrier](Self::WriteBarrierFuture) has been polled to completion must
@@ -389,6 +390,18 @@ pub trait NvBlkDev: marker::Unpin + marker::Send + marker::Sync + 'static {
         &self,
         request: R,
     ) -> Result<Result<Self::WriteFuture<R>, (R, NvBlkDevIoError)>, NvBlkDevIoError>;
+
+    /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
+    /// instantiated through
+    /// [`flush_queued_writes()`](Self::flush_queued_writes).
+    type FlushQueuedWritesFuture: NvBlkDevFuture<Self, Output = Result<(), NvBlkDevIoError>> + marker::Unpin;
+
+    /// Flush any pending write operations.
+    ///
+    /// Complete any pending [write](Self::WriteFuture) or
+    /// [trim](Self::TrimFuture) operations not yet polled to completion
+    /// with unspecified result.
+    fn flush_queued_writes(&self) -> Result<Self::FlushQueuedWritesFuture, NvBlkDevIoError>;
 
     /// `NvBlkDev` implementation specific [future](NvBlkDevFuture) type
     /// instantiated through [`write_barrier()`](Self::write_barrier).

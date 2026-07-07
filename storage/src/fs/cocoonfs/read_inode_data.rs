@@ -106,7 +106,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadInodeDataFuture<ST, B> 
     /// * `transaction` - Optional [`Transaction`](transaction::Transaction) to
     ///   read through.
     /// * `inode` - The inode whose data to read.
-    /// * `inode_flags` - The `inode`'s flags previously obtained from the inode index.
+    /// * `inode_flags` - The `inode`'s flags previously obtained from the inode
+    ///   index.
     /// * `inode_extents` - The `inode`'s data extents previously obtained from
     ///   the inode index. If `transaction` is specified, then they must be
     ///   consistent with its view on the inode index state.
@@ -179,6 +180,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -255,6 +257,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         _fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,

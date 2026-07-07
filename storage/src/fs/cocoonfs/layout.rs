@@ -327,21 +327,22 @@ pub struct ImageLayout {
     /// overhead.
     pub allocation_bitmap_file_block_allocation_blocks_log2: u8,
 
-    /// Base-2 logarithm of the Index B-Tree leaf node size as specified in units of
-    /// [Allocation Blocks](Self::allocation_block_size_128b_log2).
+    /// Base-2 logarithm of the Index B-Tree leaf node size as specified in
+    /// units of [Allocation Blocks](Self::allocation_block_size_128b_log2).
     ///
-    /// Must be >= the IV size + 4 + 8 + 5 * 12 so that the first node (in symmetric
-    /// order) is guaranteed to always store the first three special file entries needed
-    /// for bootstrapping, as per the minimum B-Tree node fill level. Note that this is
-    /// trivially satisfied for all known possible values of the IV size.
+    /// Must be >= the IV size + 4 + 8 + 5 * 12 so that the first node (in
+    /// symmetric order) is guaranteed to always store the first three
+    /// special file entries needed for bootstrapping, as per the minimum
+    /// B-Tree node fill level. Note that this is trivially satisfied for all
+    /// known possible values of the IV size.
     pub index_tree_leaf_node_allocation_blocks_log2: u8,
 
-    /// Base-2 logarithm of the Index B-Tree internal node size as specified in units
-    /// of [Allocation Blocks](Self::allocation_block_size_128b_log2).
+    /// Base-2 logarithm of the Index B-Tree internal node size as specified in
+    /// units of [Allocation Blocks](Self::allocation_block_size_128b_log2).
     ///
-    /// Must be >= the IV size + 4 + 8 + 3 * 12 so that the the minimum B-Tree node
-    /// fill level is non-zero. Note that this is trivially satisfied for all known
-    /// possible values of the IV size.
+    /// Must be >= the IV size + 4 + 8 + 3 * 12 so that the the minimum B-Tree
+    /// node fill level is non-zero. Note that this is trivially satisfied
+    /// for all known possible values of the IV size.
     pub index_tree_internal_node_allocation_blocks_log2: u8,
 
     /// The Hash algorithm to use for non-root authentication tree node
@@ -463,6 +464,12 @@ impl ImageLayout {
         }
         if io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7 >= usize::BITS {
             return Err(NvFsError::DimensionsNotSupported);
+        }
+        // The Journal log extents are chained and must be aligned to the IO Block size
+        // each.
+        if 1u64 << (io_block_allocation_blocks_log2 as u32) > extent_ptr::EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
+        {
+            return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
 
         if auth_tree_node_io_blocks_log2 as u32
@@ -606,7 +613,7 @@ impl ImageLayout {
 
     pub fn decode(buf: &[u8]) -> Result<Self, NvFsError> {
         if buf.len() != Self::encoded_len() as usize {
-            return Err(NvFsError::from(FormatError::InvalidImageHeaderFormat));
+            return Err(nvfs_err_internal!());
         }
         let allocation_block_size_128b_log2 = buf[0];
         let io_block_allocation_blocks_log2 = buf[1];
@@ -674,7 +681,7 @@ impl ImageLayout {
                 _ => nvfs_err_internal!(),
             })?;
 
-        Ok(Self {
+        Self::new(
             allocation_block_size_128b_log2,
             io_block_allocation_blocks_log2,
             auth_tree_node_io_blocks_log2,
@@ -688,6 +695,6 @@ impl ImageLayout {
             preauth_cca_protection_hmac_hash_alg,
             kdf_hash_alg,
             block_cipher_alg,
-        })
+        )
     }
 }

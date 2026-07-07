@@ -99,6 +99,12 @@ impl blkdev::NvBlkDev for StdFileNvBlkDev {
         Ok(Ok(Self::WriteFuture::<R> { request: Some(request) }))
     }
 
+    type FlushQueuedWritesFuture = StdFileNvBlkDevFlushQueuedWritesFuture;
+
+    fn flush_queued_writes(&self) -> Result<Self::FlushQueuedWritesFuture, blkdev::NvBlkDevIoError> {
+        Ok(StdFileNvBlkDevFlushQueuedWritesFuture)
+    }
+
     type WriteBarrierFuture = Self::WriteSyncFuture;
 
     fn write_barrier(&self) -> Result<Self::WriteBarrierFuture, blkdev::NvBlkDevIoError> {
@@ -545,6 +551,24 @@ impl<R: blkdev::NvBlkDevWriteRequest> blkdev::NvBlkDevFuture<StdFileNvBlkDev> fo
         }
 
         task::Poll::Ready(Ok((request, Ok(()))))
+    }
+}
+
+/// [`NvBlkDev::FlushQueuedWritesFuture`](blkdev::NvBlkDev::FLushQueuedWritesFuture) implementation
+/// for [`StdFileNvBlkDev`].
+pub struct StdFileNvBlkDevFlushQueuedWritesFuture;
+
+impl blkdev::NvBlkDevFuture<StdFileNvBlkDev> for StdFileNvBlkDevFlushQueuedWritesFuture {
+    type Output = Result<(), blkdev::NvBlkDevIoError>;
+
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        _dev: &StdFileNvBlkDev,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        // Nothing to do. As per the NvBlkDev API guarantees, any pending write
+        // operation wouldn't get polled any further.
+        task::Poll::Ready(Ok(()))
     }
 }
 

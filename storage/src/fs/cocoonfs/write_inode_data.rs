@@ -119,10 +119,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteInodeDataFuture<ST, B>
     /// * `transaction` - The [`Transaction`] to stage the updates at.
     /// * `inode` - The inode whose contents to update. It will get created if
     ///   not existing yet.
-    /// * `inode_flags` - The flags to associate with `inode`. The value is masked by
-    ///   `inode_flags_mask`. If `inode` exists already, then only the bits set in
-    ///   `inode_flags_mask` are updated to the value specified at the corresponding position in
-    ///   `inode_flags`.
+    /// * `inode_flags` - The flags to associate with `inode`. The value is
+    ///   masked by `inode_flags_mask`. If `inode` exists already, then only the
+    ///   bits set in `inode_flags_mask` are updated to the value specified at
+    ///   the corresponding position in `inode_flags`.
     /// * `inode_flags_mask` - The bitmask to apply to `inode_flags`.
     /// * `data` - The inode's new data.
     pub fn new(
@@ -212,6 +212,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     {
                         let (
                             fs_instance,
+                            _fs_sync_state_aux_fs_metadata_update_groups_heads,
                             _fs_sync_state_image_size,
                             _fs_sync_state_alloc_bitmap,
                             _fs_sync_state_alloc_bitmap_file,
@@ -421,7 +422,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &fs_instance_sync_state.get_fs_ref(),
                         transaction,
                         inode_extents_allocation_request,
-                        false,
+                        transaction::TransactionAllocationConstraints::Regular,
                     ) {
                         Ok(allocate_fut) => allocate_fut,
                         Err((transaction, e)) => break (transaction, e),
@@ -528,6 +529,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     // Prepare an encryption instance for the inode's data extents.
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,

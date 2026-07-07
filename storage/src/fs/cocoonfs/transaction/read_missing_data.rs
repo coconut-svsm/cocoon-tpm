@@ -21,7 +21,7 @@ use super::{
     write_dirty_data::min_write_block_allocation_blocks_log2,
 };
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange},
+    blkdev,
     fs::{
         NvFsError,
         cocoonfs::{alloc_bitmap, layout},
@@ -29,7 +29,7 @@ use crate::{
     nvfs_err_internal,
     utils_common::bitmanip::BitManip as _,
 };
-use core::{pin, task};
+use core::{mem, pin, task};
 
 #[cfg(doc)]
 use super::auth_tree_data_blocks_update_states::{AuthTreeDataBlockUpdateState, AuthTreeDataBlocksUpdateStates};
@@ -69,7 +69,12 @@ pub(super) struct TransactionReadMissingDataFuture<B: blkdev::NvBlkDev> {
     request_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
     request_states_index_range_offsets: Option<AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets>,
     remaining_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-    cur_region_read_fut: Option<B::ReadFuture<TransactionReadMissingDataFutureNvBlkDevReadRequest>>,
+    #[allow(clippy::type_complexity)]
+    cur_region_read_request: Option<(
+        blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
+        AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
+        bool,
+    )>,
 }
 
 impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
@@ -119,7 +124,7 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
             request_states_allocation_blocks_index_range: states_allocation_blocks_index_range.clone(),
             request_states_index_range_offsets: None,
             remaining_states_allocation_blocks_index_range,
-            cur_region_read_fut: None,
+            cur_region_read_request: None,
         })
     }
 
@@ -167,14 +172,21 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
         let this = pin::Pin::into_inner(self);
         loop {
             let transaction = this.transaction.as_mut().ok_or_else(|| nvfs_err_internal!())?;
-            if let Some(cur_region_read_fut) = this.cur_region_read_fut.as_mut() {
+            if let Some((cur_region_read_fut, read_region_states_allocation_blocks_index_range, read_from_target)) =
+                this.cur_region_read_request.as_mut()
+            {
                 match blkdev::NvBlkDevFuture::poll(pin::Pin::new(cur_region_read_fut), blkdev, cx) {
                     task::Poll::Pending => {
                         return task::Poll::Pending;
                     }
-                    task::Poll::Ready(Ok((completed_read_request, Ok(())))) => {
-                        this.cur_region_read_fut = None;
-                        if let Err(e) = Self::apply_read_request_result(transaction, completed_read_request) {
+                    task::Poll::Ready(Ok((read_allocation_block_buffers, Ok(())))) => {
+                        if let Err(e) = Self::apply_read_request_result(
+                            transaction,
+                            read_allocation_block_buffers,
+                            read_region_states_allocation_blocks_index_range,
+                            *read_from_target,
+                        ) {
+                            this.cur_region_read_request = None;
                             return task::Poll::Ready(
                                 this.transaction
                                     .take()
@@ -184,6 +196,7 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                                     .ok_or_else(|| nvfs_err_internal!()),
                             );
                         }
+                        this.cur_region_read_request = None;
                     }
                     task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
                         return task::Poll::Ready(
@@ -227,12 +240,14 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                         );
                     }
                 };
-            let read_request = match this.prepare_read_request(
+            let (read_fut, read_region_states_allocation_blocks_index_range) = match this.prepare_read_request(
                 fs_sync_state_alloc_bitmap,
                 next_read_region_states_allocation_blocks_range,
                 read_from_target,
             ) {
-                Ok(read_request) => read_request,
+                Ok((read_fut, read_region_states_allocation_blocks_index_range)) => {
+                    (read_fut, read_region_states_allocation_blocks_index_range)
+                }
                 Err(e) => {
                     return task::Poll::Ready(
                         this.transaction
@@ -243,23 +258,11 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                 }
             };
 
-            this.cur_region_read_fut = Some(match blkdev.read(read_request).and_then(|r| r.map_err(|(_, e)| e)) {
-                Ok(next_region_read_fut) => next_region_read_fut,
-                Err(e) => {
-                    return task::Poll::Ready(
-                        this.transaction
-                            .take()
-                            .map(|transaction| {
-                                (
-                                    transaction,
-                                    this.request_states_index_range_offsets.take(),
-                                    Err(NvFsError::from(e)),
-                                )
-                            })
-                            .ok_or_else(|| nvfs_err_internal!()),
-                    );
-                }
-            });
+            this.cur_region_read_request = Some((
+                read_fut,
+                read_region_states_allocation_blocks_index_range,
+                read_from_target,
+            ));
         }
     }
 
@@ -308,8 +311,8 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
         // NvBlkDev, but ramp it up to some larger reasonable value in order to
         // reduce the overall number of IO requests.
         (preferred_blkdev_io_blocks_bulk_log2 + blkdev_io_block_size_128b_log2)
+            .min(usize::BITS - 1 - 7)
             .saturating_sub(allocation_block_size_128b_log2)
-            .min(usize::BITS - 1)
             .max(auth_tree_data_block_allocation_blocks_log2)
     }
 
@@ -751,6 +754,13 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
 
     /// Prepare a storage read request.
     ///
+    /// On success, a pair of a [device read
+    /// `Future`](blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture),
+    /// the corresponding (aligned) [Allocation Block
+    /// level entry index
+    /// range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) is
+    /// returned.
+    ///
     /// # Arguments:
     ///
     /// * `fs_sync_state_alloc_bitmap` - The [filesystem instance's allocation
@@ -765,12 +775,19 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
     ///   if true, or from the [journal staging
     ///   copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin)
     ///   otherwise.
+    #[allow(clippy::type_complexity)]
     fn prepare_read_request(
         &mut self,
         fs_sync_state_alloc_bitmap: &alloc_bitmap::AllocBitmap,
         read_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
         read_from_target: bool,
-    ) -> Result<TransactionReadMissingDataFutureNvBlkDevReadRequest, NvFsError> {
+    ) -> Result<
+        (
+            blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
+            AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
+        ),
+        NvFsError,
+    > {
         let transaction = self.transaction.as_mut().ok_or_else(|| nvfs_err_internal!())?;
         let allocation_block_size_128b_log2 = transaction.allocation_block_size_128b_log2 as u32;
         let allocation_block_size = 1usize << (allocation_block_size_128b_log2 + 7);
@@ -994,8 +1011,8 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
 
         // Finally prepare the read destination buffers and the read request itself.
         // The regions never span more than the preferred read bulk size as determined
-        // by Self::determine_next_read_range(). In particular the Allocation Block
-        // count will fit an usize.
+        // by Self::determine_next_read_range(). In particular the total read region's
+        // length will fit an usize.
         let allocation_blocks_count =
             usize::try_from(u64::from(src_allocation_blocks_range.block_count())).map_err(|_| nvfs_err_internal!())?;
         let mut dst_allocation_block_buffers = FixedVec::new_with_default(allocation_blocks_count)?;
@@ -1027,21 +1044,20 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
 
             if needs_read {
                 let dst_allocation_block_buffer = FixedVec::new_with_default(allocation_block_size)?;
-                dst_allocation_block_buffers[i] = Some(dst_allocation_block_buffer);
+                dst_allocation_block_buffers[i] = dst_allocation_block_buffer;
             }
         }
 
-        Ok(TransactionReadMissingDataFutureNvBlkDevReadRequest {
-            read_region_states_allocation_blocks_index_range: aligned_read_region_states_allocation_blocks_index_range,
-            read_from_target,
-            request_io_region: ChunkedIoRegion::new(
-                u64::from(src_allocation_blocks_range.begin()) << allocation_block_size_128b_log2,
-                u64::from(src_allocation_blocks_range.end()) << allocation_block_size_128b_log2,
-                allocation_block_size_128b_log2,
-            )
-            .map_err(|_| nvfs_err_internal!())?,
+        let read_fut = blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture::new(
+            u64::from(src_allocation_blocks_range.begin()),
+            u64::from(src_allocation_blocks_range.block_count()),
+            allocation_block_size_128b_log2 as u8,
             dst_allocation_block_buffers,
-        })
+            0,
+            allocation_block_size_128b_log2 as u8,
+        );
+
+        Ok((read_fut, aligned_read_region_states_allocation_blocks_index_range))
     }
 
     /// Apply the results of a completed storage read request.
@@ -1049,22 +1065,31 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
     /// # Arguments:
     ///
     /// * `transaction` - The [`Transaction`].
-    /// * `completed_read_request` - The completed storage read request.
+    /// * `read_allocation_block_buffers` - The data read in, represented as a
+    ///   sequence of buffers, on for each [Allocation
+    ///   Block](ImageLayout::allocation_block_size_128b_log2) in the range. An
+    ///   empty buffer entry will cause the corresponding `transaction`'s
+    ///   corresponding [storage tracking
+    ///   state](AllocationBlockUpdateNvSyncState)' to remain unmodified.
+    /// * `read_region_states_allocation_blocks_index_range` - The (aligned)
+    ///   [Allocation Block level entry index
+    ///   range](AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange) read
+    ///   in.
+    /// * `read_from_target` - Where the data has been read from -- either from
+    ///   the update states' associated [target location on
+    ///   storage](AuthTreeDataBlockUpdateState::get_target_allocation_blocks_begin)
+    ///   if true, or from the [journal staging
+    ///   copy](AuthTreeDataBlockUpdateState::get_journal_staging_copy_allocation_blocks_begin)
+    ///   otherwise.
     fn apply_read_request_result(
         transaction: &mut Transaction,
-        completed_read_request: TransactionReadMissingDataFutureNvBlkDevReadRequest,
+        mut read_allocation_block_buffers: FixedVec<FixedVec<u8, 7>, 0>,
+        read_region_states_allocation_blocks_index_range: &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
+        read_from_target: bool,
     ) -> Result<(), NvFsError> {
         let auth_tree_data_block_allocation_blocks_log2 =
             transaction.auth_tree_data_block_allocation_blocks_log2 as u32;
 
-        let TransactionReadMissingDataFutureNvBlkDevReadRequest {
-            read_region_states_allocation_blocks_index_range,
-            read_from_target,
-            request_io_region: _,
-            mut dst_allocation_block_buffers,
-        } = completed_read_request;
-
-        // If read from the Journal and disguising is enabled, undisguise first.
         if !read_from_target {
             if let Some(journal_data_copy_disguise) = transaction.journal_staging_copy_disguise.as_mut() {
                 let journal_data_copy_undisguise = match journal_data_copy_disguise.1.as_ref() {
@@ -1086,12 +1111,12 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                 // populated in place by the transaction.
                 if cur_allocation_block_target != cur_allocation_block_journal_staging_copy {
                     let mut undisguise_processor = journal_data_copy_undisguise.instantiate_processor()?;
-                    for dst_allocation_block_buf in dst_allocation_block_buffers.iter_mut() {
-                        if let Some(dst_allocation_block_buf) = dst_allocation_block_buf {
+                    for read_allocation_block_buf in read_allocation_block_buffers.iter_mut() {
+                        if !read_allocation_block_buf.is_empty() {
                             undisguise_processor.undisguise_journal_staging_copy_allocation_block(
                                 cur_allocation_block_journal_staging_copy,
                                 cur_allocation_block_target,
-                                dst_allocation_block_buf,
+                                read_allocation_block_buf,
                             )?;
                         }
                         cur_allocation_block_target += layout::AllocBlockCount::from(1);
@@ -1106,13 +1131,11 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
         let states = &mut transaction.auth_tree_data_blocks_update_states;
         let mut j = 0;
         for i in read_region_states_allocation_blocks_index_range.iter(auth_tree_data_block_allocation_blocks_log2) {
-            let dst_allocation_block_buf = match dst_allocation_block_buffers[j].take() {
-                Some(dst_allocation_block_buffer) => dst_allocation_block_buffer,
-                None => {
-                    j += 1;
-                    continue;
-                }
-            };
+            let read_allocation_block_buf = mem::take(&mut read_allocation_block_buffers[j]);
+            if read_allocation_block_buf.is_empty() {
+                j += 1;
+                continue;
+            }
 
             match &mut states[i].nv_sync_state {
                 AllocationBlockUpdateNvSyncState::Unallocated(unallocated_state) => {
@@ -1124,7 +1147,7 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                     // If the data is there already, we should not have attempted to
                     // reread it in the first place.
                     debug_assert!(unallocated_state.random_fillup.is_none());
-                    unallocated_state.random_fillup = Some(dst_allocation_block_buf);
+                    unallocated_state.random_fillup = Some(read_allocation_block_buf);
                 }
                 AllocationBlockUpdateNvSyncState::Allocated(allocated_state) => {
                     match allocated_state {
@@ -1133,7 +1156,7 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                             // reread it in the first place.
                             debug_assert!(unmodified_state.cached_encrypted_data.is_none());
                             unmodified_state.cached_encrypted_data =
-                                Some(CachedEncryptedAllocationBlockData::new(dst_allocation_block_buf));
+                                Some(CachedEncryptedAllocationBlockData::new(read_allocation_block_buf));
                         }
                         AllocationBlockUpdateNvSyncStateAllocated::Modified(modified_state) => {
                             match modified_state {
@@ -1150,7 +1173,7 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                                     // reread it in the first place.
                                     debug_assert!(cached_encrypted_data.is_none());
                                     *cached_encrypted_data =
-                                        Some(CachedEncryptedAllocationBlockData::new(dst_allocation_block_buf));
+                                        Some(CachedEncryptedAllocationBlockData::new(read_allocation_block_buf));
                                 }
                             }
                         }
@@ -1161,30 +1184,5 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
             j += 1;
         }
         Ok(())
-    }
-}
-
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`TransactionReadMissingDataFuture`].
-struct TransactionReadMissingDataFutureNvBlkDevReadRequest {
-    read_region_states_allocation_blocks_index_range: AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange,
-    read_from_target: bool,
-    request_io_region: ChunkedIoRegion,
-    dst_allocation_block_buffers: FixedVec<Option<FixedVec<u8, 7>>, 0>,
-}
-
-impl blkdev::NvBlkDevReadRequest for TransactionReadMissingDataFutureNvBlkDevReadRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.request_io_region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let (allocation_block_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
-        Ok(self.dst_allocation_block_buffers[allocation_block_index]
-            .as_mut()
-            .map(|b| &mut b[range.range_in_chunk().clone()]))
     }
 }

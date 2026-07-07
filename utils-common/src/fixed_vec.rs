@@ -819,6 +819,20 @@ impl<T: Sized, const BASE_LEN_LOG2: u32> convert::AsMut<[T]> for FixedVec<T, BAS
     }
 }
 
+impl<T: Sized, I: slice::SliceIndex<[T]>, const BASE_LEN_LOG2: u32> ops::Index<I> for FixedVec<T, BASE_LEN_LOG2> {
+    type Output = I::Output;
+
+    fn index(&self, index: I) -> &Self::Output {
+        &ops::Deref::deref(self)[index]
+    }
+}
+
+impl<T: Sized, I: slice::SliceIndex<[T]>, const BASE_LEN_LOG2: u32> ops::IndexMut<I> for FixedVec<T, BASE_LEN_LOG2> {
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        &mut ops::DerefMut::deref_mut(self)[index]
+    }
+}
+
 impl<T: Sized, const BASE_LEN_LOG2: u32> Default for FixedVec<T, BASE_LEN_LOG2> {
     fn default() -> Self {
         Self::new_empty()

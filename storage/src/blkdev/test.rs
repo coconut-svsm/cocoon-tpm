@@ -245,6 +245,11 @@ impl blkdev::NvBlkDev for TestNvBlkDev {
         Ok(Ok(TestNvBlkDevWriteFuture::Init { request }))
     }
 
+    type FlushQueuedWritesFuture = TestNvBlkDevWriteSyncFuture;
+    fn flush_queued_writes(&self) -> Result<Self::FlushQueuedWritesFuture, NvBlkDevIoError> {
+        Ok(TestNvBlkDevWriteSyncFuture::Init)
+    }
+
     type WriteBarrierFuture = TestNvBlkDevWriteSyncFuture;
     fn write_barrier(&self) -> Result<Self::WriteBarrierFuture, NvBlkDevIoError> {
         Ok(TestNvBlkDevWriteSyncFuture::Init)
@@ -469,14 +474,14 @@ type TestSyncRcPtrFactory = <TestNopSyncTypes as sync_types::SyncTypes>::SyncRcP
 type TestNvBlkDevSyncRcPtr = <TestSyncRcPtrFactory as sync_types::SyncRcPtrFactory>::SyncRcPtr<TestNvBlkDev>;
 
 #[cfg(test)]
-struct TestNvBlkDevFuture<F: blkdev::NvBlkDevFuture<TestNvBlkDev>> {
+pub(super) struct TestNvBlkDevFuture<F: blkdev::NvBlkDevFuture<TestNvBlkDev>> {
     dev: TestNvBlkDevSyncRcPtr,
     dev_fut: F,
 }
 
 #[cfg(test)]
 impl<F: blkdev::NvBlkDevFuture<TestNvBlkDev>> TestNvBlkDevFuture<F> {
-    fn new(dev: TestNvBlkDevSyncRcPtr, dev_fut: F) -> Self {
+    pub fn new(dev: TestNvBlkDevSyncRcPtr, dev_fut: F) -> Self {
         Self { dev, dev_fut }
     }
 }

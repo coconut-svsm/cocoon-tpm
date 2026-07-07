@@ -1159,7 +1159,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &fs_instance_sync_state.get_fs_ref(),
                         transaction,
                         inode_extents_list_extents_allocation_request,
-                        false,
+                        transaction::TransactionAllocationConstraints::Regular,
                     ) {
                         Ok(allocate_fut) => allocate_fut,
                         Err((transaction, e)) => break (transaction, e),
@@ -1279,6 +1279,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     // Prepare an encryption instance for the extents list.
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,

@@ -16,7 +16,7 @@ use crate::fs::{self, cocoonfs::extent_ptr};
 fn write_read_one_small() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -59,7 +59,7 @@ fn write_read_one_small() {
 fn write_read_one_small_uncommitted_overwrite() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -121,7 +121,7 @@ fn write_read_one_small_uncommitted_overwrite() {
 fn write_read_one_small_committed_overwrite() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -200,7 +200,7 @@ fn write_read_one_small_committed_overwrite() {
 fn write_read_one_medium() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -253,6 +253,7 @@ fn write_read_two_large_interleaved_growth() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (18 + allocation_block_size_128b_log2),
                 enable_trimming,
             )

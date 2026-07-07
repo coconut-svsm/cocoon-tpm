@@ -16,7 +16,7 @@ use crate::fs;
 fn enumerate_inodes() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -110,6 +110,7 @@ fn create_many_inodes_forward() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -186,6 +187,7 @@ fn create_many_inodes_forward_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -273,6 +275,7 @@ fn create_many_inodes_backward() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -350,6 +353,7 @@ fn create_many_inodes_backward_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -437,6 +441,7 @@ fn create_many_inodes_inner_to_outer() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -515,6 +520,7 @@ fn create_many_inodes_inner_to_outer_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -604,6 +610,7 @@ fn create_many_inodes_outer_to_inner() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -683,6 +690,7 @@ fn create_many_inodes_outer_to_inner_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -771,7 +779,7 @@ fn create_many_inodes_outer_to_inner_sliced() {
 fn unlink_uncommitted_inodes() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -830,7 +838,7 @@ fn unlink_uncommitted_inodes() {
 fn unlink_committed_inodes() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {
-            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, 3usize << 18, enable_trimming).unwrap();
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
 
             let mut transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
 
@@ -889,6 +897,7 @@ fn unlink_many_inodes_forward() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -974,6 +983,7 @@ fn unlink_many_inodes_forward_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -1080,6 +1090,7 @@ fn unlink_many_inodes_backward() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -1166,6 +1177,7 @@ fn unlink_many_inodes_backward_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -1273,6 +1285,7 @@ fn unlink_many_inodes_inner_to_outer() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -1361,6 +1374,7 @@ fn unlink_many_inodes_inner_to_outer_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -1471,6 +1485,7 @@ fn unlink_many_inodes_outer_to_inner() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )
@@ -1560,6 +1575,7 @@ fn unlink_many_inodes_outer_to_inner_sliced() {
             let allocation_block_size_128b_log2 = test_config.layout.allocation_block_size_128b_log2 as u32;
             let fs_instance = cocoonfs_test_mkfs_op_helper(
                 &test_config,
+                None,
                 3usize << (19 + allocation_block_size_128b_log2),
                 enable_trimming,
             )

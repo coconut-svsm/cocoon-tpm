@@ -10,7 +10,10 @@ use crate::{
     crypto::{hash, rng, symcipher},
     fs::{
         self,
-        cocoonfs::{CocoonFs, MkFsFuture, OpenFsFuture, WriteMkFsInfoHeaderFuture, layout},
+        cocoonfs::{
+            AuxFsMetadata, CocoonFs, FsMetadata, MkFsFuture, OpenFsFuture, ReadFsMetadataFuture,
+            WriteAuxFsMetadataOfflineFuture, WriteMkFsInfoHeaderFuture, layout,
+        },
     },
     nvfs_err_internal, tpm2_interface,
     utils_async::{
@@ -250,15 +253,24 @@ fn cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance: <TestCocoonFs as fs
 
 fn cocoonfs_test_mkfs_op_helper(
     test_config: &CocoonFsTestConfig,
+    aux_fs_metadata: Option<AuxFsMetadata>,
     image_size: usize,
     enable_trimming: bool,
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let (blkdev, image_layout, salt) = test_config.instantiate(image_size);
-    let mkfs_fut =
-        MkFsFuture::<TestNopSyncTypes, _>::new(blkdev, &image_layout, salt, None, &[0u8; 0], enable_trimming, rng)
-            .map_err(|(_blkdev, _rng, e)| e)
-            .unwrap();
+    let mkfs_fut = MkFsFuture::<TestNopSyncTypes, _>::new(
+        blkdev,
+        &image_layout,
+        salt,
+        aux_fs_metadata.unwrap_or(AuxFsMetadata::new()),
+        None,
+        &[0u8; 0],
+        enable_trimming,
+        rng,
+    )
+    .map_err(|(_blkdev, _rng, e)| e)
+    .unwrap();
 
     let executor = TestAsyncExecutor::new();
     let mkfs_waiter = TestAsyncExecutor::spawn(&executor, mkfs_fut);
@@ -270,13 +282,20 @@ fn cocoonfs_test_mkfs_op_helper(
 
 fn cocoonfs_test_write_mkfsinfo_header_op_helper(
     test_config: &CocoonFsTestConfig,
+    aux_fs_metadata: Option<AuxFsMetadata>,
     image_size: usize,
 ) -> Result<TestNvBlkDev, fs::NvFsError> {
     let (blkdev, image_layout, salt) = test_config.instantiate(0);
     let image_size = image_size as u64;
-    let write_mkfsinfo_header_fut =
-        WriteMkFsInfoHeaderFuture::new(blkdev, &image_layout, salt, Some(image_size), false)
-            .map_err(|(_blkdev, e)| e)?;
+    let write_mkfsinfo_header_fut = WriteMkFsInfoHeaderFuture::new(
+        blkdev,
+        &image_layout,
+        salt,
+        aux_fs_metadata.unwrap_or(AuxFsMetadata::new()),
+        Some(image_size),
+        false,
+    )
+    .map_err(|(_blkdev, e)| e)?;
 
     let executor = TestAsyncExecutor::new();
     let write_mkfsinfo_header_waiter = TestAsyncExecutor::spawn(&executor, write_mkfsinfo_header_fut);
@@ -289,12 +308,39 @@ fn cocoonfs_test_write_mkfsinfo_header_op_helper(
     }
 }
 
+fn cocoonfs_test_read_fs_metadata_helper(blkdev: TestNvBlkDev) -> Result<(TestNvBlkDev, FsMetadata), fs::NvFsError> {
+    let read_fs_metadata_fut = ReadFsMetadataFuture::new(blkdev).map_err(|(_blkdev, e)| e).unwrap();
+    let executor = TestAsyncExecutor::new();
+    let read_fs_metadata_waiter = TestAsyncExecutor::spawn(&executor, read_fs_metadata_fut);
+    TestAsyncExecutor::run_to_completion(&executor);
+    let read_fs_metadata_result = read_fs_metadata_waiter.take().unwrap();
+    let (blkdev, read_fs_metadata_result) = read_fs_metadata_result.unwrap();
+    read_fs_metadata_result.map(|fs_metadata| (blkdev, fs_metadata))
+}
+
+fn cocoonfs_test_write_aux_fs_metadata_offline_helper(
+    blkdev: TestNvBlkDev,
+    fs_metadata: FsMetadata,
+    updated_aux_fs_metadata: AuxFsMetadata,
+    fail_mkfsinfo_update_blkdev_resize: bool,
+    fail_final_write: bool,
+) -> (TestNvBlkDev, Result<FsMetadata, fs::NvFsError>) {
+    let mut update_aux_fs_metatdata_fut =
+        WriteAuxFsMetadataOfflineFuture::new(blkdev, fs_metadata, updated_aux_fs_metadata);
+    update_aux_fs_metatdata_fut.test_fail_final_write = fail_final_write;
+    update_aux_fs_metatdata_fut.test_fail_mkfsinfo_update_blkdev_resize = fail_mkfsinfo_update_blkdev_resize;
+    let executor = TestAsyncExecutor::new();
+    let update_aux_fs_metadata_waiter = TestAsyncExecutor::spawn(&executor, update_aux_fs_metatdata_fut);
+    TestAsyncExecutor::run_to_completion(&executor);
+    update_aux_fs_metadata_waiter.take().unwrap().unwrap()
+}
+
 fn cocoonfs_test_openfs_op_helper(
     blkdev: TestNvBlkDev,
 ) -> Result<<TestCocoonFs as fs::NvFs>::SyncRcPtr, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].to_vec());
-    let openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+    let openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, None, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     let executor = TestAsyncExecutor::new();
@@ -310,7 +356,7 @@ fn cocoonfs_test_openfs_fail_mkfsinfo_header_application_op_helper(
 ) -> Result<TestNvBlkDev, fs::NvFsError> {
     let rng = Box::new(rng::test_rng());
     let root_key = zeroize::Zeroizing::new([0u8; 0].to_vec());
-    let mut openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, root_key, false, rng)
+    let mut openfs_fut = OpenFsFuture::<TestNopSyncTypes, _>::new(blkdev, None, root_key, false, rng)
         .map_err(|(_blkdev, _root_key, _rng, e)| e)
         .unwrap();
     // Simulate IO failure when writing the regular static image header.
@@ -392,6 +438,54 @@ fn cocoonfs_test_commit_transaction_op_helper(
     commit_transaction_waiter.take().unwrap().unwrap().1
 }
 
+fn cocooonfs_test_write_aux_fs_metadata_op_helper(
+    fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
+    transaction: <TestCocoonFs as fs::NvFs>::Transaction,
+    aux_fs_metadata: AuxFsMetadata,
+) -> Result<<TestCocoonFs as fs::NvFs>::Transaction, fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
+    let write_aux_fs_metadata_fut = TestCocoonFs::write_aux_fs_metadata(
+        &cocoonfs_test_mk_fs_instance_ref(fs_instance),
+        transaction,
+        aux_fs_metadata,
+    );
+    let executor = TestAsyncExecutor::new();
+    let write_aux_fs_metadata_waiter = TestAsyncExecutor::spawn(
+        &executor,
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(
+            fs_instance.clone(),
+            write_aux_fs_metadata_fut,
+            rng,
+        ),
+    );
+    TestAsyncExecutor::run_to_completion(&executor);
+    let write_aux_fs_metadata_result = write_aux_fs_metadata_waiter.take().unwrap().unwrap().1.1;
+    write_aux_fs_metadata_result.and_then(|(transaction, write_inode_result)| write_inode_result.map(|_| transaction))
+}
+
+fn cocoonfs_test_read_aux_fs_metadata_op_helper(
+    fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
+    read_context: Option<fs::NvFsReadContext<TestCocoonFs>>,
+) -> Result<(fs::NvFsReadContext<TestCocoonFs>, AuxFsMetadata), fs::NvFsError> {
+    let rng = Box::new(rng::test_rng());
+    let read_aux_fs_metadata_fut =
+        TestCocoonFs::read_aux_fs_metadata(&cocoonfs_test_mk_fs_instance_ref(fs_instance), read_context);
+    let executor = TestAsyncExecutor::new();
+    let read_aux_fs_metadata_waiter = TestAsyncExecutor::spawn(
+        &executor,
+        fs::NvFsFutureAsCoreFuture::<CocoonFs<TestNopSyncTypes, _>, _>::new(
+            fs_instance.clone(),
+            read_aux_fs_metadata_fut,
+            rng,
+        ),
+    );
+    TestAsyncExecutor::run_to_completion(&executor);
+    let read_aux_fs_metadata_result = read_aux_fs_metadata_waiter.take().unwrap().unwrap().1;
+    read_aux_fs_metadata_result.and_then(|(read_context, read_aux_fs_metadata_result)| {
+        read_aux_fs_metadata_result.map(|read_aux_fs_metadata| (read_context, read_aux_fs_metadata))
+    })
+}
+
 fn cocoonfs_test_write_inode_op_helper(
     fs_instance: &<TestCocoonFs as fs::NvFs>::SyncRcPtr,
     transaction: <TestCocoonFs as fs::NvFs>::Transaction,
@@ -439,8 +533,8 @@ fn cocoonfs_test_read_inode_op_helper(
             (
                 read_context,
                 read_inode_result.map(|(inode_flags, data)| {
-                    // Verify that the inode flags match the least significant bits of the inode number,
-                    // c.f. cocoonfs_test_write_inode_op_helper().
+                    // Verify that the inode flags match the least significant bits of the inode
+                    // number, c.f. cocoonfs_test_write_inode_op_helper().
                     assert_eq!(inode as u8, inode_flags);
                     data
                 }),
@@ -642,7 +736,8 @@ impl<CB: CocoonFsTestEnumerateInodesFutureCallback> fs::NvFsFuture<TestCocoonFs>
 
                     match inode {
                         Some((inode, inode_flags)) => {
-                            // Verify that the inode flags match the least significant bits of the inode number,
+                            // Verify that the inode flags match the least significant bits of the inode
+                            // number,
                             // c.f. cocoonfs_test_write_inode_op_helper().
                             assert_eq!(inode as u8, inode_flags);
                             let read_fut = fs::NvFsEnumerateCursor::read_current_inode_data(enumerate_cursor);
@@ -852,7 +947,8 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
 
                     match inode {
                         Some((inode, inode_flags)) => {
-                            // Verify that the inode flags match the least significant bits of the inode number,
+                            // Verify that the inode flags match the least significant bits of the inode
+                            // number,
                             // c.f. cocoonfs_test_write_inode_op_helper().
                             assert_eq!(inode as u8, inode_flags);
                             let read_fut = fs::NvFsUnlinkCursor::read_current_inode_data(unlink_cursor);
@@ -942,6 +1038,7 @@ impl<CB: CocoonFsTestUnlinkInodesFutureCallback> fs::NvFsFuture<TestCocoonFs> fo
     }
 }
 
+mod aux_fs_metadata;
 mod inode_index;
 mod journal_replay;
 mod mkfs;

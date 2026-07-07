@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2023-2025 SUSE LLC
+// Copyright 2023-2026 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
 //! Definition of [`CocoonFs`] and implementation of the [`NvFs`](fs::NvFs)
@@ -9,13 +9,21 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    blkdev,
+    blkdev::{self, NvBlkDevFuture},
     crypto::rng,
     fs::{
         self, NvFsError,
         cocoonfs::{
-            alloc_bitmap, auth_tree, extent_ptr, extents, inode_index, keys, layout, read_buffer,
-            read_inode_data::ReadInodeDataFuture, transaction, write_inode_data::WriteInodeDataFuture,
+            alloc_bitmap, auth_tree,
+            aux_fs_metadata::{
+                self, AuxFsMetadata, AuxFsMetadataEncodedExtentsPtrsPair, TransactionWriteAuxFsMetadataFuture,
+            },
+            extent_ptr, extents, inode_index,
+            integrity::ExtentIntegrityState,
+            keys, layout, read_buffer,
+            read_inode_data::ReadInodeDataFuture,
+            transaction,
+            write_inode_data::WriteInodeDataFuture,
         },
     },
     nvfs_err_internal,
@@ -121,7 +129,10 @@ pub(super) struct CocoonFsConfig {
 ///
 /// Maintained at [`CocoonFs::sync_state`].
 pub(super) struct CocoonFsSyncState<ST: sync_types::SyncTypes> {
+    /// Pointers to the two [`AuxFsMetadata`] update groups' heads, if any.
+    pub aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     pub image_size: layout::AllocBlockCount,
+    pub journal_log_head_integrity_state: ExtentIntegrityState,
     pub alloc_bitmap: alloc_bitmap::AllocBitmap,
     pub alloc_bitmap_file: alloc_bitmap::AllocBitmapFile,
     pub auth_tree: auth_tree::AuthTree<ST>,
@@ -583,6 +594,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         &'b mut self,
     ) -> (
         CocoonFsSyncRcPtrRefType<'b, ST, B>,
+        &'b AuxFsMetadataEncodedExtentsPtrsPair,
         &'b layout::AllocBlockCount,
         &'b alloc_bitmap::AllocBitmap,
         &'b alloc_bitmap::AllocBitmapFile,
@@ -596,6 +608,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
                 let fs_instance = sync_state_read_guard.get_rwlock().get_container().clone();
                 (
                     fs_instance,
+                    &sync_state_read_guard.aux_fs_metadata_update_groups_heads,
                     &sync_state_read_guard.image_size,
                     &sync_state_read_guard.alloc_bitmap,
                     &sync_state_read_guard.alloc_bitmap_file,
@@ -616,6 +629,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
                 let fs_instance = rwlock_ptr_ref.get_container().clone();
                 (
                     fs_instance,
+                    &sync_state.aux_fs_metadata_update_groups_heads,
                     &sync_state.image_size,
                     &sync_state.alloc_bitmap,
                     &sync_state.alloc_bitmap_file,
@@ -724,6 +738,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         &'b mut self,
     ) -> (
         CocoonFsSyncRcPtrRefType<'b, ST, B>,
+        &'b mut AuxFsMetadataEncodedExtentsPtrsPair,
         &'b mut layout::AllocBlockCount,
         &'b mut alloc_bitmap::AllocBitmap,
         &'b mut alloc_bitmap::AllocBitmapFile,
@@ -738,6 +753,7 @@ impl<'a, ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateMember
         let fs_instance = rwlock_ptr_ref.get_container().clone();
         (
             fs_instance,
+            &mut sync_state.aux_fs_metadata_update_groups_heads,
             &mut sync_state.image_size,
             &mut sync_state.alloc_bitmap,
             &mut sync_state.alloc_bitmap_file,
@@ -847,6 +863,67 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFs<ST, B> {
     ) -> CocoonFsPendingTransactionsSyncStateMemberSyncRcPtrRefType<'a, ST, B> {
         // This is sound: the outer 'this' is pinned, and so remains the member.
         unsafe { PlainCocoonFsPendingTransactionsSyncStateMemberSyncRcPtrRefType::new_projection_pin(this) }
+    }
+
+    /// Write the filesystem's [`AuxFsMetadata`].
+    ///
+    /// Stage an update to the filesystem's [`AuxFsMetadata`] at `transaction`.
+    ///
+    /// `write_aux_fs_metadata()` returns a [future](WriteAuxFsMetadataFuture),
+    /// which must get [polled](fs::NvFsFuture::poll) to stage the
+    /// [`AuxFsMetadata`] update at `transaction` and eventually return the
+    /// operation's result.
+    ///
+    /// # Arguments:
+    ///
+    /// * `this` - A [`SyncRcPtrRef<Self>`](sync_types::SyncRcPtrRef) referring
+    ///   to the [`SyncRcPtr<Self>`](sync_types::SyncRcPtr) managing the `NvFs`
+    ///   instance.
+    /// * `transaction` - The [`Transaction`](fs::NvFs::Transaction) to stage
+    ///   the updates at.
+    /// * `updated_aux_fs_metadata` - The updated [`AuxFsMetadata`] to write.
+    ///
+    /// # See also:
+    ///
+    /// * [`read_aux_fs_metadata()`](Self::read_aux_fs_metadata).
+    /// * [`WriteAuxFsMetadataOfflineFuture`](super::WriteAuxFsMetadataOfflineFuture).
+    pub fn write_aux_fs_metadata(
+        _this: &<Self as fs::NvFs>::SyncRcPtrRef<'_>,
+        transaction: Transaction,
+        updated_aux_fs_metadata: AuxFsMetadata,
+    ) -> WriteAuxFsMetadataFuture<ST, B> {
+        WriteAuxFsMetadataFuture::new(transaction, updated_aux_fs_metadata)
+    }
+
+    /// Read the filesystem's [`AuxFsMetadata`].
+    ///
+    /// An optional [`NvFsReadContext`](fs::NvFsReadContext) is accepted for the
+    /// `context` argument. It may be set to `Some` for specifying either a
+    /// [ConsistentReadSequence](fs::NvFsReadContext::Committed) to continue on
+    /// or to some [`Transaction`](fs::NvFsReadContext::Transaction) to read
+    /// through. If `None`, a new
+    /// [`ConsistentReadSequence`](fs::NvFs::ConsistentReadSequence) will get
+    /// [started](fs::NvFs::start_read_sequence) implicitly as part of the call.
+    ///
+    /// # Arguments:
+    ///
+    /// * `this` - A [`SyncRcPtrRef<Self>`](sync_types::SyncRcPtrRef) referring
+    ///   to the [`SyncRcPtr<Self>`](sync_types::SyncRcPtr) managing the `NvFs`
+    ///   instance.
+    /// * `context` - The optional [`NvFsReadContext`](fs::NvFsReadContext). If
+    ///   `None`, a [`ConsistentReadSequence`](fs::NvFs::ConsistentReadSequence)
+    ///   will be [started](fs::NvFs::start_read_sequence) implicitly as part of
+    ///   the operation.
+    ///
+    /// # See also:
+    ///
+    /// * [`ReadFsMetadataFuture`](super::ReadFsMetadataFuture).
+    /// * [`write_aux_fs_metadata()`](Self::write_aux_fs_metadata).
+    pub fn read_aux_fs_metadata(
+        _this: &<Self as fs::NvFs>::SyncRcPtrRef<'_>,
+        context: Option<fs::NvFsReadContext<Self>>,
+    ) -> ReadAuxFsMetadataFuture<ST, B> {
+        ReadAuxFsMetadataFuture::new(context)
     }
 }
 
@@ -2058,6 +2135,310 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST,
     }
 }
 
+/// Future returned by [`CocoonFs::write_aux_fs_metadata()`].
+pub struct WriteAuxFsMetadataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: WriteAuxFsMetadataFutureState<ST, B>,
+}
+
+/// Internal [`WriteAuxFsMetadataFuture`] state-machine state.
+#[allow(clippy::large_enum_variant)]
+enum WriteAuxFsMetadataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    Init {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Transaction>,
+        updated_aux_fs_metadata: AuxFsMetadata,
+    },
+    Write {
+        read_sequence: ConsistentReadSequence,
+        write_aux_fs_metadata_fut: TransactionWriteAuxFsMetadataFuture<ST, B>,
+    },
+    Done,
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> WriteAuxFsMetadataFuture<ST, B> {
+    fn new(transaction: Transaction, updated_aux_fs_metadata: AuxFsMetadata) -> Self {
+        Self {
+            fut_state: WriteAuxFsMetadataFutureState::Init {
+                transaction: Some(transaction),
+                updated_aux_fs_metadata,
+            },
+        }
+    }
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
+    for WriteAuxFsMetadataFuture<ST, B>
+{
+    /// Output type of [`poll()`](fs::NvFsFuture::poll).
+    ///
+    /// A pair of the input [`AuxFsMetadata`] and a two-level [`Result`] is
+    /// returned upon [future](fs::NvFsFuture) completion.
+    /// * `(aux_fs_metadata, Err(e))` - The outer level [`Result`] is set to
+    ///   [`Err`] upon encountering an internal error and the
+    ///   [`Transaction`](fs::NvFs::Transaction) is lost.
+    /// * `(aux_fs_metadata, Ok((transaction, ...)))` - Otherwise the outer
+    ///   level [`Result`] is set to [`Ok`] and a pair of the input
+    ///   [`Transaction`](fs::NvFs::Transaction) and the operation result will
+    ///   get returned within:
+    ///     * `(aux_fs_metadata, Ok((transaction, Err(e))))` - In case of an
+    ///       error, the error reason `e` is returned in an [`Err`].
+    ///     * `(aux_fs_metadata, Ok((transaction, Ok(()))))` -  Otherwise,
+    ///       `Ok(())` will get returned for the operation result on success.
+    type Output = (AuxFsMetadata, Result<(Transaction, Result<(), NvFsError>), NvFsError>);
+
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        fs_instance: &<CocoonFs<ST, B> as fs::NvFs>::SyncRcPtrRef<'_>,
+        _rng: &mut dyn rng::RngCoreDispatchable,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                WriteAuxFsMetadataFutureState::Init {
+                    transaction,
+                    updated_aux_fs_metadata,
+                } => {
+                    let transaction = match transaction.take() {
+                        Some(transaction) => transaction,
+                        None => {
+                            let aux_fs_metadata = mem::take(updated_aux_fs_metadata);
+                            this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready((aux_fs_metadata, Err(nvfs_err_internal!())));
+                        }
+                    };
+
+                    let Transaction {
+                        read_sequence,
+                        transaction,
+                    } = transaction;
+
+                    let write_aux_fs_metadata_fut =
+                        TransactionWriteAuxFsMetadataFuture::new(transaction, mem::take(updated_aux_fs_metadata));
+                    this.fut_state = WriteAuxFsMetadataFutureState::Write {
+                        read_sequence,
+                        write_aux_fs_metadata_fut,
+                    };
+                }
+                WriteAuxFsMetadataFutureState::Write {
+                    read_sequence,
+                    write_aux_fs_metadata_fut,
+                } => {
+                    let sync_state_read_guard = match read_sequence.continue_sequence::<ST, B>(fs_instance) {
+                        Ok(sync_state) => sync_state,
+                        Err(e) => {
+                            let aux_fs_metadata = write_aux_fs_metadata_fut.grab_data();
+                            this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready((aux_fs_metadata, Err(e)));
+                        }
+                    };
+                    let mut sync_state = CocoonFsSyncStateMemberRef::from(&sync_state_read_guard);
+
+                    let (aux_fs_metadata, transaction, result) = match CocoonFsSyncStateReadFuture::poll(
+                        pin::Pin::new(write_aux_fs_metadata_fut),
+                        &mut sync_state,
+                        &mut (),
+                        cx,
+                    ) {
+                        task::Poll::Ready((aux_fs_metadata, Ok((transaction, result)))) => {
+                            (aux_fs_metadata, transaction, result)
+                        }
+                        task::Poll::Ready((aux_fs_metadata, Err(e))) => {
+                            this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready((aux_fs_metadata, Err(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    let transaction = Transaction {
+                        read_sequence: *read_sequence,
+                        transaction,
+                    };
+                    this.fut_state = WriteAuxFsMetadataFutureState::Done;
+                    return task::Poll::Ready((aux_fs_metadata, Ok((transaction, result))));
+                }
+                WriteAuxFsMetadataFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Future returned by [`CocoonFs::read_aux_fs_metadata()`].
+pub struct ReadAuxFsMetadataFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    fut_state: ReadAuxFsMetadataFutureState<ST, B>,
+}
+
+/// Internal [`ReadAuxFsMetadataFuture`] state-machine state.
+#[allow(clippy::large_enum_variant)]
+enum ReadAuxFsMetadataFutureState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
+    StartReadSequence {
+        start_read_sequence_fut: StartReadSequenceFuture<ST, B>,
+    },
+    ReadPrepare {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        context: Option<fs::NvFsReadContext<CocoonFs<ST, B>>>,
+    },
+    Read {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        context: Option<fs::NvFsReadContext<CocoonFs<ST, B>>>,
+        read_aux_fs_metadata_fut: aux_fs_metadata::ReadAuxFsMetadataFuture<B>,
+    },
+    Done,
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> ReadAuxFsMetadataFuture<ST, B> {
+    fn new(context: Option<fs::NvFsReadContext<CocoonFs<ST, B>>>) -> Self {
+        Self {
+            fut_state: match context {
+                Some(context) => ReadAuxFsMetadataFutureState::ReadPrepare { context: Some(context) },
+                None => ReadAuxFsMetadataFutureState::StartReadSequence {
+                    start_read_sequence_fut: StartReadSequenceFuture::new(),
+                },
+            },
+        }
+    }
+}
+
+impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> fs::NvFsFuture<CocoonFs<ST, B>>
+    for ReadAuxFsMetadataFuture<ST, B>
+{
+    /// Output type of [`poll()`](fs::NvFsFuture::poll).
+    ///
+    /// A  two-level [`Result`] is
+    /// returned upon [future](fs::NvFsFuture) completion.
+    /// * `Err(e)` - The outer level [`Result`] is set to [`Err`] upon
+    ///   encountering an internal error and the input
+    ///   [`NvFsReadContext`](fs::NvFsReadContext), if any, is lost.
+    /// * `Ok((context, ...))` - Otherwise the outer level [`Result`] is set to
+    ///   [`Ok`] and a pair of the [`NvFsReadContext`](fs::NvFsReadContext) and
+    ///   the operation result will get returned within:
+    ///     * `Ok((context, Err(e)))` - In case of an error, the error reason
+    ///       `e` is returned in an [`Err`].
+    ///     * `Ok((context, Ok((aux_fs_metadata))))` -  Otherwise, the read
+    ///       [`AuxFsMetadata`] will get returned wrapped in an `Ok`.
+    type Output = Result<(fs::NvFsReadContext<CocoonFs<ST, B>>, Result<AuxFsMetadata, NvFsError>), NvFsError>;
+
+    fn poll(
+        self: pin::Pin<&mut Self>,
+        fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
+        rng: &mut dyn rng::RngCoreDispatchable,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
+        let this = pin::Pin::into_inner(self);
+
+        loop {
+            match &mut this.fut_state {
+                ReadAuxFsMetadataFutureState::StartReadSequence {
+                    start_read_sequence_fut,
+                } => match fs::NvFsFuture::poll(pin::Pin::new(start_read_sequence_fut), fs_instance, rng, cx) {
+                    task::Poll::Ready(Ok(read_sequence)) => {
+                        this.fut_state = ReadAuxFsMetadataFutureState::ReadPrepare {
+                            context: Some(fs::NvFsReadContext::Committed { seq: read_sequence }),
+                        };
+                    }
+                    task::Poll::Ready(Err(e)) => {
+                        this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                        return task::Poll::Ready(Err(e));
+                    }
+                    task::Poll::Pending => return task::Poll::Pending,
+                },
+                ReadAuxFsMetadataFutureState::ReadPrepare { context } => {
+                    let aux_fs_metadata_update_groups_heads = match context.as_ref() {
+                        Some(fs::NvFsReadContext::Committed { seq }) => {
+                            let sync_state_read_guard = match seq.continue_sequence::<ST, B>(fs_instance) {
+                                Ok(sync_state) => sync_state,
+                                Err(e) => {
+                                    this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                                    return task::Poll::Ready(Err(e));
+                                }
+                            };
+                            sync_state_read_guard.aux_fs_metadata_update_groups_heads
+                        }
+                        Some(fs::NvFsReadContext::Transaction { transaction }) => {
+                            if let Some(aux_fs_metadata_update) =
+                                transaction.transaction.aux_fs_metadata_update.as_ref()
+                            {
+                                aux_fs_metadata_update.aux_fs_metadata_update_groups_heads
+                            } else {
+                                let sync_state_read_guard =
+                                    match transaction.read_sequence.continue_sequence::<ST, B>(fs_instance) {
+                                        Ok(sync_state) => sync_state,
+                                        Err(e) => {
+                                            this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                                            return task::Poll::Ready(Err(e));
+                                        }
+                                    };
+                                sync_state_read_guard.aux_fs_metadata_update_groups_heads
+                            }
+                        }
+                        None => {
+                            this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(nvfs_err_internal!()));
+                        }
+                    };
+                    let read_aux_fs_metadata_fut = aux_fs_metadata::ReadAuxFsMetadataFuture::new(
+                        aux_fs_metadata_update_groups_heads,
+                        &fs_instance.as_ref().fs_config.image_layout,
+                    );
+                    this.fut_state = ReadAuxFsMetadataFutureState::Read {
+                        context: context.take(),
+                        read_aux_fs_metadata_fut,
+                    };
+                }
+                ReadAuxFsMetadataFutureState::Read {
+                    context,
+                    read_aux_fs_metadata_fut,
+                } => {
+                    let sync_state_read_guard = match context
+                        .as_ref()
+                        .map(|context| match context {
+                            fs::NvFsReadContext::Committed { seq } => seq,
+                            fs::NvFsReadContext::Transaction { transaction } => &transaction.read_sequence,
+                        })
+                        .ok_or_else(|| nvfs_err_internal!())
+                        .and_then(|read_sequence| read_sequence.continue_sequence::<ST, B>(fs_instance))
+                    {
+                        Ok(sync_state) => sync_state,
+                        Err(e) => {
+                            this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
+                    };
+
+                    let aux_fs_metadata =
+                        match NvBlkDevFuture::poll(pin::Pin::new(read_aux_fs_metadata_fut), &fs_instance.blkdev, cx) {
+                            task::Poll::Ready(Ok((
+                                _aux_fs_metadata_extents,
+                                _aux_fs_metadata_extents_reallocation_needed,
+                                aux_fs_metadata,
+                            ))) => aux_fs_metadata,
+                            task::Poll::Ready(Err(e)) => {
+                                drop(sync_state_read_guard);
+                                let context = context.take();
+                                this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                                return task::Poll::Ready(context.map(|context| (context, Err(e))).ok_or(e));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+                    drop(sync_state_read_guard);
+                    let context = context.take();
+                    this.fut_state = ReadAuxFsMetadataFutureState::Done;
+                    return task::Poll::Ready(
+                        context
+                            .map(|context| (context, Ok(aux_fs_metadata)))
+                            .ok_or_else(|| nvfs_err_internal!()),
+                    );
+                }
+                ReadAuxFsMetadataFutureState::Done => unreachable!(),
+            }
+        }
+    }
+}
+
 /// [`CocoonFs::committing_transaction`] state.
 enum CommittingTransactionState<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> {
     /// No transaction commit in progress.
@@ -2227,6 +2608,18 @@ enum ProgressCommittingTransactionFuture<ST: sync_types::SyncTypes, B: blkdev::N
         issue_sync: bool,
         sync_state_write_fut: CocoonFsSyncStateMemberWriteFuture<ST, B>,
     },
+    FlushPendingBlkDevWrites {
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        sync_state_write_guard: Option<CocoonFsSyncStateMemberWriteWeakGuard<ST, B>>,
+        // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
+        // reference on Self.
+        transaction: Option<Box<transaction::Transaction>>,
+        pre_commit_validate_cb: Option<fs::PreCommitValidateCallbackType>,
+        post_commit_cb: Option<fs::PostCommitCallbackType>,
+        issue_sync: bool,
+        flush_queued_writes_fut: B::FlushQueuedWritesFuture,
+    },
     GrabPendingTransactionsSyncStateForCommit {
         // Is mandatory, lives in an Option<> only so that it can be taken out of a mutable
         // reference on Self.
@@ -2325,29 +2718,48 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                 sync_state_write_fut,
             } => match future::Future::poll(pin::Pin::new(sync_state_write_fut), cx) {
                 task::Poll::Ready(Ok(sync_state_write_guard)) => {
-                    let fs_instance = sync_state_write_guard.get_rwlock().get_container().clone();
-                    let pending_transactions_sync_state =
-                        CocoonFs::get_pending_transactions_sync_state_ref(&fs_instance).make_clone();
-                    let grab_pending_transactions_sync_state_fut = match asynchronous::FutureQueue::enqueue(
-                        pending_transactions_sync_state,
-                        PendingTransactionsSyncFuture::GrabTransactionsSyncStateForCommit,
-                    ) {
-                        Ok(grab_pending_transactions_sync_state_fut) => grab_pending_transactions_sync_state_fut,
-                        Err((_, asynchronous::FutureQueueError::MemoryAllocationFailure)) => {
+                    // Alright, we're executing exlusively, no other filesystem operation is
+                    // actively executing in poll(). However, there might be
+                    // *pending* transactions, and therefore IO ops pending on their behalf.
+                    // The first step is to tear those down:
+                    // - Increment the transaction_commit_gen to prevent any further poll() from
+                    //   executing. This is required for well-definiteness -- pending IO ops
+                    //   completed implicitly through a write barrier in the next step must not get
+                    //   polled on any further.
+                    // - Flush the NvBlkDev write queue in order to complete any pending write op
+                    //   (with unspecified results. This is required for establishing
+                    //   well-definiteness regarding pending and subsequent writes to the same
+                    //   locations.
+                    // - If successful, assume ownership of the shared
+                    //   CocoonFsPendingTransactionsSyncState. This allows for repurposing the
+                    //   storage locations previously allocated by concurrently executing
+                    //   transactions, if any.
+                    let fs_sync_state_rwlock = sync_state_write_guard.get_rwlock();
+                    let fs_instance = fs_sync_state_rwlock.get_container();
+                    fs_instance
+                        .transaction_commit_gen
+                        .fetch_add(1, atomic::Ordering::Relaxed);
+
+                    let flush_queued_writes_fut = match fs_instance.blkdev.flush_queued_writes() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
                             // Drop the sync_state write guard _before_ clearing out
-                            // committing_transaction.  Threads seeing committing_transaction ==
-                            // None expect to be able to grab the sync_state for read.
-                            drop(fs_instance);
+                            // committing_transaction. Threads seeing committing_transaction
+                            // == None expect to be able to grab the sync_state for read.
+                            drop(fs_sync_state_rwlock);
                             let fs_instance = sync_state_write_guard.into_rwlock().into_container();
                             *fs_instance.committing_transaction.lock() = CommittingTransactionState::None;
                             *this = Self::Done;
-                            let r = ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
-                                commit_error: NvFsError::MemoryAllocationFailure,
-                            };
-                            return task::Poll::Ready(r);
+                            return task::Poll::Ready(
+                                ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
+                                    commit_error: NvFsError::from(e),
+                                },
+                            );
                         }
                     };
-                    *this = Self::GrabPendingTransactionsSyncStateForCommit {
+                    drop(fs_sync_state_rwlock);
+
+                    *this = Self::FlushPendingBlkDevWrites {
                         // Will receive the CocoonFsSyncStateMemberWriteGuard::into_weak() upon
                         // return from this poll() function.
                         sync_state_write_guard: None,
@@ -2355,9 +2767,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                         pre_commit_validate_cb: pre_commit_validate_cb.take(),
                         post_commit_cb: post_commit_cb.take(),
                         issue_sync: *issue_sync,
-                        grab_pending_transactions_sync_state_fut,
+                        flush_queued_writes_fut,
                     };
-                    drop(fs_instance);
+
                     sync_state_write_guard
                 }
                 task::Poll::Ready(Err(e)) => {
@@ -2394,7 +2806,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                 }
             },
 
-            Self::GrabPendingTransactionsSyncStateForCommit {
+            Self::FlushPendingBlkDevWrites {
+                sync_state_write_guard, ..
+            }
+            | Self::GrabPendingTransactionsSyncStateForCommit {
                 sync_state_write_guard, ..
             }
             | Self::CleanupOnPreCommitError {
@@ -2429,6 +2844,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                         let r = match this {
                             Self::AcquireCocoonFsSyncStateMemberWriteLock { .. } => {
                                 // Would have been handled above though.
+                                ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk { commit_error: e }
+                            }
+                            Self::FlushPendingBlkDevWrites { .. } => {
                                 ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk { commit_error: e }
                             }
                             Self::GrabPendingTransactionsSyncStateForCommit { .. } => {
@@ -2494,6 +2912,83 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                     unreachable!();
                 }
 
+                Self::FlushPendingBlkDevWrites {
+                    sync_state_write_guard: fut_sync_state_write_guard,
+                    transaction,
+                    pre_commit_validate_cb,
+                    post_commit_cb,
+                    issue_sync,
+                    flush_queued_writes_fut,
+                } => {
+                    let fs_sync_state_rwlock = sync_state_write_guard.get_rwlock();
+                    let fs_instance = fs_sync_state_rwlock.get_container();
+                    match NvBlkDevFuture::poll(pin::Pin::new(flush_queued_writes_fut), &fs_instance.blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            // Drop the sync_state write guard _before_ clearing out
+                            // committing_transaction. Threads seeing committing_transaction
+                            // == None expect to be able to grab the sync_state for read.
+                            drop(fs_sync_state_rwlock);
+                            let fs_instance = sync_state_write_guard.into_rwlock().into_container();
+                            *fs_instance.committing_transaction.lock() = CommittingTransactionState::None;
+                            *this = Self::Done;
+                            return task::Poll::Ready(
+                                ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
+                                    commit_error: NvFsError::from(e),
+                                },
+                            );
+                        }
+                        task::Poll::Pending => {
+                            drop(fs_sync_state_rwlock);
+                            *fut_sync_state_write_guard = Some(sync_state_write_guard.into_weak());
+                            return task::Poll::Pending;
+                        }
+                    }
+
+                    // Now that all pending writes issued on behalf of concurrent transactions have
+                    // been completed (with unspecified result), clear the any_transaction_pending.
+                    // This allows for any subsequently started one to become
+                    // the primary transaction and enables it to issue certain
+                    // pre-commit writes.
+                    fs_instance.any_transaction_pending.store(0, atomic::Ordering::Relaxed);
+
+                    // Any pending write operations issued on behalf of concurrent transactions, if
+                    // any, have been completed with unspecified result, as is required for starting
+                    // any new write operations on those locations. Only now it's possible to assume
+                    // ownership of the pending_transactions_sync_state.
+                    let pending_transactions_sync_state =
+                        CocoonFs::get_pending_transactions_sync_state_ref(fs_instance).make_clone();
+                    let grab_pending_transactions_sync_state_fut = match asynchronous::FutureQueue::enqueue(
+                        pending_transactions_sync_state,
+                        PendingTransactionsSyncFuture::GrabTransactionsSyncStateForCommit,
+                    ) {
+                        Ok(grab_pending_transactions_sync_state_fut) => grab_pending_transactions_sync_state_fut,
+                        Err((_, asynchronous::FutureQueueError::MemoryAllocationFailure)) => {
+                            // Drop the sync_state write guard _before_ clearing out
+                            // committing_transaction.  Threads seeing committing_transaction ==
+                            // None expect to be able to grab the sync_state for read.
+                            drop(fs_sync_state_rwlock);
+                            let fs_instance = sync_state_write_guard.into_rwlock().into_container();
+                            *fs_instance.committing_transaction.lock() = CommittingTransactionState::None;
+                            *this = Self::Done;
+                            let r = ProgressCommittingTransactionFutureResult::CommitErrAbortJournalOk {
+                                commit_error: NvFsError::MemoryAllocationFailure,
+                            };
+                            return task::Poll::Ready(r);
+                        }
+                    };
+                    *this = Self::GrabPendingTransactionsSyncStateForCommit {
+                        // Will receive the CocoonFsSyncStateMemberWriteGuard::into_weak() upon
+                        // return from this poll() function.
+                        sync_state_write_guard: None,
+                        transaction: transaction.take(),
+                        pre_commit_validate_cb: pre_commit_validate_cb.take(),
+                        post_commit_cb: post_commit_cb.take(),
+                        issue_sync: *issue_sync,
+                        grab_pending_transactions_sync_state_fut,
+                    };
+                }
+
                 Self::GrabPendingTransactionsSyncStateForCommit {
                     sync_state_write_guard: fut_sync_state_write_guard,
                     transaction,
@@ -2546,6 +3041,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                         sync_state_write_guard: None,
                                         cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                             transaction,
+                                            Some(pending_transactions_sync_state),
                                         ),
                                         pre_commit_error: e,
                                     };
@@ -2562,7 +3058,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                 pending_transactions_sync_state,
                             ) {
                                 Ok(write_journal_fut) => write_journal_fut,
-                                Err((transaction, e)) => {
+                                Err((transaction, pending_transactions_sync_state, e)) => {
                                     *this = Self::CleanupOnPreCommitError {
                                         // Will receive the
                                         // CocoonFsSyncStateMemberWriteGuard::into_weak() upon
@@ -2570,6 +3066,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                         sync_state_write_guard: None,
                                         cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                             transaction,
+                                            Some(pending_transactions_sync_state),
                                         ),
                                         pre_commit_error: e,
                                     };
@@ -2690,6 +3187,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                                             sync_state_write_guard: None,
                                             cleanup_fut: transaction::TransactionCleanupPreCommitCancelledFuture::new(
                                                 transaction,
+                                                None,
                                             ),
                                             pre_commit_error: e,
                                         };
@@ -3430,7 +3928,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         // reference on Self.
         transaction: Option<Box<transaction::Transaction>>,
         request: alloc_bitmap::ExtentsAllocationRequest,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     },
     /// Serve a [`AllocateBlockFuture`].
     AllocateBlock {
@@ -3438,7 +3936,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         // reference on Self.
         transaction: Option<Box<transaction::Transaction>>,
         block_allocation_blocks_log2: u32,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     },
     /// Serve a [`AllocateBlocksFuture`].
     AllocateBlocks {
@@ -3447,8 +3945,7 @@ enum PendingTransactionsSyncFuture<ST: sync_types::SyncTypes, B: blkdev::NvBlkDe
         transaction: Option<Box<transaction::Transaction>>,
         block_allocation_blocks_log2: u32,
         count: usize,
-        for_journal: bool,
-        request_pending_allocs: alloc_bitmap::SparseAllocBitmap,
+        constraints: transaction::TransactionAllocationConstraints,
         result: Vec<layout::PhysicalAllocBlockIndex>,
     },
     Done(marker::PhantomData<fn() -> (ST, B)>),
@@ -3539,7 +4036,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
             Self::AllocateExtents {
                 transaction,
                 request,
-                for_journal,
+                constraints,
             } => {
                 let mut transaction = match transaction.take() {
                     Some(transaction) => transaction,
@@ -3553,11 +4050,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let pending_transactions_allocs = &pending_transactions_sync_state.pending_allocs;
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
-                // Do not repurpose pending frees if allocating for the journal.
-                let transaction_pending_frees = if *for_journal {
-                    &empty_pending_frees
-                } else {
-                    &transaction.allocs.pending_frees
+                // Do not repurpose pending_frees if allocating for the journal.
+                let transaction_pending_frees = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
+                    transaction::TransactionAllocationConstraints::NoPendingFrees
+                    | transaction::TransactionAllocationConstraints::Journal => &empty_pending_frees,
                 };
 
                 let pending_allocs = [
@@ -3566,7 +4063,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     pending_transactions_allocs,
                 ];
                 let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
-                let pending_frees = [transaction_pending_frees];
+                let pending_frees = [transaction_pending_frees, &transaction.allocs.journal_frees];
                 let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
 
                 let result = fs_sync_state.alloc_bitmap.find_free_extents(
@@ -3582,10 +4079,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                             pending_transactions_sync_state.register_allocated_extents(fs_sync_state, &result.0)
                         {
                             Err(e)
-                        } else if let Err(e) = if *for_journal {
-                            &mut transaction.allocs.journal_allocs
-                        } else {
-                            &mut transaction.allocs.pending_allocs
+                        } else if let Err(e) = match constraints {
+                            transaction::TransactionAllocationConstraints::Regular
+                            | transaction::TransactionAllocationConstraints::NoPendingFrees => {
+                                &mut transaction.allocs.pending_allocs
+                            }
+                            transaction::TransactionAllocationConstraints::Journal => {
+                                &mut transaction.allocs.journal_allocs
+                            }
                         }
                         .add_extents(result.0.iter())
                         {
@@ -3593,6 +4094,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                             Err(e)
                         } else {
                             transaction.allocs.pending_frees.remove_extents(result.0.iter());
+                            transaction.allocs.journal_frees.remove_extents(result.0.iter());
                             Ok(result)
                         }
                     }
@@ -3607,7 +4109,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
             Self::AllocateBlock {
                 transaction,
                 block_allocation_blocks_log2,
-                for_journal,
+                constraints,
             } => {
                 let mut transaction = match transaction.take() {
                     Some(transaction) => transaction,
@@ -3621,11 +4123,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let pending_transactions_allocs = &pending_transactions_sync_state.pending_allocs;
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
-                // Do not repurpose pending frees if allocating for the journal.
-                let transaction_pending_frees = if *for_journal {
-                    &empty_pending_frees
-                } else {
-                    &transaction.allocs.pending_frees
+                // Do not repurpose pending_frees if allocating for the journal.
+                let transaction_pending_frees = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
+                    transaction::TransactionAllocationConstraints::NoPendingFrees
+                    | transaction::TransactionAllocationConstraints::Journal => &empty_pending_frees,
                 };
 
                 let pending_allocs = [
@@ -3634,11 +4136,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     pending_transactions_allocs,
                 ];
                 let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
-                let pending_frees = [transaction_pending_frees];
+                let pending_frees = [transaction_pending_frees, &transaction.allocs.journal_frees];
                 let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
 
                 let result = fs_sync_state.alloc_bitmap.find_free_block(
                     *block_allocation_blocks_log2,
+                    &[],
                     None,
                     &pending_allocs,
                     &pending_frees,
@@ -3654,10 +4157,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                             *block_allocation_blocks_log2,
                         ) {
                             Err(e)
-                        } else if let Err(e) = if *for_journal {
-                            &mut transaction.allocs.journal_allocs
-                        } else {
-                            &mut transaction.allocs.pending_allocs
+                        } else if let Err(e) = match constraints {
+                            transaction::TransactionAllocationConstraints::Regular
+                            | transaction::TransactionAllocationConstraints::NoPendingFrees => {
+                                &mut transaction.allocs.pending_allocs
+                            }
+                            transaction::TransactionAllocationConstraints::Journal => {
+                                &mut transaction.allocs.journal_allocs
+                            }
                         }
                         .add_block(allocated_block, *block_allocation_blocks_log2)
                         {
@@ -3671,6 +4178,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                             transaction
                                 .allocs
                                 .pending_frees
+                                .remove_block(allocated_block, *block_allocation_blocks_log2);
+                            transaction
+                                .allocs
+                                .journal_frees
                                 .remove_block(allocated_block, *block_allocation_blocks_log2);
                             Ok(allocated_block)
                         }
@@ -3686,8 +4197,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 transaction,
                 block_allocation_blocks_log2,
                 count,
-                for_journal,
-                request_pending_allocs,
+                constraints,
                 result: allocated_blocks,
             } => {
                 let mut transaction = match transaction.take() {
@@ -3702,27 +4212,27 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                 let pending_transactions_allocs = &pending_transactions_sync_state.pending_allocs;
                 let fs_sync_state = *aux_data;
                 let empty_pending_frees = alloc_bitmap::SparseAllocBitmap::new();
-                // Do not repurpose pending frees if allocating for the journal.
-                let transaction_pending_frees = if *for_journal {
-                    &empty_pending_frees
-                } else {
-                    &transaction.allocs.pending_frees
+                // Do not repurpose pending_frees if allocating for the journal.
+                let transaction_pending_frees = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular => &transaction.allocs.pending_frees,
+                    transaction::TransactionAllocationConstraints::NoPendingFrees
+                    | transaction::TransactionAllocationConstraints::Journal => &empty_pending_frees,
                 };
 
-                let pending_frees = [transaction_pending_frees];
+                let pending_allocs = [
+                    &transaction.allocs.pending_allocs,
+                    &transaction.allocs.journal_allocs,
+                    pending_transactions_allocs,
+                ];
+                let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
+
+                let pending_frees = [transaction_pending_frees, &transaction.allocs.journal_frees];
                 let pending_frees = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_frees);
 
                 while allocated_blocks.len() < *count {
-                    let pending_allocs = [
-                        &transaction.allocs.pending_allocs,
-                        &transaction.allocs.journal_allocs,
-                        pending_transactions_allocs,
-                        request_pending_allocs,
-                    ];
-                    let pending_allocs = alloc_bitmap::SparseAllocBitmapUnion::new(&pending_allocs);
-
                     let allocated_block_allocation_blocks_begin = match fs_sync_state.alloc_bitmap.find_free_block(
                         *block_allocation_blocks_log2,
+                        allocated_blocks,
                         None,
                         &pending_allocs,
                         &pending_frees,
@@ -3739,16 +4249,18 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                         }
                     };
 
-                    if let Err(e) = request_pending_allocs
-                        .add_block(allocated_block_allocation_blocks_begin, *block_allocation_blocks_log2)
-                    {
-                        *this = Self::Done(marker::PhantomData);
-                        return task::Poll::Ready(PendingTransactionsSyncFutureResult::AllocateBlocks {
-                            result: Err(e),
-                        });
-                    }
-
-                    allocated_blocks.push(allocated_block_allocation_blocks_begin);
+                    let allocated_blocks_insertion_pos =
+                        match allocated_blocks.binary_search(&allocated_block_allocation_blocks_begin) {
+                            Ok(_) => {
+                                // The Block has been allocated twice now?!
+                                *this = Self::Done(marker::PhantomData);
+                                return task::Poll::Ready(PendingTransactionsSyncFutureResult::AllocateBlocks {
+                                    result: Err(nvfs_err_internal!()),
+                                });
+                            }
+                            Err(allocated_blocks_insertion_pos) => allocated_blocks_insertion_pos,
+                        };
+                    allocated_blocks.insert(allocated_blocks_insertion_pos, allocated_block_allocation_blocks_begin);
                 }
 
                 let result = if let Err(e) = pending_transactions_sync_state.register_allocated_blocks(
@@ -3757,10 +4269,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     *block_allocation_blocks_log2,
                 ) {
                     Err(e)
-                } else if let Err(e) = if *for_journal {
-                    &mut transaction.allocs.journal_allocs
-                } else {
-                    &mut transaction.allocs.pending_allocs
+                } else if let Err(e) = match constraints {
+                    transaction::TransactionAllocationConstraints::Regular
+                    | transaction::TransactionAllocationConstraints::NoPendingFrees => {
+                        &mut transaction.allocs.pending_allocs
+                    }
+                    transaction::TransactionAllocationConstraints::Journal => &mut transaction.allocs.journal_allocs,
                 }
                 .add_blocks(allocated_blocks.iter().copied(), *block_allocation_blocks_log2)
                 {
@@ -3774,6 +4288,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                     transaction
                         .allocs
                         .pending_frees
+                        .remove_blocks(allocated_blocks.iter().copied(), *block_allocation_blocks_log2);
+                    transaction
+                        .allocs
+                        .journal_frees
                         .remove_blocks(allocated_blocks.iter().copied(), *block_allocation_blocks_log2);
                     Ok(mem::take(allocated_blocks))
                 };
@@ -3824,19 +4342,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateExtentsFuture<ST, B
     ///   behalf to allocate. Will get returned back from [`poll()`](Self::poll)
     ///   upon future completion.
     /// * `request` - The allocation request.
-    /// * `for_journal` - Whether or not the allocation is for the journal.
+    /// * `constraints`: Constraints on the allocation pertaining to its
+    ///   intended use.
     pub fn new(
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
         transaction: Box<transaction::Transaction>,
         request: alloc_bitmap::ExtentsAllocationRequest,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     ) -> Result<Self, (Option<Box<transaction::Transaction>>, NvFsError)> {
         let pending_transactions_sync_state_fut = asynchronous::FutureQueue::enqueue(
             CocoonFs::get_pending_transactions_sync_state_ref(fs_instance).make_clone(),
             PendingTransactionsSyncFuture::AllocateExtents {
                 transaction: Some(transaction),
                 request,
-                for_journal,
+                constraints,
             },
         )
         .map_err(|(f, e)| {
@@ -3941,19 +4460,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlockFuture<ST, B> 
     /// * `block_allocation_blocks_log2` - Base-2 logarithm of the desired block
     ///   size in units of [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
-    /// * `for_journal` - Whether or not the allocation is for the journal.
+    /// * `constraints`: Constraints on the allocation pertaining to its
+    ///   intended use.
     pub fn new(
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
         transaction: Box<transaction::Transaction>,
         block_allocation_blocks_log2: u32,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     ) -> Result<Self, (Option<Box<transaction::Transaction>>, NvFsError)> {
         let pending_transactions_sync_state_fut = asynchronous::FutureQueue::enqueue(
             CocoonFs::get_pending_transactions_sync_state_ref(fs_instance).make_clone(),
             PendingTransactionsSyncFuture::AllocateBlock {
                 transaction: Some(transaction),
                 block_allocation_blocks_log2,
-                for_journal,
+                constraints,
             },
         )
         .map_err(|(f, e)| {
@@ -4058,13 +4578,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlocksFuture<ST, B>
     ///   size in units of [Allocation
     ///   Blocks](layout::ImageLayout::allocation_block_size_128b_log2).
     /// * `count` - The number of blocks to allocate.
-    /// * `for_journal` - Whether or not the allocation is for the journal.
+    /// * `constraints`: Constraints on the allocation pertaining to its
+    ///   intended use.
     pub fn new(
         fs_instance: &CocoonFsSyncRcPtrRefType<ST, B>,
         transaction: Box<transaction::Transaction>,
         block_allocation_blocks_log2: u32,
         count: usize,
-        for_journal: bool,
+        constraints: transaction::TransactionAllocationConstraints,
     ) -> Result<Self, (Option<Box<transaction::Transaction>>, NvFsError)> {
         let mut result = Vec::new();
         if let Err(e) = result.try_reserve_exact(count) {
@@ -4076,8 +4597,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> AllocateBlocksFuture<ST, B>
                 transaction: Some(transaction),
                 block_allocation_blocks_log2,
                 count,
-                for_journal,
-                request_pending_allocs: alloc_bitmap::SparseAllocBitmap::new(),
+                constraints,
                 result,
             },
         )

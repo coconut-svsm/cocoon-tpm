@@ -13,20 +13,27 @@ use super::{
     staging_copy_disguise::JournalStagingCopyUndisguise,
 };
 use crate::{
-    blkdev::{self, ChunkedIoRegion, ChunkedIoRegionChunkRange, ChunkedIoRegionError},
+    blkdev,
     crypto::{CryptoError, hash, symcipher},
     fs::{
         NvFsError, NvFsIoError,
         cocoonfs::{
             FormatError, alloc_bitmap,
             auth_subject_ids::AuthSubjectDataSuffix,
+            aux_fs_metadata::{self, AuxFsMetadataEncodedExtentsPtrsPair},
             encryption_entities::{
                 EncryptedChainedExtentsAssociatedDataAuthSubjectDataSuffix, EncryptedChainedExtentsDecryptionInstance,
                 EncryptedChainedExtentsEncryptionInstance, EncryptedChainedExtentsLayout, check_cbc_padding,
             },
             extents,
             fs::CocoonFsConfig,
-            image_header, inode_extents_list, inode_index, keys,
+            image_header, inode_extents_list, inode_index,
+            integrity::{
+                ExtentIntegrityProtectionsInvalidateFuture, ExtentIntegrityState,
+                extent_integrity_protections_determine_state, extent_integrity_protections_len,
+                extent_integrity_protections_verify_and_remove,
+            },
+            keys,
             layout::{self, BlockIndex as _},
             leb128,
             transaction::{Transaction, TransactionJournalUpdateAuthDigestsScriptIterator},
@@ -44,6 +51,10 @@ use crate::{
         zeroize,
     },
 };
+
+#[cfg(doc)]
+use crate::fs::cocoonfs::{aux_fs_metadata::AuxFsMetadata, integrity::extent_integrity_protections_apply};
+
 use core::{convert, mem, num, pin, task};
 
 /// Enum value of [`JournalLogFieldTag::AuthTreeExtents`].
@@ -422,6 +433,9 @@ pub struct JournalLog {
     /// with the filesystem's fixed [journal log head
     /// extent](Self::head_extent_physical_location)
     pub log_extents: extents::PhysicalExtents,
+    /// The pointers to the [`AuxFsMetadata`] update groups' heads decoded from
+    /// the journal log's plaintext header.
+    pub aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     /// Contents of the [`AuthTreeExtents`](JournalLogFieldTag::AuthTreeExtents)
     /// field.
     pub auth_tree_extents: extents::PhysicalExtents,
@@ -449,6 +463,167 @@ pub struct JournalLog {
 }
 
 impl JournalLog {
+    /// End of the integrity protections within the journal log head extent's
+    /// plaintext header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_len()`](Self::plaintext_header_len).
+    fn plaintext_header_integrity_protections_end(image_layout: &layout::ImageLayout) -> u32 {
+        // The plaintext header placed at the beginning of the Journal Log head extent
+        // is comprised of
+        // - The magic.
+        // - The head extent integrity protections.
+        // - The plaintext payload.
+        8 + extent_integrity_protections_len(
+            image_layout.io_block_allocation_blocks_log2,
+            image_layout.allocation_block_size_128b_log2,
+        )
+    }
+
+    /// Beginning of the payload region within the journal log head extent's
+    /// plaintext header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_len()`](Self::plaintext_header_len).
+    /// * [`PLAINTEXT_HEADER_PAYLOAD_LEN`](Self::PLAINTEXT_HEADER_PAYLOAD_LEN).
+    fn plaintext_header_payload_begin(image_layout: &layout::ImageLayout) -> Result<usize, NvFsError> {
+        // The plaintext header placed at the beginning of the Journal Log head extent
+        // is comprised of
+        // - The magic.
+        // - The head extent integrity protections.
+        // - The plaintext payload.
+        usize::try_from(Self::plaintext_header_integrity_protections_end(image_layout))
+            .map_err(|_| NvFsError::DimensionsNotSupported)
+    }
+
+    /// Length of the payload region within the journal log head extent's
+    /// plaintext header.
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_len()`](Self::plaintext_header_len).
+    const PLAINTEXT_HEADER_PAYLOAD_LEN: u32 = aux_fs_metadata::AuxFsMetadataEncodedExtentsPtrsPair::encoded_len();
+
+    /// Length of the the journal log head extent's plaintext header.
+    ///
+    /// # Arguments:
+    ///
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`EncryptedChainedExtentsLayout::plain_data_extents_hdr_len`].
+    /// * [`PLAINTEXT_HEADER_PAYLOAD_LEN`](Self::PLAINTEXT_HEADER_PAYLOAD_LEN).
+    fn plaintext_header_len(image_layout: &layout::ImageLayout) -> u32 {
+        // The plaintext header placed at the beginning of the Journal Log head extent
+        // is comprised of
+        // - The magic.
+        // - The head extent integrity protections.
+        // - The plaintext payload.
+        Self::plaintext_header_integrity_protections_end(image_layout) + Self::PLAINTEXT_HEADER_PAYLOAD_LEN
+    }
+
+    /// Decode the pointers to the [`AuxFsMetadata`] update groups' heads, if
+    /// any, from the journal log head extent's plaintext header.
+    ///
+    /// Must get invoked only after the journal log head extent's integrity
+    /// protections have been [verified and
+    /// removed](extent_integrity_protections_verify_and_remove).
+    ///
+    /// # Arguments:
+    ///
+    /// * `plaintext_header` - The plaintext header buffers to decode from. The
+    ///   [`IoSlicesIter`](io_slices::IoSlicesIter)'s total length must not be
+    ///   less than the value of the
+    ///   [`EncryptedChainedExtentsLayout::plain_data_extents_hdr_len`] field as
+    ///   returned from
+    ///   [`extents_encryption_layout()`](Self::extents_encryption_layout).
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_encode_aux_fs_metadata_update_groups_heads()`](Self::plaintext_header_encode_aux_fs_metadata_update_groups_heads).
+    pub fn plaintext_header_decode_aux_fs_metadata_update_groups_heads<
+        'a,
+        HI: io_slices::IoSlicesIter<'a, BackendIteratorError = convert::Infallible>,
+    >(
+        mut plaintext_header: HI,
+        image_layout: &layout::ImageLayout,
+    ) -> Result<AuxFsMetadataEncodedExtentsPtrsPair, NvFsError> {
+        // The pointers to the AuxFsMetadata update groups' heads, if any, get stored at
+        // offset zero within the journal log head extent's plaintext header's
+        // payload region.
+        plaintext_header
+            .skip(Self::plaintext_header_payload_begin(image_layout)?)
+            .map_err(|e| match e {
+                io_slices::IoSlicesIterError::BackendIteratorError(e) => e.into(),
+                io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                    io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+                },
+            })?;
+        AuxFsMetadataEncodedExtentsPtrsPair::decode(plaintext_header)
+    }
+
+    /// Encode the location of the the pointers to the [`AuxFsMetadata`] update
+    /// groups' heads, if any, to the journal log head extent's plaintext
+    /// header.
+    ///
+    /// Must get invoked before the journal log head extent's integrity
+    /// protections get [applied](extent_integrity_protections_apply).
+    ///
+    /// # Arguments:
+    ///
+    /// * `plaintext_header` - The plaintext header buffers to encode into. The
+    ///   [`IoSlicesMutIter`](io_slices::IoSlicesMutIter)'s total length must
+    ///   not be less than the value of the
+    ///   [`EncryptedChainedExtentsLayout::plain_data_extents_hdr_len`] field as
+    ///   returned from
+    ///   [`extents_encryption_layout()`](Self::extents_encryption_layout).
+    /// * `aux_fs_metadata_update_groups_heads` - Pointers to the two
+    ///   [`AuxFsMetadata`] update groups' heads, if any.
+    /// * `image_layout` - The filesystem's
+    ///   [`ImageLayout`](layout::ImageLayout).
+    ///
+    /// # See also:
+    ///
+    /// * [`plaintext_header_decode_aux_fs_metadata_update_groups_heads()`](Self::plaintext_header_decode_aux_fs_metadata_update_groups_heads).
+    pub fn plaintext_header_encode_aux_fs_metadata_update_groups_heads<
+        'a,
+        HI: io_slices::IoSlicesMutIter<'a, BackendIteratorError = convert::Infallible>,
+    >(
+        mut plaintext_header: HI,
+        aux_fs_metadata_update_groups_heads: &AuxFsMetadataEncodedExtentsPtrsPair,
+        image_layout: &layout::ImageLayout,
+    ) -> Result<(), NvFsError> {
+        // The pointers to the AuxFsMetadata update groups' heads, if any, get stored at
+        // offset zero within the journal log head extent's plaintext header's
+        // payload region.
+        plaintext_header
+            .skip(Self::plaintext_header_payload_begin(image_layout)?)
+            .map_err(|e| match e {
+                io_slices::IoSlicesIterError::BackendIteratorError(e) => e.into(),
+                io_slices::IoSlicesIterError::IoSlicesError(e) => match e {
+                    io_slices::IoSlicesError::BuffersExhausted => nvfs_err_internal!(),
+                },
+            })?;
+
+        aux_fs_metadata_update_groups_heads.encode(plaintext_header)
+    }
+
     /// Instantiate a [`EncryptedChainedExtentsLayout`] suitable for the journal
     /// log.
     ///
@@ -466,8 +641,11 @@ impl JournalLog {
         let journal_block_allocation_blocks_log2 =
             auth_tree_data_block_allocation_blocks_log2.max(io_block_allocation_blocks_log2);
 
+        let plaintext_hdr_len =
+            usize::try_from(Self::plaintext_header_len(image_layout)).map_err(|_| NvFsError::DimensionsNotSupported)?;
+
         EncryptedChainedExtentsLayout::new(
-            8, // For the magic.
+            plaintext_hdr_len,
             image_layout.block_cipher_alg,
             Some(image_layout.preauth_cca_protection_hmac_hash_alg),
             journal_block_allocation_blocks_log2,
@@ -586,6 +764,9 @@ impl JournalLog {
     /// Determine the (fixed) location of the journal log's chained encrypted
     /// extents' head extent.
     ///
+    /// The returned range's end in units of Bytes is guaranteed to be
+    /// representable in an `u64`.
+    ///
     /// # Arguments:
     ///
     /// * `image_layout` - The filesystem's
@@ -623,6 +804,14 @@ impl JournalLog {
         // Minimum possible size of the first extent is found by requiring an effective
         // payload size of zero.
         let head_extent_allocation_blocks_count = journal_extents_layout.min_extents_allocation_blocks().0;
+        // Check that the full head extent can be read into memory.
+        if usize::try_from(
+            u64::from(head_extent_allocation_blocks_count) << (image_layout.allocation_block_size_128b_log2 as u32 + 7),
+        )
+        .is_err()
+        {
+            return Err(NvFsError::DimensionsNotSupported);
+        }
         let head_extent_payload_len =
             journal_extents_layout.extent_effective_payload_len(head_extent_allocation_blocks_count, true);
 
@@ -630,10 +819,10 @@ impl JournalLog {
         // the addition would not overflow either.
         let head_extent_allocation_blocks_end =
             head_extent_allocation_blocks_begin + head_extent_allocation_blocks_count;
-        // But check that the end in units of Bytes is still <= 2^64.
+        // But check that the end in units of Bytes is still < 2^64.
         if u64::from(head_extent_allocation_blocks_end)
             >> (u64::BITS - 7 - image_layout.allocation_block_size_128b_log2 as u32)
-            > 1
+            >= 1
         {
             return Err(NvFsError::from(FormatError::InvalidImageLayoutConfig));
         }
@@ -863,16 +1052,20 @@ impl JournalLog {
     /// * `log_extents` - The extents forming the journal log's encrypted
     ///   chained extents. Always starts with the filesystem's fixed [journal
     ///   log head extent](Self::head_extent_physical_location)
+    /// * `aux_fs_metadata_update_groups_heads`: The pointers to the
+    ///   [`AuxFsMetadata`] update groups' heads decoded from the journal log's
+    ///   plaintext header.
     /// * `root_key` - The filesystem's root key.
     /// * `keys_cache` - A [`KeyCache`](keys::KeyCache) instantiated for the
     ///   filesystem.
-    pub fn decode<
+    fn decode<
         'a,
         ST: sync_types::SyncTypes,
         SI: io_slices::PeekableIoSlicesIter<'a, BackendIteratorError = convert::Infallible>,
     >(
         mut src: SI,
         log_extents: extents::PhysicalExtents,
+        aux_fs_metadata_update_groups_heads: &AuxFsMetadataEncodedExtentsPtrsPair,
         image_layout: &layout::ImageLayout,
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<'_, ST>,
@@ -1194,6 +1387,7 @@ impl JournalLog {
 
         Ok(Self {
             log_extents,
+            aux_fs_metadata_update_groups_heads: *aux_fs_metadata_update_groups_heads,
             auth_tree_extents,
             alloc_bitmap_file_extents,
             alloc_bitmap_file_fragments_auth_digests,
@@ -1212,20 +1406,19 @@ impl JournalLog {
 /// to replay it will be made.
 pub struct JournalLogInvalidateFuture<B: blkdev::NvBlkDev> {
     fut_state: JournalLogInvalidateFutureState<B>,
-    issue_sync: bool,
 }
 
 /// [`JournalLogInvalidateFuture`] state-machine state.
 enum JournalLogInvalidateFutureState<B: blkdev::NvBlkDev> {
-    Init,
+    Init {
+        issue_sync: bool,
+    },
     WriteBarrierBeforeInvalidate {
         write_barrier_fut: B::WriteBarrierFuture,
+        issue_sync: bool,
     },
     InvalidateJournalLogHead {
-        overwrite_journal_log_head_fut: B::WriteFuture<JournalLogInvalidateNvBlkDevWriteRequest>,
-    },
-    WriteSyncAfterInvalidate {
-        write_sync_fut: B::WriteSyncFuture,
+        invalidate_fut: ExtentIntegrityProtectionsInvalidateFuture<B>,
     },
     Done,
 }
@@ -1240,8 +1433,7 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
     ///   the journal log invalidation.
     pub fn new(issue_sync: bool) -> Self {
         Self {
-            fut_state: JournalLogInvalidateFutureState::Init,
-            issue_sync,
+            fut_state: JournalLogInvalidateFutureState::Init { issue_sync },
         }
     }
 
@@ -1267,7 +1459,7 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
 
         loop {
             match &mut this.fut_state {
-                JournalLogInvalidateFutureState::Init => {
+                JournalLogInvalidateFutureState::Init { issue_sync } => {
                     let write_barrier_fut = match blkdev.write_barrier() {
                         Ok(write_barrier_fut) => write_barrier_fut,
                         Err(e) => {
@@ -1275,10 +1467,15 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                             return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                     };
-                    this.fut_state =
-                        JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate { write_barrier_fut };
+                    this.fut_state = JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate {
+                        write_barrier_fut,
+                        issue_sync: *issue_sync,
+                    };
                 }
-                JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate { write_barrier_fut } => {
+                JournalLogInvalidateFutureState::WriteBarrierBeforeInvalidate {
+                    write_barrier_fut,
+                    issue_sync,
+                } => {
                     match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
                         task::Poll::Ready(Ok(())) => (),
                         task::Poll::Ready(Err(e)) => {
@@ -1288,6 +1485,7 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
+                    // Clear out the extent's first device IO Block.
                     let journal_log_head_extent =
                         match JournalLog::head_extent_physical_location(image_layout, image_header_end) {
                             Ok((journal_log_head_extent, _)) => journal_log_head_extent,
@@ -1296,66 +1494,23 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
                                 return task::Poll::Ready(Err(e));
                             }
                         };
-                    let overwrite_journal_log_head_request = match JournalLogInvalidateNvBlkDevWriteRequest::new(
-                        &journal_log_head_extent,
-                        image_layout.allocation_block_size_128b_log2 as u32,
-                        blkdev,
-                    ) {
-                        Ok(overwrite_journal_log_head_request) => overwrite_journal_log_head_request,
-                        Err(e) => {
+                    let invalidate_fut = ExtentIntegrityProtectionsInvalidateFuture::new(
+                        journal_log_head_extent.begin(),
+                        image_layout.allocation_block_size_128b_log2,
+                        *issue_sync,
+                    );
+                    this.fut_state = JournalLogInvalidateFutureState::InvalidateJournalLogHead { invalidate_fut };
+                }
+                JournalLogInvalidateFutureState::InvalidateJournalLogHead { invalidate_fut } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(invalidate_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
                             this.fut_state = JournalLogInvalidateFutureState::Done;
                             return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let overwrite_journal_log_head_fut = match blkdev
-                        .write(overwrite_journal_log_head_request)
-                        .and_then(|r| r.map_err(|(_, e)| e))
-                    {
-                        Ok(overwrite_journal_log_head_fut) => overwrite_journal_log_head_fut,
-                        Err(e) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
-                    this.fut_state = JournalLogInvalidateFutureState::InvalidateJournalLogHead {
-                        overwrite_journal_log_head_fut,
-                    };
-                }
-                JournalLogInvalidateFutureState::InvalidateJournalLogHead {
-                    overwrite_journal_log_head_fut,
-                } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(overwrite_journal_log_head_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok((_, Ok(())))) => (),
-                        task::Poll::Ready(Ok((_, Err(e))) | Err(e)) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let write_sync_fut = match blkdev.write_sync() {
-                        Ok(write_sync_fut) => write_sync_fut,
-                        Err(e) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
-                    if this.issue_sync {
-                        this.fut_state = JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut };
-                    } else {
-                        this.fut_state = JournalLogInvalidateFutureState::Done;
-                        return task::Poll::Ready(Ok(()));
-                    }
-                }
-                JournalLogInvalidateFutureState::WriteSyncAfterInvalidate { write_sync_fut } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_sync_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok(())) => (),
-                        task::Poll::Ready(Err(e)) => {
-                            this.fut_state = JournalLogInvalidateFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
                     this.fut_state = JournalLogInvalidateFutureState::Done;
                     return task::Poll::Ready(Ok(()));
                 }
@@ -1365,58 +1520,253 @@ impl<B: blkdev::NvBlkDev> JournalLogInvalidateFuture<B> {
     }
 }
 
-/// [`NvBlkDevWriteRequest`](blkdev::NvBlkDevWriteRequest) implementation used
-/// internally by [`JournalLogInvalidateFuture`].
-struct JournalLogInvalidateNvBlkDevWriteRequest {
-    region: ChunkedIoRegion,
-    overwrite_buf: FixedVec<u8, 7>,
+/// Read the encrypted journal log head extent from storage and validate and
+/// remove its integrity protections.
+pub struct JournalLogReadHeadExtentFuture<B: blkdev::NvBlkDev> {
+    fut_state: JournalLogReadHeadExtentFutureState<B>,
 }
 
-impl JournalLogInvalidateNvBlkDevWriteRequest {
-    fn new<B: blkdev::NvBlkDev>(
-        journal_log_head_extent: &layout::PhysicalAllocBlockRange,
-        allocation_block_size_128b_log2: u32,
+/// [`JournalLogReadHeadExtentFuture`] state-machine state.
+enum JournalLogReadHeadExtentFutureState<B: blkdev::NvBlkDev> {
+    Init {
+        journal_log_head_extent: layout::PhysicalAllocBlockRange,
+    },
+    ReadJournalLogHeadExtentHead {
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
+        journal_log_head_extent: layout::PhysicalAllocBlockRange,
+    },
+    ReadJournalLogHeadExtentTail {
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
+        journal_log_head_extent_head: FixedVec<u8, 7>,
+    },
+    Done,
+}
+
+impl<B: blkdev::NvBlkDev> JournalLogReadHeadExtentFuture<B> {
+    pub fn new(journal_log_head_extent: layout::PhysicalAllocBlockRange) -> Self {
+        Self {
+            fut_state: JournalLogReadHeadExtentFutureState::Init {
+                journal_log_head_extent,
+            },
+        }
+    }
+
+    /// Poll the [`JournalLogReadHeadExtentFuture`] to completion.
+    ///
+    /// On success, a pair of the journal log head extent's (encrypted)
+    /// contents, if active, and its [`ExtentIntegrityState`]
+    /// gets returned.
+    ///
+    /// If the journal is considered inactive, i.e. if the head extent either
+    /// doesn't start with the expected magic or if its integrity
+    /// protections fail to validate, indicating a torn write, `None` will
+    /// get returned for the journal log head extent's contents. Otherwise, the
+    /// integrity protections will get removed, and the head extent's contents
+    /// returned as partitioned into two separate buffers for implementation
+    /// reasons.
+    #[allow(clippy::type_complexity)]
+    pub fn poll(
+        self: pin::Pin<&mut Self>,
         blkdev: &B,
-    ) -> Result<Self, NvFsError> {
-        // Allocate a buffer of the minimum length filled with zeroes. 128 Bytes is the
-        // minimum chunk size.
-        let overwrite_buf = FixedVec::new_with_value(128, 0u8)?;
+        image_layout: &layout::ImageLayout,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Result<(Option<[FixedVec<u8, 7>; 2]>, ExtentIntegrityState), NvFsError>> {
+        let this = pin::Pin::into_inner(self);
 
-        let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-        let journal_log_head_extent_begin_128b =
-            u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
-        // Only the magic needs to get invalidated. Overwrite the minimum possible IO
-        // unit at the beginning of the journal log.
-        let journal_log_head_extent_overwrite_end_128b = journal_log_head_extent_begin_128b
-            .checked_add(1u64 << blkdev_io_block_size_128b_log2)
-            .ok_or(NvFsError::from(blkdev::NvBlkDevIoError::IoBlockOutOfRange))?;
-        let region = ChunkedIoRegion::new(
-            journal_log_head_extent_begin_128b,
-            journal_log_head_extent_overwrite_end_128b,
-            0,
-        )
-        .map_err(|_| nvfs_err_internal!())?;
-        Ok(Self { region, overwrite_buf })
-    }
-}
+        loop {
+            match &mut this.fut_state {
+                JournalLogReadHeadExtentFutureState::Init {
+                    journal_log_head_extent,
+                } => {
+                    // Read the very first Device IO block from the Journal log and check if the
+                    // magic is there, otherwise the Journal is not active.
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+                    if u64::from(journal_log_head_extent.end()) > u64::MAX >> allocation_block_blkdev_io_blocks_log2 {
+                        this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                    }
 
-impl blkdev::NvBlkDevWriteRequest for JournalLogInvalidateNvBlkDevWriteRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
+                    // ImageLayout::new() verified that one IO Block, hence a Device IO Block, fits
+                    // an usize.
+                    let journal_log_head_extent_head =
+                        match FixedVec::new_with_default(1usize << (blkdev_io_block_size_128b_log2 + 7)) {
+                            Ok(journal_log_head_extent_head) => journal_log_head_extent_head,
+                            Err(e) => {
+                                this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
 
-    fn get_source_buffer(&self, range: &ChunkedIoRegionChunkRange) -> Result<&[u8], blkdev::NvBlkDevIoError> {
-        // The chunk size is 128 Bytes, i.e. the size of overwrite_buf. Ignore the chunk
-        // index and provide the corresponding region from zero-filled
-        // overwrite_buf.
-        Ok(&self.overwrite_buf[range.range_in_chunk().clone()])
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(journal_log_head_extent.begin()) << allocation_block_blkdev_io_blocks_log2
+                            >> blkdev_io_block_allocation_blocks_log2,
+                        1,
+                        blkdev_io_block_size_128b_log2 as u8,
+                        journal_log_head_extent_head,
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
+
+                    this.fut_state = JournalLogReadHeadExtentFutureState::ReadJournalLogHeadExtentHead {
+                        read_fut,
+                        journal_log_head_extent: *journal_log_head_extent,
+                    };
+                }
+                JournalLogReadHeadExtentFutureState::ReadJournalLogHeadExtentHead {
+                    read_fut,
+                    journal_log_head_extent,
+                } => {
+                    let journal_log_head_extent_head =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                            task::Poll::Ready(Ok((journal_log_head_extent_head, Ok(())))) => {
+                                journal_log_head_extent_head
+                            }
+                            task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
+                                this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
+                    if &journal_log_head_extent_head[..8] != b"CCFSJRNL".as_slice() {
+                        // Magic not found, journal is not active, all done.
+                        this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                        let journal_log_head_integrity_state = match extent_integrity_protections_determine_state(
+                            io_slices::SingletonIoSlice::new(&journal_log_head_extent_head),
+                            b"CCFSJRNL".len(),
+                            0,
+                            None,
+                            image_layout.io_block_allocation_blocks_log2,
+                            image_layout.allocation_block_size_128b_log2,
+                            blkdev_io_block_size_128b_log2,
+                        ) {
+                            Ok(log_head_integrity_state) => log_head_integrity_state,
+                            Err(e) => {
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+                        return task::Poll::Ready(Ok((None, journal_log_head_integrity_state)));
+                    }
+
+                    // Read the remainder from the log's head extent.
+                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
+                    let blkdev_io_block_allocation_blocks_log2 =
+                        blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
+
+                    // It's been checked in the previous step that the extent's end in units of
+                    // Device IO Blocks does not exceed u64::MAX, hence the same
+                    // applies to the extent's length.
+                    let journal_log_head_extent_blkdev_io_blocks = u64::from(journal_log_head_extent.block_count())
+                        << allocation_block_blkdev_io_blocks_log2
+                        >> blkdev_io_block_allocation_blocks_log2;
+                    if (journal_log_head_extent_blkdev_io_blocks - 1)
+                        > u64::MAX >> (blkdev_io_block_allocation_blocks_log2 + 7)
+                    {
+                        this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                    }
+                    let journal_log_head_extent_tail_len = match usize::try_from(
+                        (journal_log_head_extent_blkdev_io_blocks - 1) << (blkdev_io_block_allocation_blocks_log2 + 7),
+                    ) {
+                        Ok(journal_log_head_extent_tail_len) => journal_log_head_extent_tail_len,
+                        Err(_) => {
+                            this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
+                        }
+                    };
+                    let journal_log_head_extent_tail =
+                        match FixedVec::new_with_default(journal_log_head_extent_tail_len) {
+                            Ok(journal_log_head_extent_tail) => journal_log_head_extent_tail,
+                            Err(e) => {
+                                this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        (u64::from(journal_log_head_extent.begin()) << allocation_block_blkdev_io_blocks_log2
+                            >> blkdev_io_block_allocation_blocks_log2)
+                            + 1,
+                        journal_log_head_extent_blkdev_io_blocks - 1,
+                        blkdev_io_block_size_128b_log2 as u8,
+                        journal_log_head_extent_tail,
+                        0,
+                        blkdev_io_block_size_128b_log2 as u8,
+                    );
+
+                    this.fut_state = JournalLogReadHeadExtentFutureState::ReadJournalLogHeadExtentTail {
+                        read_fut,
+                        journal_log_head_extent_head,
+                    };
+                }
+                JournalLogReadHeadExtentFutureState::ReadJournalLogHeadExtentTail {
+                    read_fut,
+                    journal_log_head_extent_head,
+                } => {
+                    let mut journal_log_head_extent_tail =
+                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
+                            task::Poll::Ready(Ok((journal_log_head_extent_tail, Ok(())))) => {
+                                journal_log_head_extent_tail
+                            }
+                            task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
+                                this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                            task::Poll::Pending => return task::Poll::Pending,
+                        };
+
+                    let mut journal_log_head_extent_head = mem::take(journal_log_head_extent_head);
+
+                    let (journal_active, journal_log_head_integrity_state) =
+                        match extent_integrity_protections_verify_and_remove(
+                            io_slices::BuffersSliceIoSlicesMutIter::new(&mut [
+                                journal_log_head_extent_head.as_mut_slice(),
+                                journal_log_head_extent_tail.as_mut_slice(),
+                            ]),
+                            b"CCFSJRNL".len(),
+                            0,
+                            None,
+                            image_layout.io_block_allocation_blocks_log2,
+                            image_layout.allocation_block_size_128b_log2,
+                            blkdev.io_block_size_128b_log2(),
+                        ) {
+                            Ok((journal_active, log_head_integrity_state)) => {
+                                (journal_active, log_head_integrity_state)
+                            }
+                            Err(e) => {
+                                this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
+
+                    this.fut_state = JournalLogReadHeadExtentFutureState::Done;
+                    // If the integrity cannot get verified, the Journal Log head extent write had
+                    // been interrupted and the journal is considered non-existant.
+                    return task::Poll::Ready(Ok((
+                        journal_active.then_some([journal_log_head_extent_head, journal_log_head_extent_tail]),
+                        journal_log_head_integrity_state,
+                    )));
+                }
+                JournalLogReadHeadExtentFutureState::Done => unreachable!(),
+            }
+        }
     }
 }
 
 /// Read the journal log at filesystem opening time.
 pub struct JournalLogReadFuture<B: blkdev::NvBlkDev> {
     fut_state: JournalLogReadFutureState<B>,
+    journal_log_head_integrity_state: ExtentIntegrityState,
     log_extents: extents::PhysicalExtents,
+    aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair,
     extents_decryption_instance: Option<EncryptedChainedExtentsDecryptionInstance>,
     decrypted_journal_log_extents: Vec<zeroize::Zeroizing<Vec<u8>>>,
 }
@@ -1424,20 +1774,8 @@ pub struct JournalLogReadFuture<B: blkdev::NvBlkDev> {
 /// [`JournalLogReadFuture`] state-machine state.
 enum JournalLogReadFutureState<B: blkdev::NvBlkDev> {
     Init,
-    ReadJournalLogHeadExtentHead {
-        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
-        journal_log_head_extent: layout::PhysicalAllocBlockRange,
-        journal_log_head_extent_effective_payload_len: usize,
-    },
-    ReadJournalLogHeadExtentTail {
-        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
-        journal_log_head_extent_head: FixedVec<u8, 7>,
-        journal_log_head_extent_allocation_blocks: layout::AllocBlockCount,
-        journal_log_head_extent_effective_payload_len: usize,
-    },
-    DecryptJournalLogHeadExtent {
-        journal_log_head_extent_head: FixedVec<u8, 7>,
-        journal_log_head_extent_tail: FixedVec<u8, 7>,
+    ReadJournalLogHeadExtent {
+        read_fut: JournalLogReadHeadExtentFuture<B>,
         journal_log_head_extent_allocation_blocks: layout::AllocBlockCount,
         journal_log_head_extent_effective_payload_len: usize,
     },
@@ -1445,7 +1783,7 @@ enum JournalLogReadFutureState<B: blkdev::NvBlkDev> {
         next_journal_log_tail_extent: layout::PhysicalAllocBlockRange,
     },
     ReadNextJournalLogTailExtent {
-        read_fut: B::ReadFuture<JournalLogReadExtentNvBlkDevReadRequest>,
+        read_fut: blkdev::helpers::NvBlkDevReadRegionFuture<B, FixedVec<u8, 7>>,
         next_journal_log_tail_extent_allocation_blocks: layout::AllocBlockCount,
     },
     DecodeJournalLog,
@@ -1457,7 +1795,9 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
     pub fn new() -> Self {
         Self {
             fut_state: JournalLogReadFutureState::Init,
+            journal_log_head_integrity_state: ExtentIntegrityState::new_indeterminate(),
             log_extents: extents::PhysicalExtents::new(),
+            aux_fs_metadata_update_groups_heads: AuxFsMetadataEncodedExtentsPtrsPair::new_nil(),
             extents_decryption_instance: None,
             decrypted_journal_log_extents: Vec::new(),
         }
@@ -1465,9 +1805,14 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
 
     /// Poll the [`JournalLogReadFuture`] to completion.
     ///
-    /// On successful completion, a [`JournalLog`] wrapped in a `Some` is
-    /// returned if a journal to get replayed has been found, or a `None` in
-    /// case the journal is inactive.
+    /// On successful completion, a pair of the journal log head extent's
+    /// [`ExtentIntegrityState`] and a [`JournalLog`] wrapped in an
+    /// [`Option`] is being returned.  The [`ExtentIntegrityState`] contains
+    /// all information required to maintain protection against torn [device
+    /// IO Block](blkdev::NvBlkDev::io_block_size_128b_log2) writes for the
+    /// first journal log update. The latter is present only if a journal to
+    /// get replayed has been found, and `None` in case the journal is
+    /// inactive.
     ///
     /// # Arguments:
     ///
@@ -1489,7 +1834,7 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
         root_key: &keys::RootKey,
         keys_cache: &mut keys::KeyCacheRef<'_, ST>,
         cx: &mut task::Context<'_>,
-    ) -> task::Poll<Result<Option<JournalLog>, NvFsError>> {
+    ) -> task::Poll<Result<(Option<JournalLog>, ExtentIntegrityState), NvFsError>> {
         let this = pin::Pin::into_inner(self);
 
         loop {
@@ -1523,134 +1868,63 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                         return task::Poll::Ready(Err(e));
                     }
 
-                    // Read the very first Device IO block from the Journal log and check if the
-                    // magic is there, otherwise the Journal is not active.
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let journal_log_head_extent_begin_128b =
-                        u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
-                    let journal_log_head_extent_head_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
-                        journal_log_head_extent_begin_128b,
-                        journal_log_head_extent_begin_128b + (1 << blkdev_io_block_size_128b_log2),
-                        blkdev_io_block_size_128b_log2,
-                    ) {
-                        Ok(journal_log_head_extent_head_read_request) => journal_log_head_extent_head_read_request,
-                        Err(e) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(e));
-                        }
-                    };
-                    let read_fut = match blkdev.read(journal_log_head_extent_head_read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
-                    this.fut_state = JournalLogReadFutureState::ReadJournalLogHeadExtentHead {
-                        read_fut,
-                        journal_log_head_extent,
+                    this.fut_state = JournalLogReadFutureState::ReadJournalLogHeadExtent {
+                        read_fut: JournalLogReadHeadExtentFuture::new(journal_log_head_extent),
+                        journal_log_head_extent_allocation_blocks: journal_log_head_extent.block_count(),
                         journal_log_head_extent_effective_payload_len,
                     };
                 }
-                JournalLogReadFutureState::ReadJournalLogHeadExtentHead {
+                JournalLogReadFutureState::ReadJournalLogHeadExtent {
                     read_fut,
-                    journal_log_head_extent,
+                    journal_log_head_extent_allocation_blocks,
                     journal_log_head_extent_effective_payload_len,
                 } => {
-                    let journal_log_head_extent_head_read_request =
-                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                            task::Poll::Ready(Ok((journal_log_head_extent_head_read_request, Ok(())))) => {
-                                journal_log_head_extent_head_read_request
-                            }
-                            task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
-                                this.fut_state = JournalLogReadFutureState::Done;
-                                return task::Poll::Ready(Err(NvFsError::from(e)));
-                            }
-                            task::Poll::Pending => return task::Poll::Pending,
-                        };
-                    let journal_log_head_extent_head = journal_log_head_extent_head_read_request.into_dst_buf();
-                    if &journal_log_head_extent_head[..8] != b"CCFSJRNL".as_slice() {
-                        // Magic not found, journal is not active, all done.
-                        this.fut_state = JournalLogReadFutureState::Done;
-                        return task::Poll::Ready(Ok(None));
-                    }
-
-                    // Read the remainder from the log's head extent.
-                    let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
-                    let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
-                    let journal_log_head_extent_begin_128b =
-                        u64::from(journal_log_head_extent.begin()) << allocation_block_size_128b_log2;
-                    let journal_log_head_extent_tail_begin_128b =
-                        journal_log_head_extent_begin_128b + (1 << blkdev_io_block_size_128b_log2);
-                    let journal_log_head_extent_end_128b =
-                        u64::from(journal_log_head_extent.end()) << allocation_block_size_128b_log2;
-                    if journal_log_head_extent_tail_begin_128b == journal_log_head_extent_end_128b {
-                        this.fut_state = JournalLogReadFutureState::DecryptJournalLogHeadExtent {
+                    let (journal_log_head_extent_head, journal_log_head_extent_tail);
+                    (
+                        journal_log_head_extent_head,
+                        journal_log_head_extent_tail,
+                        this.journal_log_head_integrity_state,
+                    ) = match JournalLogReadHeadExtentFuture::poll(pin::Pin::new(read_fut), blkdev, image_layout, cx) {
+                        task::Poll::Ready(Ok((
+                            Some([journal_log_head_extent_head, journal_log_head_extent_tail]),
+                            journal_log_head_integrity_state,
+                        ))) => (
                             journal_log_head_extent_head,
-                            journal_log_head_extent_tail: FixedVec::new_empty(),
-                            journal_log_head_extent_allocation_blocks: journal_log_head_extent.block_count(),
-                            journal_log_head_extent_effective_payload_len:
-                                *journal_log_head_extent_effective_payload_len,
-                        };
-                        continue;
-                    }
-                    let journal_log_head_extent_tail_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
-                        journal_log_head_extent_tail_begin_128b,
-                        journal_log_head_extent_end_128b,
-                        blkdev_io_block_size_128b_log2,
-                    ) {
-                        Ok(journal_log_head_extent_tail_read_request) => journal_log_head_extent_tail_read_request,
-                        Err(e) => {
+                            journal_log_head_extent_tail,
+                            journal_log_head_integrity_state,
+                        ),
+                        task::Poll::Ready(Ok((None, journal_log_head_integrity_state))) => {
+                            // The journal is inactive.
+                            this.fut_state = JournalLogReadFutureState::Done;
+                            return task::Poll::Ready(Ok((None, journal_log_head_integrity_state)));
+                        }
+                        task::Poll::Ready(Err(e)) => {
                             this.fut_state = JournalLogReadFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }
+                        task::Poll::Pending => return task::Poll::Pending,
                     };
-                    let read_fut = match blkdev.read(journal_log_head_extent_tail_read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
-                    this.fut_state = JournalLogReadFutureState::ReadJournalLogHeadExtentTail {
-                        read_fut,
-                        journal_log_head_extent_head,
-                        journal_log_head_extent_allocation_blocks: journal_log_head_extent.block_count(),
-                        journal_log_head_extent_effective_payload_len: *journal_log_head_extent_effective_payload_len,
-                    };
-                }
-                JournalLogReadFutureState::ReadJournalLogHeadExtentTail {
-                    read_fut,
-                    journal_log_head_extent_head,
-                    journal_log_head_extent_allocation_blocks,
-                    journal_log_head_extent_effective_payload_len,
-                } => {
-                    let journal_log_head_extent_tail_read_request =
-                        match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                            task::Poll::Ready(Ok((journal_log_head_extent_tail_read_request, Ok(())))) => {
-                                journal_log_head_extent_tail_read_request
-                            }
-                            task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
+
+                    // The journal is active.
+                    // First decode the head extent's plaintext header contents.
+                    // Note that the inline authentication verified further below does cover those
+                    // for homogenity reasons, but nothing relies on it.
+                    this.aux_fs_metadata_update_groups_heads =
+                        match JournalLog::plaintext_header_decode_aux_fs_metadata_update_groups_heads(
+                            io_slices::BuffersSliceIoSlicesIter::new(&[
+                                journal_log_head_extent_head.as_slice(),
+                                journal_log_head_extent_tail.as_slice(),
+                            ]),
+                            image_layout,
+                        ) {
+                            Ok(aux_fs_metadata_update_groups_heads) => aux_fs_metadata_update_groups_heads,
+                            Err(e) => {
                                 this.fut_state = JournalLogReadFutureState::Done;
-                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                                return task::Poll::Ready(Err(e));
                             }
-                            task::Poll::Pending => return task::Poll::Pending,
                         };
-                    let journal_log_head_extent_tail = journal_log_head_extent_tail_read_request.into_dst_buf();
-                    this.fut_state = JournalLogReadFutureState::DecryptJournalLogHeadExtent {
-                        journal_log_head_extent_head: mem::take(journal_log_head_extent_head),
-                        journal_log_head_extent_tail,
-                        journal_log_head_extent_allocation_blocks: *journal_log_head_extent_allocation_blocks,
-                        journal_log_head_extent_effective_payload_len: *journal_log_head_extent_effective_payload_len,
-                    };
-                }
-                JournalLogReadFutureState::DecryptJournalLogHeadExtent {
-                    journal_log_head_extent_head,
-                    journal_log_head_extent_tail,
-                    journal_log_head_extent_allocation_blocks,
-                    journal_log_head_extent_effective_payload_len,
-                } => {
+
+                    // Decrypt the head extent just read from storage.
                     let extents_decryption_instance =
                         match JournalLog::extents_decryption_instance(image_layout, root_key, keys_cache) {
                             Ok(extents_decryption_instance) => extents_decryption_instance,
@@ -1692,21 +1966,13 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     let next_chained_extent = match extents_decryption_instance.decrypt_one_extent(
                         io_slices::SingletonIoSliceMut::new(decrypted_journal_log_head_extent.as_mut_slice())
                             .map_infallible_err(),
-                        io_slices::SingletonIoSlice::new(journal_log_head_extent_head)
-                            .chain(io_slices::SingletonIoSlice::new(journal_log_head_extent_tail))
+                        io_slices::SingletonIoSlice::new(&journal_log_head_extent_head)
+                            .chain(io_slices::SingletonIoSlice::new(&journal_log_head_extent_tail))
                             .map_infallible_err(),
                         authenticated_associated_data,
                         *journal_log_head_extent_allocation_blocks,
                     ) {
                         Ok(next_chained_extent) => next_chained_extent,
-                        Err(NvFsError::AuthenticationFailure) => {
-                            // An authentication failure for the Journal log's first "entry" extent
-                            // is non-fatal and silently ignored -- the write to it might have been
-                            // incomplete, i.e. interrupted by a power cut, in which case the
-                            // Journal is considered to be non-existant.
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Ok(None));
-                        }
                         Err(e) => {
                             this.fut_state = JournalLogReadFutureState::Done;
                             return task::Poll::Ready(Err(e));
@@ -1738,32 +2004,48 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
 
                     let allocation_block_size_128b_log2 = image_layout.allocation_block_size_128b_log2 as u32;
                     let io_block_allocation_blocks_log2 = image_layout.io_block_allocation_blocks_log2 as u32;
-                    let auth_tree_data_block_allocation_blocks_log2 =
-                        image_layout.auth_tree_data_block_allocation_blocks_log2 as u32;
-                    let journal_block_allocation_blocks_log2 =
-                        io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2);
-                    let next_journal_log_tail_extent_begin_128b =
-                        u64::from(next_journal_log_tail_extent.begin()) << allocation_block_size_128b_log2;
-                    let next_journal_log_tail_extent_end_128b =
-                        u64::from(next_journal_log_tail_extent.end()) << allocation_block_size_128b_log2;
-                    let next_journal_log_tail_extent_read_request = match JournalLogReadExtentNvBlkDevReadRequest::new(
-                        next_journal_log_tail_extent_begin_128b,
-                        next_journal_log_tail_extent_end_128b,
-                        journal_block_allocation_blocks_log2,
+                    if !(u64::from(next_journal_log_tail_extent.begin())
+                        | u64::from(next_journal_log_tail_extent.end()))
+                    .is_aligned_pow2(io_block_allocation_blocks_log2)
+                    {
+                        this.fut_state = JournalLogReadFutureState::Done;
+                        return task::Poll::Ready(Err(NvFsError::FsFormatError(
+                            FormatError::UnalignedJournalExtents as isize,
+                        )));
+                    }
+
+                    if u64::from(next_journal_log_tail_extent.block_count())
+                        > (u64::MAX >> (allocation_block_size_128b_log2 + 7))
+                    {
+                        return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
+                    }
+                    let next_journal_log_tail_extent_len = match usize::try_from(
+                        u64::from(next_journal_log_tail_extent.block_count()) << (allocation_block_size_128b_log2 + 7),
                     ) {
-                        Ok(next_journal_log_tail_extent_read_request) => next_journal_log_tail_extent_read_request,
-                        Err(e) => {
+                        Ok(next_journal_log_tail_extent_len) => next_journal_log_tail_extent_len,
+                        Err(_) => {
                             this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(e));
+                            return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                         }
                     };
-                    let read_fut = match blkdev.read(next_journal_log_tail_extent_read_request) {
-                        Ok(Ok(read_fut)) => read_fut,
-                        Err(e) | Ok(Err((_, e))) => {
-                            this.fut_state = JournalLogReadFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
+                    let next_journal_log_tail_extent_buf =
+                        match FixedVec::new_with_default(next_journal_log_tail_extent_len) {
+                            Ok(next_journal_log_tail_extent_buf) => next_journal_log_tail_extent_buf,
+                            Err(e) => {
+                                this.fut_state = JournalLogReadFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(e)));
+                            }
+                        };
+
+                    let read_fut = blkdev::helpers::NvBlkDevReadRegionFuture::new(
+                        u64::from(next_journal_log_tail_extent.begin()),
+                        u64::from(next_journal_log_tail_extent.block_count()),
+                        allocation_block_size_128b_log2 as u8,
+                        next_journal_log_tail_extent_buf,
+                        0,
+                        (io_block_allocation_blocks_log2 + allocation_block_size_128b_log2) as u8,
+                    );
+
                     this.fut_state = JournalLogReadFutureState::ReadNextJournalLogTailExtent {
                         read_fut,
                         next_journal_log_tail_extent_allocation_blocks: next_journal_log_tail_extent.block_count(),
@@ -1773,10 +2055,10 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     read_fut,
                     next_journal_log_tail_extent_allocation_blocks,
                 } => {
-                    let next_journal_log_tail_extent_read_request =
+                    let next_journal_log_tail_extent =
                         match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_fut), blkdev, cx) {
-                            task::Poll::Ready(Ok((journal_log_read_next_tail_extent_request, Ok(())))) => {
-                                journal_log_read_next_tail_extent_request
+                            task::Poll::Ready(Ok((next_journal_log_tail_extent, Ok(())))) => {
+                                next_journal_log_tail_extent
                             }
                             task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => {
                                 this.fut_state = JournalLogReadFutureState::Done;
@@ -1784,7 +2066,6 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                             }
                             task::Poll::Pending => return task::Poll::Pending,
                         };
-                    let next_journal_log_tail_extent = next_journal_log_tail_extent_read_request.into_dst_buf();
 
                     let extents_decryption_instance = match this.extents_decryption_instance.as_mut() {
                         Some(extents_decryption_instance) => extents_decryption_instance,
@@ -1903,6 +2184,7 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                         io_slices::BuffersSliceIoSlicesIter::new(&this.decrypted_journal_log_extents)
                             .map_infallible_err(),
                         mem::take(&mut this.log_extents),
+                        &this.aux_fs_metadata_update_groups_heads,
                         image_layout,
                         root_key,
                         keys_cache,
@@ -1915,62 +2197,10 @@ impl<B: blkdev::NvBlkDev> JournalLogReadFuture<B> {
                     };
                     this.decrypted_journal_log_extents = Vec::new();
                     this.fut_state = JournalLogReadFutureState::Done;
-                    return task::Poll::Ready(Ok(Some(journal_log)));
+                    return task::Poll::Ready(Ok((Some(journal_log), this.journal_log_head_integrity_state)));
                 }
                 JournalLogReadFutureState::Done => unreachable!(),
             }
         }
-    }
-}
-
-/// [`NvBlkDevReadRequest`](blkdev::NvBlkDevReadRequest) implementation used
-/// internally by [`JournalLogReadFuture`].
-struct JournalLogReadExtentNvBlkDevReadRequest {
-    region: ChunkedIoRegion,
-    dst: FixedVec<u8, 7>,
-}
-
-impl JournalLogReadExtentNvBlkDevReadRequest {
-    fn new(physical_begin_128b: u64, physical_end_128b: u64, chunk_size_128b_log2: u32) -> Result<Self, NvFsError> {
-        debug_assert!(chunk_size_128b_log2 < u64::BITS - 7);
-        let region_len_128b = physical_end_128b - physical_begin_128b;
-        let region_len = region_len_128b << 7;
-        if region_len >> 7 != region_len_128b {
-            return Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange));
-        }
-        let region_len = usize::try_from(region_len).map_err(|_| NvFsError::DimensionsNotSupported)?;
-        let dst = FixedVec::new_with_default(region_len)?;
-        let region = blkdev::ChunkedIoRegion::new(physical_begin_128b, physical_end_128b, chunk_size_128b_log2)
-            .map_err(|e| match e {
-                ChunkedIoRegionError::ChunkSizeOverflow => nvfs_err_internal!(),
-                ChunkedIoRegionError::InvalidBounds => nvfs_err_internal!(),
-                ChunkedIoRegionError::ChunkIndexOverflow => NvFsError::DimensionsNotSupported,
-                ChunkedIoRegionError::RegionUnaligned => {
-                    NvFsError::FsFormatError(FormatError::UnalignedJournalExtents as isize)
-                }
-            })?;
-        Ok(Self { region, dst })
-    }
-
-    pub fn into_dst_buf(self) -> FixedVec<u8, 7> {
-        let Self { region: _, dst } = self;
-        dst
-    }
-}
-
-impl blkdev::NvBlkDevReadRequest for JournalLogReadExtentNvBlkDevReadRequest {
-    fn region(&self) -> &ChunkedIoRegion {
-        &self.region
-    }
-
-    fn get_destination_buffer(
-        &mut self,
-        range: &ChunkedIoRegionChunkRange,
-    ) -> Result<Option<&mut [u8]>, blkdev::NvBlkDevIoError> {
-        let chunk_size_128b_log2 = self.region.chunk_size_128b_log2();
-        let (chunk_index, _) = range.chunk().decompose_to_hierarchic_indices([]);
-        let dst_chunk =
-            &mut self.dst[chunk_index << (chunk_size_128b_log2 + 7)..(chunk_index + 1) << (chunk_size_128b_log2 + 7)];
-        Ok(Some(&mut dst_chunk[range.range_in_chunk().clone()]))
     }
 }

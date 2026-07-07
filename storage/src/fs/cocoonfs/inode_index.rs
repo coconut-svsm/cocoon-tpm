@@ -90,7 +90,8 @@ pub type InodeIndexEntryFlags = u32;
 type EncodedInodeIndexEntryFlags = [u8; mem::size_of::<InodeIndexEntryFlags>()];
 /// Reserved [`InodeIndexEntryFlags`] flags.
 ///
-/// Currently any but least significant `8` bits freely available to users are reserved.
+/// Currently any but least significant `8` bits freely available to users are
+/// reserved.
 const INODE_INDEX_ENTRY_FLAGS_RESERVED: InodeIndexEntryFlags = !((!0u8) as InodeIndexEntryFlags);
 
 /// Encode a [`InodeIndexKeyType`].
@@ -270,8 +271,9 @@ impl InodeIndexTreeLayout {
         // The format is (in logical order)
         // - four bytes to encode the node level in the B+-tree, counted 1-based from
         //   leaf nodes upwards,
-        // - a sequence of inode entries, each comprising the 64 bit inode number, a 32 bit inode
-        //   flags value as well as the EncodedExtentPtr to the respective inode's extents,
+        // - a sequence of inode entries, each comprising the 64 bit inode number, a 32
+        //   bit inode flags value as well as the EncodedExtentPtr to the respective
+        //   inode's extents,
         // - a single block pointer to the next leaf node in symmetric order.
         let leaf_node_max_payload_len = leaf_node_encrypted_block_layout.effective_payload_len()?;
         let max_leaf_node_entries = (leaf_node_max_payload_len - 4 - EncodedBlockPtr::ENCODED_SIZE as usize)
@@ -323,9 +325,9 @@ impl InodeIndexTreeLeafNode {
         node_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         layout: &InodeIndexTreeLayout,
     ) -> Result<Self, NvFsError> {
-        // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is implicitly
-        // initialized to SpecialInode::NoInode and the ->encoded_entry_flags[] are all clear, as it
-        // should be.
+        // By initializing the FixedVec with zeroes, the ->encoded_keys[] are is
+        // implicitly initialized to SpecialInode::NoInode and the
+        // ->encoded_entry_flags[] are all clear, as it should be.
         let encoded_node = FixedVec::new_with_value(layout.encoded_leaf_node_len, 0u8)?;
         let mut n = Self {
             encoded_node,
@@ -735,8 +737,8 @@ impl InodeIndexTreeLeafNode {
         // Spill count EncodedInodeIndexEntryFlags from right to left.
         left.encoded_entries_flags_mut(layout)[dst_entries_flags_spill_begin..dst_entries_flags_spill_end]
             .copy_from_slice(&src_entries_flags[..src_entries_flags_spill_end]);
-        // Memmove the right node's remaining EncodedInodeIndexEntryFlags to the front and clear out the tail
-        // accordingly.
+        // Memmove the right node's remaining EncodedInodeIndexEntryFlags to the front
+        // and clear out the tail accordingly.
         let src_original_entries_flags_end = original_src_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
         src_entries_flags.copy_within(src_entries_flags_spill_end..src_original_entries_flags_end, 0);
         src_entries_flags[src_original_entries_flags_end - entries_flags_spill_len..src_original_entries_flags_end]
@@ -827,14 +829,15 @@ impl InodeIndexTreeLeafNode {
         let dst_entries_flags_spill_end = entries_flags_spill_len;
         let dst_entries_flags = right.encoded_entries_flags_mut(layout);
         let src_entries_flags = left.encoded_entries_flags_mut(layout);
-        // Make room for count new EncodedInodeIndexEntryFlags at the right node's head by memmoving
-        // the existing ones towards the tail.
+        // Make room for count new EncodedInodeIndexEntryFlags at the right node's head
+        // by memmoving the existing ones towards the tail.
         let dst_original_entries_flags_end = original_dst_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
         dst_entries_flags.copy_within(..dst_original_entries_flags_end, dst_entries_flags_spill_end);
         // Spill count EncodedInodeIndexEntryFlags from left to right.
         dst_entries_flags[..dst_entries_flags_spill_end]
             .copy_from_slice(&src_entries_flags[src_entries_flags_spill_begin..src_entries_flags_spill_end]);
-        // Clear out all EncodedInodeIndexEntryFlags entries that became vacant at the src' tail.
+        // Clear out all EncodedInodeIndexEntryFlags entries that became vacant at the
+        // src' tail.
         src_entries_flags[src_entries_flags_spill_begin..src_entries_flags_spill_end].fill(0);
 
         let extent_ptrs_spill_len = count * EncodedExtentPtr::ENCODED_SIZE as usize;
@@ -1036,8 +1039,9 @@ impl InodeIndexTreeLeafNode {
         let src_keys = self.encoded_keys_mut(layout);
         src_keys[src_keys_clear_begin..src_keys_clear_end].fill(0u8);
 
-        // The remainder of dst_entries_flags is initialized to all-zeroes by the FixedVec
-        // allocation above already. Take care of the EncodedInodeIndexEntryFlags removed from self.
+        // The remainder of dst_entries_flags is initialized to all-zeroes by the
+        // FixedVec allocation above already. Take care of the
+        // EncodedInodeIndexEntryFlags removed from self.
         let src_entries_flags_clear_begin = self.entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
         let src_entries_flags_clear_end = original_src_entries * mem::size_of::<EncodedInodeIndexEntryFlags>();
         let src_entries_flags = self.encoded_entries_flags_mut(layout);
@@ -1451,7 +1455,8 @@ impl InodeIndexTreeLeafNode {
             .map_err(|_| nvfs_err_internal!())
     }
 
-    /// Get a shared reference to an inode entry's associated [`EncodedInodeIndexEntryFlags`].
+    /// Get a shared reference to an inode entry's associated
+    /// [`EncodedInodeIndexEntryFlags`].
     ///
     /// Will fail only upon an internal logic error.
     ///
@@ -1474,7 +1479,8 @@ impl InodeIndexTreeLeafNode {
             .map_err(|_| nvfs_err_internal!())
     }
 
-    /// Get a `mut` reference to an inode entry's associated [`EncodedInodeIndexEntryFlags`].
+    /// Get a `mut` reference to an inode entry's associated
+    /// [`EncodedInodeIndexEntryFlags`].
     ///
     /// Will fail only upon an internal logic error.
     ///
@@ -2387,10 +2393,12 @@ impl InodeIndexTreeNode {
     ///
     /// # Arguments:
     ///
-    /// * `preallocated_encoded_node` - Buffer to receive the cloned node's encoding. Its length
-    ///   must match either [`InodeIndexTreeLayout::encoded_leaf_node_len`] or
-    ///   [`InodeIndexTreeLayout::encoded_internal_node_len`], depending on wheter `self`
-    ///   stores a [leaf](Self::Leaf) or an [internal](Self::Internal) node.
+    /// * `preallocated_encoded_node` - Buffer to receive the cloned node's
+    ///   encoding. Its length must match either
+    ///   [`InodeIndexTreeLayout::encoded_leaf_node_len`] or
+    ///   [`InodeIndexTreeLayout::encoded_internal_node_len`], depending on
+    ///   wheter `self` stores a [leaf](Self::Leaf) or an
+    ///   [internal](Self::Internal) node.
     fn clone_with_preallocated_buf(&self, mut preallocated_encoded_node: FixedVec<u8, 7>) -> Self {
         match self {
             Self::Internal(InodeIndexTreeInternalNode {
@@ -3807,8 +3815,8 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
     ///   index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
     ///   [`tree_leaf_node_decryption_instance`
     ///   member](InodeIndex::tree_leaf_node_decryption_instance).
-    /// * `fs_sync_state_inode_index_tree_internal_node_decryption_instance` - The
-    ///   [filesystem instance's inode
+    /// * `fs_sync_state_inode_index_tree_internal_node_decryption_instance` -
+    ///   The [filesystem instance's inode
     ///   index'](crate::fs::cocoonfs::fs::CocoonFsSyncState::inode_index)
     ///   [`tree_internal_node_decryption_instance`
     ///   member](InodeIndex::tree_internal_node_decryption_instance).
@@ -4434,6 +4442,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
         let (
             fs_instance,
+            _fs_sync_state_aux_fs_metadata_update_groups_heads,
             _fs_sync_state_image_size,
             fs_sync_state_alloc_bitmap,
             _fs_sync_state_alloc_bitmap_file,
@@ -4948,6 +4957,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -5179,6 +5189,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 InodeIndexEnumerateCursorNextFutureState::ReadNextTreeLeafNode { cursor, read_fut } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -5482,6 +5493,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Ok(Some((_first_inode_extents_list_extent, true))) => {
                             let (
                                 fs_instance,
+                                _fs_sync_state_aux_fs_metadata_update_groups_heads,
                                 _fs_sync_state_image_size,
                                 _fs_sync_state_alloc_bitmap,
                                 _fs_sync_state_alloc_bitmap_file,
@@ -5811,6 +5823,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
         let (
             fs_instance,
+            _fs_sync_state_aux_fs_metadata_update_groups_heads,
             _fs_sync_state_image_size,
             fs_sync_state_alloc_bitmap,
             _fs_sync_state_alloc_bitmap_file,
@@ -6166,10 +6179,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexInsertEntryFuture
     /// * `lookup_result` - The [`InodeIndexLookupForInsertResult`] for the
     ///   inode to modify.
     /// * `entry_flags` - The inode index entry flags flags for the inode entry.
-    ///   The value is masked by `entry_flags_mask`. If an inode index entry
-    ///   for the inode identified by `lookup_result` exists already,
-    ///   then only the bits set in `entry_flags_mask` are updated to the
-    ///   value specified at the corresponding position in `entry_flags`.
+    ///   The value is masked by `entry_flags_mask`. If an inode index entry for
+    ///   the inode identified by `lookup_result` exists already, then only the
+    ///   bits set in `entry_flags_mask` are updated to the value specified at
+    ///   the corresponding position in `entry_flags`.
     /// * `entry_flags_mask` - The bitmask to apply to `entry_flags`.
     /// * `pending_inode_extents_reallocation` - The inode's pending data
     ///   extents (re)allocations. Consumed on success, returned from
@@ -6308,6 +6321,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         } => {
                             let (
                                 fs_instance,
+                                _fs_sync_state_aux_fs_metadata_update_groups_heads,
                                 _fs_sync_state_image_size,
                                 fs_sync_state_alloc_bitmap,
                                 _fs_sync_state_alloc_bitmap_file,
@@ -6471,6 +6485,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             } => {
                                 let (
                                     fs_instance,
+                                    _fs_sync_state_aux_fs_metadata_update_groups_heads,
                                     _fs_sync_state_image_size,
                                     fs_sync_state_alloc_bitmap,
                                     _fs_sync_state_alloc_bitmap_file,
@@ -6545,13 +6560,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         if image_layout.index_tree_leaf_node_allocation_blocks_log2
                             == image_layout.index_tree_internal_node_allocation_blocks_log2
                         {
-                            // The leaf and internal node sizes match, allocate the new root and sibling in one step.
+                            // The leaf and internal node sizes match, allocate the new root and sibling in
+                            // one step.
                             let allocate_fut = match AllocateBlocksFuture::<ST, B>::new(
                                 &fs_instance,
                                 transaction,
                                 image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
                                 2,
-                                false,
+                                transaction::TransactionAllocationConstraints::Regular,
                             ) {
                                 Ok(allocate_fut) => allocate_fut,
                                 Err((transaction, e)) => break (transaction, Err(e)),
@@ -6562,12 +6578,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 allocate_fut,
                             };
                         } else {
-                            // The leaf and internal node sizes differ, allocate the new root and sibling separately.
+                            // The leaf and internal node sizes differ, allocate the new root and sibling
+                            // separately.
                             let allocate_fut = match AllocateBlockFuture::<ST, B>::new(
                                 &fs_instance,
                                 transaction,
                                 image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
-                                false,
+                                transaction::TransactionAllocationConstraints::Regular,
                             ) {
                                 Ok(allocate_fut) => allocate_fut,
                                 Err((transaction, e)) => break (transaction, Err(e)),
@@ -6669,6 +6686,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -6805,7 +6823,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     } else {
                                         image_layout.index_tree_internal_node_allocation_blocks_log2
                                     } as u32,
-                                    false,
+                                    transaction::TransactionAllocationConstraints::Regular,
                                 ) {
                                     Ok(allocate_fut) => allocate_fut,
                                     Err((transaction, e)) => break (transaction, Err(e)),
@@ -7201,7 +7219,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         &fs_instance,
                         transaction,
                         image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32,
-                        false,
+                        transaction::TransactionAllocationConstraints::Regular,
                     ) {
                         Ok(allocate_fut) => allocate_fut,
                         Err((transaction, e)) => {
@@ -7303,6 +7321,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -7675,6 +7694,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -7957,6 +7977,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 InodeIndexInsertEntryFutureState::PreemptiveRotateSplitWalkLoadRoot { read_root_fut } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -8065,7 +8086,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             transaction,
                             image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
                             2,
-                            false,
+                            transaction::TransactionAllocationConstraints::Regular,
                         ) {
                             Ok(allocate_fut) => allocate_fut,
                             Err((transaction, e)) => break (transaction, Err(e)),
@@ -8119,6 +8140,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         // Get the parent an update staging slot for the splitting.
                         let (
                             fs_instance,
+                            _fs_sync_state_aux_fs_metadata_update_groups_heads,
                             _fs_sync_state_image_size,
                             fs_sync_state_alloc_bitmap,
                             _fs_sync_state_alloc_bitmap_file,
@@ -8183,7 +8205,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             &fs_instance,
                             transaction,
                             image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32,
-                            false,
+                            transaction::TransactionAllocationConstraints::Regular,
                         ) {
                             Ok(allocate_fut) => allocate_fut,
                             Err((transaction, e)) => break (transaction, Err(e)),
@@ -8242,6 +8264,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -8749,9 +8772,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
     ///       [`Ok`] is returned:
     ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
     ///           specified enumeration range.
-    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next inode
-    ///           existing in the specified enumeration range has number `inode`
-    ///           and flags `inode_flags`.
+    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next
+    ///           inode existing in the specified enumeration range has number
+    ///           `inode` and flags `inode_flags`.
     type Output = Result<
         (
             Box<InodeIndexUnlinkCursor<ST, B>>,
@@ -9035,6 +9058,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -9321,6 +9345,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 InodeIndexUnlinkCursorNextFutureState::ReadNextTreeLeafNode { cursor, read_fut } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -9720,6 +9745,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Ok(Some((_first_inode_extents_list_extent, true))) => {
                             let (
                                 fs_instance,
+                                _fs_sync_state_aux_fs_metadata_update_groups_heads,
                                 _fs_sync_state_image_size,
                                 _fs_sync_state_alloc_bitmap,
                                 _fs_sync_state_alloc_bitmap_file,
@@ -9946,6 +9972,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         } => {
                             let (
                                 fs_instance,
+                                _fs_sync_state_aux_fs_metadata_update_groups_heads,
                                 _fs_sync_state_image_size,
                                 fs_sync_state_alloc_bitmap,
                                 _fs_sync_state_alloc_bitmap_file,
@@ -10117,6 +10144,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             } => {
                                 let (
                                     fs_instance,
+                                    _fs_sync_state_aux_fs_metadata_update_groups_heads,
                                     _fs_sync_state_image_size,
                                     fs_sync_state_alloc_bitmap,
                                     _fs_sync_state_alloc_bitmap_file,
@@ -10335,6 +10363,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -11130,6 +11159,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -11268,6 +11298,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
@@ -11648,6 +11679,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Ok(Some((_first_inode_extents_list_extent, true))) => {
                             let (
                                 fs_instance,
+                                _fs_sync_state_aux_fs_metadata_update_groups_heads,
                                 _fs_sync_state_image_size,
                                 _fs_sync_state_alloc_bitmap,
                                 _fs_sync_state_alloc_bitmap_file,
@@ -11915,6 +11947,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 InodeIndexUpdateRootNodeInodeFutureState::ReadEntryLeafTreeNode { read_fut } => {
                     let (
                         fs_instance,
+                        _fs_sync_state_aux_fs_metadata_update_groups_heads,
                         _fs_sync_state_image_size,
                         fs_sync_state_alloc_bitmap,
                         _fs_sync_state_alloc_bitmap_file,
