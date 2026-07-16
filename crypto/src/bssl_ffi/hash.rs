@@ -23,7 +23,7 @@ use core::{convert, ffi, marker, mem, ptr};
 fn map_to_evp_md(alg: tpm2_interface::TpmiAlgHash) -> Result<*const bssl_bare_sys::EVP_MD, CryptoError> {
     let md = match alg {
         #[cfg(feature = "sha1")]
-        tpm2_interface::TpmiAlgHash::Sha1 => unsafe { bssl_bare_sys::EVP_sha1 },
+        tpm2_interface::TpmiAlgHash::Sha1 => unsafe { bssl_bare_sys::EVP_sha1() },
         #[cfg(feature = "sha256")]
         tpm2_interface::TpmiAlgHash::Sha256 => unsafe { bssl_bare_sys::EVP_sha256() },
         #[cfg(feature = "sha384")]
