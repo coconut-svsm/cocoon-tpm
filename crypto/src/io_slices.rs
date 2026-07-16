@@ -2,12 +2,12 @@
 // Copyright 2023-2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
-//! Convience traits fixing the various [*IO slice iterator* traits](io_slices)'
-//! associated
-//! [`BackendIteratorError`](io_slices::IoSlicesIterCommon::BackendIteratorError) fixed to
-//! [`CryptoError`].
+//! Convenience traits specializing the various [*IO slice iterator*
+//! traits](io_slices)' associated
+//! [`BackendIteratorError`](io_slices::IoSlicesIterCommon::BackendIteratorError)
+//! to [`CryptoError`].
 
-// Lifetimes are not obvious at first sight here, make the explicit.
+// Lifetimes are not obvious at first sight here, make them explicit.
 #![allow(clippy::needless_lifetimes)]
 
 use crate::CryptoError;

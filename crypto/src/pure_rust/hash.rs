@@ -4,7 +4,7 @@
 
 //! Pure Rust, RustCrypto based backend for hash algorithms.
 
-// Lifetimes are not obvious at first sight here, make the explicit.
+// Lifetimes are not obvious at first sight here, make them explicit.
 #![allow(clippy::needless_lifetimes)]
 
 extern crate alloc;
@@ -69,7 +69,7 @@ impl HashInstance {
         Ok(())
     }
 
-    /// Produce the final digest into a provided buffer..
+    /// Produce the final digest into a provided buffer.
     ///
     /// # Arguments:
     ///
@@ -342,7 +342,7 @@ pub struct HmacInstance {
 }
 
 impl HmacInstance {
-    /// Create a new hash instance for the specified underlying hash algorithm.
+    /// Create a new HMAC instance for the specified underlying hash algorithm.
     ///
     /// # Arguments:
     ///
@@ -400,7 +400,7 @@ impl HmacInstance {
     pub fn update<'a, DI: CryptoIoSlicesIter<'a>>(&mut self, mut data: DI) -> Result<(), CryptoError> {
         self.state.update(&mut data)
     }
-    /// Produce the final digest into a provided buffer..
+    /// Produce the final digest into a provided buffer.
     ///
     /// # Arguments:
     ///
