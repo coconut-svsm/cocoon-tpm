@@ -61,7 +61,7 @@ pub fn sign(
         remaining_retries -= 1;
 
         // Step 3.
-        let mut k_buf = try_alloc_zeroizing_vec::<u8>(order.len()).unwrap();
+        let mut k_buf = try_alloc_zeroizing_vec::<u8>(order.len())?;
         gen_random_scalar::tcg_tpm2_gen_random_ec_scalar(
             &mut k_buf,
             &order,
@@ -79,7 +79,7 @@ pub fn sign(
         drop(g);
 
         // Steps 6-8.
-        let mut r_buf = try_alloc_vec::<u8>(curve.get_p_len()).unwrap();
+        let mut r_buf = try_alloc_vec::<u8>(curve.get_p_len())?;
         let mut r_x = cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut r_buf);
         if let Err(e) = r.into_affine_plain_coordinates(&mut r_x, None, &curve_ops, Some(&mut curve_ops_scratch))? {
             match e {
