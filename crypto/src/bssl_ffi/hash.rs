@@ -4,7 +4,7 @@
 
 //! BoringSSL FFI backend for hash algorithms.
 
-// Lifetimes are not obvious at first sight here, make the explicit.
+// Lifetimes are not obvious at first sight here, make them explicit.
 #![allow(clippy::needless_lifetimes)]
 
 extern crate alloc;
@@ -23,7 +23,7 @@ use core::{convert, ffi, marker, mem, ptr};
 fn map_to_evp_md(alg: tpm2_interface::TpmiAlgHash) -> Result<*const bssl_bare_sys::EVP_MD, CryptoError> {
     let md = match alg {
         #[cfg(feature = "sha1")]
-        tpm2_interface::TpmiAlgHash::Sha1 => unsafe { bssl_bare_sys::EVP_sha1 },
+        tpm2_interface::TpmiAlgHash::Sha1 => unsafe { bssl_bare_sys::EVP_sha1() },
         #[cfg(feature = "sha256")]
         tpm2_interface::TpmiAlgHash::Sha256 => unsafe { bssl_bare_sys::EVP_sha256() },
         #[cfg(feature = "sha384")]
@@ -201,7 +201,7 @@ impl HashInstance {
         Ok(())
     }
 
-    /// Produce the final digest into a provided buffer..
+    /// Produce the final digest into a provided buffer.
     ///
     /// # Arguments:
     ///
@@ -345,7 +345,7 @@ pub struct HmacInstance {
 }
 
 impl HmacInstance {
-    /// Create a new hash instance for the specified underlying hash algorithm.
+    /// Create a new HMAC instance for the specified underlying hash algorithm.
     ///
     /// # Arguments:
     ///
@@ -469,7 +469,7 @@ impl HmacInstance {
 
         Ok(())
     }
-    /// Produce the final digest into a provided buffer..
+    /// Produce the final digest into a provided buffer.
     ///
     /// # Arguments:
     ///
@@ -496,6 +496,13 @@ impl HmacInstance {
     /// Determine the instance's associated hash algorithm's digest length.
     pub fn digest_len(&self) -> usize {
         hash_alg_digest_len(self.alg) as usize
+    }
+}
+
+impl Drop for HmacInstance {
+    fn drop(&mut self) {
+        unsafe { bssl_bare_sys::HMAC_CTX_cleanse(self.ctx.as_ptr()) };
+        unsafe { bssl_bare_sys::HMAC_CTX_free(self.ctx.as_ptr()) };
     }
 }
 
