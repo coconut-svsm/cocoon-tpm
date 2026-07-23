@@ -283,7 +283,7 @@ fn test_generic_io_slices_iter_peekable_variant(with_head: bool) {
         &[&[1, 2], &[3, 4, 5]]
     };
     let first = expected_slices[0];
-    let iter = GenericIoSlicesIter::new(bufs.clone().into_iter(), head);
+    let iter = GenericIoSlicesIter::new(bufs.into_iter(), head);
     {
         // decoupled_borrow sees the same data (skipping empties)
         let mut peeked = iter.decoupled_borrow();
@@ -307,7 +307,7 @@ fn test_generic_io_slices_iter_peekable_variant(with_head: bool) {
     }
     {
         // decoupled_borrow after advancing original
-        let mut advanced = GenericIoSlicesIter::new(bufs.clone().into_iter(), head);
+        let mut advanced = GenericIoSlicesIter::new(bufs.into_iter(), head);
         assert_eq!(advanced.next_slice(Some(1)).unwrap().unwrap(), &first[..1]);
         let mut peeked = advanced.decoupled_borrow();
         // remaining head is first[1..], then the rest
