@@ -103,7 +103,7 @@ pub fn sign(
         h.finalize_into(&mut r_buf)?;
         // r will get returned. Truncate the buffer to its final size, if needed.
         let r_buf = if r_buf.len() > order.len() {
-            let mut new_r_buf = try_alloc_vec(order.len()).unwrap();
+            let mut new_r_buf = try_alloc_vec(order.len())?;
             new_r_buf.copy_from_slice(&r_buf[..order.len()]);
             drop(r_buf);
             new_r_buf

@@ -19,7 +19,10 @@ use crate::{
                 DetermineAuxFsMetadataExtentsReallocationNeededStateFuture,
             },
             extent_ptr, extents,
-            fs::{CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState, CocoonFsSyncStateFilesystemUpdateCounter},
+            fs::{
+                CocoonFs, CocoonFsConfig, CocoonFsSyncRcPtrType, CocoonFsSyncState,
+                CocoonFsSyncStateFilesystemUpdateCounter,
+            },
             image_header::{self, FsMetadataMkFsInfo},
             inode_extents_list, inode_index,
             integrity::ExtentIntegrityState,

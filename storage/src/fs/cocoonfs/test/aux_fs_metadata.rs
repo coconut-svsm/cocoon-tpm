@@ -648,7 +648,6 @@ fn extra_reserve_capacity_openfs_reallocation() {
                 Err(e) => assert_eq!(e, NvFsError::NoSpace),
             }
 
-
             // Now open the filesystem. This should reallocate the AuxFsMetadata extents in order to
             // reestablish the extra reserve capacity as part of its maintenance work.
             let fs_instance = cocoonfs_test_openfs_op_helper(blkdev).unwrap();

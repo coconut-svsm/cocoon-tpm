@@ -536,7 +536,7 @@ impl RootKey {
             KeyPurpose::Encryption => self.block_cipher_key_len,
         };
         let mut key = zeroize::Zeroizing::new(FixedVec::new_with_default(key_len)?);
-        let mut full_domain = [0u8; mem::size_of::<u64>() +  mem::size_of::<u32>()];
+        let mut full_domain = [0u8; mem::size_of::<u64>() + mem::size_of::<u32>()];
         // split_array_mut() is unstable.
         *<&mut [u8; mem::size_of::<u64>()]>::try_from(&mut full_domain[..mem::size_of::<u64>()])
             .map_err(|_| nvfs_err_internal!())? = key_id.domain.to_le_bytes();
