@@ -8,8 +8,6 @@ extern crate alloc;
 use alloc::{boxed, vec};
 
 #[allow(unused_imports)]
-use vec::Vec;
-#[allow(unused_imports)]
 use boxed::Box;
 #[allow(unused_imports)]
 use core::cmp;
@@ -18,6 +16,8 @@ use core::mem;
 use core::ops;
 #[allow(unused_imports)]
 use core::ptr;
+#[allow(unused_imports)]
+use vec::Vec;
 
 #[derive(Clone, Copy, Debug)]
 pub enum TpmErr {
@@ -28,7 +28,8 @@ pub enum TpmErr {
 #[allow(unused)]
 fn copy_vec_from_slice<T: Copy>(slice: &[T]) -> Result<Vec<T>, TpmErr> {
     let mut v = Vec::new();
-    v.try_reserve_exact(slice.len()).map_err(|_| TpmErr::Rc(TpmRc::MEMORY))?;
+    v.try_reserve_exact(slice.len())
+        .map_err(|_| TpmErr::Rc(TpmRc::MEMORY))?;
     v.extend_from_slice(slice);
     Ok(v)
 }
@@ -43,10 +44,11 @@ impl<'a> TpmBuffer<'a> {
     pub fn into_owned(mut self) -> Result<TpmBuffer<'static>, TpmErr> {
         let o = match &mut self {
             Self::Borrowed(b) => copy_vec_from_slice(b)?,
-            Self::Owned(o) => {
+            Self::Owned(o) =>
+            {
                 #[allow(clippy::mem_replace_with_default)]
                 mem::replace(o, Vec::new())
-            },
+            }
         };
         Ok(TpmBuffer::<'static>::Owned(o))
     }
@@ -110,8 +112,7 @@ pub fn box_try_new<T>(v: T) -> Result<Box<T>, ()> {
 }
 
 #[derive(Clone, Debug)]
-pub struct TpmLimits {
-}
+pub struct TpmLimits {}
 impl TpmLimits {
     #[cfg(feature = "ecc")]
     fn max_ecc_key_bytes(&self) -> Result<u16, ()> {
@@ -325,7 +326,25 @@ fn marshal_bytes<'a>(buf: &'a mut [u8], src: &[u8]) -> Result<&'a mut [u8], TpmE
 }
 
 // TCG Algorithm Registry, page 11, table 3, TPM_ALG_ID constants
-#[cfg(any(feature = "aes", feature = "camellia", feature = "cbc", feature = "cfb", feature = "ctr", feature = "ecb", feature = "ofb", feature = "sha1", feature = "sha256", feature = "sha384", feature = "sha3_256", feature = "sha3_384", feature = "sha3_512", feature = "sha512", feature = "sm3_256", feature = "sm4", feature = "tdes"))]
+#[cfg(any(
+    feature = "aes",
+    feature = "camellia",
+    feature = "cbc",
+    feature = "cfb",
+    feature = "ctr",
+    feature = "ecb",
+    feature = "ofb",
+    feature = "sha1",
+    feature = "sha256",
+    feature = "sha384",
+    feature = "sha3_256",
+    feature = "sha3_384",
+    feature = "sha3_512",
+    feature = "sha512",
+    feature = "sm3_256",
+    feature = "sm4",
+    feature = "tdes"
+))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 enum TpmAlgId {
@@ -432,7 +451,7 @@ impl convert::TryFrom<u16> for TpmEccCurve {
             value if value == Self::Curve448 as u16 => Self::Curve448,
             _ => {
                 return Err(TpmErr::Rc(TpmRc::CURVE));
-            },
+            }
         };
 
         Ok(result)
@@ -441,8 +460,7 @@ impl convert::TryFrom<u16> for TpmEccCurve {
 
 // TCG TPM2 Library, Part 2 -- Structures, page 54, table 16, TPM_RC constants
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TpmRc {
-}
+pub struct TpmRc {}
 
 impl TpmRc {
     pub const SUCCESS: u32 = 0x0u32;
@@ -629,7 +647,7 @@ impl convert::TryFrom<u16> for TpmiAlgHash {
             value if value == Self::Sha3_512 as u16 => Self::Sha3_512,
             _ => {
                 return Err(TpmErr::Rc(TpmRc::HASH));
-            },
+            }
         };
 
         Ok(result)
@@ -681,7 +699,7 @@ impl convert::TryFrom<u16> for TpmiAlgSymObject {
             value if value == Self::Camellia as u16 => Self::Camellia,
             _ => {
                 return Err(TpmErr::Rc(TpmRc::SYMMETRIC));
-            },
+            }
         };
 
         Ok(result)
@@ -731,7 +749,7 @@ impl convert::TryFrom<u16> for TpmiAlgCipherMode {
             value if value == Self::Ecb as u16 => Self::Ecb,
             _ => {
                 return Err(TpmErr::Rc(TpmRc::MODE));
-            },
+            }
         };
 
         Ok(result)
@@ -888,7 +906,7 @@ impl<'a> Tpm2bEccParameter<'a> {
             Some(size) => size,
             None => {
                 return Err(());
-            },
+            }
         };
 
         let buffer_size = self.buffer.len();
@@ -896,7 +914,7 @@ impl<'a> Tpm2bEccParameter<'a> {
             Some(size) => size,
             None => {
                 return Err(());
-            },
+            }
         };
 
         Ok(size)
@@ -908,7 +926,7 @@ impl<'a> Tpm2bEccParameter<'a> {
             Ok(marshalled_size) => marshalled_size,
             Err(_) => {
                 return Err(TpmErr::Rc(TpmRc::SIZE));
-            },
+            }
         };
         let buf = marshal_u16(buf, marshalled_size)?;
 
@@ -923,7 +941,7 @@ impl<'a> Tpm2bEccParameter<'a> {
             Ok(r) => r,
             Err(e) => {
                 return Err(e);
-            },
+            }
         };
 
         let buffer_size: u16 = unmarshalled_size;
@@ -932,7 +950,7 @@ impl<'a> Tpm2bEccParameter<'a> {
             Err(_) => {
                 debug_assert!(false, "Unexpected runtime constant evaluation failure");
                 return Err(TpmErr::InternalErr);
-            },
+            }
         };
         if buffer_size > v0 {
             return Err(TpmErr::Rc(TpmRc::SIZE));
@@ -942,11 +960,16 @@ impl<'a> Tpm2bEccParameter<'a> {
             Ok((unmarshalled_buffer, buf)) => (unmarshalled_buffer, buf),
             Err(e) => {
                 return Err(e);
-            },
+            }
         };
         let unmarshalled_buffer = TpmBuffer::from(unmarshalled_buffer);
 
-        Ok((buf, Self{buffer: unmarshalled_buffer}))
+        Ok((
+            buf,
+            Self {
+                buffer: unmarshalled_buffer,
+            },
+        ))
     }
 }
 
@@ -967,26 +990,26 @@ impl<'a> TpmsEccPoint<'a> {
             Ok(x_size) => x_size,
             Err(_) => {
                 return Err(());
-            },
+            }
         };
         size = match size.checked_add(x_size) {
             Some(size) => size,
             None => {
                 return Err(());
-            },
+            }
         };
 
         let y_size = match self.y.marshalled_size() {
             Ok(y_size) => y_size,
             Err(_) => {
                 return Err(());
-            },
+            }
         };
         size = match size.checked_add(y_size) {
             Some(size) => size,
             None => {
                 return Err(());
-            },
+            }
         };
 
         Ok(size)
@@ -1005,17 +1028,23 @@ impl<'a> TpmsEccPoint<'a> {
             Ok(r) => r,
             Err(e) => {
                 return Err(e);
-            },
+            }
         };
 
         let (buf, unmarshalled_y) = match Tpm2bEccParameter::<'_>::unmarshal_intern(buf, limits) {
             Ok(r) => r,
             Err(e) => {
                 return Err(e);
-            },
+            }
         };
 
-        Ok((buf, Self{x: unmarshalled_x, y: unmarshalled_y}))
+        Ok((
+            buf,
+            Self {
+                x: unmarshalled_x,
+                y: unmarshalled_y,
+            },
+        ))
     }
 
     pub fn unmarshal(buf: &'a [u8], limits: &TpmLimits) -> Result<(&'a [u8], Box<Self>), TpmErr> {
@@ -1024,7 +1053,7 @@ impl<'a> TpmsEccPoint<'a> {
             Ok(unmarshalled) => unmarshalled,
             Err(_) => {
                 return Err(TpmErr::Rc(TpmRc::MEMORY));
-            },
+            }
         };
 
         Ok((buf, unmarshalled))

@@ -63,7 +63,7 @@ pub enum SpecialInode {
     IndexRoot = 3,
     #[allow(dead_code)]
     Reserved = 4,
-    JournalLog = 5, // Virtual inode used for key derivation.
+    JournalLog = 5,              // Virtual inode used for key derivation.
     FilesystemUpdateCounter = 6, // Virtual inode used for key derivation.
     ReservedLast = 15,
 }

@@ -104,7 +104,6 @@ pub struct Transaction {
     /// tree once the journal has been written.
     pending_auth_tree_updates: TransactionPendingAuthTreeUpdates,
 
-
     /// The extents allocated to the journal log's chained encrypted extents'
     /// tail.
     ///
