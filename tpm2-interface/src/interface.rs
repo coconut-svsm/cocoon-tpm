@@ -937,12 +937,7 @@ impl<'a> Tpm2bEccParameter<'a> {
         if buffer_size > v0 {
             return Err(TpmErr::Rc(TpmRc::SIZE));
         }
-        let buffer_size = match usize::try_from(buffer_size) {
-            Ok(buffer_size) => buffer_size,
-            Err(_) => {
-                return Err(TpmErr::Rc(TpmRc::INSUFFICIENT));
-            },
-        };
+        let buffer_size = usize::from(buffer_size);
         let (unmarshalled_buffer, buf) = match split_slice_at(buf, buffer_size) {
             Ok((unmarshalled_buffer, buf)) => (unmarshalled_buffer, buf),
             Err(e) => {
