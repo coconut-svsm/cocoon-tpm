@@ -2625,9 +2625,11 @@ impl<'a> WalkableIoSlicesIter<'a> for ZeroFilledIoSlices {
         if divisor == 0 {
             Ok(false)
         } else if divisor.is_pow2() {
-            Ok(self.remaining & (divisor - 1) == 0)
+            const _: () = assert!(ZeroFilledIoSlices::CHUNK_SIZE.is_power_of_two());
+            Ok(self.remaining & (divisor - 1) == 0
+                && (self.remaining <= Self::CHUNK_SIZE || divisor <= Self::CHUNK_SIZE))
         } else {
-            Ok(self.remaining.is_multiple_of(divisor))
+            Ok(self.remaining.is_multiple_of(divisor) && self.remaining <= Self::CHUNK_SIZE)
         }
     }
 }

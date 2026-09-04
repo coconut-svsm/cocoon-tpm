@@ -124,8 +124,45 @@ fn zero_filled_io_slices() {
         assert!(!slice.all_lengths_multiple_of(0).unwrap());
         assert!(slice.all_lengths_multiple_of(1).unwrap());
         assert!(!slice.all_lengths_multiple_of(4).unwrap());
-        assert!(slice.all_lengths_multiple_of(5).unwrap());
+        assert!(!slice.all_lengths_multiple_of(5).unwrap());
         assert!(!slice.all_lengths_multiple_of(17).unwrap());
+    }
+
+    {
+        // all_lengths_multiple_of on a total length being an exact multiple of
+        // CHUNK_SIZE: only divisors of CHUNK_SIZE qualify.
+        let slice = ZeroFilledIoSlices::new(2 * ZeroFilledIoSlices::CHUNK_SIZE);
+        assert!(slice.all_lengths_multiple_of(1).unwrap());
+        assert!(
+            slice
+                .all_lengths_multiple_of(ZeroFilledIoSlices::CHUNK_SIZE / 2)
+                .unwrap()
+        );
+        assert!(slice.all_lengths_multiple_of(ZeroFilledIoSlices::CHUNK_SIZE).unwrap());
+        assert!(
+            !slice
+                .all_lengths_multiple_of(2 * ZeroFilledIoSlices::CHUNK_SIZE)
+                .unwrap()
+        );
+        assert!(!slice.all_lengths_multiple_of(3).unwrap());
+    }
+
+    {
+        // all_lengths_multiple_of on a single, short slice.
+        let slice = ZeroFilledIoSlices::new(3);
+        assert!(slice.all_lengths_multiple_of(1).unwrap());
+        assert!(slice.all_lengths_multiple_of(3).unwrap());
+        assert!(!slice.all_lengths_multiple_of(2).unwrap());
+        assert!(!slice.all_lengths_multiple_of(ZeroFilledIoSlices::CHUNK_SIZE).unwrap());
+    }
+
+    {
+        // all_lengths_multiple_of on an empty iterator: vacuously true.
+        let slice = ZeroFilledIoSlices::new(0);
+        assert!(!slice.all_lengths_multiple_of(0).unwrap());
+        assert!(slice.all_lengths_multiple_of(1).unwrap());
+        assert!(slice.all_lengths_multiple_of(3).unwrap());
+        assert!(slice.all_lengths_multiple_of(ZeroFilledIoSlices::CHUNK_SIZE).unwrap());
     }
 }
 
