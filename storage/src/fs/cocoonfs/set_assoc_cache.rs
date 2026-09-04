@@ -196,16 +196,44 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
     /// * `slot` - The index of the slot, relative to [`Self::slots`], whose LRU
     ///   age to reset.
     fn lru_reference_slot_sync(lru_reference_matrix: &atomic::AtomicU64, capacity: u32, slot: u32) {
-        // There will be no new concurrent slot allocations without a lock, so
-        // the set of unoccupied slots computed below is stable.
-        let lru_reference_matrix_mask_referenced_slot = ((1u64 << capacity) - 1) << (8 * slot);
+        // Textbook implementations of the LRU matrix scheme maintain a total order with
+        // respect to age among all slots. What matters however is the "is not
+        // newer than" relation and that there's always at least one slot which
+        // is not newer than any other for Self::insert() to pick.
+        //
+        // Take advantage of this: slots refreshed concurrently through
+        // lru_reference_slot_sync() won't necessarily be in a total order with
+        // respect to age, but would still be in a reflexive "is not newer than"
+        // relationship then.
+        //
+        // To that end, proceed in two phases and update the atomic lru_reference_matrix
+        // twice: first, set all bits in the row associated with the specified
+        // slot, then clear all bits in the column associated with it.
+        // Concurrently executing lru_reference_slot_sync() would clear the bits
+        // in the each others' rows from their second steps each, establishing the
+        // required reflexive "is not newer than" relation between the respective slots.
+        //
+        // Note that unoccupied slots with the special marker value of all-ones in their
+        // rows should be exempt from the bit clearing in second phase.
+        // Fortunately, allocating an unoccupied slot requires a mut reference
+        // to self, so the set of unoccupied slots is stable when here.
+        let subwords8_mask_slot_bit = Self::subwords8_mask_lsb() << slot;
+        // First step: set all bits in the row associated with the specified slot.
+        // Be careful to not temporarily write the special all-ones marker value in case
+        // the capacity is at its maximum value of the row width by clearing the
+        // diagonal bit upfront -- otherwise a concurrently executing
+        // lru_reference_slot_sync() could errorneously exempt the rwo from
+        // its aging operation.
+        let lru_reference_matrix_mask_referenced_slot =
+            (((1u64 << capacity) - 1) << (8 * slot)) & !subwords8_mask_slot_bit;
         let lru_reference_matrix_val =
             lru_reference_matrix.fetch_or(lru_reference_matrix_mask_referenced_slot, atomic::Ordering::Relaxed);
-        // Don't age unoccupied slots, they shall continue to have all bits set in the
-        // lru_reference_matrix.
+        // Second step: age all other slots by clearing the bit in the column associated
+        // with the specified slot. Don't age unoccupied slots, they shall
+        // continue to have all bits set in the lru_reference_matrix.
         let lru_reference_matrix_mask_unoccupied_slots = Self::subwords8_mask_all_set(lru_reference_matrix_val);
         lru_reference_matrix.fetch_and(
-            !(Self::subwords8_mask_lsb() << slot) | lru_reference_matrix_mask_unoccupied_slots,
+            !subwords8_mask_slot_bit | lru_reference_matrix_mask_unoccupied_slots,
             atomic::Ordering::Relaxed,
         );
     }
@@ -625,10 +653,16 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
 
     /// Find the least recently used cache set slot.
     ///
-    /// Return the [`slots`](Self::slots) index of the least recently used slot,
+    /// Return the [`slots`](Self::slots) index of a least recently used slot,
     /// if any. Unoccpuied slots are not considered in the search. If no
     /// slot is occupied, then `None` will get returned, otherwise the index
-    /// of the least recently used slot.
+    /// of a least recently used slot.
+    ///
+    /// Note that there's not necessarily a unique least recently used slot, as
+    /// concurrently
+    /// executing [`lru_reference_slot_sync()`](Self::lru_reference_slot_sync)
+    /// might have established a reflexive "is not newer than" relationship
+    /// between multiple slots.
     fn least_recently_used_occupied_slot(&self) -> Option<SetAssocCacheSetSlotIndex> {
         let subwords8_mask_lsb = Self::subwords8_mask_lsb();
 
@@ -657,22 +691,13 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
             compressed_lru_reference_matrix ^ (shortest_compressed * subwords8_mask_lsb),
         );
         debug_assert!(slot < Self::MAX_ASSOCIATIVITY);
-        // It's unique.
-        debug_assert_eq!(
-            Self::find_least_significant_zero_byte(
-                ((compressed_lru_reference_matrix | !u64::trailing_bits_mask(8 * (self.capacity as u32)))
-                    ^ (shortest_compressed * subwords8_mask_lsb))
-                    | (1u64 << (8 * slot))
-            ),
-            Self::MAX_ASSOCIATIVITY
-        );
 
         Some(SetAssocCacheSetSlotIndex { slot: slot as u8 })
     }
 
-    /// Find the cache set slot of a specific LRU age.
+    /// Find a cache set slot of a specific LRU age.
     ///
-    /// Return the [`slots`](Self::slots) index of the slot having a specified
+    /// Return the [`slots`](Self::slots) index of a slot having a specified
     /// `age`, if any. An `age` value of `0` will yield the most recently
     /// used (occupied) slot, if any , whereas an `age` value of `capacity -
     /// 1` corresponds to the maximum age the least recently used (occupied)
@@ -682,6 +707,13 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
     /// returned wrapped in a `Some`. Otherwise, i.e. if `age` is not less
     /// than [`occupied_slots_count()`](Self::occupied_slots_count), then
     /// `None` gets returned.
+    ///
+    /// Note that there's not necessarily a unique slot of a given age, as
+    /// concurrently executing
+    /// [`lru_reference_slot_sync()`](Self::lru_reference_slot_sync) might have
+    /// established a reflexive "is not newer than" relationship between
+    /// multiple slots. Furthermore it's possible that a slot of specified
+    /// age does not exist while there may be slots of an older age.
     fn slot_with_age(&self, age: u32) -> Option<SetAssocCacheSetSlotIndex> {
         debug_assert!(age < Self::MAX_ASSOCIATIVITY);
         if age >= self.capacity as u32 {
@@ -700,15 +732,6 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
         let slot = Self::find_least_significant_zero_byte(
             compressed_lru_reference_matrix
                 ^ ((subwords8_mask_lsb << (self.capacity as u32 - 1 - age)) - subwords8_mask_lsb),
-        );
-        // The age is unique, there should be no more than one match.
-        debug_assert!(
-            slot == self.capacity as u32
-                || Self::find_least_significant_zero_byte(
-                    (compressed_lru_reference_matrix
-                        ^ ((subwords8_mask_lsb << (self.capacity as u32 - 1 - age)) - subwords8_mask_lsb))
-                        | (1u64 << (8 * slot))
-                ) == self.capacity as u32
         );
 
         (slot < self.capacity as u32).then_some(SetAssocCacheSetSlotIndex { slot: slot as u8 })
@@ -1083,6 +1106,10 @@ impl<K: cmp::Ord, T, M: SetAssocCacheMapKeyToSet<K>> SetAssocCache<K, T, M> {
                             let least_recently_used_redistributed_slot_age = cur_destination_set.capacity
                                 - cur_destination_set.reconfigure_state.remaining_to_redistribute
                                 - 1;
+                            // The already redistributed slots' ages are contiguous and unique, as
+                            // SetAssocCacheSet::lru_reference_slot_sync() possibly causing gaps is
+                            // not getting invoked from the redistribution. Thus, the search will yield
+                            // a well-defined result and the unwrap() cannot panic.
                             let least_recently_used_redistributed_slot = cur_destination_set
                                 .slot_with_age(least_recently_used_redistributed_slot_age as u32)
                                 .unwrap();
