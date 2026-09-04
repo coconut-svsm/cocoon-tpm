@@ -622,8 +622,8 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
     ///
     /// Increase the cache set's [`capacity`](Self::capacity) to `new_capacity`.
     fn grow_capacity(&mut self, new_capacity: u32) {
-        debug_assert!(new_capacity <= Self::MAX_ASSOCIATIVITY);
         debug_assert!(new_capacity > self.capacity as u32);
+        let new_capacity = new_capacity.min(Self::MAX_ASSOCIATIVITY);
 
         // Mark the newly added slots as unoccpuied by flipping all their bits to one.
         let added_capacity = new_capacity - self.capacity as u32;
