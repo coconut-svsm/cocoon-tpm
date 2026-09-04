@@ -36,3 +36,18 @@ use ossl_ffi as backend;
 
 pub use error::*;
 pub use io_slices::*;
+
+pub const fn backend_name() -> &'static str {
+    #[cfg(feature = "openssl")]
+    {
+        "openssl"
+    }
+    #[cfg(feature = "boringssl")]
+    {
+        "boringssl"
+    }
+    #[cfg(not(any(feature = "boringssl", feature = "openssl")))]
+    {
+        "pure_rust"
+    }
+}
