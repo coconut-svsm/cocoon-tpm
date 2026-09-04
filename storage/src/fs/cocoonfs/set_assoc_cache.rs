@@ -416,6 +416,7 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
     /// then that evicted entry will get returned in the second component of
     /// the returned value.
     fn insert(&mut self, key: K, value: T) -> (SetAssocCacheSetSlotIndex, Option<(K, T)>) {
+        debug_assert_ne!(self.capacity, 0);
         let mut ordered_slots_insertion_index = match self.lookup_ordered_slots_index(&key) {
             Ok(existing_ordered_slots_index) => {
                 let slot = self.get_ordered_slot(existing_ordered_slots_index).unwrap();
@@ -1229,6 +1230,9 @@ impl<K: cmp::Ord, T, M: SetAssocCacheMapKeyToSet<K>> SetAssocCache<K, T, M> {
             Some(set_index) => set_index,
             None => return SetAssocCacheInsertionResult::Uncacheable { value },
         };
+        if self.sets[set_index].capacity == 0 {
+            return SetAssocCacheInsertionResult::Uncacheable { value };
+        }
         let (slot, evicted) = self.sets[set_index].insert(key, value);
         SetAssocCacheInsertionResult::Inserted {
             index: SetAssocCacheIndex { set_index, slot },
