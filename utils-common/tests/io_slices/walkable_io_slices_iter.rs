@@ -187,6 +187,19 @@ fn io_slices_take_exact() {
     }
 
     {
+        let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(10);
+        assert!(matches!(take_exact.for_each(&mut |_| true), Ok(())));
+    }
+
+    {
+        let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(11);
+        assert!(matches!(
+            take_exact.for_each(&mut |_| true),
+            Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
+        ));
+    }
+
+    {
         // for each
         let take_exact = BuffersSliceIoSlicesIter::new(&slices).take_exact(4);
         let all_slices = [buffer1.as_slice(), &buffer2[0..2]];

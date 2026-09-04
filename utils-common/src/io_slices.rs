@@ -2263,7 +2263,7 @@ where
 {
     fn for_each(&self, cb: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), Self::BackendIteratorError> {
         let mut remaining = self.remaining;
-        let mut buffers_exhausted = false;
+        let mut iterated_all = true;
         self.iter
             .for_each(&mut |slice| {
                 if remaining == 0 {
@@ -2271,16 +2271,14 @@ where
                 }
 
                 let slice_len = remaining.min(slice.len());
-                if slice_len == 0 {
-                    buffers_exhausted = true;
-                    return false;
-                }
+                debug_assert_ne!(slice_len, 0);
                 remaining -= slice_len;
-                cb(&slice[..slice_len])
+                iterated_all = cb(&slice[..slice_len]);
+                iterated_all
             })
             .map_err(IoSlicesIterError::BackendIteratorError)?;
 
-        if !buffers_exhausted {
+        if !iterated_all || remaining == 0 {
             Ok(())
         } else {
             Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
@@ -2288,6 +2286,9 @@ where
     }
 
     fn total_len(&self) -> Result<usize, Self::BackendIteratorError> {
+        // Deliberately don't verify that remaining is <= the underlying iterator's
+        // total_len() at this point here. BuffersExhausted will get reported
+        // when actually iterating.
         Ok(self.remaining)
     }
 }
