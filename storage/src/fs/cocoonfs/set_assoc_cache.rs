@@ -668,14 +668,16 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
 
         // The least recently used occupied slot will be the one with the fewest set
         // bits in its associated lru_reference_matrix value. Note that
-        // unoccupied ones will have all their bits set, while unoccupied ones
+        // unoccupied ones will have all their bits set, while occupied ones
         // will have at least one clear (the one corresponding to themselves).
         // Compress all bits to the right in each 8-bit subword.
         let lru_reference_matrix = self.lru_reference_matrix.load(atomic::Ordering::Relaxed);
+        // Mark the slots beyond the capacity as unoccupied for the purpose of the
+        // search below.
+        let lru_reference_matrix = lru_reference_matrix | !u64::trailing_bits_mask(8 * self.capacity as u32);
         let compressed_lru_reference_matrix = Self::subwords8_compress(!0, lru_reference_matrix);
 
-        // Now determine the shortest compressed lru_reference_matrix value, ignoring
-        // the zeros.
+        // Now determine the shortest compressed lru_reference_matrix value.
         let mut shortest_compressed = compressed_lru_reference_matrix;
         shortest_compressed &= shortest_compressed >> 8;
         shortest_compressed &= shortest_compressed >> 16;
