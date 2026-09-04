@@ -39,7 +39,6 @@ use crate::{
     tpm2_interface,
     utils_common::{
         alloc::try_alloc_zeroizing_vec,
-        bitmanip::BitManip as _,
         io_slices::{self, IoSlicesIterCommon as _, IoSlicesMutIter as _},
         zeroize,
     },
@@ -507,7 +506,7 @@ pub(crate) fn transform_next_blocks<
         let first_src_slice_len = src.next_slice_len()?;
         if first_src_slice_len >= 2 * block_len {
             let batch_len = first_dst_slice_len.min(first_src_slice_len);
-            let batch_len = if block_len.is_pow2() {
+            let batch_len = if block_len.is_power_of_two() {
                 batch_len & !(block_len - 1)
             } else {
                 batch_len - (batch_len % block_len)
@@ -596,7 +595,7 @@ pub(crate) fn transform_next_blocks_in_place<
     let first_dst_slice_len = dst.next_slice_len()?;
     // Try to process a batch of multiple block cipher blocks at once.
     if first_dst_slice_len >= 2 * block_len {
-        let batch_len = if block_len.is_pow2() {
+        let batch_len = if block_len.is_power_of_two() {
             first_dst_slice_len & !(block_len - 1)
         } else {
             first_dst_slice_len - (first_dst_slice_len % block_len)

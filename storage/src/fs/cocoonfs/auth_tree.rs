@@ -1093,7 +1093,7 @@ impl AuthTreeNodeCacheMapNodeIdToSetAssocCacheSet {
         debug_assert!(cache_sets_count <= 64);
 
         // Logarithm by two, rounded up.
-        let auth_tree_levels_log2 = auth_tree_levels.ilog2() + !auth_tree_levels.is_pow2() as u32;
+        let auth_tree_levels_log2 = auth_tree_levels.ilog2() + !auth_tree_levels.is_power_of_two() as u32;
         let auth_tree_levels_inv_shift = 16 + auth_tree_levels_log2;
         let auth_tree_levels_inv_multiplier = (1u32 << auth_tree_levels_inv_shift).div_ceil(auth_tree_levels);
         debug_assert!(auth_tree_levels_inv_multiplier < 1u32 << (16 + 1));

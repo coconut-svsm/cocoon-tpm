@@ -19,11 +19,6 @@ macro_rules! impl_bitmanip_common {
             ((value | value.wrapping_neg()) >> (<$ut>::BITS - 1)) as $t
         }
 
-        fn is_pow2(self) -> bool {
-            let value = <Self as BitManip>::abs(self);
-            value & value.wrapping_sub(1) == 0
-        }
-
         fn is_aligned_pow2(self, pow2_log2: u32) -> bool {
             <Self as BitManip>::abs(self) & <$ut as BitManip>::trailing_bits_mask(pow2_log2) == 0
         }
@@ -218,9 +213,6 @@ pub trait BitManip: Copy {
     ///
     /// * `pow2_log2` - The base-2 logarithm of the desired power of two.
     fn exp2(pow2_log2: u32) -> Self;
-
-    /// Test whether a value is a power of two.
-    fn is_pow2(self) -> bool;
 
     /// Test whether a value is a multiple of a given power of two.
     ///

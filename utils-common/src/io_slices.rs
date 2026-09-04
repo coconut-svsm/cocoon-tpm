@@ -17,7 +17,7 @@
 // Lifetimes are not obvious at first sight here, make them explicit.
 #![allow(clippy::needless_lifetimes)]
 
-use crate::{bitmanip::BitManip as _, ct_cmp, xor};
+use crate::{ct_cmp, xor};
 use core::{convert, fmt, iter, marker};
 
 /// Error information for [`IoSlicesIterError::IoSlicesError`].
@@ -553,7 +553,7 @@ pub trait WalkableIoSlicesIter<'a>: IoSlicesIter<'a> {
             return Ok(false);
         }
         let mut all_multiple_of = true;
-        if divisor.is_pow2() {
+        if divisor.is_power_of_two() {
             self.for_each(&mut |slice| {
                 all_multiple_of &= slice.len() & (divisor - 1) == 0;
                 all_multiple_of
@@ -2625,7 +2625,7 @@ impl<'a> WalkableIoSlicesIter<'a> for ZeroFilledIoSlices {
     fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
         if divisor == 0 {
             Ok(false)
-        } else if divisor.is_pow2() {
+        } else if divisor.is_power_of_two() {
             const _: () = assert!(ZeroFilledIoSlices::CHUNK_SIZE.is_power_of_two());
             Ok(self.remaining & (divisor - 1) == 0
                 && (self.remaining <= Self::CHUNK_SIZE || divisor <= Self::CHUNK_SIZE))

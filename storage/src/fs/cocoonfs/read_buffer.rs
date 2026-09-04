@@ -190,7 +190,7 @@ impl BlockAllocationBlocksReadBuffer {
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         src_allocation_blocks_bufs: SI,
     ) -> Option<layout::PhysicalAllocBlockIndex> {
-        debug_assert!(self.buffered_allocation_blocks.len().is_pow2());
+        debug_assert!(self.buffered_allocation_blocks.len().is_power_of_two());
         let buffered_block_allocation_blocks_begin = layout::PhysicalAllocBlockIndex::from(
             u64::from(src_allocation_blocks_begin) & !(self.buffered_allocation_blocks.len() as u64 - 1),
         );
@@ -253,7 +253,7 @@ impl BlockAllocationBlocksReadBuffer {
     ) -> Option<layout::PhysicalAllocBlockIndex> {
         // If no block is currently being buffered, return.
         let buffered_block_allocation_blocks_begin = self.buffered_block_allocation_blocks_begin?;
-        debug_assert!(self.buffered_allocation_blocks.len().is_pow2());
+        debug_assert!(self.buffered_allocation_blocks.len().is_power_of_two());
         if (u64::from(src_allocation_blocks_begin) ^ u64::from(buffered_block_allocation_blocks_begin))
             & !(self.buffered_allocation_blocks.len() as u64 - 1)
             != 0

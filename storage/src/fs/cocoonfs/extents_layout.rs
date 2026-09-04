@@ -11,7 +11,7 @@ use crate::{
         cocoonfs::{FormatError, layout},
     },
     nvfs_err_internal,
-    utils_common::bitmanip::{BitManip as _, UBitManip as _},
+    utils_common::bitmanip::UBitManip as _,
 };
 
 /// Layout characteristics of a logical group of extents.
@@ -221,7 +221,7 @@ impl ExtentsLayout {
             }
             - self.extent_hdr_len as u64;
 
-        let payload_padding_len = if self.extent_payload_len_alignment.is_pow2() {
+        let payload_padding_len = if self.extent_payload_len_alignment.is_power_of_two() {
             total_payload_len & (self.extent_payload_len_alignment as u64 - 1)
         } else {
             total_payload_len % self.extent_payload_len_alignment as u64
@@ -273,7 +273,7 @@ impl ExtentsLayout {
                 u64::MAX
             }
         };
-        let payload_len_padding = if self.extent_payload_len_alignment.is_pow2() {
+        let payload_len_padding = if self.extent_payload_len_alignment.is_power_of_two() {
             payload_len.wrapping_neg() & (self.extent_payload_len_alignment as u64 - 1)
         } else {
             let r = payload_len % self.extent_payload_len_alignment as u64;
@@ -364,7 +364,7 @@ impl ExtentsLayout {
         // depend on the respective extent's allocated size.
         if self.extents_hdr_len == 0 {
             true
-        } else if self.extent_payload_len_alignment.is_pow2() {
+        } else if self.extent_payload_len_alignment.is_power_of_two() {
             // The payload alignment is <= the extent alignment, c.f. Self::new().
             debug_assert!(
                 self.extent_payload_len_alignment as u64
@@ -402,7 +402,7 @@ impl ExtentsLayout {
         debug_assert_ne!(u64::from(extent_allocation_blocks), 0);
         if self.extents_hdr_len == 0 {
             0
-        } else if self.extent_payload_len_alignment.is_pow2() {
+        } else if self.extent_payload_len_alignment.is_power_of_two() {
             debug_assert!(self.extents_hdr_placement_cost_is_invariant());
             let payload_padding_wo_extents_hdr_len =
                 (self.extent_hdr_len as u64).wrapping_neg() & (self.extent_payload_len_alignment as u64 - 1);

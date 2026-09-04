@@ -20,7 +20,6 @@ use crate::{
     },
     nvfs_err_internal, tpm2_interface,
     utils_common::{
-        bitmanip::BitManip as _,
         fixed_vec::FixedVec,
         io_slices::{
             self, IoSlicesIter as _, IoSlicesIterCommon as _, IoSlicesMutIter as _, WalkableIoSlicesIter as _,
@@ -64,7 +63,7 @@ fn align_len_down_to_block_cipher_alg_block_len(
     len: usize,
     block_cipher_alg_block_len: usize,
 ) -> Result<(usize, usize), NvFsError> {
-    if !block_cipher_alg_block_len.is_pow2() {
+    if !block_cipher_alg_block_len.is_power_of_two() {
         return Err(nvfs_err_internal!());
     }
     let excess = len & (block_cipher_alg_block_len - 1);
@@ -84,7 +83,7 @@ fn align_len_up_to_block_cipher_alg_block_len(
     len: usize,
     block_cipher_alg_block_len: usize,
 ) -> Result<(usize, usize), NvFsError> {
-    if !block_cipher_alg_block_len.is_pow2() {
+    if !block_cipher_alg_block_len.is_power_of_two() {
         return Err(nvfs_err_internal!());
     }
     // Distance to next alignment boundary.

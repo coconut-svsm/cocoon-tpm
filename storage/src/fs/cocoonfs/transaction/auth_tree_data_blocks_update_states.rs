@@ -4506,7 +4506,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
     }
 
     fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
-        if divisor.is_pow2() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
+        if divisor.is_power_of_two() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
                 .head
@@ -4515,7 +4515,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
                 .unwrap_or(true))
         } else {
             let mut all_multiple_of = true;
-            if divisor.is_pow2() {
+            if divisor.is_power_of_two() {
                 self.for_each(&mut |slice| {
                     all_multiple_of &= slice.len() & (divisor - 1) == 0;
                     all_multiple_of
@@ -4660,7 +4660,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
     }
 
     fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
-        if divisor.is_pow2() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
+        if divisor.is_power_of_two() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
                 .head
@@ -4669,7 +4669,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
                 .unwrap_or(true))
         } else {
             let mut all_multiple_of = true;
-            if divisor.is_pow2() {
+            if divisor.is_power_of_two() {
                 self.for_each(&mut |slice| {
                     all_multiple_of &= slice.len() & (divisor - 1) == 0;
                     all_multiple_of
