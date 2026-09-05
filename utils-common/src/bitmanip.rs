@@ -83,12 +83,8 @@ macro_rules! impl_ubitmanip {
                 if lz != 0 {
                     Some((1 as $ut) << (<$ut>::BITS - lz))
                 } else {
-                    if self & t == 0 {
-                        // Is maximum possible power of two already.
-                        Some(t)
-                    } else {
-                        None
-                    }
+                    // Is either 0 or > the largest representable power of two.
+                    if self == 0 { Some(self) } else { None }
                 }
             }
 
@@ -263,10 +259,16 @@ pub trait UBitManip: Sized + BitManip<UnsignedType = Self> {
     ///
     /// Returns `None` on overflow, otherwise the rounded value wrapped in a
     /// `Some`.
+    ///
+    /// On input `0`, `Some(0)` is getting returned, even though that's not
+    /// a power of two.
     fn round_up_next_pow2(self) -> Option<Self>;
 
     /// Round a value downwards to the next power of two smaller than or equal
     /// to it.
+    ///
+    /// On input `0`, `0` is getting returned, even though that's not a power of
+    /// two.
     fn round_down_next_pow2(self) -> Self;
 
     /// Expand from right operation.
