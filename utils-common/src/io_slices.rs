@@ -2364,6 +2364,7 @@ where
         self.iter0
             .as_mut()
             .map(|iter0| iter0.next_slice_len())
+            .filter(|iter0_next_slice_len| !matches!(iter0_next_slice_len, Ok(0)))
             .or_else(|| self.iter1.as_mut().map(|iter1| iter1.next_slice_len()))
             .unwrap_or(Ok(0))
     }
