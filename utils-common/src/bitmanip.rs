@@ -204,7 +204,7 @@ pub trait BitManip: Copy {
 
     /// Test if non-zero.
     ///
-    /// Returns `1` if not, `0` if yes.
+    /// Returns `0` if not, `1` if yes.
     fn is_nonzero(self) -> Self;
 
     /// Raise two to a given power.
