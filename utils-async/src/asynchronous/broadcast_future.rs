@@ -32,7 +32,7 @@ impl convert::From<BroadcastWakerError> for BroadcastFutureError {
 /// `BroadcastFutureSubscription::poll()`](BroadcastFutureSubscription::poll).
 pub trait BroadcastedFuture: marker::Send {
     /// The type of value produced on completion.
-    type Output: Clone + marker::Send;
+    type Output: Clone + marker::Send + marker::Sync;
 
     /// Type of the auxiliary argument provided to [`poll()`](Self::poll).
     type AuxPollData<'a>;
@@ -231,7 +231,8 @@ impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
             BroadcastFutureInnerFuture::Pending { inner } => inner,
             BroadcastFutureInnerFuture::Ready(result) => {
                 // Don't clone under the lock. Note that once the inner future has completed and
-                // the result installed here, it's stable.
+                // the result installed here, it's stable. Also, the Output is Sync,
+                // so it's fine to clone() through a shared reference.
                 drop(polling_state_guard);
                 this.subscriptions.unsubscribe(subscription_id, false);
                 return task::Poll::Ready(result.clone());
