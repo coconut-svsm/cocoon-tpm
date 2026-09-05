@@ -950,7 +950,15 @@ impl<K: cmp::Ord, T, M: SetAssocCacheMapKeyToSet<K>> SetAssocCache<K, T, M> {
         }
 
         let new_sets_count = sets_capacities.clone().count();
-        if new_sets_count > self.sets.len() {
+        if new_sets_count == 0 {
+            self.sets.truncate(0);
+            self.map_key_to_set = map_key_to_set;
+            return Ok(());
+        } else if self.sets.is_empty() {
+            // Nothing to redistribute, simply initialize the cache.
+            *self = Self::new(map_key_to_set, sets_capacities)?;
+            return Ok(());
+        } else if new_sets_count > self.sets.len() {
             self.sets
                 .try_reserve_exact(new_sets_count - self.sets.len())
                 .map_err(|_| SetAssocCacheConfigureError::MemoryAllocationFailure)?;
