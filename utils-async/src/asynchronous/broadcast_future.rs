@@ -101,7 +101,9 @@ impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
         Self {
             subscriptions: BroadcastWakerSubscriptions::new(),
             polling_state: ST::Lock::from(BroadcastFuturePollingState::Idle),
-            inner_fut: cell::UnsafeCell::new(BroadcastFutureInnerFuture::Pending { inner }),
+            inner_fut: cell::UnsafeCell::new(BroadcastFutureInnerFuture::Pending {
+                inner: cell::UnsafeCell::new(inner),
+            }),
         }
     }
 
@@ -111,7 +113,7 @@ impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
     /// [`Pending`](task::Poll::Pending), `None` otherwise.
     pub fn into_inner(self) -> Option<F> {
         match self.inner_fut.into_inner() {
-            BroadcastFutureInnerFuture::Pending { inner } => Some(inner),
+            BroadcastFutureInnerFuture::Pending { inner } => Some(inner.into_inner()),
             BroadcastFutureInnerFuture::Ready(_) => None,
         }
     }
@@ -223,12 +225,16 @@ impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
         // be UB.
         atomic::compiler_fence(atomic::Ordering::Acquire);
 
-        // Safe, access is exclusive as per holding the lock and ->polling_state
-        // being Idle.
         let inner_fut = this.inner_fut.get();
-        let inner_fut = unsafe { &mut *inner_fut };
+        // SAFETY:
+        // - No mut references around, because we hold the polling_state_guard and we're
+        //   in BroadcastFuturePollingState::Idle state.
+        // - Once inner_fut enters BroadcastFutureInnerFuture::Ready, no more mut
+        //   references will ever get created, meaning the reference remains valid even
+        //   after the polling_state_guard drop in the Ready arm match below.
+        let inner_fut = unsafe { &*inner_fut };
         let f = match inner_fut {
-            BroadcastFutureInnerFuture::Pending { inner } => inner,
+            BroadcastFutureInnerFuture::Pending { inner } => inner.get(),
             BroadcastFutureInnerFuture::Ready(result) => {
                 // Don't clone under the lock. Note that once the inner future has completed and
                 // the result installed here, it's stable. Also, the Output is Sync,
@@ -256,10 +262,14 @@ impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
             // with the lock held.
             let in_poll_guard = BroadcastFutureInPollGuard::new(&this, polling_state_guard);
 
-            // Safe, it's a projection repin.
-            let f = unsafe { pin::Pin::new_unchecked(&mut *f) };
+            let result = {
+                // SAFETY: access is exclusive, as per owning the in_poll_guard.
+                let f = unsafe { &mut *f };
+                // SAFETY: it's a projection repin.
+                let f = unsafe { pin::Pin::new_unchecked(&mut *f) };
 
-            let result = BroadcastedFuture::poll(f, aux_poll_data, &mut task::Context::from_waker(&waker));
+                BroadcastedFuture::poll(f, aux_poll_data, &mut task::Context::from_waker(&waker))
+            };
 
             // At this point the (broadcast) waker might wake other tasks, they'd see
             // ->polling_state == InPoll and put themselves immediately back to sleep. In
@@ -269,6 +279,9 @@ impl<ST: sync_types::SyncTypes, F: BroadcastedFuture> BroadcastFuture<ST, F> {
             // when needed.
             match result {
                 task::Poll::Ready(result) => {
+                    // SAFETY: no references around as per owning the in_poll_guard and inner_fut
+                    // not being in the Ready state yet.
+                    let inner_fut = unsafe { &mut *this.inner_fut.get() };
                     *inner_fut = BroadcastFutureInnerFuture::Ready(result.clone());
                     // Reacquire the ->polling_state lock and reset to Idle.
                     polling_state_guard = in_poll_guard.release();
@@ -331,7 +344,10 @@ enum BroadcastFutureInnerFuture<F: BroadcastedFuture> {
     /// yet and must get polled further.
     Pending {
         /// The inner future to get collectively polled for.
-        inner: F,
+        ///
+        /// Accessed only from the task owning the
+        /// [`BroadcastFuturePollingState::InPoll`] state.
+        inner: cell::UnsafeCell<F>,
     },
     /// The inner [`BroadcastedFuture`] is [`Ready`](task::Poll::Ready),
     /// with the resulting [`Output`][`Future::Output`].
