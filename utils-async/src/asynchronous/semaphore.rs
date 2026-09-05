@@ -32,6 +32,7 @@ pub enum AsyncSemaphoreError {
 
 /// Internal representation of the number/type of leases requested respectively
 /// granted from an [`AsyncSemaphore`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AsyncSemaphoreLeaseGrantCount {
     /// "Trivial" grant for zero leases, mutually exclusive with
     /// [`ExclusiveAll`](Self::ExclusiveAll) grants.
@@ -122,8 +123,8 @@ impl AsyncSemaphoreQueue {
     /// # Arguments:
     ///
     /// * `waiter_id` - The waiter id, as previously returned by
-    ///   [`enqueue_waiter()`](Self::enqueue_waiter) of the enqueued waiter
-    ///   instance to check for completion.
+    ///   [`enqueue_waiter()`](AsyncSemaphoreQueueEntryAllocation::enqueue_waiter)
+    ///   of the enqueued waiter instance to check for completion.
     /// * `waker` - The waker to register at the enqueued waiter entry in case
     ///   the waiter is not ready yet.
     fn poll_waiter(&mut self, waiter_id: num::NonZeroU64, waker: task::Waker) -> bool {
@@ -162,65 +163,48 @@ impl AsyncSemaphoreQueue {
     /// # Arguments:
     ///
     /// * `waiter_id` - The waiter id as previously returned by
-    ///   [`enqueue_waiter()`](Self::enqueue_waiter) of the waiter entry to
-    ///   remove from the queue..
+    ///   [`enqueue_waiter()`](AsyncSemaphoreQueueEntryAllocation::enqueue_waiter)
+    ///   of the waiter entry to remove from the queue.
     fn remove_waiter(&mut self, waiter_id: num::NonZeroU64) {
         let index = self.waiter_position(waiter_id).unwrap();
         self.remove_entry(index);
     }
 
-    /// Enqueue a waiter for the semaphore.
+    /// Prepare for enqueueing a waiter for the semaphore.
     ///
-    /// On success, an id uniquely identifying the wait entry gets returned.
+    /// Attempt to allocate a queue entry and return the
+    /// [`AsyncSemaphoreQueueEntryAllocation`] on success.  The
+    /// [`AsyncSemaphoreQueueEntryAllocation::enqueue_waiter()`] may then
+    /// subsequently get invoked for actually enqueueing a waiter.
     ///
-    /// Note that the caller is required to update
-    /// `enqueued_exclusive_all_waiters` or `enqueued_trivial_lease_waiters` as
-    /// appropriate.
-    ///
-    /// `enqueue_waiter()` may drop and reacquire the supplied `this_guard`
-    /// locking guard.
+    /// `enqueue_waiter_prepare()` may drop and reacquire the supplied
+    /// `this_guard` locking guard.
     ///
     /// # Arguments:
     ///
-    /// * `queue_lock` - A [`LockForInner`](sync_types::LockForInner) for
+    /// * `queue_lock_for_inner_queue` - A
+    ///   [`LockForInner`](sync_types::LockForInner) for
     ///   [`AsyncSemaphoreQueue::queue`] derived from a
     ///   [`Lock`](sync_types::Lock) for `Self`.
     /// * `this_guard` - A [`Lock::Guard`](sync_types::Lock::Guard) on a
     ///   [`Lock`](sync_types::Lock) for `Self`.
-    ///
-    /// * `leases_requested` - The request number/type of leases to record at
-    ///   the newly created waiter entry.
-    ///
-    /// # Errors:
-    ///
-    /// * [`AsyncSemaphoreError::MemoryAllocationFailure`] - Memory allocation
-    ///   failure.
-    fn enqueue_waiter<'a, QL: sync_types::Lock<Self>>(
-        queue_lock: &'a sync_types::LockForInner<'a, Self, QL, AsyncSemaphoreQueueDerefInnerQueueTag>,
+    fn enqueue_waiter_prepare<'a, QL: sync_types::Lock<Self>>(
+        queue_lock_for_inner_queue: &'a sync_types::LockForInner<'a, Self, QL, AsyncSemaphoreQueueDerefInnerQueueTag>,
         this_guard: QL::Guard<'a>,
-        leases_requested: AsyncSemaphoreLeaseGrantCount,
-    ) -> (QL::Guard<'a>, Result<num::NonZeroU64, AsyncSemaphoreError>) {
-        let queue_guard =
+    ) -> Result<AsyncSemaphoreQueueEntryAllocation<'a, QL>, (QL::Guard<'a>, AsyncSemaphoreError)> {
+        let queue_guard_for_inner_queue =
             sync_types::LockForInnerGuard::<'_, _, _, AsyncSemaphoreQueueDerefInnerQueueTag>::from_outer(this_guard);
-        let (queue_guard, r) = SyncVec::try_reserve(queue_lock, queue_guard, 1);
-        if let Err(e) = r {
-            return (
-                queue_guard.into_outer(),
-                Err(match e {
+        match SyncVec::try_reserve(queue_lock_for_inner_queue, queue_guard_for_inner_queue, 1) {
+            (queue_guard_for_inner_queue, Ok(())) => Ok(AsyncSemaphoreQueueEntryAllocation {
+                queue_guard: queue_guard_for_inner_queue.into_outer(),
+            }),
+            (queue_guard_for_inner_queue, Err(e)) => Err((
+                queue_guard_for_inner_queue.into_outer(),
+                match e {
                     SyncVecError::MemoryAllocationFailure => AsyncSemaphoreError::MemoryAllocationFailure,
-                }),
-            );
+                },
+            )),
         }
-        let mut this_guard = queue_guard.into_outer();
-
-        this_guard.last_waiter_id += 1;
-        let waiter_id = num::NonZeroU64::new(this_guard.last_waiter_id).unwrap();
-        this_guard.queue.push(AsyncSemaphoreQueueEntry {
-            leases_requested,
-            waker: None,
-            waiter_id,
-        });
-        (this_guard, Ok(waiter_id))
     }
 
     /// Check whether the queue has any uncancelled waiters enqueued.
@@ -258,6 +242,50 @@ impl AsyncSemaphoreQueue {
                 .any(|entry| { matches!(entry.leases_requested, AsyncSemaphoreLeaseGrantCount::ExclusiveAll) })
         );
         has_exclusive_all_waiters
+    }
+}
+
+/// Queue entry reservation returned by
+/// [`AsyncSemaphoreQueue::enqueue_waiter_prepare()`].
+struct AsyncSemaphoreQueueEntryAllocation<'a, QL: sync_types::Lock<AsyncSemaphoreQueue>>
+where
+    QL: 'a,
+{
+    queue_guard: QL::Guard<'a>,
+}
+
+impl<'a, QL: sync_types::Lock<AsyncSemaphoreQueue>> AsyncSemaphoreQueueEntryAllocation<'a, QL>
+where
+    QL: 'a,
+{
+    /// Enqueue a waiter for the semaphore, consuming the queue entry allocation
+    /// associated with `self`.
+    ///
+    /// An id uniquely identifying the wait entry gets returned, alongside a
+    /// guard for the lock initially passed to
+    /// [`AsyncSemaphoreQueue::enqueue_waiter_prepare()`]. Note that this guard
+    /// might have been dropped and reacquired in the course of
+    /// [`AsyncSemaphoreQueue::enqueue_waiter_prepare()`].
+    ///
+    /// # Arguments:
+    ///
+    /// * `leases_requested` - The request number/type of leases to record at
+    ///   the newly created waiter entry.
+    fn enqueue_waiter(self, leases_requested: AsyncSemaphoreLeaseGrantCount) -> (QL::Guard<'a>, num::NonZeroU64) {
+        let Self { mut queue_guard } = self;
+        queue_guard.last_waiter_id += 1;
+        let waiter_id = num::NonZeroU64::new(queue_guard.last_waiter_id).unwrap();
+        queue_guard.queue.push(AsyncSemaphoreQueueEntry {
+            leases_requested,
+            waker: None,
+            waiter_id,
+        });
+        match leases_requested {
+            AsyncSemaphoreLeaseGrantCount::TrivialLease => queue_guard.enqueued_trivial_lease_waiters += 1,
+            AsyncSemaphoreLeaseGrantCount::Leases { count: _ } => (),
+            AsyncSemaphoreLeaseGrantCount::ExclusiveAll => queue_guard.enqueued_exclusive_all_waiters += 1,
+        };
+        (queue_guard, waiter_id)
     }
 }
 
@@ -380,24 +408,26 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
     /// * [`AsyncSemaphoreError::MemoryAllocationFailure`] - Memory allocation
     ///   failure.
     fn prepare_acquire_leases(&self, leases_requested: usize) -> Result<Option<num::NonZeroU64>, AsyncSemaphoreError> {
-        let locked_queue = self.queue.lock();
-        if self._try_acquire_leases(&locked_queue, leases_requested)? {
+        let queue_guard = self.queue.lock();
+        if self._try_acquire_leases(&queue_guard, leases_requested)? {
             Ok(None)
         } else {
             let queue_lock_for_inner_queue =
                 sync_types::LockForInner::<'_, _, _, AsyncSemaphoreQueueDerefInnerQueueTag>::from_outer(&self.queue);
-            match AsyncSemaphoreQueue::enqueue_waiter(
-                &queue_lock_for_inner_queue,
-                locked_queue,
-                AsyncSemaphoreLeaseGrantCount::from(leases_requested),
-            ) {
-                (mut locked_queue, Ok(waiter_id)) => {
-                    if leases_requested == 0 {
-                        locked_queue.enqueued_trivial_lease_waiters += 1;
+
+            match AsyncSemaphoreQueue::enqueue_waiter_prepare(&queue_lock_for_inner_queue, queue_guard) {
+                Ok(entry_allocation) => {
+                    // The enqueue_waiter_prepare() might have dropped and reacquired the lock and
+                    // some wakeups might have been missed. Recheck.
+                    if self._try_acquire_leases(&entry_allocation.queue_guard, leases_requested)? {
+                        Ok(None)
+                    } else {
+                        let (_, waiter_id) =
+                            entry_allocation.enqueue_waiter(AsyncSemaphoreLeaseGrantCount::from(leases_requested));
+                        Ok(Some(waiter_id))
                     }
-                    Ok(Some(waiter_id))
                 }
-                (_, Err(e)) => Err(e),
+                Err((_, e)) => Err(e),
             }
         }
     }
@@ -426,30 +456,37 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
     /// * [`AsyncSemaphoreError::MemoryAllocationFailure`] - Memory allocation
     ///   failure.
     fn prepare_acquire_exclusive_all(&self) -> Result<Option<num::NonZeroU64>, AsyncSemaphoreError> {
-        let mut locked_queue = self.queue.lock();
-        self.acquire_exclusive_all_begin(&locked_queue);
-        if self._try_acquire_exclusive_all(&locked_queue) {
-            self.acquire_exclusive_all_end(&locked_queue);
+        let queue_guard = self.queue.lock();
+        self.acquire_exclusive_all_begin(&queue_guard);
+        if self._try_acquire_exclusive_all(&queue_guard) {
+            self.acquire_exclusive_all_end(&queue_guard);
             Ok(None)
         } else {
-            // The enqueue_waiter() might drop and reacquire the lock. Bump
-            // enqueued_exclusive_all_waiters now so that any concurrent
-            // acquire_exclusive_all_begin()/acquire_exclusive_all_end() while the lock is
-            // dropped becomes a nop.
-            locked_queue.enqueued_exclusive_all_waiters += 1;
+            // The enqueue_waiter_prepare() might drop and reacquire the lock.
+            // enqueued_exclusive_all_waiters has not been bumped yet, because that's
+            // possible below only once there's an actual ExlusiveAll waiter
+            // enqueued. Invoke acquire_exclusive_all_end() before dropping the
+            // lock so that a acquire_exclusive_all_begin() issued concurrently
+            // while the lock is dropped wouldn't subtract the
+            // TRIVIAL_LEASES_GRANTED_NO_EXCLUSIVE_ALL_WAITERS_OFFSET once again.
+            self.acquire_exclusive_all_end(&queue_guard);
             let queue_lock_for_inner_queue =
                 sync_types::LockForInner::<'_, _, _, AsyncSemaphoreQueueDerefInnerQueueTag>::from_outer(&self.queue);
-            match AsyncSemaphoreQueue::enqueue_waiter(
-                &queue_lock_for_inner_queue,
-                locked_queue,
-                AsyncSemaphoreLeaseGrantCount::ExclusiveAll,
-            ) {
-                (_, Ok(waiter_id)) => Ok(Some(waiter_id)),
-                (mut locked_queue, Err(e)) => {
-                    locked_queue.enqueued_exclusive_all_waiters -= 1;
-                    self.acquire_exclusive_all_end(&locked_queue);
-                    Err(e)
+            match AsyncSemaphoreQueue::enqueue_waiter_prepare(&queue_lock_for_inner_queue, queue_guard) {
+                Ok(entry_allocation) => {
+                    self.acquire_exclusive_all_begin(&entry_allocation.queue_guard);
+                    // Recheck whether the grant can get acquired now -- we might have missed some
+                    // wakeups while the lock was dropped.
+                    if self._try_acquire_exclusive_all(&entry_allocation.queue_guard) {
+                        self.acquire_exclusive_all_end(&entry_allocation.queue_guard);
+                        Ok(None)
+                    } else {
+                        let (_, waiter_id) =
+                            entry_allocation.enqueue_waiter(AsyncSemaphoreLeaseGrantCount::ExclusiveAll);
+                        Ok(Some(waiter_id))
+                    }
                 }
+                Err((_, e)) => Err(e),
             }
         }
     }
@@ -910,8 +947,8 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
     ///
     /// * `locked_queue` - Guard for the locked [`queue`](Self::queue).
     /// * `waiter_id` - The waiter id, as previously returned by
-    ///   [`enqueue_waiter()`](AsyncSemaphoreQueue::enqueue_waiter) of the
-    ///   enqueued waiter instance to cancel.
+    ///   [`enqueue_waiter()`](AsyncSemaphoreQueueEntryAllocation::enqueue_waiter)
+    ///   of the enqueued waiter instance to cancel.
     /// * `leases_requested` - The grant request associated with the waiter to
     ///   cancel.
     fn cancel_waiter(
