@@ -49,6 +49,7 @@ macro_rules! impl_bitmanip_u {
             }
 
             fn sign_extend(self, sign_bit_pos: u32) -> Self {
+                debug_assert!(sign_bit_pos < <$ut>::BITS);
                 let leading_bits = <$ut>::BITS - sign_bit_pos - 1;
                 (((self << leading_bits) as $st) >> leading_bits) as $ut
             }
