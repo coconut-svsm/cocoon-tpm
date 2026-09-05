@@ -151,6 +151,10 @@ impl<I: ?Sized + IoSlicesIterCommon> IoSlicesIterCommon for &mut I {
     fn next_slice_len(&mut self) -> Result<usize, Self::BackendIteratorError> {
         I::next_slice_len(*self)
     }
+
+    fn is_empty(&mut self) -> Result<bool, Self::BackendIteratorError> {
+        I::is_empty(*self)
+    }
 }
 
 /// *IO slice iterator* returning readable, non-`mut` byte slices.
@@ -244,6 +248,10 @@ pub trait IoSlicesIter<'a>: IoSlicesIterCommon {
 impl<'a, 'b: 'a, I: ?Sized + IoSlicesIter<'b>> IoSlicesIter<'a> for &'a mut I {
     fn next_slice(&mut self, max_len: Option<usize>) -> Result<Option<&'a [u8]>, Self::BackendIteratorError> {
         I::next_slice(*self, max_len)
+    }
+
+    fn skip(&mut self, distance: usize) -> Result<(), IoSlicesIterError<Self::BackendIteratorError>> {
+        I::skip(*self, distance)
     }
 }
 
@@ -457,6 +465,10 @@ impl<'a, 'b: 'a, I: ?Sized + DoubleEndedIoSlicesIter<'b>> DoubleEndedIoSlicesIte
     fn next_back_slice(&mut self, max_len: Option<usize>) -> Result<Option<&'a [u8]>, Self::BackendIteratorError> {
         I::next_back_slice(*self, max_len)
     }
+
+    fn skip_back(&mut self, distance: usize) -> Result<(), IoSlicesIterError<Self::BackendIteratorError>> {
+        I::skip_back(*self, distance)
+    }
 }
 
 /// *IO slice iterator* from which writeable, `mut` byte slices can get consumed
@@ -571,6 +583,14 @@ pub trait WalkableIoSlicesIter<'a>: IoSlicesIter<'a> {
 impl<'a, 'b: 'a, I: ?Sized + WalkableIoSlicesIter<'b>> WalkableIoSlicesIter<'a> for &'a mut I {
     fn for_each(&self, cb: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), Self::BackendIteratorError> {
         I::for_each(*self, cb)
+    }
+
+    fn total_len(&self) -> Result<usize, Self::BackendIteratorError> {
+        I::total_len(*self)
+    }
+
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        I::all_lengths_multiple_of(*self, divisor)
     }
 }
 
