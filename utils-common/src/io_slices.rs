@@ -828,10 +828,12 @@ impl<'a, 'b: 'a, I: Iterator<Item = Result<&'b [u8], BackendIteratorError>> + Cl
         Self: 'c;
 
     fn decoupled_borrow<'c>(&'c self) -> Self::DecoupledBorrowIterType<'c> {
-        GenericIoSlicesIter::new(
-            self.iter.clone().map(|s: Result<&'b [u8], BackendIteratorError>| s),
-            self.head,
-        )
+        GenericIoSlicesIter {
+            iter: self.iter.clone().map(|s: Result<&'b [u8], BackendIteratorError>| s),
+            head: self.head,
+            tail: self.tail,
+            iter_done: self.iter_done,
+        }
     }
 }
 
