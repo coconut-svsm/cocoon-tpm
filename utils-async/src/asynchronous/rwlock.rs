@@ -514,7 +514,7 @@ impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT
     for AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>
 where
     OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
-    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: Sized + marker::Send + marker::Sync,
 {
     type WeakSyncRcPtr = AsyncRwLockReadWeakGuardForInner<ST, OT, LP, TAG>;
 
@@ -597,7 +597,7 @@ impl<ST: sync_types::SyncTypes, OT, LP: sync_types::SyncRcPtr<AsyncRwLock<ST, OT
     > for AsyncRwLockReadWeakGuardForInner<ST, OT, LP, TAG>
 where
     OT: sync_types::DerefInnerByTag<TAG> + marker::Send + marker::Sync,
-    <OT as sync_types::DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    <OT as sync_types::DerefInnerByTag<TAG>>::Output: Sized + marker::Send + marker::Sync,
 {
     fn upgrade(&self) -> Option<AsyncRwLockReadGuardForInner<ST, OT, LP, TAG>> {
         self.guard_for_outer
@@ -610,11 +610,19 @@ where
 
     fn into_raw(this: Self) -> *const <OT as sync_types::DerefInnerByTag<TAG>>::Output {
         let ptr_to_outer = AsyncRwLockReadWeakGuard::into_raw(this.guard_for_outer);
-        <OT as sync_types::DerefInnerByTag<TAG>>::to_inner_ptr(ptr_to_outer)
+        if !ptr_to_outer.is_null() {
+            <OT as sync_types::DerefInnerByTag<TAG>>::to_inner_ptr(ptr_to_outer)
+        } else {
+            ptr::null()
+        }
     }
 
     unsafe fn from_raw(ptr: *const <OT as sync_types::DerefInnerByTag<TAG>>::Output) -> Self {
-        let ptr_to_outer = unsafe { <OT as sync_types::DerefInnerByTag<TAG>>::container_of(ptr) };
+        let ptr_to_outer = if !ptr.is_null() {
+            unsafe { <OT as sync_types::DerefInnerByTag<TAG>>::container_of(ptr) }
+        } else {
+            ptr::null()
+        };
         let guard_for_outer = unsafe { AsyncRwLockReadWeakGuard::from_raw(ptr_to_outer) };
         Self {
             guard_for_outer,

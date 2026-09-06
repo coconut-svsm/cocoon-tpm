@@ -9,8 +9,8 @@ use crate::{
     alloc::{SyncVec, SyncVecError},
     sync_types::{self, Lock as _, WeakSyncRcPtr as _},
 };
-use core::sync::atomic;
 use core::{cell, convert, future, marker, num, ops, pin, task};
+use core::{ptr, sync::atomic};
 
 /// Error information returned by the [`AsyncSemaphore`] API.
 #[derive(Clone, Copy, Debug)]
@@ -1758,11 +1758,15 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::
     /// hence its wrapped value, might have been dropped already.
     pub(super) fn into_raw(mut self) -> (*const T, usize) {
         let sem_ptr = SP::WeakSyncRcPtr::into_raw(self.sem.take().unwrap());
-        let data_ptr =
-            <AsyncSemaphore<ST, T> as sync_types::DerefInnerByTag<AsyncSemaphoreDerefInnerDataTag>>::to_inner_ptr(
-                sem_ptr,
-            );
-        (cell::UnsafeCell::raw_get(data_ptr), self.leases_granted)
+        if !sem_ptr.is_null() {
+            let data_ptr =
+                <AsyncSemaphore<ST, T> as sync_types::DerefInnerByTag<AsyncSemaphoreDerefInnerDataTag>>::to_inner_ptr(
+                    sem_ptr,
+                );
+            (cell::UnsafeCell::raw_get(data_ptr), self.leases_granted)
+        } else {
+            (ptr::null(), self.leases_granted)
+        }
     }
 
     /// Convert back from a pair of raw pointer to the protected value and
@@ -1774,13 +1778,17 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::
     /// must have been previously obtained from
     /// [`into_raw()`](Self::into_raw).
     pub(super) unsafe fn from_raw(data_ptr: *const T, leases_granted: usize) -> Self {
-        // UnsafeCell<T> is transmutable to T.
-        let data_ptr = data_ptr as *const cell::UnsafeCell<T>;
-        // This is safe, the ptr is required to come from into_raw()
-        let sem_ptr = unsafe {
-            <AsyncSemaphore<ST, T> as sync_types::DerefInnerByTag<AsyncSemaphoreDerefInnerDataTag>>::container_of(
-                data_ptr,
-            )
+        let sem_ptr = if !data_ptr.is_null() {
+            // UnsafeCell<T> is transmutable to T.
+            let data_ptr = data_ptr as *const cell::UnsafeCell<T>;
+            // This is safe, the ptr is required to come from into_raw()
+            unsafe {
+                <AsyncSemaphore<ST, T> as sync_types::DerefInnerByTag<AsyncSemaphoreDerefInnerDataTag>>::container_of(
+                    data_ptr,
+                )
+            }
+        } else {
+            ptr::null()
         };
         // Likewise.
         let sem = unsafe { SP::WeakSyncRcPtr::from_raw(sem_ptr) };
