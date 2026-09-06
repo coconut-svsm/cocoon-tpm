@@ -664,8 +664,11 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
             }
             AsyncSemaphoreLeaseGrantCount::Leases { count } => {
                 let leases_granted = self.leases_granted.load(atomic::Ordering::Relaxed);
-                debug_assert!(count.get() <= locked_queue.max_leases);
-                if locked_queue.max_leases >= leases_granted + count.get() {
+                if leases_granted
+                    .checked_add(count.get())
+                    .map(|needed_max_leases| needed_max_leases <= locked_queue.max_leases)
+                    .unwrap_or(false)
+                {
                     self.leases_granted
                         .store(leases_granted + count.get(), atomic::Ordering::Relaxed);
                     true
