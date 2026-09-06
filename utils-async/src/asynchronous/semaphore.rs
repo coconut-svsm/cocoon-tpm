@@ -12,6 +12,15 @@ use crate::{
 use core::{cell, convert, future, marker, num, ops, pin, task};
 use core::{ptr, sync::atomic};
 
+/// Error returned by [`AsyncSemaphore::new()`] and
+/// [`AsyncSemaphoreExclusiveAllGuard::resize_semaphore()`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AsyncSemaphoreNewError {
+    /// The number of the configured maximum leases is not **strictly** less
+    /// than [`usize::MAX`].
+    UnsupportedCapacity,
+}
+
 /// Error information returned by the [`AsyncSemaphore`] API.
 #[derive(Clone, Copy, Debug)]
 pub enum AsyncSemaphoreError {
@@ -1081,10 +1090,32 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> AsyncSemaphore<S
     ///   **strictly** less than [`usize::MAX`]. May be zero to permit only
     ///   "trivial" and "exlusive-all" leases.
     /// * `data` - The data item to wrap and synchronize accesses to.
-    pub fn new(max_leases: usize, data: T) -> Self {
-        debug_assert!(max_leases < usize::MAX);
-        Self {
+    pub fn new(max_leases: usize, data: T) -> Result<Self, AsyncSemaphoreNewError> {
+        if max_leases == usize::MAX {
+            return Err(AsyncSemaphoreNewError::UnsupportedCapacity);
+        }
+
+        Ok(Self {
             state: AsyncSemaphoreState::new(max_leases),
+            data: cell::UnsafeCell::new(data),
+        })
+    }
+
+    /// Instantiate a new [`AsyncSemaphore`] with a capacity of zero.
+    ///
+    /// Equivalent to [`AsyncSemaphore::new(0)`], except that the
+    /// `new_with_no_capacity()` is infallible.
+    ///
+    /// Note that the caller is supposed to move the returned `AsyncSemaphore`
+    /// into a [`SyncRcPtr`](sync_types::SyncRcPtr) -- the other parts of
+    /// the API expect that.
+    ///
+    /// # Arguments:
+    ///
+    /// * `data` - The data item to wrap and synchronize accesses to.
+    pub fn new_with_no_capacity(data: T) -> Self {
+        Self {
+            state: AsyncSemaphoreState::new(0),
             data: cell::UnsafeCell::new(data),
         }
     }
@@ -1095,7 +1126,7 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> AsyncSemaphore<S
     /// Note that a semaphore's capacity can be adjusted after instantiation,
     /// either through leases grant
     /// [leaking](AsyncSemaphoreLeasesGuard::leak), or
-    /// [directly](AsyncSemaphoreExclusiveAllGuard::resize_future) through an
+    /// [directly](AsyncSemaphoreExclusiveAllGuard::resize_semaphore) through an
     /// "exclusive-all" grant, so be careful to stabilize the value as
     /// needed.
     pub fn max_leases(&self) -> usize {
@@ -2042,8 +2073,11 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::
     ///
     /// * `max_leases` - The new [`AsyncSemaphore`] capacity. Must be
     ///   **strictly** less than [`usize::MAX`].
-    pub fn resize_future(&mut self, max_leases: usize) {
-        debug_assert!(max_leases < usize::MAX);
+    pub fn resize_semaphore(&mut self, max_leases: usize) -> Result<(), AsyncSemaphoreNewError> {
+        if max_leases == usize::MAX {
+            return Err(AsyncSemaphoreNewError::UnsupportedCapacity);
+        }
+
         let sem = self.sem.as_ref().unwrap();
         let mut locked_queue = sem.state.queue.lock();
         let capacity_shrunken = max_leases < locked_queue.max_leases;
@@ -2055,6 +2089,8 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::
         if capacity_shrunken {
             sem.state.wake_failed_waiters(&mut locked_queue);
         }
+
+        Ok(())
     }
 
     /// Downgrade the "exclusive-all" grant on all of a semaphore's capacity to
@@ -2337,7 +2373,7 @@ fn test_async_semaphore_lease_vs_lease() {
 
     let e = TestAsyncExecutor::new();
     let sem = <<TestNopSyncTypes as sync_types::SyncTypes>::SyncRcPtrFactory as sync_types::SyncRcPtrFactory>::try_new(
-        TestAsyncSemaphore::new(2, ()),
+        TestAsyncSemaphore::new(2, ()).unwrap(),
     )
     .unwrap();
     let lease_fut0 = AsyncSemaphore::acquire_leases(&sem.as_ref(), 2).unwrap();
@@ -2441,7 +2477,7 @@ fn test_async_semaphore_lease_vs_trivial() {
 
     let e = TestAsyncExecutor::new();
     let sem = <<TestNopSyncTypes as sync_types::SyncTypes>::SyncRcPtrFactory as sync_types::SyncRcPtrFactory>::try_new(
-        TestAsyncSemaphore::new(1, ()),
+        TestAsyncSemaphore::new(1, ()).unwrap(),
     )
     .unwrap();
     let lease_fut0 = AsyncSemaphore::acquire_leases(&sem.as_ref(), 1).unwrap();
@@ -2520,7 +2556,7 @@ fn test_async_semaphore_exclusive_vs_exclusive() {
 
     let e = TestAsyncExecutor::new();
     let sem = <<TestNopSyncTypes as sync_types::SyncTypes>::SyncRcPtrFactory as sync_types::SyncRcPtrFactory>::try_new(
-        TestAsyncSemaphore::new(0, ()),
+        TestAsyncSemaphore::new(0, ()).unwrap(),
     )
     .unwrap();
     let excl_fut0 = AsyncSemaphore::acquire_exclusive_all(&sem.as_ref()).unwrap();
@@ -2622,7 +2658,7 @@ fn test_async_semaphore_exclusive_vs_lease() {
 
     let e = TestAsyncExecutor::new();
     let sem = <<TestNopSyncTypes as sync_types::SyncTypes>::SyncRcPtrFactory as sync_types::SyncRcPtrFactory>::try_new(
-        TestAsyncSemaphore::new(1, ()),
+        TestAsyncSemaphore::new(1, ()).unwrap(),
     )
     .unwrap();
     let excl_fut0 = AsyncSemaphore::acquire_exclusive_all(&sem.as_ref()).unwrap();
@@ -2763,7 +2799,7 @@ fn test_async_semaphore_exclusive_vs_trivial() {
 
     let e = TestAsyncExecutor::new();
     let sem = <<TestNopSyncTypes as sync_types::SyncTypes>::SyncRcPtrFactory as sync_types::SyncRcPtrFactory>::try_new(
-        TestAsyncSemaphore::new(1, ()),
+        TestAsyncSemaphore::new(1, ()).unwrap(),
     )
     .unwrap();
     let excl_fut0 = AsyncSemaphore::acquire_exclusive_all(&sem.as_ref()).unwrap();

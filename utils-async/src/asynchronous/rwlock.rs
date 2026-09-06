@@ -70,7 +70,7 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync> AsyncRwLock<ST, 
     /// * `data` - the data to wrap in the the lock.
     pub fn new(data: T) -> Self {
         Self {
-            sem: semaphore::AsyncSemaphore::new(0, data),
+            sem: semaphore::AsyncSemaphore::new_with_no_capacity(data),
         }
     }
 
