@@ -864,6 +864,7 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
         locked_queue: &mut <ST::Lock<AsyncSemaphoreQueue> as sync_types::Lock<AsyncSemaphoreQueue>>::Guard<'_>,
     ) {
         let mut i = 0;
+        let mut trivial_leases_only = false;
         while i < locked_queue.queue.len() {
             let entry = &locked_queue.queue[i];
             if let AsyncSemaphoreLeaseGrantCount::Leases { count } = &entry.leases_requested {
@@ -876,7 +877,9 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
             }
             let is_exclusive_all_waiter =
                 matches!(&entry.leases_requested, AsyncSemaphoreLeaseGrantCount::ExclusiveAll);
-            if self.try_grant_one(locked_queue, &entry.leases_requested) {
+            if (!trivial_leases_only || matches!(&entry.leases_requested, AsyncSemaphoreLeaseGrantCount::TrivialLease))
+                && self.try_grant_one(locked_queue, &entry.leases_requested)
+            {
                 let entry = &mut locked_queue.queue[i];
                 if let Some(waker) = entry.waker.take() {
                     waker.wake();
@@ -884,13 +887,23 @@ impl<ST: sync_types::SyncTypes> AsyncSemaphoreState<ST> {
                 locked_queue.remove_entry(i);
                 if is_exclusive_all_waiter {
                     self.acquire_exclusive_all_end(locked_queue);
+                    break;
                 }
             } else if !is_exclusive_all_waiter
-                && !self.is_exclusive_all_granted(locked_queue)
-                && locked_queue.has_trivial_lease_waiters()
+                && (trivial_leases_only
+                    || (!self.is_exclusive_all_granted(locked_queue) && locked_queue.has_trivial_lease_waiters()))
             {
+                // It's not an ExlusiveAll waiter and a TrivialLease waiter would have been
+                // woken above. So it must be a Lease waiter.
+                debug_assert!(matches!(
+                    &entry.leases_requested,
+                    AsyncSemaphoreLeaseGrantCount::Leases { .. }
+                ));
                 // TrivialLease waiters shall be blocked by ExclusiveAll grants ahead in line
-                // only.
+                // only. Continue the search, waking those.
+                // Be careful to not complete subsequent Leases waiters with a possibly smaller
+                // count request.
+                trivial_leases_only = true;
                 i += 1;
             } else {
                 break;
