@@ -1632,9 +1632,11 @@ impl<ST: sync_types::SyncTypes, T: marker::Send + marker::Sync, SP: sync_types::
         debug_assert!(locked_queue.max_leases >= self.leases_granted);
         locked_queue.max_leases -= self.leases_granted;
         debug_assert!(sem.state.leases_granted.load(atomic::Ordering::Relaxed) >= self.leases_granted);
+        // Release pairs with Acquire in the ExclusiveAll path from try_grant_one(),
+        // c.f. the comment there.
         sem.state.leases_granted.store(
             sem.state.leases_granted.load(atomic::Ordering::Relaxed) - self.leases_granted,
-            atomic::Ordering::Relaxed,
+            atomic::Ordering::Release,
         );
 
         // Shrinking the semaphore capcacity might have rendered some pending request
