@@ -1172,9 +1172,10 @@ macro_rules! cfg_select_curve_id {
 pub fn test_curve_id() -> tpm2_interface::TpmEccCurve {
     cfg_select_curve_id!(
         ("ecc_nist_p192", NistP192),
+        ("ecc_nist_p256", NistP256),
         ("ecc_nist_p224", NistP224),
         ("ecc_nist_p384", NistP384),
-        ("ecc_nist_p512", NistP521),
+        ("ecc_nist_p521", NistP521),
         ("ecc_bn_p256", BnP256),
         ("ecc_bn_p638", BnP638),
         ("ecc_bp_p256_r1", BpP256R1),
