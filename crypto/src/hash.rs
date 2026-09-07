@@ -160,22 +160,22 @@ pub const fn hash_alg_select_for_preimage_security_strength(
 pub use super::backend::hash::*;
 
 macro_rules! cfg_select_hash {
-    (($f:literal, $id:ident)) => {
+    (($f:literal, $id:ident)) => {{
         #[cfg(feature = $f)]
         return tpm2_interface::TpmiAlgHash::$id;
         #[cfg(not(feature = $f))]
         {
             "Force compile error for no hash configured"
         }
-    };
-    (($f:literal, $id:ident), $(($f_more:literal, $id_more:ident)),+) => {
+    }};
+    (($f:literal, $id:ident), $(($f_more:literal, $id_more:ident)),+) => {{
         #[cfg(feature = $f)]
         return tpm2_interface::TpmiAlgHash::$id;
         #[cfg(not(feature = $f))]
         {
             cfg_select_hash!($(($f_more, $id_more)),+)
         }
-    };
+    }};
 }
 
 pub const fn test_hash_alg() -> tpm2_interface::TpmiAlgHash {
