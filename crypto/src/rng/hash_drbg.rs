@@ -126,30 +126,37 @@ impl HashDrbg {
         // seedlen_for_hash_alg() and thus, not aligned to the digest_len.
         let mut digest_scratch_buf =
             try_alloc_zeroizing_vec::<u8>(digest_len).map_err(|e| RngReseedError::CryptoError(CryptoError::from(e)))?;
+        let mut new_v = try_alloc_zeroizing_vec::<u8>(self.v.len())
+            .map_err(CryptoError::from)
+            .map_err(RngReseedError::CryptoError)?;
+        let mut new_c = try_alloc_zeroizing_vec::<u8>(self.c.len())
+            .map_err(CryptoError::from)
+            .map_err(RngReseedError::CryptoError)?;
 
-        // Spare a reallocation, swap V and C. The old V, now in self.c, is getting
-        // hashed into the new state below.
-        mem::swap(&mut self.v, &mut self.c);
         // Step 1.)
-        let seed_material = [[0x01u8].as_slice(), self.c.as_slice(), entropy];
+        let seed_material = [[0x01u8].as_slice(), self.v.as_slice(), entropy];
         // Step 2-3.)
         Self::hash_df(
             &mut hash_instance,
             io_slices::BuffersSliceIoSlicesIter::new(seed_material.as_slice()),
             additional_input.as_mut(),
-            &mut self.v,
+            &mut new_v,
             &mut digest_scratch_buf,
         )
         .map_err(RngReseedError::CryptoError)?;
         // Step 4.)
         Self::hash_df::<_, EmptyCryptoIoSlices>(
             &mut hash_instance,
-            io_slices::BuffersSliceIoSlicesIter::new([[0x00u8].as_slice(), &self.v].as_slice()),
+            io_slices::BuffersSliceIoSlicesIter::new([[0x00u8].as_slice(), &new_v].as_slice()),
             None,
-            &mut self.c,
+            &mut new_c,
             &mut digest_scratch_buf,
         )
         .map_err(RngReseedError::CryptoError)?;
+
+        // Now, that the reseed cannot fail anymore, update self's state.
+        self.v = new_v;
+        self.c = new_c;
 
         // Step 5.)
         self.reseed_counter = 1;
