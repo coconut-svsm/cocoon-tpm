@@ -400,7 +400,8 @@ impl RsaPrivateKeyCrt {
         );
         let mut p_mod_q_scratch = p_mod_q_scratch.shrink_to(q.len());
         // And calculate its inverse mod q.
-        let mut p_inv_mod_q_buf = try_alloc_zeroizing_vec(q.len())?;
+        let mut p_inv_mod_q_buf =
+            try_alloc_zeroizing_vec(cmpa::MpMutNativeEndianUIntLimbsSlice::nlimbs_for_len(q.len()))?;
         let mut p_inv_mod_q = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(&mut p_inv_mod_q_buf);
         cmpa::ct_inv_mod_odd_mp_mp(&mut p_inv_mod_q, &mut p_mod_q_scratch, q, [scratch0, scratch1]).map_err(
             |e| match e {
