@@ -1424,7 +1424,7 @@ macro_rules! cfg_select_block_cipher_alg {
         return $id;
         #[cfg(not(feature = $f))]
         {
-            cfg_select_hash!($(($f_more, $id_more)),+)
+            cfg_select_block_cipher_alg!($(($f_more, $id_more)),+)
         }
     };
 }
