@@ -64,7 +64,13 @@ impl AffinePoint {
             return Err(bssl_get_error());
         }
 
-        let mut bn_ctx = BsslBnCtx::new()?;
+        let mut bn_ctx = match BsslBnCtx::new() {
+            Ok(bn_ctx) => bn_ctx,
+            Err(e) => {
+                unsafe { bssl_bare_sys::EC_POINT_clear_free(point) };
+                return Err(e);
+            }
+        };
         if unsafe {
             bssl_bare_sys::EC_POINT_set_affine_coordinates(
                 curve_ops.bssl_ec_group.as_ptr(),
@@ -75,6 +81,7 @@ impl AffinePoint {
             )
         } == 0
         {
+            unsafe { bssl_bare_sys::EC_POINT_clear_free(point) };
             return Err(bssl_get_error());
         }
         Ok(AffinePoint { bssl_ec_point: point })
@@ -580,6 +587,7 @@ impl<'a> CurveOps<'a> {
                 )
             } == 0
             {
+                unsafe { bssl_bare_sys::EC_POINT_clear_free(dbl_src) };
                 unsafe { bssl_bare_sys::EC_POINT_clear_free(dbl_dst) };
                 return Err(bssl_get_error());
             }

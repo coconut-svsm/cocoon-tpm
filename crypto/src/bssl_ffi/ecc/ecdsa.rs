@@ -79,8 +79,20 @@ pub fn sign(
             }
         };
 
-    let mut r_bytes = try_alloc_vec(r_len)?;
-    let mut s_bytes = try_alloc_vec(s_len)?;
+    let mut r_bytes = match try_alloc_vec(r_len) {
+        Ok(r_bytes) => r_bytes,
+        Err(e) => {
+            unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
+            return Err(CryptoError::from(e));
+        }
+    };
+    let mut s_bytes = match try_alloc_vec(s_len) {
+        Ok(s_bytes) => s_bytes,
+        Err(e) => {
+            unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
+            return Err(CryptoError::from(e));
+        }
+    };
     if unsafe { bssl_bare_sys::BN_bn2bin_padded(r_bytes.as_mut_ptr(), r_len, bssl_bn_r) } < 0 {
         unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
         return Err(bssl_get_error());
@@ -135,9 +147,27 @@ pub fn verify(digest: &[u8], signature: (&[u8], &[u8]), pub_key: &key::EccPublic
         return Err(bssl_get_error());
     }
 
-    let curve = curve::Curve::new(pub_key.get_curve_id())?;
-    let curve_ops = curve.curve_ops()?;
-    let bssl_ec_key = BsslEcKey::new_from_ecc_pub_key(pub_key, &curve_ops)?;
+    let curve = match curve::Curve::new(pub_key.get_curve_id()) {
+        Ok(curve) => curve,
+        Err(e) => {
+            unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
+            return Err(e);
+        }
+    };
+    let curve_ops = match curve.curve_ops() {
+        Ok(curve_ops) => curve_ops,
+        Err(e) => {
+            unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
+            return Err(e);
+        }
+    };
+    let bssl_ec_key = match BsslEcKey::new_from_ecc_pub_key(pub_key, &curve_ops) {
+        Ok(bssl_ec_key) => bssl_ec_key,
+        Err(e) => {
+            unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
+            return Err(e);
+        }
+    };
 
     let r =
         unsafe { bssl_bare_sys::ECDSA_do_verify(digest.as_ptr(), digest.len(), bssl_ecdsa_sig, bssl_ec_key.as_ptr()) };
