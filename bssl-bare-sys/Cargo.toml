@@ -108,5 +108,5 @@ exclude = [
 cocoon-tpm-bssl-bare-sys-target-integration = { version = "0.1.2" }
 
 [build-dependencies]
-bindgen = "0.71.1"
+bindgen = "0.73.1"
 cmake = "0.1.54"
