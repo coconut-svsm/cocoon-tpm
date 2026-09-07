@@ -67,8 +67,7 @@ pub(crate) fn _ecdh_c_1e_1s_cdh_derive_shared_secret(
         pub_key_u_x,
         pub_key_v_x,
         8 * (digest_len as u32),
-    )
-    .unwrap();
+    )?;
     kdf_e.generate(io_slices::SingletonIoSliceMut::new(&mut shared_secret).map_infallible_err())?;
     Ok(shared_secret)
 }
