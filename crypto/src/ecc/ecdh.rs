@@ -10,6 +10,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use cmpa::MpMutUInt as _;
+
 use super::{curve, key};
 
 use crate::{
@@ -128,15 +130,29 @@ pub fn ecdh_c_1e_1s_cdh_party_v_key_gen(
 
     // In the terminology of NIST SP800-56Ar3, party V (the local party) contributes
     // the static key, party U (the remote party) an ephemeral key.
+    // Note that this validates that pub_key_u_plain denotes a point on the curve.
     let z = _ecdh_c_1_1_cdh_compute_z(&curve_ops, key_v, pub_key_u_plain)?;
 
-    let pub_key_u_x = &pub_key_u_plain.x.buffer;
     let mut pub_key_v_x = try_alloc_vec::<u8>(curve_ops.get_curve().get_p_len())?;
     key_v.pub_key().get_point().to_plain_coordinates(
         &mut cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut pub_key_v_x),
         None,
         &curve_ops,
     )?;
+
+    // pub_key_u_x will be used for the PartyUInfo. Bring it into canonical padding
+    // format in order to avoid interoperability issues.
+    let pub_key_u_x = &pub_key_u_plain.x.buffer;
+    let mut padded_pub_key_u_x;
+    let p_len = curve_ops.get_curve().get_p_len();
+    let pub_key_u_x = if pub_key_u_x.len() >= p_len {
+        &pub_key_u_x[pub_key_u_x.len() - p_len..]
+    } else {
+        padded_pub_key_u_x = try_alloc_vec(p_len)?;
+        cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut padded_pub_key_u_x)
+            .copy_from(&cmpa::MpBigEndianUIntByteSlice::from_bytes(pub_key_u_x));
+        &padded_pub_key_u_x
+    };
 
     _ecdh_c_1e_1s_cdh_derive_shared_secret(&z, kdf_hash_alg, kdf_label, pub_key_u_x, &pub_key_v_x)
 }

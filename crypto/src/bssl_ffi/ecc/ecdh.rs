@@ -10,6 +10,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use cmpa::MpMutUInt as _;
+
 use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
 
 use super::super::{
@@ -177,7 +179,19 @@ pub fn ecdh_c_1e_1s_cdh_party_u_key_gen(
     bssl_bn_u_y.to_be_bytes(&mut cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut pub_key_u_y))?;
     drop(bssl_bn_u_y);
 
+    // pub_key_v_x will be used for the PartyVInfo. Bring it into canonical padding
+    // format in order to avoid interoperability issues.
     let pub_key_v_x = &pub_key_v_plain.x.buffer;
+    let mut padded_pub_key_v_x;
+    let p_len = curve_ops.get_curve().get_p_len();
+    let pub_key_v_x = if pub_key_v_x.len() >= p_len {
+        &pub_key_v_x[pub_key_v_x.len() - p_len..]
+    } else {
+        padded_pub_key_v_x = try_alloc_vec(p_len)?;
+        cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut padded_pub_key_v_x)
+            .copy_from(&cmpa::MpBigEndianUIntByteSlice::from_bytes(pub_key_v_x));
+        &padded_pub_key_v_x
+    };
 
     let shared_secret =
         ecdh::_ecdh_c_1e_1s_cdh_derive_shared_secret(&z, kdf_hash_alg, kdf_label, &pub_key_u_x, pub_key_v_x)?;
