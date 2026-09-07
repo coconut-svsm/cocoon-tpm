@@ -107,8 +107,13 @@ impl BsslEcKey {
         let priv_key_bytes = if !priv_key.is_null() {
             let priv_key_len =
                 usize::try_from(unsafe { bssl_bare_sys::BN_num_bytes(priv_key) }).map_err(|_| CryptoError::Internal)?;
-            let mut priv_key_bytes = try_alloc_zeroizing_vec(priv_key_len)?;
-            if unsafe { bssl_bare_sys::BN_bn2bin_padded(priv_key_bytes.as_mut_ptr(), priv_key_len, priv_key) } < 0 {
+            // Canonical format is to pad to p_len.
+            let p_len = curve_ops.curve.get_p_len();
+            if priv_key_len > p_len {
+                return Err(CryptoError::Internal);
+            }
+            let mut priv_key_bytes = try_alloc_zeroizing_vec(p_len)?;
+            if unsafe { bssl_bare_sys::BN_bn2bin_padded(priv_key_bytes.as_mut_ptr(), p_len, priv_key) } < 0 {
                 return Err(bssl_get_error());
             }
             Some(priv_key_bytes)
