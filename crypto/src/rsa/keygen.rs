@@ -714,7 +714,7 @@ pub fn gen_prime_pair_nist_sp800_56br2(
 
         let [lcm, lcm_scratch, _, _, _, _] = &mut scratch;
         let mut lcm = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(lcm);
-        cmpa::ct_lcm_mp_mp(
+        if cmpa::ct_lcm_mp_mp(
             &mut lcm,
             &mut p_minus_one,
             prime_len,
@@ -722,7 +722,12 @@ pub fn gen_prime_pair_nist_sp800_56br2(
             prime_len,
             lcm_scratch,
         )
-        .map_err(|_| CryptoError::Internal)?;
+        .is_err()
+        {
+            zeroize::Zeroize::zeroize(result_p);
+            zeroize::Zeroize::zeroize(result_q);
+            return Err(CryptoError::Internal);
+        }
 
         // The p/q_minus_one buffers aren't needed any longer.
         drop(p_q_minus_one);
@@ -746,8 +751,11 @@ pub fn gen_prime_pair_nist_sp800_56br2(
         d.copy_from(public_exponent);
         // Note that the gen_prime() has already checked that the public_exponent is
         // coprime with both, p - 1 and q - 1, so the inverse does exist.
-        cmpa::ct_inv_mod_mp_mp(&mut d, &mut lcm, [scratch0, scratch1, scratch2, scratch3])
-            .map_err(|_| CryptoError::Internal)?;
+        if cmpa::ct_inv_mod_mp_mp(&mut d, &mut lcm, [scratch0, scratch1, scratch2, scratch3]).is_err() {
+            zeroize::Zeroize::zeroize(result_p);
+            zeroize::Zeroize::zeroize(result_q);
+            return Err(CryptoError::Internal);
+        }
 
         let (_, d_width) = cmpa::ct_find_last_set_bit_mp(&d);
         let mut d_is_in_range = false;
