@@ -391,7 +391,7 @@ impl RsaPrivateKeyCrt {
     ) -> Result<zeroize::Zeroizing<Vec<cmpa::LimbType>>, CryptoError> {
         let [scratch0, scratch1, scratch2] = scratch;
         // First reduce p modulo q.
-        let mut p_mod_q_scratch = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(scratch2);
+        let mut p_mod_q_scratch = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(scratch0);
         p_mod_q_scratch.copy_from(p);
         cmpa::ct_mod_mp_mp(
             None,
@@ -403,7 +403,7 @@ impl RsaPrivateKeyCrt {
         let mut p_inv_mod_q_buf =
             try_alloc_zeroizing_vec(cmpa::MpMutNativeEndianUIntLimbsSlice::nlimbs_for_len(q.len()))?;
         let mut p_inv_mod_q = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(&mut p_inv_mod_q_buf);
-        cmpa::ct_inv_mod_odd_mp_mp(&mut p_inv_mod_q, &mut p_mod_q_scratch, q, [scratch0, scratch1]).map_err(
+        cmpa::ct_inv_mod_odd_mp_mp(&mut p_inv_mod_q, &mut p_mod_q_scratch, q, [scratch1, scratch2]).map_err(
             |e| match e {
                 cmpa::CtInvModOddMpMpError::OperandsNotCoprime | cmpa::CtInvModOddMpMpError::InvalidModulus => {
                     CryptoError::KeyBinding
