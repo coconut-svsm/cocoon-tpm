@@ -113,7 +113,7 @@ impl BsslEcKey {
                 return Err(CryptoError::Internal);
             }
             let mut priv_key_bytes = try_alloc_zeroizing_vec(p_len)?;
-            if unsafe { bssl_bare_sys::BN_bn2bin_padded(priv_key_bytes.as_mut_ptr(), p_len, priv_key) } < 0 {
+            if unsafe { bssl_bare_sys::BN_bn2bin_padded(priv_key_bytes.as_mut_ptr(), p_len, priv_key) } == 0 {
                 return Err(bssl_get_error());
             }
             Some(priv_key_bytes)

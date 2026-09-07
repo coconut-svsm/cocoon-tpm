@@ -71,7 +71,7 @@ impl BsslBn {
             return Ok(());
         }
 
-        if unsafe { bssl_bare_sys::BN_bn2bin_padded(bytes.as_mut_ptr(), bytes_len, self.bn) } < 0 {
+        if unsafe { bssl_bare_sys::BN_bn2bin_padded(bytes.as_mut_ptr(), bytes_len, self.bn) } == 0 {
             return Err(bssl_get_error());
         }
         Ok(())

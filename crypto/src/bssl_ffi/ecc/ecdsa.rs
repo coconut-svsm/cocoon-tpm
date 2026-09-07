@@ -100,11 +100,11 @@ pub fn sign(
             return Err(CryptoError::from(e));
         }
     };
-    if unsafe { bssl_bare_sys::BN_bn2bin_padded(r_bytes.as_mut_ptr(), order.len(), bssl_bn_r) } < 0 {
+    if unsafe { bssl_bare_sys::BN_bn2bin_padded(r_bytes.as_mut_ptr(), order.len(), bssl_bn_r) } == 0 {
         unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
         return Err(bssl_get_error());
     }
-    if unsafe { bssl_bare_sys::BN_bn2bin_padded(s_bytes.as_mut_ptr(), order.len(), bssl_bn_s) } < 0 {
+    if unsafe { bssl_bare_sys::BN_bn2bin_padded(s_bytes.as_mut_ptr(), order.len(), bssl_bn_s) } == 0 {
         unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
         return Err(bssl_get_error());
     }
