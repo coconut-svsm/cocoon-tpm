@@ -10,6 +10,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use cmpa::MpUIntCommon;
 use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
 
 use super::super::error::bssl_get_error;
@@ -78,26 +79,32 @@ pub fn sign(
                 return Err(e);
             }
         };
+    // Canonical format is to pad r/s to order.len().
+    let order = curve.get_order();
+    if r_len > order.len() || s_len > order.len() {
+        unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
+        return Err(CryptoError::Internal);
+    }
 
-    let mut r_bytes = match try_alloc_vec(r_len) {
+    let mut r_bytes = match try_alloc_vec(order.len()) {
         Ok(r_bytes) => r_bytes,
         Err(e) => {
             unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
             return Err(CryptoError::from(e));
         }
     };
-    let mut s_bytes = match try_alloc_vec(s_len) {
+    let mut s_bytes = match try_alloc_vec(order.len()) {
         Ok(s_bytes) => s_bytes,
         Err(e) => {
             unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
             return Err(CryptoError::from(e));
         }
     };
-    if unsafe { bssl_bare_sys::BN_bn2bin_padded(r_bytes.as_mut_ptr(), r_len, bssl_bn_r) } < 0 {
+    if unsafe { bssl_bare_sys::BN_bn2bin_padded(r_bytes.as_mut_ptr(), order.len(), bssl_bn_r) } < 0 {
         unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
         return Err(bssl_get_error());
     }
-    if unsafe { bssl_bare_sys::BN_bn2bin_padded(s_bytes.as_mut_ptr(), s_len, bssl_bn_s) } < 0 {
+    if unsafe { bssl_bare_sys::BN_bn2bin_padded(s_bytes.as_mut_ptr(), order.len(), bssl_bn_s) } < 0 {
         unsafe { bssl_bare_sys::ECDSA_SIG_free(bssl_ecdsa_sig) };
         return Err(bssl_get_error());
     }
