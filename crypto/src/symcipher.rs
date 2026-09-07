@@ -554,19 +554,17 @@ pub(crate) fn transform_next_blocks<
         src_block_len += io_slices::SingletonIoSliceMut::new(&mut scratch_block_buf[src_block_len..])
             .map_infallible_err::<CryptoError>()
             .copy_from_iter(src)?;
+        let mut dst_block_len = first_dst_slice.len();
         if src_block_len != block_len {
-            if !ENABLE_PARTIAL_LAST_BLOCK {
+            if !ENABLE_PARTIAL_LAST_BLOCK || dst_block_len > src_block_len {
                 return Err(CryptoError::Internal);
             } else {
                 scratch_block_buf[src_block_len..].fill(0);
             }
-        } else if src_block_len < first_dst_slice.len() {
-            return Err(CryptoError::Internal);
         }
 
         block_transform(scratch_block_buf, None);
 
-        let mut dst_block_len = first_dst_slice.len();
         first_dst_slice.copy_from_slice(&scratch_block_buf[..dst_block_len]);
         dst_block_len += dst.copy_from_iter(
             &mut io_slices::SingletonIoSlice::new(&scratch_block_buf[dst_block_len..src_block_len])
