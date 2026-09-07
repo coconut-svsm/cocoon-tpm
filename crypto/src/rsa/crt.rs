@@ -529,8 +529,13 @@ impl RsaPrivateKeyCrt {
         // scratch = scratch * p
         cmpa::ct_mul_trunc_mp_mp(&mut scratch, self.q_len, &p);
 
-        // x = x_p + scratch. Remember, x_p is still in y and that's where
-        // the final result is supposed to go.
+        // x = x_p + scratch. Remember, x_p is still in y and that's where the final
+        // result is supposed to go. Be careful to trim scratch[] to the y.len()
+        // before the addition: it had been allocated to accomodate for the
+        // maximum needed for any of the different computation step it's been
+        // repurposed for above. Note that this removes only leading zeros from the
+        // most signifcant end, if any.
+        let scratch = scratch.shrink_to(y.len());
         cmpa::ct_add_mp_mp(&mut y, &scratch);
 
         Ok(())
