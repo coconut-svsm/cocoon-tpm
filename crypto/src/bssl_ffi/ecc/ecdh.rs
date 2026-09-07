@@ -23,7 +23,10 @@ use crate::ecc::{curve, ecdh, key};
 use crate::{CryptoError, rng};
 use crate::{
     tpm2_interface,
-    utils_common::alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
+    utils_common::{
+        alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
+        zeroize,
+    },
 };
 use core::ffi;
 
