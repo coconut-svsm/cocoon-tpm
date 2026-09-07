@@ -289,32 +289,32 @@ static TEST_VECS: &[TestVec] = &[
     TestVec {
         drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha384,
         expected_p: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "d10923c21464e43c5922d20c6786108142908ab542d11482046df72e838e507e\
-             128133a8b6f2e958299bf1a5853db12464ef4d42decc8a793d635dcfd3526607\
-             f4dd9dcbbb540cba5e729615cf8d39fe58f80fe341f123fc7c36d4e8e4d91a3d\
-             294933d52ca0391cb91902118e93296de24bd903373afbb843a58de795977915",
+            "e05d631830fa8102d2f3e426d35ce66975b4254545ad3c29447f8e60240e60ec\
+             4c4ae2a4267eaafa606ffd5ac7b34b68603f1cb49858ecabee1bb1b831b0a83b\
+             71123da90ce733cbcbe27fe65c367b5e8df6ea5d30032a604c5828bee89c911a\
+             76bc7d807aa358e1924f45e540671f3cb00c0f0e52f59b6c0e1b71f1377738b5",
         ),
         expected_q: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "eb6e9cb54025562eaeb664469a3a0f39978282aea588f59a4932faa780e5c425\
-             0e5bcc4212ff80bcb7a116c15e54bd87f36c53208fff1235207312b9f8bdd864\
-             fa6ed0d8946ced8cd16b091a11e7dd6c7123e4a1035b5eb99043153836dbe9ca\
-             c0e1ee8b30f77f650da6aff1a18b31580ca3e400736ceadd1c21b9b87f8047cb",
+            "ebcf29c4c034e057a4ac9e0f2ef322b6e6d8f6088fa557eb70f2e98bb8c383f6\
+             c94b86132631e85f654e24609449cea92d432beb4e603d8ee0da584bbf3fbd63\
+             3bb730769c2cbb859196188ee7328af035164d9ac495bbe3eb50ccf7a06fd44e\
+             dbe3811bf6a8bb3ec26130aad5f71382735aad0ac0386b49393db75cbefc429f",
         ),
     },
     #[cfg(feature = "sha512")]
     TestVec {
         drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha512,
         expected_p: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "fd3642b1ecf3e095671f4c37ab2ee6efcd9a3ccca803b9fe86f8b7958ea725b7\
-             0a6cba72b272cca8ee5264dc468fecbcc811853a0b3b142c2935d7d5af3cd2ba\
-             2ef7c22fbc4329da3ae821a03f0221516ea74b6b9f55e0085d8c5adb7abb407d\
-             d23216ab634d26b12d8575dcd8f78d20209bae6f00cede9617c66dc8d62d5bab",
+            "c34dd67889a44dd8692a5b444c9155d278863024b599a9d387b3ac9ceea42879\
+             89223486660806fa40929755ea2016bda8d5544312aba5b9a696ec807516180f\
+             9784724946a787a4518e67b5ac63c8ea97c3aacc18c1fecc2f57286f48a03fd4\
+             4043f7d29f3b029373579ce890900eba165bd1058a3614cabd1a038ceef97211",
         ),
         expected_q: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "ed865e02b7992f6449b24b855238d2e5ac17809be61ec6fec026b9aaff4f891f\
-             7b8ae7202d5a33945366c1148aa3a075e0656f55f83853a819e4109a56f63453\
-             3e57a0c30df599d50156496ebb476ee7ba3fc3f713d433b0029c4197400f88c5\
-             0e71c692425234bb6acbe11e5d5020c4cdd059ea6692121ee52c6fa6379680e7",
+            "e5b594993e844bb3bc26994d6f125b12e82f93ab47c813c668e78fd814d3a19c\
+             ccb6402f267eb9ce33dc992edc400ada68603fc934fffa5f6aa38afd8b6c8f43\
+             0fb39ea52c4c147a1ab9251f9aef68053243c89e2c02460e4728bbd3127f40a4\
+             e63188e5841ca6caea73cc5e9827dfcd827578ae10c5c6c9c1b47fb468dd2e7b",
         ),
     },
     #[cfg(feature = "sha3_256")]
@@ -337,32 +337,32 @@ static TEST_VECS: &[TestVec] = &[
     TestVec {
         drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha3_384,
         expected_p: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "f9598e8ba47709b0bd12509e835e17b5c050c88cf60cfdccf19f6a6e6758e2a8\
-             b2738299b034c37d107b95ae0a733b92b0ba4b4fefed3c01d80654ca1d64a223\
-             617637d43d61c7d869a32c50c8793a8264cc683dba60ff256147e281761ff6a6\
-             2b614280cc9ea3280030d49705adb103be2a410ec34b5b38de9efcfd8ffdffb3",
+            "e3adf6b310827955d4af73e00ed99cf2b2ad4defb15ab52b81f9fd06c1542bab\
+             09fb72524b30429b7bad02dceed699ef5ec8cfe0859de4eafae77a28e19fc353\
+             540daac7bdc7ef84d1b1c796584890ffe7ead39fb06b9db6e60a4c2d0b27b694\
+             5dd9b0207af800d2374497df4f41d559cf1461610759f66ace5bb3ceffa7a203",
         ),
         expected_q: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "c983168abc5fac66c3ceb8f17cab7dec572323744274e127a27c14ea9cf535d1\
-             c3ba04a38ffb0bd778f3bbce63b6a8837af99e0da580e4f543f8c3cecb532e13\
-             7512b49313b4ef5c07e9134052ed05d8390cffd31fbdfc3efcc3c1afc62d7f19\
-             c7eaa68f792adf35011d964fcf2450bf398f210d33b9879ebde4ab877b4cae33",
+            "e5028b2f9dea3416d1b64d5b61243377f27ad71031f2a560712044bfd767a7bb\
+             70b2a5f535acdc1715135cbf8b2b4f48aa4d15fc2a30410e598544a322a46aee\
+             00f37b0e37f965144606a110c12dd00de0df1e1021877e640470b70b746b7b49\
+             643001ce02c86107c2a6732aed3165f5da3efe205a06ba3e1740cd9b9521f663",
         ),
     },
     #[cfg(feature = "sha3_512")]
     TestVec {
         drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha3_512,
         expected_p: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "c8f8455fe25ec3a785635bca6893d790ab35f1189992f9c47c40195bbbf5f554\
-             ca7bd9e62f707a717e439ac609be83d2b8726d0de1fe5472d4c7726a547bc47c\
-             83f7194b15299cd4a161d70ac3dc572caac80515b135508bb2e88cf50b8c42e1\
-             033b28f132c6750d104f6457733d105fdf6fac71166f64fada00ee4efdad56a9",
+            "cbea57a86adf9c4b72c7d878c20c326451da7384a68402874a1bc33d308d05f2\
+             008570e4435d78bb295948b20fddbc151cd1d9a09644723b04eb6bbbebb8f675\
+             9373d622e9f999969463a977e5de499ed4d879fdf783813f35e176375757dddd\
+             f0c9807bc5bc70574aff2c1a8eb4bd8eb35a83dfb2fd1e3b49718171ddbd82d3",
         ),
         expected_q: &cmpa::hexstr::bytes_from_hexstr_cnst::<128>(
-            "c17f9ebf814d30139c6e026cd7fef60835b1d5287d5e3866bab14b59936e1491\
-             78ebf5e3649af1acaff837c557a52c42777e8c1904b3a05150b4304199223763\
-             2faa03de1be5333b9209bb054c7a64b705cc8185ef7f6ecc70d46eff47f15587\
-             75ca8bf06b7ec7b99d3744bad93df6117aaf9c8558c47d3a162159599433a477",
+            "d566469ad7238b76214fb2357af79bebf2d0f987fa5e861a5ed3e8765e2fee95\
+             64cbdbb4674bd9fd4e6a8d28922e56b4b2d10e99c07efa8a98a83e61d30b63b8\
+             b94408b828515092ffc6770066583cdea90a6a0df5baeb852d15a7f80a146910\
+             b46540d36bbb62720452b0c4241c0c4c38149fb84cb6330a6d21e0125fd425a9",
         ),
     },
 ];

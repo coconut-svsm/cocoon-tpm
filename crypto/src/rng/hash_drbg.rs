@@ -230,7 +230,7 @@ impl HashDrbg {
         if digest_len <= 32 {
             Ok(55)
         } else if digest_len <= 64 {
-            Ok(110)
+            Ok(111)
         } else {
             Err(CryptoError::UnsupportedSecurityStrength)
         }
@@ -562,18 +562,18 @@ fn test_hash_drbg_sha384() {
             with_optional_inputs: false,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<120>(
-                    "271a66720ada0dee30562dc4ff31b204\
-                     a4e90df2006fc86d0e65bf00600fecc4\
-                     72bc50fc956ae2db6be778385aefa0d4\
-                     1769304ad0a4b9256199a54dcde6ed68\
-                     b70331da22b2bcddc342087280965c4b\
-                     a6fbb8ed7a3d012fbbc41e66c07a91d5\
-                     3994ee53d4529fb0b1e6987003f163c9\
-                     28efecdda3b05021",
+                    "6ae872085ec478b3896b1cb2c007abe3\
+                     324b55233c75de1343009921896b078c\
+                     bacb1827df2436eaabcfe8f5676ae058\
+                     fc6afc54b4c53b151684e2e85874aa93\
+                     a75d58fd270664e1ecf5415849e017e6\
+                     7d36dbfab0938184789bb95b6396ea37\
+                     b160692cad04a968b0b0f9aca684122b\
+                     d6f0d22580e55de4",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<23>(
-                    "bbc6249a83081a679a139672175379d1\
-                     6cf5631eaf0d0e",
+                    "a485fdfd9aa424984a0418501d400591\
+                     bc2f4c642ef480",
                 ),
             ],
         },
@@ -581,18 +581,18 @@ fn test_hash_drbg_sha384() {
             with_optional_inputs: true,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<120>(
-                    "753ae3fa4385496e100bfab4ca4bc4dc\
-                     10b8ad9d7ad2e4584b92f6e34677068f\
-                     d968a8a441512d386ce12ecef1a5af5f\
-                     0f30bf7c9f268c423b23a9e3fa2e3552\
-                     e6b9392fb016531ccb80880781529983\
-                     58aecf4dde58bc0677e510343847ef99\
-                     f9e238757e1b0b08cf319dd72fb2a58b\
-                     e6493dac5fe23925",
+                    "1cc0474d1c0e60900c2c518400b41a37\
+                     5413b331efc7524a21ba2d075940c047\
+                     6e490597efd6514416de32023e6786f8\
+                     08afca11e0d9bf84b89d95a1388cbb08\
+                     a26024717562b7272c3cac71f3ea5676\
+                     5066d66661cec91d80f146986a9e9590\
+                     4c999c24dc52853a8595ca7d34cb47a6\
+                     951c9a7d4bfc8249",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<23>(
-                    "4a9f2c3286e6d08e407928a35a521bec\
-                     ba4ccdfef96f66",
+                    "b4453f9972b2331d8613c6741b8d5f05\
+                     a027135f802503",
                 ),
             ],
         },
@@ -615,20 +615,20 @@ fn test_hash_drbg_sha512() {
             with_optional_inputs: false,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<160>(
-                    "6fd3b8e6c808cc413f7c61b6d768a2cf\
-                     ff0249a422ecf0f95457122c0c859f29\
-                     9ae9eea351550763cb859a8f3b81b474\
-                     652f29e38a0c830dc1157467de685a92\
-                     33ac560fcc43ea6ba75b69bc534587ee\
-                     954042aa2734b250e8f5c09adfd1d450\
-                     46216ab7bf13d5a69490cb0f0585b55a\
-                     12f246827a3fdd45dbe4ad27bbdca305\
-                     b61938b9da656d4ee6fd073e0ae7f7f5\
-                     35055785946abb901c4b87c6aa541def",
+                    "a44129625cff6eb33e4797b25bd034a9\
+                     50c4489a04f8d65a2daf80211a3801ea\
+                     c4c29721f3c11eda74d58f2568838d54\
+                     ffa69af5ec7621409bd867de075c4fc7\
+                     f577355e3b3a2778c6f12253629eba2b\
+                     93c7384a621d0fc3753442834843c242\
+                     c83edd6f880e1f5bf5887d291a948ee9\
+                     3e7cb956a33dd593d39b4317b880fb40\
+                     9ec23b390c4e2257d9c6ca934d5f0df2\
+                     65f7942cc2df74e0b1051aca53b77de0",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<31>(
-                    "1ae68ac86b3ed5a9e0a0d18d2350a6de\
-                     b9b276dfdd31fcd3f4ccdd24961978",
+                    "61656fa999bc329c5c1df90a05489a34\
+                     376a097372397f6b115401749c8767",
                 ),
             ],
         },
@@ -636,20 +636,20 @@ fn test_hash_drbg_sha512() {
             with_optional_inputs: true,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<160>(
-                    "73672b5b088ddb62535252e1826e9dd4\
-                     23905963b0c1d385ecd39e67dbf8e751\
-                     87c35031d6ce233bb85c39bc7f5c638d\
-                     e0ebfd23408e73ffc9cd71454d31136e\
-                     b206e48bff1f79d0ee68740fc4cd61db\
-                     efdf02da2b39ed83243a385a04d3db6d\
-                     64748dd6e1ae46dc3425b3492948b652\
-                     29fa161a775f61a3c1f58392fcd60c1a\
-                     c16a372349f569d41f0fbb3acc14e691\
-                     eb98ae10ecce48be9fb0288165072d73",
+                    "8037acaddd4f6681adfb223cb61460a8\
+                     4efabccbd268ba06650bd2232a1f5e00\
+                     d3a3d5b01b324208158d00ddf8474c9d\
+                     541009d41b7a5b8cb24a1d06688d2a63\
+                     3a61719a655c9e36c7e9b9cf2219859e\
+                     dcd831bc3e88c8dff2ca2d1e7f7f42a0\
+                     b287be176d360ca448a29ffca21cc07a\
+                     72207e8adf0340c701f5fbea9ede412e\
+                     b69676dd464779896a9a7486ae65719e\
+                     e5eb97791257d34251678956b0eabbef",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<31>(
-                    "2eca8324d481d6d68122f415500161d4\
-                     e56358814707526f8fde6fcda94c59",
+                    "cbf4710c699a2d0f5832b5dc352d6455\
+                     5a5f790c2660c83807d95e277b14de",
                 ),
             ],
         },
@@ -710,18 +710,18 @@ fn test_hash_drbg_sha3_384() {
             with_optional_inputs: false,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<120>(
-                    "696e8d4a7f691a54c0ef7c9ddd9e4a48\
-                     3a51ce8f8736ee0e141d0d4a9229a58f\
-                     e285d12f5e945bc5969eab921a7b834b\
-                     f2f92226210b2683339e53a649ca6b93\
-                     0c01e42618e4edf5ee5a824374b77432\
-                     28efb419eefd551d90ae642f88fd9e53\
-                     123f3d5d56c3ca1771da20e212c79f78\
-                     9e491e01cc425e6e",
+                    "27eb240ebd3c8b68105c5134e73c6e9e\
+                     9a6eece002da32fe07974e2ef93958eb\
+                     bef47845384f374fdadf498dac643ce6\
+                     6d574489c02b16c2a11e438aacb5dace\
+                     8d2a58664ebeffb67f45c9b829e3b5f3\
+                     547a097bdb35bd7560a8d7c1d5ee9e22\
+                     2da3fdaa538e018d600525913917d327\
+                     7a003c827e50a331",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<23>(
-                    "ad54372cf6c760705a89497a8d16c053\
-                     fcd49d129162fe",
+                    "f3b2ee64096725aa93e42993a991355e\
+                     583bb209b31834",
                 ),
             ],
         },
@@ -729,18 +729,18 @@ fn test_hash_drbg_sha3_384() {
             with_optional_inputs: true,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<120>(
-                    "5120e9f9c1ff9afa552d7488b30676df\
-                     4893d279d2eed8564902a9f5c2db4576\
-                     c95f73c4441eb55c4c9809763f942a7a\
-                     4091a868e0324f181470e186544e3fdc\
-                     c73a2d31c7c488ff3f7be4312a6a5141\
-                     784e7f9691aa8f07169052960a1abbbf\
-                     04f7318448fddcd201cc5c36ebb1f095\
-                     57eaabe273eb6ed5",
+                    "7f89181ba09aec19012e68574c0b4a6d\
+                     76de19e5f53c7a186a58eff1c51e2dfd\
+                     0db980a31e17aa52fe7304fe277a0e33\
+                     1dab1ebce555277fd1f5dd7d0a53233e\
+                     c91440438b00cc382440e3dcd337451b\
+                     eaff9da90371e2dfcfc00fdee2af6cbb\
+                     db793f854ba96c245cb6678b1ec9f5a4\
+                     4ae6b9bccb259079",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<23>(
-                    "2ab06377bb40cde09cc0b660ed22f10c\
-                     9264a3da6ace16",
+                    "752fa293a163670f148c6d406a1c92b1\
+                     6613c1c2b9af21",
                 ),
             ],
         },
@@ -763,20 +763,20 @@ fn test_hash_drbg_sha3_512() {
             with_optional_inputs: false,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<160>(
-                    "8216bba2eff7eb98071001558a4b2778\
-                     d2d506492bdabd1c0e8b8c992c4892ec\
-                     11fdf5c6527767aba9a6125751e10020\
-                     a52b061a94986e766ed6aa281136006c\
-                     89d15ad418ec2d934e0ec71df44c0cb3\
-                     b947af06ff764e5554656144b8624bc1\
-                     3dce3e7f6efcfda12df6510d805bc54f\
-                     da4c5ce03391a6f2c951b7566c2d7c2b\
-                     361efa08ada32367d0bc9f89f4884b76\
-                     d4204420a192d3437d2c52551c2ac9e0",
+                    "f05455751196861f05646c22e9914d13\
+                     80b83c1ad7364afb10df3c4f3c297c6c\
+                     a8a85e9b26dee9b52720a7fa895b8be5\
+                     064c3b6d51927b7165b824ff6c9dfe0a\
+                     8ac0a0428ef2e0d1e176a8b49c386e6e\
+                     3938ef277188540eb253f57b046de4b9\
+                     2cfeec142311342305a9811f9e81fdfb\
+                     e3c47e6fd17cdd17787ec01a8b70c695\
+                     643bc67f0e94e7c3087fb3897b904350\
+                     250c5a8a105c9690b87d5a291501c74f",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<31>(
-                    "208c106b6b3e3ff59efb41a82d26d61b\
-                     725cedd560e20ec164f9ab567f11d6",
+                    "9cb2fb3d56cf2d60551070d97ce4ec6c\
+                     a4bcbc809c203fc6d7892098f83594",
                 ),
             ],
         },
@@ -784,20 +784,20 @@ fn test_hash_drbg_sha3_512() {
             with_optional_inputs: true,
             expected_outputs: [
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<160>(
-                    "92395b61629b012b755e8c4c87e8ae80\
-                     c2ba7ae4ebac717643d9baec28b848e3\
-                     5bace3496da4349632b0c79693a8181d\
-                     701d0baa704fbd0e45bbf1398c362612\
-                     26fd88d7bd4f81840ba150854c3828c0\
-                     972386d7db1ca5ef1fa6854cd3ba7dcc\
-                     b37cc2896788df52d342dd234ecdfff9\
-                     dc366fd7487a3ccdc9253e76bfa6957e\
-                     eafbfb9f446936e3998d4a126926250b\
-                     67b85e7ecde016059767c603d7d2a40d",
+                    "3b1f0e42408926fa81d64f88b3e070eb\
+                     b8921761eeebe7f50060be9c377c6a78\
+                     9b2aad96e42afcf03fbb5f24988b35ed\
+                     eaa757436951a0d201a44c5e4ef3b74c\
+                     2fdb31795d14d72b8d0d022619ee530d\
+                     a6a38dac8512ea78ae9545fad2d0c513\
+                     ef3c474f270d3ab16c4d7eea765c66a8\
+                     454dbebfff5d34235d5ee699600cbe17\
+                     35319a78be0cedc4baceb7e3f7af1fe9\
+                     6b4c42c1233832f1e0fb864ff8bc76c8",
                 ),
                 &cmpa::hexstr::bytes_from_hexstr_cnst::<31>(
-                    "c48cd20f6d2a35cb7ec56ae7bc300596\
-                     c9466932037b0f759d4117dce676e2",
+                    "414de6dfb1628aaf79f8da757226a021\
+                     e3aac077039344123001f8b985912e",
                 ),
             ],
         },
