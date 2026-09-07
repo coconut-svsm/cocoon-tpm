@@ -337,17 +337,24 @@ impl HashDrbg {
 
             // Step 4.2.) with final step 5.) fused into the loop.
             if output_slice_len == digest_len {
-                hash_instance.finalize_into_reset(output_slice)?;
+                if let Err(e) = hash_instance.finalize_into_reset(output_slice) {
+                    break Err(CryptoError::from(e));
+                }
                 remaining_len -= digest_len;
             } else {
                 assert_eq!(digest_scratch_buf.len(), hash_instance.digest_len());
-                hash_instance.finalize_into_reset(digest_scratch_buf)?;
+                if let Err(e) = hash_instance.finalize_into_reset(digest_scratch_buf) {
+                    break Err(CryptoError::from(e));
+                }
                 let digest: &[u8] = digest_scratch_buf;
                 output_slice.copy_from_slice(&digest[..output_slice_len]);
                 remaining_len -= output_slice_len;
-                remaining_len -= output.copy_from_iter(
+                remaining_len -= match output.copy_from_iter(
                     &mut io_slices::SingletonIoSlice::new(&digest[output_slice_len..]).map_infallible_err(),
-                )?
+                ) {
+                    Ok(copied) => copied,
+                    Err(e) => break Err(e),
+                };
             }
 
             // Stop if the (maximum) request length has been exceeded. Don't dequeue any
