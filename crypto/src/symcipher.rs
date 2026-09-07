@@ -1411,22 +1411,22 @@ fn test_encrypt_decrypt_in_place_ecb_sm4_128() {
 }
 
 macro_rules! cfg_select_block_cipher_alg {
-    (($f:literal, $id:expr)) => {
+    (($f:literal, $id:expr)) => {{
         #[cfg(feature = $f)]
         return $id;
         #[cfg(not(feature = $f))]
         {
             "Force compile error for no block cipher configured"
         }
-    };
-    (($f:literal, $id:expr), $(($f_more:literal, $id_more:expr)),+) => {
+    }};
+    (($f:literal, $id:expr), $(($f_more:literal, $id_more:expr)),+) => {{
         #[cfg(feature = $f)]
         return $id;
         #[cfg(not(feature = $f))]
         {
             cfg_select_block_cipher_alg!($(($f_more, $id_more)),+)
         }
-    };
+    }};
 }
 
 pub const fn test_block_cipher_alg() -> SymBlockCipherAlg {
