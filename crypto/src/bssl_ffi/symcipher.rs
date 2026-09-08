@@ -68,9 +68,9 @@ macro_rules! key_size_to_key_len {
 macro_rules! gen_match_on_aes_key_size {
     ($aes_key_size_value:expr, $m:ident $(, $($args:tt),*)?) => {
         match $aes_key_size_value {
-            symcipher::SymBlockCipherAesKeySize::Aes128 => $m!($($($args:tt),*,)? 128),
-            symcipher::SymBlockCipherAesKeySize::Aes192 => $m!($($($args:tt),*,)? 192),
-            symcipher::SymBlockCipherAesKeySize::Aes256 => $m!($($($args:tt),*,)? 256),
+            symcipher::SymBlockCipherAesKeySize::Aes128 => $m!($($($args),*,)? 128),
+            symcipher::SymBlockCipherAesKeySize::Aes192 => $m!($($($args),*,)? 192),
+            symcipher::SymBlockCipherAesKeySize::Aes256 => $m!($($($args),*,)? 256),
         }
     };
 }
