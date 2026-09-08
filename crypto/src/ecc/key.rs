@@ -9,7 +9,7 @@ use super::{curve, gen_random_scalar};
 use crate::{CryptoError, rng};
 use crate::{
     tpm2_interface,
-    utils_common::{alloc::try_alloc_zeroizing_vec, ct_cmp, zeroize},
+    utils_common::{alloc::try_alloc_zeroizing_vec, zeroize},
 };
 use cmpa::{self, MpMutUInt as _};
 use core::{convert, mem};
@@ -353,8 +353,14 @@ impl<'a, 'b, 'c>
                 curve_ops,
             )?;
 
-            if (ct_cmp::ct_bytes_eq(&plain_x, &src_point.x.buffer) & ct_cmp::ct_bytes_eq(&plain_y, &src_point.y.buffer))
-                .unwrap()
+            if (cmpa::ct_eq_mp_mp(
+                &cmpa::MpBigEndianUIntByteSlice::from_bytes(&plain_x),
+                &cmpa::MpBigEndianUIntByteSlice::from_bytes(&src_point.x.buffer),
+            ) & cmpa::ct_eq_mp_mp(
+                &cmpa::MpBigEndianUIntByteSlice::from_bytes(&plain_y),
+                &cmpa::MpBigEndianUIntByteSlice::from_bytes(&src_point.y.buffer),
+            ))
+            .unwrap()
                 == 0
             {
                 return Err(CryptoError::KeyBinding);
