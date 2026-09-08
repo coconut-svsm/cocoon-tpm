@@ -117,7 +117,7 @@ impl RsaPrivateKeyCrt {
         // Make a copy of p in native-endian order, it will be needed anyway, so it's
         // better to create it first and use that for all subsequent
         // computations.
-        let p_len = p.len();
+        let p_len = cmpa::ct_find_last_set_byte_mp(p).1;
         let p_nlimbs = cmpa::MpMutNativeEndianUIntLimbsSlice::nlimbs_for_len(p_len);
         let mut p_buf = try_alloc_zeroizing_vec::<cmpa::LimbType>(p_nlimbs)?;
         let mut ne_p = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(&mut p_buf);
