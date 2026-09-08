@@ -209,7 +209,8 @@ fn gen_prime(
         let rounds = miller_rabin_rounds(nbits);
         let mut is_composite = false;
         let result_div = &cmpa::CtMpDivisor::new(&result, None).map_err(|_| CryptoError::Internal)?;
-        for _ in 0..rounds {
+        let mut round = 0;
+        while round < rounds {
             let rng_scratch = cmpa::limb_slice_as_bytes_mut(scratch2);
             let rng_scratch = rng_scratch.split_at_mut(nbytes).0;
             rng::rng_dyn_dispatch_generate(
@@ -222,6 +223,33 @@ fn gen_prime(
             base.copy_from(&rng_scratch);
             cmpa::clear_bits_above_mp(&mut base, nbits);
             cmpa::ct_mod_mp_mp(None, &mut base, result_div);
+
+            // Verify the base is in the range [2, p -2], c.f. FIPS 186-5, step 4.2.
+            // Compare against the lower bound.
+            if cmpa::ct_leq_mp_l(&base, 1).unwrap() != 0 {
+                // Reject the base, sample another one. Consume a retry -- the probability of a
+                // base getting rejected in negligible in case the RNG is working properly, and
+                // an infinite loop should be avoided if not.
+                if *retries == 0 {
+                    return Err(CryptoError::RandomSamplingRetriesExceeded);
+                }
+                *retries -= 1;
+                continue;
+            }
+            // Compare against the upper bound.
+            if cmpa::ct_add_mp_l(&mut base, 1) != 0 || cmpa::ct_geq_mp_mp(&base, &result).unwrap() != 0 {
+                // Reject the base, sample another one. Consume a retry -- the probability of a
+                // base getting rejected in negligible in case the RNG is working properly, and
+                // an infinite loop should be avoided if not.
+                if *retries == 0 {
+                    return Err(CryptoError::RandomSamplingRetriesExceeded);
+                }
+                *retries -= 1;
+                continue;
+            }
+            // Undo the increment made for the comparison right above.
+            cmpa::ct_sub_mp_l(&mut base, 1);
+
             let mut mg_base = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(scratch2);
             cmpa::ct_to_montgomery_form_mp(&mut mg_base, &base, &result, neg_p0_inv_mod_l, &mg_radix2_mod_p)
                 .map_err(|_| CryptoError::Internal)?;
@@ -233,6 +261,7 @@ fn gen_prime(
                 is_composite = true;
                 break;
             }
+            round += 1;
         }
         if is_composite {
             continue;
