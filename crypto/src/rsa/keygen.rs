@@ -15,7 +15,7 @@ use crate::utils_common::{
     zeroize,
 };
 use crate::{CryptoError, rng};
-use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
+use cmpa::{self, MpMutUInt as _, MpUIntCommon as _, MpUIntSlice as _};
 use core::array;
 
 /// The minimum public exponent allowed by FIPS 186-5.
@@ -518,12 +518,17 @@ fn gen_prime_pair_fips_186_5(
     additional_rng_generate_input: Option<&[Option<&[u8]>]>,
 ) -> Result<(), CryptoError> {
     // FIPS 186-5, A.1.3, step 1.
-    if modulus_nbits % (2 * 8) != 0 || modulus_nbits < 2048 || public_exponent.len() > modulus_nbits / 8 {
+    // As an additional constraint, require the modulus length to be an even number
+    // of bytes, and that half of it is at least as large as public_exponent,
+    // the gen_prime() implementation assumes that. For interoperability, trim
+    // leading zeros off the public_exponent.
+    let public_exponent = public_exponent.shrink_to(cmpa::find_last_set_byte_mp(public_exponent));
+    if modulus_nbits % (2 * 8) != 0 || modulus_nbits < 2048 || public_exponent.len() > modulus_nbits / 16 {
         return Err(CryptoError::InvalidParams);
     }
 
     // FIPS 186-5, A.1.3, step 2.
-    if !public_exponent_is_valid(public_exponent) {
+    if !public_exponent_is_valid(&public_exponent) {
         return Err(CryptoError::InvalidParams);
     }
 
@@ -545,7 +550,7 @@ fn gen_prime_pair_fips_186_5(
     if let Err(e) = gen_prime(
         result_p,
         prime_nbits,
-        public_exponent,
+        &public_exponent,
         rng,
         additional_rng_generate_input,
         &mut p_retries,
@@ -570,7 +575,7 @@ fn gen_prime_pair_fips_186_5(
         if let Err(e) = gen_prime(
             result_q,
             prime_nbits,
-            public_exponent,
+            &public_exponent,
             rng,
             additional_rng_generate_input,
             &mut q_retries,
@@ -671,7 +676,13 @@ pub fn gen_prime_pair_nist_sp800_56br2(
     rng: &mut dyn rng::RngCoreDispatchable,
     additional_rng_generate_input: Option<&[Option<&[u8]>]>,
 ) -> Result<(), CryptoError> {
-    if modulus_nbits % (2 * 8) != 0 || modulus_nbits < 2048 || public_exponent.len() > modulus_nbits / 8 {
+    // Same check as FIPS 186-5, A.1.3, step 1.
+    // As an additional constraint, require the modulus length to be an even number
+    // of bytes, and that half of it is at least as large as public_exponent,
+    // the gen_prime() implementation assumes that. For interoperability, trim
+    // leading zeros off the public_exponent.
+    let public_exponent = public_exponent.shrink_to(cmpa::find_last_set_byte_mp(public_exponent));
+    if modulus_nbits % (2 * 8) != 0 || modulus_nbits < 2048 || public_exponent.len() > modulus_nbits / 16 {
         return Err(CryptoError::InvalidParams);
     }
 
@@ -691,7 +702,7 @@ pub fn gen_prime_pair_nist_sp800_56br2(
             result_p,
             result_q,
             modulus_nbits,
-            public_exponent,
+            &public_exponent,
             rng,
             additional_rng_generate_input,
         )?;
@@ -777,7 +788,7 @@ pub fn gen_prime_pair_nist_sp800_56br2(
         let [lcm, d, scratch0, scratch1, scratch2, scratch3] = &mut scratch;
         let mut lcm = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(lcm);
         let mut d = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(d);
-        d.copy_from(public_exponent);
+        d.copy_from(&public_exponent);
         // Note that the gen_prime() has already checked that the public_exponent is
         // coprime with both, p - 1 and q - 1, so the inverse does exist.
         if cmpa::ct_inv_mod_mp_mp(&mut d, &mut lcm, [scratch0, scratch1, scratch2, scratch3]).is_err() {
