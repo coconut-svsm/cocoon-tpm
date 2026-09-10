@@ -5,6 +5,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use cmpa::MpUIntSlice as _;
+
 use super::{curve, gen_random_scalar};
 use crate::{CryptoError, rng};
 use crate::{
@@ -321,13 +323,21 @@ impl<'a, 'b, 'c>
             // Verify that the externally provided public key matches the
             // regenerated one.
             let curve = curve_ops.get_curve();
+            // Trim overlong paddings beyond p_len for interoperability -- validate_scalar()
+            // would reject it if longer than p_len(). Be careful to make it
+            // constant-time in order to not reveal the exact length of the
+            // private scalar.
+            let p_len = curve.get_p_len();
             let src_d = cmpa::MpBigEndianUIntByteSlice::from_bytes(&src_d.buffer);
+            let src_d_len = cmpa::ct_find_last_set_byte_mp(&src_d).1;
+            let src_d_len = cmpa::ct_gt_usize_usize(p_len, src_d_len).select_usize(src_d_len, p_len);
+            let src_d = src_d.shrink_to(src_d_len);
             curve.validate_scalar(&src_d).map_err(|e| match e {
                 CryptoError::InvalidPoint => CryptoError::KeyBinding,
                 e => e,
             })?;
 
-            let mut d_buf = try_alloc_zeroizing_vec::<u8>(curve.get_p_len())?;
+            let mut d_buf = try_alloc_zeroizing_vec::<u8>(p_len)?;
             let mut d = cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut d_buf);
             d.copy_from(&src_d);
 
@@ -345,8 +355,8 @@ impl<'a, 'b, 'c>
             // And compare with the input public key. Don't stabilize -- it won't get used
             // further henceafter anyways and equality at some point in time is
             // good enough as far as this check here is concerned.
-            let mut plain_x = try_alloc_zeroizing_vec::<u8>(curve.get_p_len())?;
-            let mut plain_y = try_alloc_zeroizing_vec::<u8>(curve.get_p_len())?;
+            let mut plain_x = try_alloc_zeroizing_vec::<u8>(p_len)?;
+            let mut plain_y = try_alloc_zeroizing_vec::<u8>(p_len)?;
             point.to_plain_coordinates(
                 &mut cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut plain_x),
                 Some(&mut cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut plain_y)),
