@@ -17,7 +17,7 @@ use crate::{
     rng,
 };
 use crate::{tpm2_interface, utils_common::zeroize};
-use cmpa::{self, MpUIntCommon as _};
+use cmpa::{self, MpUIntCommon as _, MpUIntSlice as _};
 use core::{ffi, marker, mem, ptr};
 
 /// ECC point in a representation with efficient storage characteristics.
@@ -102,15 +102,19 @@ impl AffinePoint {
         y: &cmpa::MpBigEndianUIntByteSlice,
         curve_ops: &CurveOps,
     ) -> Result<Self, CryptoError> {
+        // Accept coordinates padded to beyond p_len for interoperability.
+        let x = x.shrink_to(cmpa::find_last_set_byte_mp(x));
+        let y = y.shrink_to(cmpa::find_last_set_byte_mp(y));
+
         let p = curve_ops.curve.get_p();
         if !x.len_is_compatible_with(p.len())
             || !y.len_is_compatible_with(p.len())
-            || cmpa::ct_geq_mp_mp(x, &p).unwrap() != 0
-            || cmpa::ct_geq_mp_mp(y, &p).unwrap() != 0
+            || cmpa::ct_geq_mp_mp(&x, &p).unwrap() != 0
+            || cmpa::ct_geq_mp_mp(&y, &p).unwrap() != 0
         {
             return Err(CryptoError::InvalidPoint);
         }
-        Self::_try_from_plain_coordinates(x, y, curve_ops)
+        Self::_try_from_plain_coordinates(&x, &y, curve_ops)
     }
 
     /// Convert an `AffinePoint` into "plain" affine coordinates.
