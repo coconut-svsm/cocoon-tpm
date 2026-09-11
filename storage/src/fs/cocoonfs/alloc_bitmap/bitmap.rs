@@ -3721,6 +3721,22 @@ impl AllocBitmap {
         // (as determined in the previous loop) greater than the current s_delta
         // below. Note that this set grows with decreasing s_log2.
         let mut blocks_with_s_str_lsbs: BitmapWord = blocks_with_max_str_lsbs;
+        // Clear the least significant bits in each block in order to prevent bits from
+        // bleeding into the neighbouring block in the y >> 1 from the
+        // nonzero_blocks_lsbs computation below. At this point, only blocks
+        // with a maxstr length of 1 can have the LSB set and these are
+        // handled by the s_per_block initialization, not the the backtracking loop
+        // below, which is only for blocks with a maxstr >= 2.
+        debug_assert_eq!(
+            bitmap_word
+                & Self::bitmap_word_nonzero_blocks_lsbs(
+                    s_per_block & !bitmap_word_blocks_lsbs_mask,
+                    block_allocation_blocks_log2,
+                    bitmap_word_blocks_lsbs_mask,
+                ),
+            0
+        );
+        bitmap_word &= !bitmap_word_blocks_lsbs_mask;
         while s_log2 > 0 {
             s_log2 -= 1;
             let s_delta = 1u32 << s_log2;
