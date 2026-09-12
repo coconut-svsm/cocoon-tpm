@@ -1213,7 +1213,7 @@ impl JournalLog {
             ));
         }
 
-        if src.total_len()? < encoded_alloc_bitmap_file_extents_len {
+        if src.total_len()? < encoded_alloc_bitmap_file_fragments_auth_digests_len {
             return Err(NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds));
         }
         alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_hmac_instance.update(
