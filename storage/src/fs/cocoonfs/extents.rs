@@ -1858,7 +1858,7 @@ impl<'a> LogicalExtentsRangeIterator<'a> {
         Self {
             extents,
             range: Some(range.clone()),
-            index: 0,
+            index: range.index_first,
         }
     }
 }
