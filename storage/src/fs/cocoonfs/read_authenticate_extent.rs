@@ -395,6 +395,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             ));
                         }
                         task::Poll::Ready(Err(e)) => {
+                            this.fut_state = ReadAuthenticateExtentFutureState::Done;
                             return task::Poll::Ready(Err((None, e)));
                         }
                         task::Poll::Pending => return task::Poll::Pending,
