@@ -2465,40 +2465,46 @@ impl AllocBitmap {
                         + excess_fixed_alignment_padding_tail,
                     excess_allocation_blocks
                 );
-                let max_movable_excess_block = u32::next_power_of_two(movable_excess_allocation_blocks + 1) >> 1;
-                // First option: the allocation is placed after the (movable part of the) excess
-                // space.
-                // This computes the amount of excess space after the point point of maximum
-                // alignment within the excess space, c.f. Hacker's Delight, 2nd edition, 3-3
-                // ("Detecting a Power-of-2 Boundary Crossing").
-                let movable_excess_aligned_blocks_set_after_1 = (containing_block_candidate_aligned_maxstr_begin
-                    | max_movable_excess_block.wrapping_neg())
-                .wrapping_add(movable_excess_allocation_blocks);
-                let movable_excess_aligned_blocks_set_after_0 =
-                    movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_after_1;
-                let movable_excess_aligned_blocks_set_after =
-                    movable_excess_aligned_blocks_set_after_0 | movable_excess_aligned_blocks_set_after_1;
-                // Second option: the allocation is placed before the (movable part of the)
-                // excess space.
-                let movable_excess_aligned_blocks_set_before_1 = ((containing_block_candidate_aligned_maxstr_begin
-                    + chunk_allocation_blocks)
-                    | max_movable_excess_block.wrapping_neg())
-                .wrapping_add(movable_excess_allocation_blocks);
-                let movable_excess_aligned_blocks_set_before_0 =
-                    movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_before_1;
-                let movable_excess_aligned_blocks_set_before =
-                    movable_excess_aligned_blocks_set_before_0 | movable_excess_aligned_blocks_set_before_1;
-                let (chunk_begin, excess_aligned_blocks_set) = if movable_excess_aligned_blocks_set_after
-                    > movable_excess_aligned_blocks_set_before
-                {
-                    (
-                        containing_block_candidate_aligned_maxstr_begin + movable_excess_allocation_blocks,
-                        movable_excess_aligned_blocks_set_after | excess_fixed_alignment_padding_aligned_blocks_set,
-                    )
+                let (chunk_begin, excess_aligned_blocks_set) = if movable_excess_allocation_blocks != 0 {
+                    let max_movable_excess_block = u32::next_power_of_two(movable_excess_allocation_blocks + 1) >> 1;
+                    // First option: the allocation is placed after the (movable part of the) excess
+                    // space.
+                    // This computes the amount of excess space after the point point of maximum
+                    // alignment within the excess space, c.f. Hacker's Delight, 2nd edition, 3-3
+                    // ("Detecting a Power-of-2 Boundary Crossing").
+                    let movable_excess_aligned_blocks_set_after_1 = (containing_block_candidate_aligned_maxstr_begin
+                        | max_movable_excess_block.wrapping_neg())
+                    .wrapping_add(movable_excess_allocation_blocks);
+                    let movable_excess_aligned_blocks_set_after_0 =
+                        movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_after_1;
+                    let movable_excess_aligned_blocks_set_after =
+                        movable_excess_aligned_blocks_set_after_0 | movable_excess_aligned_blocks_set_after_1;
+                    // Second option: the allocation is placed before the (movable part of the)
+                    // excess space.
+                    let movable_excess_aligned_blocks_set_before_1 = ((containing_block_candidate_aligned_maxstr_begin
+                        + chunk_allocation_blocks)
+                        | max_movable_excess_block.wrapping_neg())
+                    .wrapping_add(movable_excess_allocation_blocks);
+                    let movable_excess_aligned_blocks_set_before_0 =
+                        movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_before_1;
+                    let movable_excess_aligned_blocks_set_before =
+                        movable_excess_aligned_blocks_set_before_0 | movable_excess_aligned_blocks_set_before_1;
+                    if movable_excess_aligned_blocks_set_after > movable_excess_aligned_blocks_set_before {
+                        (
+                            containing_block_candidate_aligned_maxstr_begin + movable_excess_allocation_blocks,
+                            movable_excess_aligned_blocks_set_after | excess_fixed_alignment_padding_aligned_blocks_set,
+                        )
+                    } else {
+                        (
+                            containing_block_candidate_aligned_maxstr_begin,
+                            movable_excess_aligned_blocks_set_before
+                                | excess_fixed_alignment_padding_aligned_blocks_set,
+                        )
+                    }
                 } else {
                     (
                         containing_block_candidate_aligned_maxstr_begin,
-                        movable_excess_aligned_blocks_set_before | excess_fixed_alignment_padding_aligned_blocks_set,
+                        excess_fixed_alignment_padding_aligned_blocks_set,
                     )
                 };
                 let chunk_begin = chunk_begin + containing_block_begin;
