@@ -411,8 +411,7 @@ impl SparseAllocBitmap {
                 Err(e) => {
                     // Rollback on error.
                     for extent in extents_iter.take(i) {
-                        self.prune_unused_in_range(&extent, first_entry_index_hint, false);
-                        first_entry_index_hint = None;
+                        self.prune_unused_in_range(&extent, None, false);
                     }
                     return Err(e);
                 }
