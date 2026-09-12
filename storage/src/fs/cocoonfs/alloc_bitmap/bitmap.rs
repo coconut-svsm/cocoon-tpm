@@ -2250,7 +2250,13 @@ impl AllocBitmap {
                 continue;
             }
 
-            if containing_blocks_max_aligned_maxstr_len == containing_block_allocation_blocks {
+            // If no stuitable sub-block chunk has been found yet and the
+            // containing_blocks_max_excess_len upper bound compared against above hasn't
+            // been refined yet, then the free blocks are a subset of the
+            // candidates. Otherwise no free block is among the candidates.
+            if !matches!(best, Some(FoundCandidate::ChunkInPartialContainingBlock { .. }))
+                && containing_blocks_max_aligned_maxstr_len == containing_block_allocation_blocks
+            {
                 // There is at least one fully free containing block.
                 let free_containing_blocks_lsbs = Self::bitmap_word_free_blocks_lsbs(
                     bitmap_word,
@@ -2321,6 +2327,14 @@ impl AllocBitmap {
                 // anyway.
                 containing_blocks_candidates_lsbs ^= free_containing_blocks_lsbs;
                 debug_assert_ne!(containing_blocks_candidates_lsbs, 0);
+            } else {
+                // The free blocks, if any, are not among the candidates.
+                let free_containing_blocks_lsbs = Self::bitmap_word_free_blocks_lsbs(
+                    bitmap_word,
+                    containing_block_allocation_blocks_log2,
+                    word_containing_blocks_lsbs_mask,
+                );
+                debug_assert_eq!(containing_blocks_candidates_lsbs & free_containing_blocks_lsbs, 0);
             }
 
             // At this point, all (remaining) containing candidate blocks are known to
@@ -2508,8 +2522,11 @@ impl AllocBitmap {
                     )
                 };
                 let chunk_begin = chunk_begin + containing_block_begin;
-                debug_assert!(excess_allocation_blocks < containing_block_allocation_blocks);
-                debug_assert!(best_excess_allocation_blocks == containing_block_allocation_blocks || best.is_some());
+                debug_assert!(excess_allocation_blocks < containing_block_allocation_blocks - chunk_allocation_blocks);
+                debug_assert!(
+                    best_excess_allocation_blocks == containing_block_allocation_blocks - chunk_allocation_blocks
+                        || best.is_some()
+                );
                 if excess_allocation_blocks < best_excess_allocation_blocks {
                     if best.is_none() {
                         // Something's been found, arm the placement optimization search distance limit.
