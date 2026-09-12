@@ -894,7 +894,7 @@ impl SparseAllocBitmap {
                     .enumerate()
                     .find(|(_i, e)| e.bitmap_word != 0 || e.bitmap_word_index - bitmap_word_index >= bitmap_words_count)
                     .map(|(i, _e)| i)
-                    .unwrap_or(0)
+                    .unwrap_or(self.entries.len() - entry_index - 1)
                     + 1;
 
                 let next_bitmap_word_index = self.entries[entry_index + cur_batch_len - 1].bitmap_word_index + 1;
