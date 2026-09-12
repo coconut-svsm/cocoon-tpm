@@ -815,6 +815,7 @@ impl SparseAllocBitmap {
                     bitmap_words_count == 0 || bitmap_word_index == self.entries[next_entry_index].bitmap_word_index
                 );
 
+                bitmap_word_index += 1;
                 bitmap_words_count = bitmap_words_count.saturating_sub(1);
                 next_entry_index += 1;
             } else {
