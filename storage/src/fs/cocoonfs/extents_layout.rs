@@ -147,7 +147,8 @@ impl ExtentsLayout {
         // For the purpose of the implementation, each extent's length in units of Bytes
         // must fit an usize.
         let max_extent_allocation_blocks_upper_bound = layout::AllocBlockCount::from(
-            u64::try_from(usize::MAX).unwrap_or(u64::MAX) >> (allocation_block_size_128b_log2 + 7),
+            (u64::try_from(usize::MAX).unwrap_or(u64::MAX) >> (allocation_block_size_128b_log2 + 7))
+                .round_down_pow2(extent_alignment_allocation_blocks_log2 as u32),
         );
 
         // Verify that a minimum length extent does not exceed
