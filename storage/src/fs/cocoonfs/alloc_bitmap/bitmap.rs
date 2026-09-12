@@ -1163,7 +1163,7 @@ impl AllocBitmap {
         let bitmap_words = ((u64::from(image_allocation_blocks) - 1) >> BITMAP_WORD_BITS_LOG2) + 1;
         let bitmap_words = usize::try_from(bitmap_words).map_err(|_| NvFsError::DimensionsNotSupported)?;
 
-        if bitmap_words < self.bitmap.len() {
+        if bitmap_words <= self.bitmap.len() {
             self.bitmap.truncate(bitmap_words);
             let bits_in_last_bitmap_word = u64::BITS
                 - ((u64::from(image_allocation_blocks).wrapping_neg() & u64::trailing_bits_mask(BITMAP_WORD_BITS_LOG2))
