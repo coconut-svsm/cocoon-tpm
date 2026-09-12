@@ -450,9 +450,15 @@ impl cmp::Ord for AuthTreeNodeId {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         // Implement DFS pre order.
         let max_level = self.level.max(other.level);
-        if (u64::from(self.covered_data_blocks_begin) ^ u64::from(other.covered_data_blocks_begin))
-            >> (max_level * self.node_digests_per_node_log2 + self.data_digests_per_node_log2)
-            == 0
+        let max_level_covered_data_block_index_bits = Self::level_covered_data_block_index_bits(
+            max_level as u32,
+            self.node_digests_per_node_log2 as u32,
+            self.data_digests_per_node_log2 as u32,
+        );
+        if max_level_covered_data_block_index_bits >= u64::BITS
+            || (u64::from(self.covered_data_blocks_begin) ^ u64::from(other.covered_data_blocks_begin))
+                >> max_level_covered_data_block_index_bits
+                == 0
         {
             // One is the parent of the other, the child compares as greater.
             return match self.level.cmp(&other.level) {
