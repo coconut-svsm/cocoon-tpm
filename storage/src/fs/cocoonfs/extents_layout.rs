@@ -111,8 +111,7 @@ impl ExtentsLayout {
         }
         // The payload alignment must be <= the extent alignment.
         if (extent_payload_len_alignment as u64)
-            >> (extent_alignment_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7)
-            > 1
+            > 1 << (extent_alignment_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7)
         {
             return Err(nvfs_err_internal!());
         }
