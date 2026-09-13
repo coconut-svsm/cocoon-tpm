@@ -1593,7 +1593,7 @@ impl InodeIndexTreeInternalNode {
         separator_key: EncodedInodeIndexKeyType,
         layout: &InodeIndexTreeLayout,
     ) -> Result<(), NvFsError> {
-        if !self.entries == 0 {
+        if self.entries != 0 {
             return Err(nvfs_err_internal!());
         }
 
