@@ -519,7 +519,7 @@ impl AuxFsMetadata {
         // As an optimization, check whether there's only a termination record with no
         // extra reserve info.
         self.encoded.len() <= ENTRY_HEADER_LEN
-            || (self.iter().next().is_none() && self.get_extra_reserve_capacity() == Some(0))
+            || (self.iter().next().is_none() && self.get_extra_reserve_capacity().is_none())
     }
 
     /// The [`AuxFsMetadata`]'s encoded length.
