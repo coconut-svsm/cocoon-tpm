@@ -973,7 +973,7 @@ impl EncryptedChainedExtentsLayout {
         extent_alignment_allocation_blocks_log2: u8,
         allocation_block_size_128b_log2: u8,
     ) -> Result<Self, NvFsError> {
-        if extent_alignment_allocation_blocks_log2 as u32 > u64::BITS
+        if extent_alignment_allocation_blocks_log2 as u32 >= u64::BITS
             || 1u64 << extent_alignment_allocation_blocks_log2 > EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
         {
             return Err(nvfs_err_internal!());
