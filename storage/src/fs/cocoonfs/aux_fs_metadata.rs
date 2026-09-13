@@ -370,15 +370,13 @@ impl AuxFsMetadata {
 
         // Find the insertion position and the termination record.
         let mut used_encoded_len = 0;
-        let mut insertion_pos = None;
+        let mut insertion_pos = 0;
         for entry in self.iter() {
-            if uuid < entry.0 {
-                insertion_pos = Some(used_encoded_len);
-            }
-
             used_encoded_len += ENTRY_HEADER_LEN + entry.1.len();
+            if uuid >= entry.0 {
+                insertion_pos = used_encoded_len;
+            }
         }
-        let insertion_pos = insertion_pos.unwrap_or(used_encoded_len);
 
         // Account for the termination record.
         let extra_reserve = if self.encoded.is_empty() {
