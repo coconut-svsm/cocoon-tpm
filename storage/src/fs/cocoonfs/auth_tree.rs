@@ -656,7 +656,7 @@ impl AuthTreeDataAllocationBlocksMap {
             .partition_point(|e| e.0 - e.1 <= u64::from(data_allocation_block_index));
         if map_index != 0 {
             layout::PhysicalAllocBlockIndex::from(
-                u64::from(data_allocation_block_index) + self.auth_tree_storage_physical_extents[map_index].1,
+                u64::from(data_allocation_block_index) + self.auth_tree_storage_physical_extents[map_index - 1].1,
             )
         } else {
             layout::PhysicalAllocBlockIndex::from(u64::from(data_allocation_block_index))
