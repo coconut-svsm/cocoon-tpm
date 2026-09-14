@@ -317,7 +317,7 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
         min_extent_alignment_allocation_blocks_log2: u32,
     ) -> layout::AllocBlockCount {
         debug_assert!(
-            extent_accounted_target_effective_payload_len.wrapping_sub(self.allocated_excess_effective_payload_len)
+            extent_accounted_target_effective_payload_len.saturating_sub(self.allocated_excess_effective_payload_len)
                 <= self.allocated_effective_payload_len
         );
         let min_extent_alignment_allocation_blocks_log2 = min_extent_alignment_allocation_blocks_log2
