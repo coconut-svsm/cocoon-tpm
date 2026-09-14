@@ -956,7 +956,7 @@ impl FindFreeFullwordChunksExtentCandiateFilter for FindFreeFullwordChunksExtent
     fn account_extent_added(&mut self) {
         // In case the maximum extent length is constrained by the request, we might
         // run out of budget early.
-        self.budget = self.budget.wrapping_sub(1)
+        self.budget = self.budget.saturating_sub(1)
     }
 
     fn account_extents_dropped(&mut self, n_extents_dropped: u32) {
