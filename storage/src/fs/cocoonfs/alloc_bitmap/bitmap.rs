@@ -1805,9 +1805,14 @@ impl AllocBitmap {
                     .extent_payload_len_to_allocation_blocks(remainder_extent_min_effective_payload_len, false)
                     .0;
                 // All the allocated excess comes from this remainder extent, compute it now.
-                let remainder_extent_allocated_effective_payload_len = allocation_request
-                    .layout
-                    .extent_effective_payload_len(remainder_extent_allocation_blocks, false);
+                let remainder_extent_allocated_effective_payload_len =
+                    if u64::from(remainder_extent_allocation_blocks) != 0 {
+                        allocation_request
+                            .layout
+                            .extent_effective_payload_len(remainder_extent_allocation_blocks, false)
+                    } else {
+                        0
+                    };
                 let allocated_excess_effective_payload_len =
                     remainder_extent_allocated_effective_payload_len - remainder_extent_min_effective_payload_len;
 
