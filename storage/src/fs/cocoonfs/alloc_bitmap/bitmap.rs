@@ -2730,7 +2730,7 @@ impl AllocBitmap {
                             // Found something and no placement optimization requested, bail out.
                             return Some(layout::PhysicalAllocBlockIndex::from(
                                 ((bitmap_word_index - 1) << BITMAP_WORD_BITS_LOG2)
-                                    + (previous_bitmap_word & subword_rem_free_tail_word_mask).trailing_zeros() as u64,
+                                    + (BitmapWord::BITS - subword_rem_allocation_blocks) as u64,
                             ));
                         }
 
