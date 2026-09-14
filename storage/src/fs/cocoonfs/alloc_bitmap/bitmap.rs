@@ -3841,7 +3841,7 @@ impl AllocBitmap {
         }
     }
 
-    /// Packed integer `<=` comparison.
+    /// Packed integer `>=` comparison.
     ///
     /// Interpret `x` and `y` as sequences of packed integers with a width of
     /// two to the power of `block_allocation_blocks_log2` stored in a
@@ -3849,7 +3849,7 @@ impl AllocBitmap {
     /// of `x` and `y` each and return the result as a sequence of packed
     /// integers of matching format with their least significant bits set if
     /// and only if the the corresponding packed integer field from `x` compares
-    /// as less than or equal to the one from `y`.
+    /// as greater than or equal to the one from `y`.
     ///
     /// # Arguments:
     /// `x` - Packed first operand integers.
