@@ -928,7 +928,7 @@ impl FindFreeFullwordChunksExtentCandidateFilterConstrainExtentsCount {
         // (roughly) to the set bits in the remaining allocation request size
         // each. In particular the maximum imposed lower bound would be less or equal to
         // roughly half the remaining allocation request size.
-        let mut budget = if allocation_request.total_effective_payload_len != 1 {
+        let mut budget = if allocation_request.total_effective_payload_len > 1 {
             (allocation_request.total_effective_payload_len - 1).ilog2() + 1
         } else {
             0
