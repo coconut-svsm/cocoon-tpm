@@ -1846,7 +1846,8 @@ impl AllocBitmap {
                     allocation_request.layout.allocation_block_size_128b_log2,
                 )?;
                 let fullwords_allocation_request = ExtentsAllocationRequest::new(
-                    fullwords_extents_allocation_blocks << (allocation_request.layout.allocation_block_size_128b_log2),
+                    fullwords_extents_allocation_blocks
+                        << (allocation_request.layout.allocation_block_size_128b_log2 + 7),
                     &trivial_fullwords_extents_layout,
                 );
                 let fullwords_allocation_result = self.find_free_fullword_chunks(
