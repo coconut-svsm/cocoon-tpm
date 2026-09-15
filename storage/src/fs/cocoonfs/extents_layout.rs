@@ -397,6 +397,11 @@ impl ExtentsLayout {
     /// `extent_allocation_blocks`, defined as the amount of [`effective
     /// payload storage capacity`](Self::extent_effective_payload_len) lost when
     /// compared to not storing the header in that extent.
+    ///
+    /// For fixed `self`, `extents_hdr_placement_cost()` as a function of
+    /// `extent_allocation_blocks` is two-valued at most. If there are two
+    /// possible outcomes, then these differ exactly by the [payload
+    /// alignment padding](Self::extent_payload_len_alignment).
     pub fn extents_hdr_placement_cost(&self, extent_allocation_blocks: layout::AllocBlockCount) -> u64 {
         debug_assert!(extent_allocation_blocks <= self.max_extent_allocation_blocks);
         debug_assert_ne!(u64::from(extent_allocation_blocks), 0);
@@ -424,7 +429,17 @@ impl ExtentsLayout {
                 total_payload_len_w_extents_hdr % self.extent_payload_len_alignment as u64;
             // Does not overflow, extents_hdr_len is an u32 and the payload alignment even
             // fits an u8.
-            self.extents_hdr_len as u64 + payload_padding_w_extents_hdr_len - payload_padding_wo_extents_hdr_len
+            let cost =
+                self.extents_hdr_len as u64 + payload_padding_w_extents_hdr_len - payload_padding_wo_extents_hdr_len;
+            debug_assert!(
+                cost == self.extents_hdr_len as u64
+                    - (self.extents_hdr_len % self.extent_payload_len_alignment as u32) as u64
+                    || cost
+                        == self.extents_hdr_len as u64
+                            - (self.extents_hdr_len % self.extent_payload_len_alignment as u32) as u64
+                            + self.extent_payload_len_alignment as u64
+            );
+            cost
         }
     }
 }
