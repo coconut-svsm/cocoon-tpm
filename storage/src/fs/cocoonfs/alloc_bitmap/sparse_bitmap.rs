@@ -969,7 +969,7 @@ impl SparseAllocBitmap {
             let next_bitmap_word_index = self.entries[entry_index].bitmap_word_index;
             if next_bitmap_word_index != bitmap_word_index {
                 let bits_in_words = ((next_bitmap_word_index - bitmap_word_index - 1) << BITMAP_WORD_BITS_LOG2)
-                    + (u64::BITS - offset_in_bitmap_word) as u64;
+                    + (BitmapWord::BITS - offset_in_bitmap_word) as u64;
                 let bits_in_words = bits_in_words.min(physical_allocation_block_count);
                 physical_allocation_block_count -= bits_in_words;
                 bitmap_word_index = next_bitmap_word_index;
