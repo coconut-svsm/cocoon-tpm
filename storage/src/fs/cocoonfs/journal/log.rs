@@ -1102,9 +1102,14 @@ impl JournalLog {
         // indirect_extents_list_decode() already checks that the extents are
         // well-formed and non-overlapping. Check that they're aligned
         // as expected.
+        let auth_tree_node_allocation_blocks_log2 = image_layout
+            .auth_tree_node_io_blocks_log2
+            .checked_add(image_layout.io_block_allocation_blocks_log2)
+            .ok_or(FormatError::InvalidAuthTreeConfig)? as u32;
         for cur_extent in auth_tree_extents.iter() {
             if !(u64::from(cur_extent.begin()) | u64::from(cur_extent.end()))
                 .is_aligned_pow2(journal_block_allocation_blocks_log2)
+                || !u64::from(cur_extent.block_count()).is_aligned_pow2(auth_tree_node_allocation_blocks_log2)
             {
                 return Err(NvFsError::from(FormatError::UnalignedAuthTreeExtents));
             }

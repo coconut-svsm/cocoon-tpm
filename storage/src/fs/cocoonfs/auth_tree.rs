@@ -1476,7 +1476,7 @@ impl AuthTreeConfig {
             let physical_range = extent.physical_range();
             if !(u64::from(physical_range.begin()) | u64::from(physical_range.end()))
                 .is_aligned_pow2(auth_tree_extents_min_alignment_allocation_blocks_log2)
-                || !u64::from(physical_range.block_count()).is_aligned_pow2(io_block_allocation_blocks_log2)
+                || !u64::from(physical_range.block_count()).is_aligned_pow2(node_allocation_blocks_log2 as u32)
             {
                 return Err(FormatError::UnalignedAuthTreeExtents.into());
             }
@@ -1492,7 +1492,8 @@ impl AuthTreeConfig {
         let auth_tree_data_allocation_blocks_map = AuthTreeDataAllocationBlocksMap::new(&auth_tree_extents)?;
 
         // Deduce the Authentication Tree dimensions from the node count.
-        let auth_tree_node_count = u64::from(auth_tree_nodes_allocation_block_count) >> node_allocation_blocks_log2;
+        let auth_tree_node_count =
+            u64::from(auth_tree_nodes_allocation_block_count) >> (node_allocation_blocks_log2 as u32);
         let auth_tree_levels = auth_tree_node_count_to_auth_tree_levels(
             auth_tree_node_count,
             node_digests_per_node_log2 as u32,
