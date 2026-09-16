@@ -1393,7 +1393,7 @@ impl AllocBitmap {
             }
             None => 0,
         };
-        debug_assert!(search_begin_bitmap_word_index < image_bitmap_words);
+        debug_assert!(image_bitmap_words == 0 || search_begin_bitmap_word_index < image_bitmap_words);
 
         let word_blocks_lsbs_mask_table = BitmapWordBlocksLsbsMaskTable::new();
         let word_blocks_lsbs_mask = word_blocks_lsbs_mask_table.get_blocks_lsbs_mask(block_allocation_blocks_log2);
