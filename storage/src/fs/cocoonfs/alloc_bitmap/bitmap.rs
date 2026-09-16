@@ -1450,6 +1450,7 @@ impl AllocBitmap {
                         AllocBitmapWordIterator::new_at_bitmap_word_index(self, pending_allocs, pending_frees, 0)
                             .take(usize::try_from(search_begin_bitmap_word_index).unwrap_or(usize::MAX));
                     allocated_blocks_index = 0;
+                    next_allocated_fullword_chunk = None;
                 }
             }
 
