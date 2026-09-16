@@ -3197,19 +3197,21 @@ impl AllocBitmap {
                 let shortest_extent_stores_extents_hdr = !extents_hdr_transferred
                     && allocation_request.layout.extents_hdr_len != 0
                     && shortest_extent_index == 0;
-                if shortest_extent_stores_extents_hdr
-                    && cur_extent_max_allocation_blocks >= head_extent_min_allocation_blocks
-                {
-                    // Recompute the current extent's maximum payload length if the extents header
-                    // was transferred to it.
-                    cur_extent_max_effective_payload_len = allocation_request
-                        .layout
-                        .extent_effective_payload_len(cur_extent_max_allocation_blocks, true);
-                    if cur_extent_used_effective_payload_len > cur_extent_max_effective_payload_len {
+                if shortest_extent_stores_extents_hdr {
+                    if cur_extent_max_allocation_blocks >= head_extent_min_allocation_blocks {
+                        // Recompute the current extent's maximum payload length if the extents header
+                        // was transferred to it.
+                        cur_extent_max_effective_payload_len = allocation_request
+                            .layout
+                            .extent_effective_payload_len(cur_extent_max_allocation_blocks, true);
+                        if cur_extent_used_effective_payload_len > cur_extent_max_effective_payload_len {
+                            break;
+                        }
+
+                        extents_hdr_transferred = true;
+                    } else {
                         break;
                     }
-
-                    extents_hdr_transferred = true;
                 }
 
                 let mut shortest_extent_used_effective_payload_len =
