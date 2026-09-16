@@ -120,13 +120,6 @@ impl PhysicalExtents {
     }
 
     /// Remove the extent at the sequence's back.
-    ///
-    /// # Arguments:
-    ///
-    /// * `pos` - Index position to insert the extent at.
-    /// * `range` - The extent to insert.
-    /// * `no_merge` - Whether or not to attempt to merge `range` with its
-    ///   preexisting predecessor.
     pub fn pop_extent(&mut self) {
         self.extents.pop();
     }
