@@ -197,6 +197,7 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
     let mut decode_buf_len = 0;
     let mut src_exhausted = false;
     let mut last_inode_extent_end = 0u64;
+    let mut max_inode_extent_end = layout::PhysicalAllocBlockIndex::from(0u64);
     loop {
         // Refill the decode_buf.
         while !src_exhausted && decode_buf_len < decode_buf.len() {
@@ -272,13 +273,23 @@ pub fn indirect_extents_list_decode<'a, SI: io_slices::IoSlicesIter<'a, BackendI
         }
         last_inode_extent_end = inode_extent_allocation_blocks_end;
 
-        inode_extents.push_extent(
-            &layout::PhysicalAllocBlockRange::new(
-                layout::PhysicalAllocBlockIndex::from(inode_extent_allocation_blocks_begin),
-                layout::PhysicalAllocBlockIndex::from(inode_extent_allocation_blocks_end),
-            ),
-            true,
-        )?;
+        // Check that all extents are non-overlapping.
+        let cur_inode_extent = layout::PhysicalAllocBlockRange::new(
+            layout::PhysicalAllocBlockIndex::from(inode_extent_allocation_blocks_begin),
+            layout::PhysicalAllocBlockIndex::from(inode_extent_allocation_blocks_end),
+        );
+        if cur_inode_extent.begin() < max_inode_extent_end {
+            for inode_extent in inode_extents.iter() {
+                if cur_inode_extent.overlaps_with(&inode_extent) {
+                    return Err(NvFsError::from(FormatError::InvalidExtents));
+                }
+            }
+            debug_assert!(cur_inode_extent.end() < max_inode_extent_end);
+        } else {
+            max_inode_extent_end = cur_inode_extent.end()
+        }
+
+        inode_extents.push_extent(&cur_inode_extent, true)?;
     }
 }
 
@@ -678,26 +689,6 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for InodeExtentsListReadPreA
             Ok(inode_extents) => inode_extents,
             Err(e) => return task::Poll::Ready(Err(e)),
         };
-
-        // This is unauthenticated data. While the indirect_extents_list_decode() does
-        // already verify all individual extents are well-formed, it does not
-        // check for overlaps.  Do it now.
-        if inode_extents.is_empty() {
-            return task::Poll::Ready(Ok(inode_extents));
-        }
-        let mut extents_end_high_watermark = inode_extents.get_extent_range(0).end();
-        for (i, cur_extent) in inode_extents.iter().enumerate() {
-            if cur_extent.begin() >= extents_end_high_watermark {
-                extents_end_high_watermark = cur_extent.end();
-                continue;
-            }
-
-            for j in 0..i {
-                if inode_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
-                }
-            }
-        }
 
         task::Poll::Ready(Ok(inode_extents))
     }

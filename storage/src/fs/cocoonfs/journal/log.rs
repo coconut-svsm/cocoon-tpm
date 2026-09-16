@@ -1098,26 +1098,15 @@ impl JournalLog {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
         // This is considered unauthenticated data, because the encoded extents might
-        // span multiple, independently authenticated Journal log extents. While the
-        // indirect_extents_list_decode() does  already verify all individual
-        // extents are well-formed, it does not check for overlaps.  Do it now.
-        let mut extents_end_high_watermark = layout::PhysicalAllocBlockIndex::from(0u64);
-        for (i, cur_extent) in auth_tree_extents.iter().enumerate() {
+        // span multiple, independently authenticated Journal log extents.
+        // indirect_extents_list_decode() already checks that the extents are
+        // well-formed and non-overlapping. Check that they're aligned
+        // as expected.
+        for cur_extent in auth_tree_extents.iter() {
             if !(u64::from(cur_extent.begin()) | u64::from(cur_extent.end()))
                 .is_aligned_pow2(journal_block_allocation_blocks_log2)
             {
                 return Err(NvFsError::from(FormatError::UnalignedAuthTreeExtents));
-            }
-
-            if cur_extent.begin() >= extents_end_high_watermark {
-                extents_end_high_watermark = cur_extent.end();
-                continue;
-            }
-
-            for j in 0..i {
-                if auth_tree_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return Err(NvFsError::from(FormatError::InvalidExtents));
-                }
             }
         }
 
@@ -1179,23 +1168,6 @@ impl JournalLog {
             inode_extents_list::indirect_extents_list_decode(&mut encoded_alloc_bitmap_file_extents)?;
         if !encoded_alloc_bitmap_file_extents.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
-        }
-        // This is considered unauthenticated data, because the encoded extents might
-        // span multiple, independently authenticated Journal log extents. While the
-        // indirect_extents_list_decode() does  already verify all individual
-        // extents are well-formed, it does not check for overlaps.  Do it now.
-        let mut extents_end_high_watermark = layout::PhysicalAllocBlockIndex::from(0u64);
-        for (i, cur_extent) in alloc_bitmap_file_extents.iter().enumerate() {
-            if cur_extent.begin() >= extents_end_high_watermark {
-                extents_end_high_watermark = cur_extent.end();
-                continue;
-            }
-
-            for j in 0..i {
-                if alloc_bitmap_file_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return Err(NvFsError::from(FormatError::InvalidExtents));
-                }
-            }
         }
 
         // Journal log field: Allocation Bitmap File digests.
