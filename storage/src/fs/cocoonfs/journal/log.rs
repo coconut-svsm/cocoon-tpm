@@ -1303,7 +1303,7 @@ impl JournalLog {
         let apply_writes_script = apply_script::JournalApplyWritesScript::decode(
             encoded_apply_writes_script.as_ref(),
             image_layout.io_block_allocation_blocks_log2 as u32,
-            image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
+            image_layout.allocation_block_size_128b_log2 as u32,
         )?;
         if !encoded_apply_writes_script.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
@@ -1329,7 +1329,7 @@ impl JournalLog {
         let update_auth_digests_script = apply_script::JournalUpdateAuthDigestsScript::decode(
             encoded_update_auth_digests_script.as_ref(),
             image_layout.auth_tree_data_block_allocation_blocks_log2 as u32,
-            image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
+            image_layout.allocation_block_size_128b_log2 as u32,
         )?;
         if !encoded_update_auth_digests_script.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
@@ -1355,7 +1355,7 @@ impl JournalLog {
                 trim_script = Some(apply_script::JournalTrimsScript::decode(
                     encoded_trim_script.as_ref(),
                     image_layout.io_block_allocation_blocks_log2 as u32,
-                    image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
+                    image_layout.allocation_block_size_128b_log2 as u32,
                 )?);
                 if !encoded_trim_script.is_empty()? {
                     return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
