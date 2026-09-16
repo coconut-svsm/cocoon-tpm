@@ -165,6 +165,13 @@ impl ChunkedIoRegion {
             return (self.clone(), None);
         }
 
+        // Only split at chunk boundaries.
+        if !(aligned_physical_end_128b - self.physical_begin_128b).is_aligned_pow2(self.chunk_size_128b_log2)
+            || !(aligned_physical_begin_128b - self.physical_begin_128b).is_aligned_pow2(self.chunk_size_128b_log2)
+        {
+            return (self.clone(), None);
+        }
+
         let chunk_index_offset = self.chunk_index_offset;
         let unaligned_head = Self {
             physical_begin_128b: self.physical_begin_128b,
