@@ -543,7 +543,9 @@ fn produce_iv(
     let iv_len = iv_out.len();
     debug_assert_eq!(iv_gen_block_cipher_instance.block_cipher_block_len(), iv_len);
     iv_out.fill(0);
-    debug_assert!(iv_len >= mem::size_of::<u64>());
+    if iv_len < mem::size_of::<u64>() {
+        return Err(NvFsError::Internal);
+    }
     let (iv_out_head, iv_out_tail) = iv_out.split_at_mut(iv_len - mem::size_of::<u64>());
     iv_out_tail.copy_from_slice(&u64::from(journal_staging_copy_allocation_block).to_le_bytes());
 
