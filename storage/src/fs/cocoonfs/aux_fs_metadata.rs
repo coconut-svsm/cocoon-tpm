@@ -3552,7 +3552,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for WriteAuxFsMetadataExtent
                     let blkdev_io_block_allocation_blocks_log2 =
                         blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
                     let allocation_block_blkdev_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
                     // All AuxFsMetadata extents are aligned to the IO Block
                     // size, hence to the device IO Block size as well.
                     debug_assert!(

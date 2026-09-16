@@ -1736,8 +1736,8 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ExtentIntegrityProtectio
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let blkdev_io_block_allocation_blocks_log2 =
                         blkdev_io_block_size_128b_log2.saturating_sub(*allocation_block_size_128b_log2 as u32);
-                    let allocation_block_blkdev_io_blocks_log2 = (*allocation_block_size_128b_log2 as u32)
-                        .saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        (*allocation_block_size_128b_log2 as u32).saturating_sub(blkdev_io_block_size_128b_log2);
                     let extent_begin_blkdev_io_blocks = u64::from(*extent_begin)
                         >> blkdev_io_block_allocation_blocks_log2
                         << allocation_block_blkdev_io_blocks_log2;
