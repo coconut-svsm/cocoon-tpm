@@ -4894,57 +4894,66 @@ fn image_allocation_blocks_to_auth_tree_node_count(
         return (0, layout::AllocBlockCount::from(image_allocation_blocks));
     }
 
-    // Number of nodes in a complete subtree emerging from a node at the current
-    // level and data range covered by a complete subtree emerging from a node
-    // at the current level.
-    let (mut entry_subtree_node_count, mut entry_subtree_data_allocation_blocks) = if auth_tree_levels >= 2 {
-        (
-            auth_subtree_node_count(
-                auth_tree_levels - 2,
-                auth_tree_levels - 1,
-                node_digests_per_node_log2,
-                node_digests_per_node_minus_one_inv_mod_u64,
-            ),
-            1u64 << ((auth_tree_levels - 2) as u32 * node_digests_per_node_log2
-                + data_digests_per_node_log2
-                + data_block_allocation_blocks_log2),
-        )
-    } else {
-        (
-            0,
-            1u64 << (data_digests_per_node_log2 + data_block_allocation_blocks_log2),
-        )
-    };
-
     let mut auth_tree_node_count = 0;
-    let mut level = auth_tree_levels;
-    while level > 0 {
-        level -= 1;
+    if auth_tree_levels >= 2 {
+        // Number of nodes in a complete subtree emerging from a node at the current
+        // level and data range covered by a complete subtree emerging from a node
+        // at the current level.
+        let mut entry_subtree_node_count = auth_subtree_node_count(
+            auth_tree_levels - 2,
+            auth_tree_levels - 1,
+            node_digests_per_node_log2,
+            node_digests_per_node_minus_one_inv_mod_u64,
+        );
+        let mut entry_subtree_data_allocation_blocks = 1u64
+            << ((auth_tree_levels - 2) as u32 * node_digests_per_node_log2
+                + data_digests_per_node_log2
+                + data_block_allocation_blocks_log2);
 
-        let entry_subtree_total_allocation_blocks =
-            (entry_subtree_node_count << node_allocation_blocks_log2) + entry_subtree_data_allocation_blocks;
+        let mut level = auth_tree_levels;
+        while level > 1 {
+            level -= 1;
 
-        // Account for the current root node itself.
-        image_allocation_blocks -= node_allocation_blocks;
-        auth_tree_node_count += 1;
-        // Complete subtrees descendant of the current root node.
-        let full_subtree_count = image_allocation_blocks / entry_subtree_total_allocation_blocks;
-        image_allocation_blocks -= full_subtree_count * entry_subtree_total_allocation_blocks;
-        auth_tree_node_count += full_subtree_count * entry_subtree_node_count;
+            let entry_subtree_total_allocation_blocks =
+                (entry_subtree_node_count << node_allocation_blocks_log2) + entry_subtree_data_allocation_blocks;
 
-        if image_allocation_blocks < (level as u64) << node_allocation_blocks_log2 {
-            // Not enough space left for even a single tree path down to the bottom.
-            break;
-        }
+            // Account for the current root node itself.
+            image_allocation_blocks -= node_allocation_blocks;
+            auth_tree_node_count += 1;
+            // Complete subtrees descendant of the current root node.
+            let full_subtree_count = image_allocation_blocks / entry_subtree_total_allocation_blocks;
+            debug_assert!(full_subtree_count <= 1u64 << node_digests_per_node_log2);
+            image_allocation_blocks -= full_subtree_count * entry_subtree_total_allocation_blocks;
+            auth_tree_node_count += full_subtree_count * entry_subtree_node_count;
 
-        if level != 0 {
+            if full_subtree_count == 1u64 << node_digests_per_node_log2
+                || image_allocation_blocks < (level as u64) << node_allocation_blocks_log2
+            {
+                // Either the subtree at the current level is full and we're done, or there's
+                // not enough space left for even a single tree path down to the
+                // bottom.
+                return (
+                    auth_tree_node_count,
+                    layout::AllocBlockCount::from(image_allocation_blocks),
+                );
+            }
+
             // Update for the next iteration.
             entry_subtree_node_count = (entry_subtree_node_count - 1) >> node_digests_per_node_log2;
             entry_subtree_data_allocation_blocks >>= node_digests_per_node_log2;
         }
     }
 
-    debug_assert!(level != 0 || image_allocation_blocks < (1u64 << data_block_allocation_blocks_log2));
+    // Take care of the partial leaf node.
+    debug_assert!(image_allocation_blocks >= node_allocation_blocks);
+    // Account for the leaf node itself.
+    image_allocation_blocks -= node_allocation_blocks;
+    auth_tree_node_count += 1;
+    // And the Authentication Tree Data Blocks authenticated by the leaf node.
+    let used_digest_entries_count = image_allocation_blocks >> data_block_allocation_blocks_log2;
+    debug_assert!(used_digest_entries_count <= 1u64 << data_digests_per_node_log2);
+    image_allocation_blocks -= used_digest_entries_count << data_block_allocation_blocks_log2;
+    debug_assert!(image_allocation_blocks < (1u64 << data_block_allocation_blocks_log2));
 
     (
         auth_tree_node_count,
