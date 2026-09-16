@@ -328,7 +328,9 @@ impl<K: cmp::Ord, T> SetAssocCacheSet<K, T> {
             let slot = match self.get_ordered_slot(m) {
                 Some(slot) => slot,
                 None => {
-                    debug_assert_ne!(u, 0);
+                    // The orderd slot m is unoccupied, but we know there is as least one occupied
+                    // slot, and that must come before m.
+                    debug_assert_ne!(m, 0);
                     u = m - 1;
                     continue;
                 }
