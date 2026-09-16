@@ -3949,8 +3949,8 @@ impl AllocBitmap {
     /// # Arguments:
     ///
     /// * `bitmap_word` - The [`BitmapWord`] value to examine.
-    /// * `min_str_len` - The 1-string length to search for. Must be a multiple
-    ///   of the alignment as determined by
+    /// * `min_str_len` - The 1-string length to search for. Must be a non-zero
+    ///   multiple of the alignment as determined by
     ///   `str_alignment_allocation_blocks_log2` and strictly less than
     ///   [`BitmapWord::BITS`].
     /// * `str_alignment_allocation_blocks_log2` - Alignment constrained on the
@@ -3965,7 +3965,7 @@ impl AllocBitmap {
         bitmap_word_str_alignment_anchors_mask: BitmapWord,
     ) -> Option<u32> {
         debug_assert!(str_alignment_allocation_blocks_log2 < BITMAP_WORD_BITS_LOG2);
-        debug_assert!(min_str_len.is_aligned_pow2(str_alignment_allocation_blocks_log2));
+        debug_assert!(min_str_len != 0 && min_str_len.is_aligned_pow2(str_alignment_allocation_blocks_log2));
         debug_assert!(min_str_len < 64);
         // This is the the algorithm from Hacker's Delight, 2nd
         // edition, 6-2 ("Find first string of 1-Bits of a Given Length").
