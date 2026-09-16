@@ -529,6 +529,8 @@ fn find_distinct_u8_value<'a, V: io_slices::PeekableIoSlicesIter<'a>>(
     // less than 256 values, so at least one of the 16 slot will receive less
     // than 16 values.
     let mut c = [0u8; 16];
+    // Record a virtual zero byte.
+    c[0] = 1;
     let mut peeking_values = values.decoupled_borrow();
     while let Some(slice) = peeking_values.next_slice(None)? {
         for v in slice {
