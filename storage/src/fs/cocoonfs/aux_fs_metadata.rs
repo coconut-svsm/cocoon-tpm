@@ -664,9 +664,10 @@ impl AuxFsMetadata {
         extents_layout::ExtentsLayout::new(
             Some(max_extent_allocation_blocks),
             io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2),
-            0,
             extents_hdr_len,
             extent_hdr_len,
+            // No per-extent header in the payload.
+            0,
             // No alignment constraints on the payload.
             1,
             allocation_block_size_128b_log2,
