@@ -1276,9 +1276,12 @@ where
     let checksum = checksum.finish_send();
 
     // Copy the data from the checkpoint locations to the respective checkpoint
-    // locations data save area slot. Do it in reverse order, to support
-    // the case that the checkpoint locations data save area overlaps with
-    // one of the checkpoint locations.
+    // locations data save area slot. Do it in reverse order, to support the
+    // case that the checkpoint locations data save area overlaps with one of
+    // the checkpoint locations. Note that the checkpoint locations
+    // data save area is considered to contain uninitialized data initially, so the
+    // original data found at the checkpoint locations overlapping with the save
+    // area is not worth saving away.
     for i in (1..=(io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32)).rev() {
         let checkpoint_location_end = 1usize << (i + 7);
         let mut peeking_extent = extent.decoupled_borrow();
