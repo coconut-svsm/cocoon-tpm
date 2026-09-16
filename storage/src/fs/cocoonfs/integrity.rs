@@ -520,7 +520,7 @@ where
 /// # Arguments:
 ///
 /// * `values` - Iterator over the byte values to avoid. Must not yield more
-///   than 254 distinct non-zero values.
+///   than 254 values.
 fn find_distinct_u8_value<'a, V: io_slices::PeekableIoSlicesIter<'a>>(
     mut values: V,
 ) -> Result<u8, V::BackendIteratorError> {
