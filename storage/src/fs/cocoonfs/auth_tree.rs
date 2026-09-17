@@ -3995,11 +3995,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                         // Popped node is not the root, digest its updated contents into the
                         // associated parent entry.
                         let popped_node_id = popped_node_pending_updates.node_id;
-                        auth_tree_config.digest_descendant_node_into(
+                        if let Err(e) = auth_tree_config.digest_descendant_node_into(
                             &mut popped_node_digest_dst,
                             &popped_node_id,
                             popped_node_updated_digests,
-                        )?;
+                        ) {
+                            break Err((e, next_updated_data_block));
+                        };
                         drop(popped_node_original); // Drop the locks before doing the memory allocation below.
                         if let Err((e, _)) = this.pending_bottom_node_updates_push(
                             popped_node_id.covered_data_blocks_begin,
