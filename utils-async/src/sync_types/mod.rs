@@ -141,8 +141,8 @@ where
 
 /// Locking guard obtained from [`LockForInner::lock()`](LockForInner::lock).
 ///
-/// Alternatively, an existing guard for the [`Lock`] wrapping the outer `OT` may
-/// get converted directly [to](Self::from_outer) and [back
+/// Alternatively, an existing guard for the [`Lock`] wrapping the outer `OT`
+/// may get converted directly [to](Self::from_outer) and [back
 /// from](Self::into_outer) a `LockForInnerGuard` instance.
 pub struct LockForInnerGuard<'a, OT, OL, TAG>
 where
@@ -494,9 +494,9 @@ pub trait SyncRcPtrRef<'a, T: ?Sized, P: 'a + SyncRcPtr<T>>: Clone + ops::Deref<
 /// the implementation of
 /// [`Pin<SyncRcPtr<T>>::downgrade()`](SyncRcPtr::downgrade).
 ///
-/// Note that it is not possible to simply use `Pin<SyncRcPtr<T>::WeakSyncRcPtr>`
-/// for that, as [`Pin`](pin::Pin) requires the wrapped pointer to be
-/// dereferenceable.
+/// Note that it is not possible to simply use
+/// `Pin<SyncRcPtr<T>::WeakSyncRcPtr>` for that, as [`Pin`](pin::Pin) requires
+/// the wrapped pointer to be dereferenceable.
 pub struct PinnedWeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>> {
     weak_ptr: P::WeakSyncRcPtr,
 }
@@ -1028,9 +1028,9 @@ where
 ///
 /// As outlined in the documentation to [`SyncRcPtrRef`], translating a
 /// [`SyncRcPtrRef`] for the outer containing `struct` to a
-/// `SyncRcPtrRefForInner` for the member is a zero cost operation, whereas going
-/// from a [`SyncRcPtr`] for the outer `struct` to a [`SyncRcPtrForInner`] for
-/// the member is not.
+/// `SyncRcPtrRefForInner` for the member is a zero cost operation, whereas
+/// going from a [`SyncRcPtr`] for the outer `struct` to a [`SyncRcPtrForInner`]
+/// for the member is not.
 pub struct SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
     OT: ?Sized + DerefInnerByTag<TAG>,
