@@ -6470,8 +6470,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             };
 
                             break match this
-                                .pending_inode_extents_list_update
-                                .rollback_excess_preexisting_inode_extents_list_extents_free(
+                                .pending_inode_extents_reallocation
+                                .rollback_excess_preexisting_inode_extents_free(
                                     transaction,
                                     &fs_instance_sync_state.alloc_bitmap,
                                 ) {
