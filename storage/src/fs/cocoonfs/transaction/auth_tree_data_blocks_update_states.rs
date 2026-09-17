@@ -1866,7 +1866,7 @@ impl AuthTreeDataBlocksUpdateStates {
         }
 
         let auth_tree_data_block_allocation_blocks_log2 = self.auth_tree_data_block_allocation_blocks_log2 as u32;
-        let last_auth_tree_data_block_target_allocation_blocks_begin =
+        let mut last_auth_tree_data_block_target_allocation_blocks_begin =
             self.states[cur_auth_tree_data_block_update_states_index.index].target_allocation_blocks_begin;
         cur_auth_tree_data_block_update_states_index = cur_auth_tree_data_block_update_states_index.step();
         while cur_auth_tree_data_block_update_states_index
@@ -1890,6 +1890,8 @@ impl AuthTreeDataBlocksUpdateStates {
                 );
             }
             cur_auth_tree_data_block_update_states_index = cur_auth_tree_data_block_update_states_index.step();
+            last_auth_tree_data_block_target_allocation_blocks_begin =
+                cur_auth_tree_data_block_target_allocation_blocks_begin;
         }
         debug_assert_eq!(
             cur_auth_tree_data_block_update_states_index,
