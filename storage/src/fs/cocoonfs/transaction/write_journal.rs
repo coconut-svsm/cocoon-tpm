@@ -463,10 +463,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    transaction
-                        .auth_tree_data_blocks_update_states
-                        .apply_allocation_blocks_staged_updates(None, &fs_instance_sync_state.alloc_bitmap);
-
                     let all_update_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::new(
                         AuthTreeDataBlocksUpdateStatesIndex::from(0),
                         AuthTreeDataBlocksUpdateStatesIndex::from(
@@ -491,6 +487,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     {
                         break (false, Some(transaction), e);
                     }
+
+                    transaction
+                        .auth_tree_data_blocks_update_states
+                        .apply_allocation_blocks_staged_updates(None, &fs_instance_sync_state.alloc_bitmap);
 
                     // Before actually writing dirty data, allocate Journal staging copies. Doing it
                     // upfront potentially enables write request coalescing.
