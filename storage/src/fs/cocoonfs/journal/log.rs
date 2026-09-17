@@ -1644,14 +1644,13 @@ impl<B: blkdev::NvBlkDev> JournalLogReadHeadExtentFuture<B> {
                     let journal_log_head_extent_blkdev_io_blocks = u64::from(journal_log_head_extent.block_count())
                         << allocation_block_blkdev_io_blocks_log2
                         >> blkdev_io_block_allocation_blocks_log2;
-                    if (journal_log_head_extent_blkdev_io_blocks - 1)
-                        > u64::MAX >> (blkdev_io_block_allocation_blocks_log2 + 7)
+                    if (journal_log_head_extent_blkdev_io_blocks - 1) > u64::MAX >> (blkdev_io_block_size_128b_log2 + 7)
                     {
                         this.fut_state = JournalLogReadHeadExtentFutureState::Done;
                         return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
                     }
                     let journal_log_head_extent_tail_len = match usize::try_from(
-                        (journal_log_head_extent_blkdev_io_blocks - 1) << (blkdev_io_block_allocation_blocks_log2 + 7),
+                        (journal_log_head_extent_blkdev_io_blocks - 1) << (blkdev_io_block_size_128b_log2 + 7),
                     ) {
                         Ok(journal_log_head_extent_tail_len) => journal_log_head_extent_tail_len,
                         Err(_) => {
