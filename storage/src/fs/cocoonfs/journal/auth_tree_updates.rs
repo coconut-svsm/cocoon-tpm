@@ -240,7 +240,7 @@ pub fn alloc_bitmap_file_block_indices_to_physical_extents(
                 alloc_file_blocks_run_physical_allocation_blocks_begin =
                     alloc_file_blocks_run_physical_allocation_blocks_end
                         + layout::AllocBlockCount::from(
-                            (alloc_bitmap_file_block_indices[i] - alloc_bitmap_file_block_indices[i - 1])
+                            (alloc_bitmap_file_block_indices[i] - alloc_bitmap_file_block_indices[i - 1] - 1)
                                 << alloc_bitmap_file_block_allocation_blocks_log2,
                         );
                 alloc_file_blocks_run_physical_allocation_blocks_end =
