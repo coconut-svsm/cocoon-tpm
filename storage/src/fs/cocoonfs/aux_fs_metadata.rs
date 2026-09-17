@@ -3229,7 +3229,7 @@ impl<B: blkdev::NvBlkDev> WriteAuxFsMetadataUpdateGroupExtentsFuture<B> {
                     // be represented in an usize.
                     this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtentPrepare {
                         encoding_pos: (head_extent_payload_len as usize).min(aux_fs_metadata.encoded.len()),
-                        extent_index: 1,
+                        extent_index: group_head_extent_index + 1,
                     };
                 }
                 WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtentPrepare {
