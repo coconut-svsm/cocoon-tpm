@@ -194,9 +194,9 @@ pub struct InodeIndexTreeLayout {
     max_internal_node_entries: usize,
     /// Minimum number of entries (keys) in an internal node.
     min_internal_node_entries: usize,
-    /// Maximum number of entries in a leaf node.
     /// A leaf node's encoded payload length.
     encoded_leaf_node_len: usize,
+    /// Maximum number of entries in a leaf node.
     max_leaf_node_entries: usize,
     /// Minimum number of entries in a leaf node.
     min_leaf_node_entries: usize,
@@ -2457,7 +2457,7 @@ pub struct InodeIndexTreeNodeCache {
 impl InodeIndexTreeNodeCache {
     fn new(layout: &InodeIndexTreeLayout, index_tree_levels: u32) -> Self {
         // Cache the two topmost levels' nodes.
-        let cached_nodes_capacity = 1 + layout.max_internal_node_entries.max(layout.max_leaf_node_entries);
+        let cached_nodes_capacity = 1 + layout.max_internal_node_entries + 1;
         Self {
             cached_nodes: Vec::new(),
             cached_nodes_capacity,
