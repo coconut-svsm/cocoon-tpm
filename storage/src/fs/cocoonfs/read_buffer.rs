@@ -1858,7 +1858,7 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                         ),
                                 );
                             } else if any_allocated_at_head {
-                                fs_sync_state_read_buffer.insert_authenticated_buffers(
+                                fs_sync_state_read_buffer.insert_unauthenticated_buffers(
                                     this.d.aligned_request_range.begin(),
                                     (unused_head_alignment_scratch_allocation_blocks_bufs
                                         .iter()
