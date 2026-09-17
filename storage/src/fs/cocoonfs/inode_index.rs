@@ -5611,11 +5611,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
         task::Poll::Ready(match cursor {
             Some(mut cursor) => {
                 cursor.transaction = cursor.transaction.take().or(transaction);
-                if cursor.transaction.is_none() {
-                    Err(e)
-                } else {
-                    Ok((cursor, Err(e)))
-                }
+                Ok((cursor, Err(e)))
             }
             None => Err(e),
         })
