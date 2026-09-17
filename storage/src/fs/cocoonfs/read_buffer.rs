@@ -1236,7 +1236,22 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             this.d
                                 .alignment_scratch_allocation_blocks_bufs
                                 .fill(FixedVec::new_empty());
-                            this.d.dst_allocation_blocks_bufs.fill(FixedVec::new_empty());
+
+                            // Be careful to reset only that part of dst_allocation_blocks_bufs[]
+                            // that corresponds to a part of found_subrange. Otherwise me might
+                            // reset something in the authenticated_subrange_from_read_buf.
+                            // If that too is overlapping, it will get taken care of below.
+                            let overlap_with_request_range_begin =
+                                found_subrange.begin().max(this.d.request_range.begin());
+                            let overlap_with_request_range_end = found_subrange.end().min(this.d.request_range.end());
+                            if overlap_with_request_range_begin < overlap_with_request_range_end {
+                                this.d.dst_allocation_blocks_bufs[u64::from(
+                                    overlap_with_request_range_begin - this.d.request_range.begin(),
+                                ) as usize
+                                    ..u64::from(overlap_with_request_range_end - this.d.request_range.begin())
+                                        as usize]
+                                    .fill(FixedVec::new_empty());
+                            }
                         } else {
                             this.d.unauthenticated_subrange_from_read_buf = Some(found_subrange);
                         }
