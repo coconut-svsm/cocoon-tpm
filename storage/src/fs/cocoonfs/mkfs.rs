@@ -874,7 +874,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
                     // MkFsInfoHeader, it's associated AuxFsMetadata or to the initial metadata
                     // structures to be written out.
                     if mkfsinfo_data_location.end() > backup_mkfsinfo_data_location.begin()
-                        || mkfs_layout.allocated_image_allocation_blocks_end > backup_mkfsinfo_data_location.end()
+                        || mkfs_layout.allocated_image_allocation_blocks_end > backup_mkfsinfo_data_location.begin()
                     {
                         return Err((blkdev, rng, NvFsError::NoSpace));
                     }
