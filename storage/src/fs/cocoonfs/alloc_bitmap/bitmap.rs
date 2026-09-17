@@ -3473,7 +3473,7 @@ impl AllocBitmap {
                                 >> BITMAP_WORD_BITS_LOG2
                         })
                         .count()
-                        == 1
+                        <= 1
                     {
                         break;
                     }
