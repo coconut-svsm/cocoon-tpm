@@ -236,7 +236,9 @@ impl MkFsLayout {
         let alloc_bitmap_file_allocation_blocks = alloc_bitmap_file_allocation_blocks
             .align_up(auth_tree_data_block_allocation_blocks_log2)
             .ok_or(NvFsError::NoSpace)?;
-        if u64::from(image_size) - u64::from(auth_tree_extent.end()) < u64::from(alloc_bitmap_file_allocation_blocks) {
+        if u64::from(image_size) - u64::from(allocated_image_allocation_blocks_end)
+            < u64::from(alloc_bitmap_file_allocation_blocks)
+        {
             return Err(NvFsError::NoSpace);
         }
         let alloc_bitmap_file_extent = layout::PhysicalAllocBlockRange::new(
