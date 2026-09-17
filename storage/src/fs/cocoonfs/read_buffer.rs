@@ -1756,7 +1756,7 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                     .iter_mut()
                                     .map(Some),
                             );
-                            authenticated_head_alignment_scratch_allocation_blocks_bufs_taken = true;
+                            authenticated_tail_alignment_scratch_allocation_blocks_bufs_taken = true;
                         } else if !authenticated_head_alignment_scratch_allocation_blocks_bufs.is_empty()
                             && head_is_authenticated
                         {
@@ -1766,7 +1766,7 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                     .iter_mut()
                                     .map(Some),
                             );
-                            authenticated_tail_alignment_scratch_allocation_blocks_bufs_taken = true;
+                            authenticated_head_alignment_scratch_allocation_blocks_bufs_taken = true;
                         }
                     }
 
