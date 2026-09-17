@@ -4256,7 +4256,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                         None => {
                             *this = Self::Done(marker::PhantomData);
                             return task::Poll::Ready(PendingTransactionsSyncFutureResult::AllocateBlocks {
-                                result: Err(NvFsError::NoSpace),
+                                result: Ok((transaction, Err(NvFsError::NoSpace))),
                             });
                         }
                     };
