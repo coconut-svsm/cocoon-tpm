@@ -864,7 +864,7 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                 // The current read region's and the original input request's beginnings are
                 // in different Minimum Read Blocks. In particular, all states filled up for
                 // aligning the former will get inserted after the latter.
-                debug_assert_eq!(
+                debug_assert_ne!(
                     (u64::from(states[read_region_states_index_range.begin()].get_target_allocation_blocks_begin())
                         ^ u64::from(states[request_states_index_range.begin()].get_target_allocation_blocks_begin()))
                         >> min_read_block_allocation_blocks_log2,
