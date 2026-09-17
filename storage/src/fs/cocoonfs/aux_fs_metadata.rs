@@ -1671,6 +1671,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for DoReadAuxFsMetadataFutur
                                         .aux_fs_metadata_extents
                                         .extents
                                         .get_extent_range(this.aux_fs_metadata_extents.extents.len() - 1);
+                                    this.aux_fs_metadata_extents.extents.pop_extent();
                                     if this.update_groups_heads.ptrs[1]
                                         .as_ref()
                                         .map(|update_group1_head| update_group1_head.begin() == skipped_extent.begin())
