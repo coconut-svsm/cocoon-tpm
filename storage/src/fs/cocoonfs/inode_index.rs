@@ -5044,7 +5044,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             // that all existing inode entries overlapping with the query range are
                             // to be found there, then set is_final_leaf_node in order to avoid
                             // an unnecessary leaf node chain walk.
-                            if next_child_node_level == 1 && next_child_index != internal_node.entries {
+                            if next_child_node_level == 0 && next_child_index != internal_node.entries {
                                 match internal_node.get_separator_key(next_child_index, tree_layout) {
                                     Ok(next_leaf_node_keys_range_begin) => {
                                         if InodeIndexKeyType::from_le_bytes(next_leaf_node_keys_range_begin)
