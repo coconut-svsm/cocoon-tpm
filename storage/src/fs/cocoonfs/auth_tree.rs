@@ -2130,7 +2130,7 @@ impl AuthTreeConfig {
         } else {
             (self.data_digest_len as usize, self.data_digests_per_node_log2)
         };
-        debug_assert!(node_data.len() >= digest_entry_len << self.node_digests_per_node_log2);
+        debug_assert!(node_data.len() >= digest_entry_len << digest_entries_in_node_log2);
         let node_digest = self.digest_descendant_node(
             node_id,
             node_data
