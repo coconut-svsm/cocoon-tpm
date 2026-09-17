@@ -721,7 +721,7 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                     )
                 };
 
-                read_buffer.update_authenticated_buffers(
+                read_buffer.update_unauthenticated_buffers(
                     cur_allocation_block_index,
                     iter::from_fn(|| {
                         if cur_allocation_block_index >= buffered_unauthenticated_range.end() {
