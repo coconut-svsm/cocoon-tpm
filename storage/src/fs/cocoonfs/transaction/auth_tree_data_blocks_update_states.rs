@@ -1553,7 +1553,7 @@ impl AuthTreeDataBlocksUpdateStates {
                         let states_index_range_offsets = if total_inserted_states_count != 0 {
                             debug_assert!(
                                 total_inserted_states_count as u64
-                                    >= total_missing_states_before_count + total_missing_states_after_count
+                                    >= total_missing_states_before_count + inserted_states_after_range_count
                             );
                             Some(AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
                                 inserted_states_before_range_count: total_missing_states_before_count as usize,
