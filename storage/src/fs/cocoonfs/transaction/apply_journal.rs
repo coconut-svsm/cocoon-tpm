@@ -1294,6 +1294,9 @@ impl<B: blkdev::NvBlkDev> TransactionWriteDataUpdatesFuture<B> {
                         &cur_io_block_states_allocation_blocks_index_range_end,
                         remaining_states_allocation_blocks_index_range.end(),
                     );
+            } else {
+                // Write what we have.
+                break;
             }
 
             cur_states_allocation_block_index = cur_io_block_states_allocation_blocks_index_range_end;
