@@ -366,6 +366,7 @@ impl JournalLogEncodeBufferLayout {
             let encoded_trim_script_value_len = num::NonZeroUsize::new(apply_script::JournalTrimsScript::encoded_len(
                 TransactionJournalTrimsScriptIterator::new(
                     fs_sync_state_alloc_bitmap,
+                    &transaction.allocs.pending_allocs,
                     &transaction.allocs.pending_frees,
                     image_layout.io_block_allocation_blocks_log2,
                 ),
@@ -1015,6 +1016,7 @@ impl JournalLog {
                 dst,
                 TransactionJournalTrimsScriptIterator::new(
                     fs_sync_state_alloc_bitmap,
+                    &transaction.allocs.pending_allocs,
                     &transaction.allocs.pending_frees,
                     image_layout.io_block_allocation_blocks_log2,
                 ),

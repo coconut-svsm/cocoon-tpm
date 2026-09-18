@@ -906,6 +906,8 @@ pub trait JournalTrimsScriptIterator {
 #[derive(Clone)]
 pub struct TransactionJournalTrimsScriptIterator<'a> {
     alloc_bitmap: &'a alloc_bitmap::AllocBitmap,
+    transaction_pending_allocs_iter: alloc_bitmap::SparseAllocBitmapBlockIterator<'a>,
+    next_pending_alloc: Option<(layout::PhysicalAllocBlockIndex, alloc_bitmap::BitmapWord)>,
     transaction_pending_frees_iter: alloc_bitmap::SparseAllocBitmapBlockIterator<'a>,
     next_pending_free: Option<(layout::PhysicalAllocBlockIndex, alloc_bitmap::BitmapWord)>,
     io_block_allocation_blocks_log2: u8,
@@ -914,14 +916,19 @@ pub struct TransactionJournalTrimsScriptIterator<'a> {
 impl<'a> TransactionJournalTrimsScriptIterator<'a> {
     pub fn new(
         fs_sync_state_alloc_bitmap: &'a alloc_bitmap::AllocBitmap,
+        transaction_pending_allocs: &'a alloc_bitmap::SparseAllocBitmap,
         transaction_pending_frees: &'a alloc_bitmap::SparseAllocBitmap,
         io_block_allocation_blocks_log2: u8,
     ) -> Self {
+        let transaction_pending_allocs_iter =
+            transaction_pending_allocs.block_iter(io_block_allocation_blocks_log2 as u32);
         let mut transaction_pending_frees_iter =
             transaction_pending_frees.block_iter(io_block_allocation_blocks_log2 as u32);
         let next_pending_free = transaction_pending_frees_iter.next();
         Self {
             alloc_bitmap: fs_sync_state_alloc_bitmap,
+            transaction_pending_allocs_iter,
+            next_pending_alloc: None,
             transaction_pending_frees_iter,
             next_pending_free,
             io_block_allocation_blocks_log2,
@@ -940,16 +947,42 @@ impl<'a> JournalTrimsScriptIterator for TransactionJournalTrimsScriptIterator<'a
         let (region_allocation_blocks_begin, mut alloc_bitmap_io_block_iter) = loop {
             match self.next_pending_free.take() {
                 Some(next_pending_free) => {
-                    let mut alloc_bitmap_io_block_iter = self.alloc_bitmap.iter_chunked_at_allocation_block(
-                        &empty_sparse_alloc_bitmap,
-                        &empty_sparse_alloc_bitmap,
-                        next_pending_free.0,
-                        io_block_allocation_blocks,
-                    );
-                    let io_block_alloc_bitmap_word = alloc_bitmap_io_block_iter.next().unwrap_or(0);
-                    if io_block_alloc_bitmap_word & !next_pending_free.1 == 0 {
-                        // The complete IO block became free.
-                        break (next_pending_free.0, alloc_bitmap_io_block_iter);
+                    // Get the allocations to the IO Block the pending frees are in. There must
+                    // be none, or the IO Block must not get trimmed.
+                    let next_pending_alloc = match self
+                        .next_pending_alloc
+                        .take()
+                        .filter(|next_pending_alloc| next_pending_alloc.0 >= next_pending_free.0)
+                        .or_else(|| {
+                            self.transaction_pending_allocs_iter.skip_to(next_pending_free.0);
+                            self.transaction_pending_allocs_iter.next()
+                        }) {
+                        Some(next_pending_alloc) => {
+                            debug_assert!(next_pending_alloc.0 >= next_pending_free.0);
+                            if next_pending_alloc.0 == next_pending_free.0 {
+                                Some(next_pending_alloc.1)
+                            } else {
+                                // Stash away for later.
+                                self.next_pending_alloc = Some(next_pending_alloc);
+                                None
+                            }
+                        }
+                        None => None,
+                    }
+                    .unwrap_or(0);
+                    debug_assert_eq!(next_pending_free.1 & next_pending_alloc, 0);
+                    if next_pending_alloc == 0 {
+                        let mut alloc_bitmap_io_block_iter = self.alloc_bitmap.iter_chunked_at_allocation_block(
+                            &empty_sparse_alloc_bitmap,
+                            &empty_sparse_alloc_bitmap,
+                            next_pending_free.0,
+                            io_block_allocation_blocks,
+                        );
+                        let io_block_alloc_bitmap_word = alloc_bitmap_io_block_iter.next().unwrap_or(0);
+                        if io_block_alloc_bitmap_word & !next_pending_free.1 == 0 {
+                            // The complete IO block became free.
+                            break (next_pending_free.0, alloc_bitmap_io_block_iter);
+                        }
                     }
                     self.next_pending_free = self.transaction_pending_frees_iter.next();
                 }
@@ -967,8 +1000,32 @@ impl<'a> JournalTrimsScriptIterator for TransactionJournalTrimsScriptIterator<'a
             {
                 break;
             }
+            // Get the allocations to the IO Block the pending frees are in. There must
+            // be none, or the IO Block must not get trimmed.
+            let next_pending_alloc = match self
+                .next_pending_alloc
+                .take()
+                .filter(|next_pending_alloc| next_pending_alloc.0 >= next_pending_free.0)
+                .or_else(|| {
+                    self.transaction_pending_allocs_iter.skip_to(next_pending_free.0);
+                    self.transaction_pending_allocs_iter.next()
+                }) {
+                Some(next_pending_alloc) => {
+                    debug_assert!(next_pending_alloc.0 >= next_pending_free.0);
+                    if next_pending_alloc.0 == next_pending_free.0 {
+                        Some(next_pending_alloc.1)
+                    } else {
+                        // Stash away for later.
+                        self.next_pending_alloc = Some(next_pending_alloc);
+                        None
+                    }
+                }
+                None => None,
+            }
+            .unwrap_or(0);
+            debug_assert_eq!(next_pending_free.1 & next_pending_alloc, 0);
             let io_block_alloc_bitmap_word = alloc_bitmap_io_block_iter.next().unwrap_or(0);
-            if io_block_alloc_bitmap_word & !next_pending_free.1 != 0 {
+            if next_pending_alloc != 0 || io_block_alloc_bitmap_word & !next_pending_free.1 != 0 {
                 // Skip over the current pending free entry so that the next invocation won't
                 // reexamine it.
                 self.next_pending_free = self.transaction_pending_frees_iter.next();
