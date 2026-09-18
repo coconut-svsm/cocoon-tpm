@@ -428,11 +428,6 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         break (false, Some(transaction), e);
                     }
 
-                    // Prune any unneeded update states before proceeding further.
-                    transaction
-                        .auth_tree_data_blocks_update_states
-                        .prune_unmodified(fs_config.image_header_end);
-
                     let all_update_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::new(
                         AuthTreeDataBlocksUpdateStatesIndex::from(0),
                         AuthTreeDataBlocksUpdateStatesIndex::from(
@@ -492,6 +487,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         .auth_tree_data_blocks_update_states
                         .apply_allocation_blocks_staged_updates(None, &fs_instance_sync_state.alloc_bitmap);
 
+                    // Prune any unneeded update states before proceeding further.
+                    let fs_config = &fs_instance.fs_config;
+                    transaction
+                        .auth_tree_data_blocks_update_states
+                        .prune_unmodified(fs_config.image_header_end);
+
                     // Before actually writing dirty data, allocate Journal staging copies. Doing it
                     // upfront potentially enables write request coalescing.
                     //
@@ -502,7 +503,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                     // copies) for the image header in place will make sure
                     // these will get considered when generating the
                     // JournalApplyWritesScript.
-                    let salt_len = match u8::try_from(fs_instance.fs_config.salt.len()) {
+                    let salt_len = match u8::try_from(fs_config.salt.len()) {
                         Ok(salt_len) => salt_len,
                         Err(_) => {
                             break (
@@ -512,9 +513,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                             );
                         }
                     };
-                    let image_layout = &fs_instance.fs_config.image_layout;
+                    let image_layout = &fs_config.image_layout;
                     let mutable_image_header_region = image_header::MutableImageHeader::physical_location(
-                        &fs_instance.fs_config.image_layout,
+                        image_layout,
                         salt_len,
                     );
                     // Align to the IO Block size before the states insertion, otherwise alignment
