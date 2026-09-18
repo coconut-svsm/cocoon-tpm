@@ -9217,10 +9217,10 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 Ok(Err(entry_index_in_leaf_node)) => {
                                     if entry_index_in_leaf_node == leaf_node.entries {
                                         // The first leaf node's inodes are all less than the query
-                                        // range, move to the next one, if any and if it is not already
-                                        // known that all inodes in that one would come after the
-                                        // query range.
-                                        let next_leaf_node_allocation_blocks_begin = if !*is_final_leaf_node {
+                                        // range, move to the next one, if any and only if it is not
+                                        // already known that all inodes in that one would come
+                                        // after the query range.
+                                        let mut next_leaf_node_allocation_blocks_begin = if !*is_final_leaf_node {
                                             match leaf_node.encoded_next_leaf_node_ptr(tree_layout).and_then(
                                                 |next_leaf_ptr| {
                                                     EncodedBlockPtr::from(*next_leaf_ptr).decode(
@@ -9241,24 +9241,145 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             None
                                         };
 
-                                        // No inodes in range. Still update the cursor's tree_position so
-                                        // that the nodes will perhaps get added to the caches as
-                                        // appropriate upon return.
+                                        // No inodes in range.  Get the last inode stored in the
+                                        // leaf, as that's possibly needed for resetting the parent
+                                        // below.
+                                        let leaf_node_last_entry_inode = if leaf_node.entries != 0 {
+                                            match leaf_node.entry_inode(leaf_node.entries - 1, tree_layout) {
+                                                Ok(leaf_node_last_entry_inode) => Some(leaf_node_last_entry_inode),
+                                                Err(e) => {
+                                                    let (transaction, _node_ref) =
+                                                        InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
+                                                    break (Some(cursor), transaction.or(returned_transaction), e);
+                                                }
+                                            }
+                                        } else {
+                                            None
+                                        };
+
                                         let (transaction, node_ref) =
                                             InodeIndexTreeNodeRefForUpdate::try_from_node_ref(node_ref);
-                                        let transaction = transaction.or(returned_transaction);
+                                        let mut transaction = match transaction.or(returned_transaction) {
+                                            Some(transaction) => transaction,
+                                            None => break (None, None, nvfs_err_internal!()),
+                                        };
                                         let node_ref = match node_ref {
                                             Ok(node_ref) => node_ref,
                                             Err(e) => {
-                                                break (Some(cursor), transaction, e);
+                                                break (Some(cursor), Some(transaction), e);
                                             }
                                         };
-                                        cursor.transaction = Some(match transaction {
-                                            Some(transaction) => transaction,
-                                            None => {
-                                                break (None, None, nvfs_err_internal!());
+
+                                        // Reset the found_leaf_parent_node, if any, and if not a
+                                        // parent of the next leaf node in the chain as well.
+                                        if let Some((leaf_parent_node, next_leaf_node_allocation_blocks_begin_value)) =
+                                            found_leaf_parent_node
+                                                .as_ref()
+                                                .zip(next_leaf_node_allocation_blocks_begin)
+                                        {
+                                            let leaf_parent_node = match leaf_parent_node.get_node(&transaction) {
+                                                Ok(InodeIndexTreeNode::Internal(leaf_parent_node)) => leaf_parent_node,
+                                                Ok(InodeIndexTreeNode::Leaf(_)) => {
+                                                    break (Some(cursor), Some(transaction), nvfs_err_internal!());
+                                                }
+                                                Err(e) => break (Some(cursor), Some(transaction), e),
+                                            };
+                                            // By the fact we're following to the next leaf node means that the
+                                            // former one is not the root, hence has some entries in it.
+                                            let leaf_node_last_entry_inode = match leaf_node_last_entry_inode {
+                                                Some(leaf_node_last_entry_inode) => leaf_node_last_entry_inode,
+                                                None => {
+                                                    break (
+                                                        Some(cursor),
+                                                        Some(transaction),
+                                                        NvFsError::from(FormatError::InvalidIndexNode),
+                                                    );
+                                                }
+                                            };
+                                            let leaf_node_child_entry_in_parent = match leaf_parent_node
+                                                .lookup_child(leaf_node_last_entry_inode, tree_layout)
+                                            {
+                                                Ok(child_entry_index) => child_entry_index,
+                                                Err(e) => break (Some(cursor), Some(transaction), e),
+                                            };
+                                            if leaf_node_child_entry_in_parent == leaf_parent_node.entries {
+                                                // The previous child node had been the last one, reset the parent.
+                                                if let Some(InodeIndexTreeNodeRefForUpdate::Owned {
+                                                    node: leaf_parent_node,
+                                                    is_modified_by_transaction:
+                                                        leaf_parent_node_is_modified_by_transaction,
+                                                }) = found_leaf_parent_node.take()
+                                                {
+                                                    if leaf_parent_node_is_modified_by_transaction {
+                                                        transaction
+                                                            .inode_index_updates
+                                                            .updated_tree_nodes_cache
+                                                            .insert(1, leaf_parent_node);
+                                                    } else {
+                                                        let mut tree_nodes_cache_guard =
+                                                            fs_sync_state_inode_index.tree_nodes_cache.write();
+                                                        tree_nodes_cache_guard.insert(1, leaf_parent_node);
+                                                    }
+                                                }
+                                            } else {
+                                                // Consistency check: the parent's next child pointer should match
+                                                // what's been found through the leaf's next link above.
+                                                let next_child_node_allocation_blocks_begin = match leaf_parent_node
+                                                    .entry_child_ptr(leaf_node_child_entry_in_parent + 1, tree_layout)
+                                                    .and_then(|child_ptr| {
+                                                        EncodedBlockPtr::from(*child_ptr).decode(
+                                                            fs_instance
+                                                                .fs_config
+                                                                .image_layout
+                                                                .allocation_block_size_128b_log2
+                                                                as u32,
+                                                        )
+                                                    }) {
+                                                    Ok(next_child_node_allocation_blocks_begin) => {
+                                                        next_child_node_allocation_blocks_begin
+                                                    }
+                                                    Err(e) => break (Some(cursor), Some(transaction), e),
+                                                };
+                                                match next_child_node_allocation_blocks_begin {
+                                                    Some(next_child_node_allocation_blocks_begin) => {
+                                                        if next_child_node_allocation_blocks_begin
+                                                            != next_leaf_node_allocation_blocks_begin_value
+                                                        {
+                                                            break (
+                                                                Some(cursor),
+                                                                Some(transaction),
+                                                                NvFsError::from(FormatError::InvalidIndexNode),
+                                                            );
+                                                        }
+                                                    }
+                                                    None => {
+                                                        break (
+                                                            Some(cursor),
+                                                            Some(transaction),
+                                                            NvFsError::from(FormatError::InvalidIndexNode),
+                                                        );
+                                                    }
+                                                }
+
+                                                // If the separator key in the parent happens to be past the
+                                                // specified inode range already, then don't bother loading the
+                                                // next leaf and stop right now..
+                                                let separator_key = match leaf_parent_node
+                                                    .get_separator_key(leaf_node_child_entry_in_parent, tree_layout)
+                                                {
+                                                    Ok(separator_key) => decode_key(separator_key),
+                                                    Err(e) => break (Some(cursor), Some(transaction), e),
+                                                };
+                                                if separator_key > *cursor.inodes_unlink_range.end() {
+                                                    next_leaf_node_allocation_blocks_begin = None;
+                                                }
                                             }
-                                        });
+                                        };
+
+                                        // Update the cursor's tree_position so that the nodes will
+                                        // perhaps get added to the caches as appropriate upon
+                                        // return.
+                                        cursor.transaction = Some(transaction);
                                         cursor.tree_position = Some(InodeIndexUnlinkCursorTreePosition {
                                             leaf_node: node_ref,
                                             leaf_parent_node: found_leaf_parent_node.take(),
@@ -9284,7 +9405,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                             },
                                         };
                                         continue;
-                                    }
+                                    };
 
                                     entry_index_in_leaf_node
                                 }
