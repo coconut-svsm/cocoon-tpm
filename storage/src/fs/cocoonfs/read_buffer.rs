@@ -2276,6 +2276,7 @@ impl BufferedReadAuthenticatedDataFutureData {
                     {
                         debug_assert!(
                             authenticated_subrange_from_read_buf.end() == self.request_range.end()
+                                || cur_request_allocation_block_index == self.request_range.begin()
                                 || u64::from(cur_request_allocation_block_index)
                                     .is_aligned_pow2(auth_tree_data_block_allocation_blocks_log2)
                         );
