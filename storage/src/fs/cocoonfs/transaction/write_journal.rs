@@ -458,51 +458,20 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
-                    let all_update_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::new(
-                        AuthTreeDataBlocksUpdateStatesIndex::from(0),
-                        AuthTreeDataBlocksUpdateStatesIndex::from(
-                            transaction.auth_tree_data_blocks_update_states.len(),
-                        ),
-                    );
-                    // In preparation of writing dirty data, fill all IO block alignment gaps.
-                    let fs_instance = fs_instance_sync_state.get_fs_ref();
-                    let io_block_allocation_blocks_log2 =
-                        fs_instance.fs_config.image_layout.io_block_allocation_blocks_log2 as u32;
-                    if let Err(e) = transaction
-                        .auth_tree_data_blocks_update_states
-                        .fill_states_allocation_blocks_index_range_regions_alignment_gaps(
-                            &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange::from(
-                                all_update_states_index_range,
-                            ),
-                            io_block_allocation_blocks_log2,
-                            &fs_instance_sync_state.alloc_bitmap,
-                            &transaction.allocs.pending_frees,
-                        )
-                        .0
-                    {
-                        break (false, Some(transaction), e);
-                    }
-
-                    transaction
-                        .auth_tree_data_blocks_update_states
-                        .apply_allocation_blocks_staged_updates(None, &fs_instance_sync_state.alloc_bitmap);
-
-                    // Prune any unneeded update states before proceeding further.
-                    let fs_config = &fs_instance.fs_config;
-                    transaction
-                        .auth_tree_data_blocks_update_states
-                        .prune_unmodified(fs_config.image_header_end);
-
-                    // Before actually writing dirty data, allocate Journal staging copies. Doing it
-                    // upfront potentially enables write request coalescing.
+                    // Before allocating Journal staging copies further below, insert placeholder
+                    // update states for the mutable image header, which will
+                    // always receive an update because the root authentication
+                    // digest is being stored there. Having placeholder update
+                    // states (with allocated Journal staging copies) for the
+                    // image header in place will make sure these will get
+                    // considered when generating the JournalApplyWritesScript.
                     //
-                    // Before allocating Journal staging copies, insert placeholder update states
-                    // for the mutable image header, which will always receive an update because the
-                    // root authentication digest is being stored there. Having
-                    // placeholder update states (with allocated Journal staging
-                    // copies) for the image header in place will make sure
-                    // these will get considered when generating the
-                    // JournalApplyWritesScript.
+                    // Do the placeholder insertion _before_ the
+                    // apply_allocation_blocks_staged_updates(), as the insertion might stage
+                    // Deallocate updates to some of the Allocation Blocks in the vincity of the
+                    // mutable image header.
+                    let fs_instance = fs_instance_sync_state.get_fs_ref();
+                    let fs_config = &fs_instance.fs_config;
                     let salt_len = match u8::try_from(fs_config.salt.len()) {
                         Ok(salt_len) => salt_len,
                         Err(_) => {
@@ -514,10 +483,8 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         }
                     };
                     let image_layout = &fs_config.image_layout;
-                    let mutable_image_header_region = image_header::MutableImageHeader::physical_location(
-                        image_layout,
-                        salt_len,
-                    );
+                    let mutable_image_header_region =
+                        image_header::MutableImageHeader::physical_location(image_layout, salt_len);
                     // Align to the IO Block size before the states insertion, otherwise alignment
                     // gaps would have to get filled later on.
                     let mutable_image_header_region =
@@ -543,6 +510,41 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                         break (false, Some(transaction), e);
                     }
 
+                    let all_update_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::new(
+                        AuthTreeDataBlocksUpdateStatesIndex::from(0),
+                        AuthTreeDataBlocksUpdateStatesIndex::from(
+                            transaction.auth_tree_data_blocks_update_states.len(),
+                        ),
+                    );
+                    // In preparation of writing dirty data, fill all IO block alignment gaps.
+                    let io_block_allocation_blocks_log2 =
+                        fs_instance.fs_config.image_layout.io_block_allocation_blocks_log2 as u32;
+                    if let Err(e) = transaction
+                        .auth_tree_data_blocks_update_states
+                        .fill_states_allocation_blocks_index_range_regions_alignment_gaps(
+                            &AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange::from(
+                                all_update_states_index_range,
+                            ),
+                            io_block_allocation_blocks_log2,
+                            &fs_instance_sync_state.alloc_bitmap,
+                            &transaction.allocs.pending_frees,
+                        )
+                        .0
+                    {
+                        break (false, Some(transaction), e);
+                    }
+
+                    transaction
+                        .auth_tree_data_blocks_update_states
+                        .apply_allocation_blocks_staged_updates(None, &fs_instance_sync_state.alloc_bitmap);
+
+                    // Prune any unneeded update states before proceeding further.
+                    transaction
+                        .auth_tree_data_blocks_update_states
+                        .prune_unmodified(fs_config.image_header_end);
+
+                    // Before actually writing dirty data, allocate Journal staging copies. Doing it
+                    // upfront potentially enables write request coalescing.
                     let all_update_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::new(
                         AuthTreeDataBlocksUpdateStatesIndex::from(0),
                         AuthTreeDataBlocksUpdateStatesIndex::from(
