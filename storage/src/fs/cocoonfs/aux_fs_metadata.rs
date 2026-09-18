@@ -4339,23 +4339,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
         let (transaction, result) = 'outer: loop {
             match &mut this.fut_state {
                 TransactionWriteAuxFsMetadataFutureState::Init { transaction } => {
-                    let mut transaction = match transaction.take() {
+                    let transaction = match transaction.take() {
                         Some(transaction) => transaction,
                         None => break (None, Err(nvfs_err_internal!())),
                     };
                     this.fut_state = match transaction.aux_fs_metadata_update.as_ref() {
-                        Some(previous_aux_fs_metatada_update) => {
-                            // Add to journal_frees now, as that can fail. On a subsequent failure,
-                            // they will get removed from journal_frees again. On success, the
-                            // extents will eventually also get removed from pending_allocs.
-                            if let Err(e) = transaction
-                                .allocs
-                                .journal_frees
-                                .add_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter())
-                            {
-                                break (Some(transaction), Err(e));
-                            }
-
+                        Some(_previous_aux_fs_metatada_update) => {
                             TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare {
                                 transaction: Some(transaction),
                             }
@@ -4398,12 +4387,14 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Some(transaction) => transaction,
                         None => break (None, Err(nvfs_err_internal!())),
                     };
-                    if let Err(e) = transaction
-                        .allocs
-                        .pending_frees
-                        .add_extents(this.original_aux_fs_metadata_extents.iter())
-                    {
-                        break (Some(transaction), Err(e));
+                    if transaction.aux_fs_metadata_update.is_none() {
+                        if let Err(e) = transaction
+                            .allocs
+                            .pending_frees
+                            .add_extents(this.original_aux_fs_metadata_extents.iter())
+                        {
+                            break (Some(transaction), Err(e));
+                        }
                     }
 
                     this.fut_state = TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare {
@@ -4509,7 +4500,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     // the CocoonFsPendingTransactionsSyncState and trimmed, if enabled.
                                     // All that would happen on failure is that this transaction cannot subsequently
                                     // repurpose the allocation.
-                                    let _ = transaction.allocs.journal_allocs.add_extents(allocated_extents.iter());
+                                    let _ = transaction.allocs.journal_frees.add_extents(allocated_extents.iter());
                                     break 'outer (Some(transaction), Err(e));
                                 }
                             }
@@ -4557,39 +4548,51 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
         this.fut_state = TransactionWriteAuxFsMetadataFutureState::Done;
         task::Poll::Ready(match transaction {
             Some(mut transaction) => {
-                if result.is_ok() {
-                    if let Some(previous_aux_fs_metatada_update) = transaction.aux_fs_metadata_update.as_ref() {
-                        // Conclude the deallocation.
-                        transaction
-                            .allocs
-                            .pending_allocs
-                            .remove_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter());
-                        transaction.allocs.pending_allocs.reset_remove_rollback();
+                // Take care of cleaning up the previously staged AuxFsMetadata, if any.
+                let result = match result {
+                    Ok(()) => {
+                        match transaction.aux_fs_metadata_update.as_ref() {
+                            Some(previous_aux_fs_metatada_update) => {
+                                // Add the extents from the previously staged update to
+                                // journal_frees first, as that can fail. On a subsequent failure,
+                                // they will get removed from journal_frees again. On success, the
+                                // extents will eventually also get removed from pending_allocs.
+                                match transaction
+                                    .allocs
+                                    .journal_frees
+                                    .add_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter())
+                                {
+                                    Ok(()) => {
+                                        // Conclude the deallocation.
+                                        transaction.allocs.pending_allocs.remove_extents(
+                                            previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter(),
+                                        );
+                                        transaction.allocs.pending_allocs.reset_remove_rollback();
+                                        Ok(())
+                                    }
+                                    Err(e) => Err(e),
+                                }
+                            }
+                            None => Ok(()),
+                        }
                     }
+                    Err(e) => Err(e),
+                };
 
+                if result.is_ok() {
                     // Make the update effective.
                     transaction.aux_fs_metadata_update = Some(TransactionStagedAuxFsMetatdataUpdate {
                         aux_fs_metatada_extents: mem::replace(&mut this.new_extents, PhysicalExtents::new()),
                         aux_fs_metadata_update_groups_heads: this.new_update_groups_heads,
                     });
                 } else {
-                    match transaction.aux_fs_metadata_update.as_ref() {
-                        Some(previous_aux_fs_metatada_update) => {
-                            // Rollback.
-                            transaction
-                                .allocs
-                                .journal_frees
-                                .remove_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter());
-                            transaction.allocs.journal_frees.reset_remove_rollback();
-                        }
-                        None => {
-                            // Rollback.
-                            transaction
-                                .allocs
-                                .pending_frees
-                                .remove_extents(this.original_aux_fs_metadata_extents.iter());
-                            transaction.allocs.pending_frees.reset_remove_rollback();
-                        }
+                    if transaction.aux_fs_metadata_update.as_ref().is_none() {
+                        // Rollback.
+                        transaction
+                            .allocs
+                            .pending_frees
+                            .remove_extents(this.original_aux_fs_metadata_extents.iter());
+                        transaction.allocs.pending_frees.reset_remove_rollback();
                     };
 
                     // Free the newly allocated extents.
@@ -4602,7 +4605,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     // the CocoonFsPendingTransactionsSyncState and trimmed, if enabled.
                     // All that would happen on failure is that this transaction cannot subsequently
                     // repurpose the allocation.
-                    let _ = transaction.allocs.journal_allocs.add_extents(this.new_extents.iter());
+                    let _ = transaction.allocs.journal_frees.add_extents(this.new_extents.iter());
                 }
 
                 (mem::take(&mut this.new_aux_fs_metadata), Ok((transaction, result)))
