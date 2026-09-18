@@ -10682,9 +10682,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         Ok(parent_separator_key) => parent_separator_key,
                                         Err(e) => break (Some(cursor), Some(transaction), e),
                                     };
+                                let parent_node_level = match parent_node.node_level(tree_layout) {
+                                    Ok(parent_node_level) => parent_node_level,
+                                    Err(e) => break (Some(cursor), Some(transaction), e),
+                                };
 
                                 // Free up the right node's backing Allocation Blocks now before the
                                 // point of no return, as the associated memory allocation can fail.
+                                if let Err(e) = transaction.inode_index_updates.removed_nodes.try_reserve(1) {
+                                    break (Some(cursor), Some(transaction), NvFsError::from(e));
+                                }
                                 let index_tree_internal_node_allocation_blocks_log2 = fs_instance
                                     .fs_config
                                     .image_layout
@@ -10698,16 +10705,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                 ) {
                                     break (Some(cursor), Some(transaction), e);
                                 }
+                                transaction
+                                    .inode_index_updates
+                                    .removed_nodes
+                                    .push(right_child_node.node_allocation_blocks_begin);
 
                                 // If the parent is the root, and would have
                                 // only a single child after the merge, free it now before the point
                                 // of now return, as the associated memory allocation can fail.
-                                let parent_node_level = match parent_node.node_level(tree_layout) {
-                                    Ok(parent_node_level) => parent_node_level,
-                                    Err(e) => break (Some(cursor), Some(transaction), e),
-                                };
                                 if parent_node_level + 1 == index_tree_levels && parent_node.entries == 1 {
                                     if let Err(e) = transaction.inode_index_updates.removed_nodes.try_reserve(1) {
+                                        transaction.inode_index_updates.removed_nodes.pop();
                                         let right_child_node_node_allocation_blocks_begin =
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
@@ -10726,6 +10734,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         parent_node.node_allocation_blocks_begin,
                                         index_tree_internal_node_allocation_blocks_log2,
                                     ) {
+                                        transaction.inode_index_updates.removed_nodes.pop();
                                         let right_child_node_node_allocation_blocks_begin =
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
@@ -10989,6 +10998,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
 
                                 // Free up the right node's backing Allocation Blocks now before the
                                 // point of no return, as the associated memory allocation can fail.
+                                if let Err(e) = transaction.inode_index_updates.removed_nodes.try_reserve(1) {
+                                    let transaction = match rollback_inode_extents_deallocation(transaction) {
+                                        Ok(transaction) => transaction,
+                                        Err(e) => break (Some(cursor), None, e),
+                                    };
+                                    break (Some(cursor), Some(transaction), NvFsError::from(e));
+                                }
                                 let image_layout = &fs_instance.fs_config.image_layout;
                                 let index_tree_leaf_node_allocation_blocks_log2 =
                                     image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32;
@@ -11004,12 +11020,17 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                     };
                                     break (Some(cursor), Some(transaction), e);
                                 }
+                                transaction
+                                    .inode_index_updates
+                                    .removed_nodes
+                                    .push(right_child_node.node_allocation_blocks_begin);
 
                                 // If the parent is the root, and would have only a single child
                                 // after the merge, free it now before the point of now return, as
                                 // the associated memory allocation can fail.
                                 if index_tree_levels == 2 && parent_node.entries == 1 {
                                     if let Err(e) = transaction.inode_index_updates.removed_nodes.try_reserve(1) {
+                                        transaction.inode_index_updates.removed_nodes.pop();
                                         let right_child_node_node_allocation_blocks_begin =
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
@@ -11032,6 +11053,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                                         parent_node.node_allocation_blocks_begin,
                                         image_layout.index_tree_internal_node_allocation_blocks_log2 as u32,
                                     ) {
+                                        transaction.inode_index_updates.removed_nodes.pop();
                                         let right_child_node_node_allocation_blocks_begin =
                                             right_child_node.node_allocation_blocks_begin;
                                         let transaction = match transaction.rollback_block_free(
