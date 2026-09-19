@@ -242,6 +242,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             for allocation_block_update_state in transaction_update_states
                                 .iter_allocation_blocks(Some(&update_states_allocation_blocks_range))
                             {
+                                if allocation_block_update_state.1.has_staged_update_failed() {
+                                    this.fut_state = ReadAuthenticateExtentFutureState::Done;
+                                    return task::Poll::Ready(Err((Some(transaction), NvFsError::FailedDataUpdateRead)));
+                                }
+
                                 let has_modified_data = allocation_block_update_state.1.has_modified_data();
                                 any_has_modified_data |= has_modified_data;
                                 all_have_modified_data &= has_modified_data;

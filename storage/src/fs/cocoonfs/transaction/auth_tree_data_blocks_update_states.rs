@@ -332,6 +332,12 @@ impl AllocationBlockUpdateState {
         }
     }
 
+    /// Determine whether the [`AllocationBlockUpdateState`] is in the
+    /// [`AllocationBlockUpdateStagedUpdate::FailedUpdate`] state.
+    pub fn has_staged_update_failed(&self) -> bool {
+        matches!(self.staged_update, AllocationBlockUpdateStagedUpdate::FailedUpdate)
+    }
+
     /// Access the [Allocation
     /// Block's](ImageLayout::allocation_block_size_128b_log2) authenticated
     /// encrypted data.
@@ -348,7 +354,9 @@ impl AllocationBlockUpdateState {
             AllocationBlockUpdateStagedUpdate::Deallocate => {
                 return Err(nvfs_err_internal!());
             }
-            AllocationBlockUpdateStagedUpdate::FailedUpdate => (),
+            AllocationBlockUpdateStagedUpdate::FailedUpdate => {
+                return Err(nvfs_err_internal!());
+            }
         }
 
         match &self.nv_sync_state {
