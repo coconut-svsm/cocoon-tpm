@@ -3965,7 +3965,10 @@ impl<B: blkdev::NvBlkDev> InodeIndexReadTreeNodeFuture<B> {
                             transaction_update_states.lookup_allocation_blocks_update_states_index_range(&node_range)
                         {
                             let all_allocation_block_update_states_present = transaction_update_states
-                                .is_contiguous_allocation_blocks_region(&update_states_allocation_blocks_range);
+                                .is_contiguous_allocation_blocks_region(&update_states_allocation_blocks_range)
+                                && transaction_update_states
+                                    .get_contiguous_region_target_range(&update_states_allocation_blocks_range)
+                                    == node_range;
                             let mut any_has_modified_data = false;
                             let mut all_have_modified_data = all_allocation_block_update_states_present;
                             let mut all_have_data_loaded = all_allocation_block_update_states_present;
