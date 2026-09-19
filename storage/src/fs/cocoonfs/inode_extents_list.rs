@@ -367,7 +367,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeExtentsListReadFuture<
             &extents_list_encryption_key,
         ) {
             Ok(extents_list_encryption_block_cipher_instance) => extents_list_encryption_block_cipher_instance,
-            Err(e) => return Err((transaction.take(), NvFsError::CryptoError(e))),
+            Err(e) => return Err((transaction.take(), NvFsError::from(e))),
         };
         drop(extents_list_encryption_key);
         let extents_list_inline_authentication_hmac_alg =
