@@ -6140,6 +6140,7 @@ pub struct AuthTreeReplayJournalUpdateScriptCursor {
     cur_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
     cur_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
     cur_contiguous_data_allocation_blocks_range_end: AuthTreeDataAllocBlockIndex,
+    io_block_allocation_blocks_log2: u8,
     at_end: bool,
 }
 
@@ -6230,6 +6231,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
             cur_physical_allocation_block_index: layout::PhysicalAllocBlockIndex::from(0u64),
             cur_data_allocation_block_index: AuthTreeDataAllocBlockIndex::from(0u64),
             cur_contiguous_data_allocation_blocks_range_end: AuthTreeDataAllocBlockIndex::from(0u64),
+            io_block_allocation_blocks_log2: image_layout.io_block_allocation_blocks_log2,
             at_end: false,
         })
         .map_err(NvFsError::from)
@@ -6282,9 +6284,22 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///   [`AuthTreeReplayJournalUpdateScriptCursorUpdateResult::Done`].
     pub fn update<B: blkdev::NvBlkDev>(
         mut self: Box<Self>,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
+        physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
         allocation_block_data: &[u8],
     ) -> Result<AuthTreeReplayJournalUpdateScriptCursorUpdateResult<B>, NvFsError> {
+        // If the Allocation Block is before the current physical position,
+        // then it's been skipped over by advance_to(), because it's not covered by a
+        // JournalUpdateAuthDigestsScriptEntry.
+        if physical_allocation_block_index < self.cur_physical_allocation_block_index {
+            return Ok(AuthTreeReplayJournalUpdateScriptCursorUpdateResult::Done { cursor: self });
+        }
+        debug_assert_eq!(
+            physical_allocation_block_index,
+            self.cur_physical_allocation_block_index
+        );
+
         if self.cur_data_allocation_block_index >= self.cur_contiguous_data_allocation_blocks_range_end {
             self.update_physical_position(tree_config)?;
         }
@@ -6293,16 +6308,77 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
         }
 
         // Push missing nodes all the way to the bottom.
-        while self.root_path_nodes.len() != tree_config.auth_tree_levels as usize {
-            let node = FixedVec::new_with_default(tree_config.node_size())?;
-            self.root_path_nodes.push(AuthTreeNode { data: node });
-            debug_assert!(u64::from(self.cur_data_allocation_block_index).is_aligned_pow2(
-                AuthTreeNodeId::level_covered_data_block_index_bits(
-                    (tree_config.auth_tree_levels as usize - self.root_path_nodes.len()) as u32,
-                    tree_config.node_digests_per_node_log2 as u32,
-                    tree_config.data_digests_per_node_log2 as u32
-                )
-            ));
+        // Be careful to not enter leaf nodes for whose covered data range no
+        // JournalUpdateAuthDigestsScriptEntry entry exists: in this case we might
+        // not have the allocation bitmap file fragments required for the
+        // reconstruction.
+        if self.root_path_nodes.len() != tree_config.auth_tree_levels as usize {
+            while self.journal_update_script_index != self.journal_update_script.len()
+                && self.journal_update_script[self.journal_update_script_index]
+                    .get_target_range()
+                    .end()
+                    <= self.cur_physical_allocation_block_index
+            {
+                self.journal_update_script_index += 1;
+            }
+
+            if self.journal_update_script_index == self.journal_update_script.len() {
+                // No more JournalUpdateAuthDigestsScriptEntry entries exist at all. Advamce the
+                // cursro all the way to the end, never entering a leaf node again.
+                let image_size = self.image_size;
+                return Ok(AuthTreeReplayJournalUpdateScriptCursorUpdateResult::NeedCursorAdvance {
+                    advance_fut: AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::new(
+                        blkdev,
+                        self,
+                        layout::PhysicalAllocBlockIndex::from(0u64) + image_size,
+                        tree_config,
+                    )?,
+                });
+            } else {
+                let next_journal_update_script_entry_target_allocation_blocks_begin = self.journal_update_script
+                    [self.journal_update_script_index]
+                    .get_target_range()
+                    .begin();
+                if physical_allocation_block_index < next_journal_update_script_entry_target_allocation_blocks_begin
+                    && (u64::from(tree_config.translate_physical_to_data_block_index(
+                        next_journal_update_script_entry_target_allocation_blocks_begin,
+                    )) ^ u64::from(
+                        tree_config.translate_physical_to_data_block_index(physical_allocation_block_index),
+                    )) >> tree_config.covered_data_blocks_per_leaf_node_log2()
+                        != 0
+                {
+                    // The leaf node covering the physical_allocation_block_index has no
+                    // JournalUpdateAuthDigestsScriptEntry in its range. Advance over it.
+                    let physical_allocation_block_index = physical_allocation_block_index
+                        + layout::AllocBlockCount::from(1u64 << self.io_block_allocation_blocks_log2 as u32);
+                    return Ok(AuthTreeReplayJournalUpdateScriptCursorUpdateResult::NeedCursorAdvance {
+                        advance_fut: AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::new(
+                            blkdev,
+                            self,
+                            physical_allocation_block_index,
+                            tree_config,
+                        )?,
+                    });
+                }
+            }
+
+            // Ok, the leaf node about to get entered has at least one
+            // JournalUpdateAuthDigestsScriptEntry in its covered data range.
+            // Push missing nodes all the way to the bottom.
+            loop {
+                let node = FixedVec::new_with_default(tree_config.node_size())?;
+                self.root_path_nodes.push(AuthTreeNode { data: node });
+                debug_assert!(u64::from(self.cur_data_allocation_block_index).is_aligned_pow2(
+                    AuthTreeNodeId::level_covered_data_block_index_bits(
+                        (tree_config.auth_tree_levels as usize - self.root_path_nodes.len()) as u32,
+                        tree_config.node_digests_per_node_log2 as u32,
+                        tree_config.data_digests_per_node_log2 as u32
+                    )
+                ));
+                if self.root_path_nodes.len() == tree_config.auth_tree_levels as usize {
+                    break;
+                }
+            }
         }
 
         let digest_cur_data_block_context = match self.digest_cur_data_block_context.as_mut() {
@@ -6435,6 +6511,10 @@ pub enum AuthTreeReplayJournalUpdateScriptCursorUpdateResult<B: blkdev::NvBlkDev
     NeedAuthTreePartWrite {
         write_fut: AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B>,
     },
+    /// The [`AuthTreeReplayJournalUpdateScriptCursor`] needs to get advanced.
+    NeedCursorAdvance {
+        advance_fut: AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B>,
+    },
 }
 
 /// Future returned by
@@ -6479,7 +6559,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
     fn new(
         blkdev: &B,
         cursor: Box<AuthTreeReplayJournalUpdateScriptCursor>,
-        mut to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
+        to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
         tree_config: &AuthTreeConfig,
     ) -> Result<Self, NvFsError> {
         let blkdev_io_block_allocation_blocks_log2 = blkdev
@@ -6488,6 +6568,99 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
         if !u64::from(to_physical_allocation_block_index).is_aligned_pow2(blkdev_io_block_allocation_blocks_log2) {
             return Err(nvfs_err_internal!());
         }
+
+        // Be careful not to descend into leaves for which there exists no
+        // JournalUpdateAuthDigestsScriptEntry. In this case, there might not exist a
+        // corresponding allocation bitmap file fragment either, and we cannot
+        // reconstruct such a leaf. An example where this could happen is when
+        // advancing to the beginning of the mutable image header,
+        // which is always written by a transaction in practice, but which is exempt
+        // from the authentication as a special case.
+        let mut next_journal_update_script_index = cursor.journal_update_script_index;
+        while next_journal_update_script_index < cursor.journal_update_script.len()
+            && cursor.journal_update_script[next_journal_update_script_index]
+                .get_target_range()
+                .end()
+                <= to_physical_allocation_block_index
+        {
+            next_journal_update_script_index += 1;
+        }
+        let mut to_physical_allocation_block_index = if next_journal_update_script_index
+            != cursor.journal_update_script.len()
+        {
+            let next_journal_update_script_entry_target_allocation_blocks_begin = cursor.journal_update_script
+                [next_journal_update_script_index]
+                .get_target_range()
+                .begin();
+            if to_physical_allocation_block_index >= next_journal_update_script_entry_target_allocation_blocks_begin {
+                to_physical_allocation_block_index
+            } else if cursor.root_path_nodes.len() == tree_config.auth_tree_levels as usize
+                && (u64::from(AuthTreeDataBlockIndex::new_from_data_allocation_block_index(
+                    cursor.cur_data_allocation_block_index,
+                    tree_config.data_block_allocation_blocks_log2 as u32,
+                )) ^ u64::from(
+                    tree_config.translate_physical_to_data_block_index(to_physical_allocation_block_index),
+                )) >> tree_config.covered_data_blocks_per_leaf_node_log2()
+                    == 0
+            {
+                // The target location is not covered by any authentication tree data update
+                // script entry. The cursor is in a leaf node, and the target
+                // location is within its covered range. Being in the leaf node
+                // means we're certainly able to reconstruct it.  Simply move to
+                // the requested location, perhaps some subsequent
+                // Self::update() call may contribute to providing the data needed to completing
+                // the node.
+                to_physical_allocation_block_index
+            } else {
+                // The target location is not covered by any authentication tree data update
+                // script entry. Advance at least to the beginning of the next
+                // leaf node's covered
+                // range. If to_physical_allocation_block_index is contained in that, good,
+                // then some its data may perhaps get provided through subsequent Self::update()
+                // invocations and must not get read from storage. If not, also
+                // fine, Self::update() will dismiss the data then.
+                debug_assert!(
+                    tree_config.covered_data_blocks_per_leaf_node_log2()
+                        + tree_config.data_block_allocation_blocks_log2
+                        >= cursor.io_block_allocation_blocks_log2
+                );
+                let next_auth_tree_leaf_node_covered_physical_allocation_blocks_begin = tree_config
+                    .translate_data_block_index_to_physical(
+                        tree_config
+                            .translate_physical_to_data_block_index(
+                                next_journal_update_script_entry_target_allocation_blocks_begin,
+                            )
+                            .align_down(tree_config.covered_data_blocks_per_leaf_node_log2() as u32),
+                    );
+                debug_assert!(
+                    u64::from(next_auth_tree_leaf_node_covered_physical_allocation_blocks_begin)
+                        .is_aligned_pow2(cursor.io_block_allocation_blocks_log2 as u32)
+                );
+                to_physical_allocation_block_index
+                    .max(next_auth_tree_leaf_node_covered_physical_allocation_blocks_begin)
+            }
+        } else {
+            // There are no more JournalUpdateAuthDigestsScriptEntrys.
+            if cursor.root_path_nodes.len() == tree_config.auth_tree_levels as usize
+                && (u64::from(AuthTreeDataBlockIndex::new_from_data_allocation_block_index(
+                    cursor.cur_data_allocation_block_index,
+                    tree_config.data_block_allocation_blocks_log2 as u32,
+                )) ^ u64::from(
+                    tree_config.translate_physical_to_data_block_index(to_physical_allocation_block_index),
+                )) >> tree_config.covered_data_blocks_per_leaf_node_log2()
+                    == 0
+            {
+                // The cursor is in a leaf node, and the target location is within its covered
+                // range. Being in the leaf node means we're certainly able to reconstruct it.
+                // Simply move to the requested location, perhaps some subsequent
+                // Self::update() call may contribute to providing the data needed to completing
+                // the node.
+                to_physical_allocation_block_index
+            } else {
+                layout::PhysicalAllocBlockIndex::from(0u64) + cursor.image_size
+            }
+        };
+
         let to_data_allocation_block_index =
             if to_physical_allocation_block_index >= layout::PhysicalAllocBlockIndex::from(0u64) + cursor.image_size {
                 to_physical_allocation_block_index =
@@ -6508,6 +6681,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                         & u64::trailing_bits_mask(tree_config.data_block_allocation_blocks_log2 as u32),
                 )
             };
+
         Ok(Self {
             cursor: Some(cursor),
             fut_state: AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState::Init,
@@ -6635,6 +6809,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                     // cur_data_allocation_block_index is at the beginning or end of the current
                     // node: if it aligns with a node boundary, then it's always at its end.
                     if cursor.cur_data_allocation_block_index == this.to_data_allocation_block_index {
+                        cursor.cur_physical_allocation_block_index = this.to_physical_allocation_block_index;
                         break Ok(());
                     }
 
@@ -6650,6 +6825,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                             // and there's nothing to do.
                             debug_assert_eq!(u64::from(cursor.cur_data_allocation_block_index), 0);
                             debug_assert!(cursor.journal_update_script.is_empty());
+                            cursor.cur_data_allocation_block_index = this.to_data_allocation_block_index;
+                            cursor.cur_physical_allocation_block_index = this.to_physical_allocation_block_index;
                             break Ok(());
                         }
 
