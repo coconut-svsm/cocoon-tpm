@@ -574,7 +574,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteDirtyDataFu
                     &region_needing_write_states_allocation_blocks_index_range_end,
                 )),
                 AuthTreeDataBlocksUpdateStatesAllocationBlocksIndexRange::new(
-                    &cur_states_allocation_block_index,
+                    &region_needing_write_states_allocation_blocks_index_range_end,
                     remaining_states_allocation_blocks_index_range.end(),
                 ),
             )
