@@ -1971,7 +1971,7 @@ where
                     // Device IO block size in length.
                     debug_assert_eq!(
                         (u64::from(mkfs_layout.alloc_bitmap_file_extent.end() - tail_data_allocation_blocks_begin)
-                            >> (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32))
+                            >> (image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32))
                             as usize,
                         alloc_bitmap_partial_blkdev_io_block_file_blocks.len(),
                     );
