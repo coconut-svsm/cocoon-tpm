@@ -636,6 +636,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteJournalFutu
                                 auth_tree_data_block_allocation_blocks_log2,
                             ),
                             &fs_instance_sync_state.alloc_bitmap_file,
+                            fs_instance_sync_state.image_size,
                             fs_instance_sync_state.auth_tree.get_config(),
                             auth_tree_data_block_allocation_blocks_log2,
                         ) {

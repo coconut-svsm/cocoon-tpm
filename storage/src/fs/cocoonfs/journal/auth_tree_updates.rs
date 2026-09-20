@@ -20,6 +20,8 @@ use crate::{
 use core::cmp;
 
 #[cfg(doc)]
+use crate::fs::cocoonfs::image_header::MutableImageHeader;
+#[cfg(doc)]
 use layout::ImageLayout;
 
 /// Collect the set of [Allocation Bitmap File
@@ -40,6 +42,8 @@ use layout::ImageLayout;
 ///   with updated associated authentication digests.
 /// * `alloc_bitmap_file` - The filesystem's
 ///   [`AllocBitmapFile`](alloc_bitmap::AllocBitmapFile).
+/// * `image_size` - The filesystem image size as found in the filesystem's
+///   [`MutableImageHeader::image_size`].
 /// * `auth_tree_config` - The filesystem's
 ///   [`AuthTreeConfig`](auth_tree::AuthTreeConfig).
 /// * `auth_tree_data_block_allocation_blocks_log2` - Verbatim value of
@@ -51,6 +55,7 @@ use layout::ImageLayout;
 pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdateAuthDigestsScriptIterator>(
     mut update_auth_digests_script_iter: UI,
     alloc_bitmap_file: &alloc_bitmap::AllocBitmapFile,
+    image_size: layout::AllocBlockCount,
     auth_tree_config: &auth_tree::AuthTreeConfig,
     auth_tree_data_block_allocation_blocks_log2: u8,
 ) -> Result<Vec<u64>, NvFsError> {
@@ -114,10 +119,22 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
                 needed_auth_tree_data_blocks_end,
             ))
         {
-            let needed_physical_allocation_blocks_range = layout::PhysicalAllocBlockRange::from((
+            let mut needed_physical_allocation_blocks_range = layout::PhysicalAllocBlockRange::from((
                 needed_auth_tree_data_physical_segment.1,
                 needed_auth_tree_data_physical_segment.0.block_count(),
             ));
+            if needed_physical_allocation_blocks_range.begin()
+                >= layout::PhysicalAllocBlockIndex::from(0u64) + image_size
+            {
+                // The authentication tree leaf node is the last, only partially used one.
+                continue;
+            }
+            needed_physical_allocation_blocks_range = layout::PhysicalAllocBlockRange::new(
+                needed_physical_allocation_blocks_range.begin(),
+                needed_physical_allocation_blocks_range
+                    .end()
+                    .min(layout::PhysicalAllocBlockIndex::from(0u64) + image_size),
+            );
             if needed_physical_allocation_blocks_range.end() <= covered_physical_allocation_blocks_end {
                 continue;
             }
