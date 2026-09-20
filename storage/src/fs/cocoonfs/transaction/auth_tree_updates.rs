@@ -169,7 +169,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let next_subrange_begin_in_auth_tree_data_block =
                         updated_auth_tree_data_block_alloc_bitmap.trailing_zeros();
                     let next_subrange_end_in_auth_tree_data_block = next_subrange_begin_in_auth_tree_data_block
-                        + (!updated_auth_tree_data_block_alloc_bitmap >> next_subrange_begin_in_auth_tree_data_block)
+                        + (!(updated_auth_tree_data_block_alloc_bitmap >> next_subrange_begin_in_auth_tree_data_block))
                             .trailing_zeros();
                     let next_subrange = layout::PhysicalAllocBlockRange::new(
                         this.auth_tree_data_block_allocation_blocks_begin
