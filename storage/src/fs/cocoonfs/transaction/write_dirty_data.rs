@@ -640,22 +640,33 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteDirtyDataFu
         // Before doing the fill (and invalidating the index ranges), save away some
         // information needed to fixup the original input request index range
         // later.
-        let (
-            request_range_missing_states_before_in_write_range_count,
-            request_range_missing_tail_states_in_write_range_count,
-        ) = {
+        //
+        // Note that depending on the Minimum Clean Block size passed to
+        // determine_next_write_region(), the write region doesn't necessarily overlap
+        // with the request region.
+        #[allow(clippy::enum_variant_names)]
+        enum RequestRangeMissingStates {
+            // The request range overlaps with the write region.
+            OverlapsWithWriteRange {
+                // Number of missing states in the write range before the request range.
+                request_range_missing_states_before_in_write_range_count: Option<u64>,
+                // Number of missing states in the write range overlapping with the request range's tail.
+                request_range_missing_tail_states_in_write_range_count: Option<u64>,
+            },
+            // The request range is disjunct from the write range and located before it.
+            IsBeforeWriteRange,
+            // The request range is disjunct from the write range and located after it.
+            IsAfterWriteRange,
+        }
+        let request_range_missing_states = {
             let write_region_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::from(
                 write_region_states_allocation_blocks_index_range.clone(),
             );
             let request_states_index_range = AuthTreeDataBlocksUpdateStatesIndexRange::from(
                 self.request_states_allocation_blocks_index_range.clone(),
             );
-            // The effective write range does get extended within Minimum Write Block
-            // alignment, but should always overlap with the original request.
-            debug_assert!(request_states_index_range.begin() < write_region_states_index_range.end());
-            debug_assert!(request_states_index_range.end() > write_region_states_index_range.begin());
-            // Also, Self::determine_next_write_region() would always return ranges already
-            // maximal within the alignment distance.
+            // Self::determine_next_write_region() would always return ranges already
+            // maximal within the Minimum Write Block alignment distance.
             debug_assert_eq!(
                 states.extend_states_allocation_blocks_index_range_within_alignment(
                     write_region_states_allocation_blocks_index_range,
@@ -672,42 +683,51 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteDirtyDataFu
                 ) >= write_region_states_index_range.end()
             );
 
-            // The number of missing states within the write region index range and before
-            // the request index range, if any. It's the difference of what is
-            // expected and what's already there.
-            let request_range_missing_states_before_in_write_range_count = if write_region_states_index_range.begin()
-                <= request_states_index_range.begin()
-            {
-                let request_range_begin_auth_tree_data_blocks_offset_in_write_range = u64::from(
-                    states[request_states_index_range.begin()].get_target_allocation_blocks_begin()
-                        - states[write_region_states_index_range.begin()].get_target_allocation_blocks_begin(),
-                )
-                    >> auth_tree_data_block_allocation_blocks_log2;
-                Some(
-                    request_range_begin_auth_tree_data_blocks_offset_in_write_range
-                        - AuthTreeDataBlocksUpdateStatesIndexRange::new(
-                            write_region_states_index_range.begin(),
-                            request_states_index_range.begin(),
-                        )
-                        .len() as u64,
-                )
+            if request_states_index_range.end() <= write_region_states_index_range.begin() {
+                RequestRangeMissingStates::IsBeforeWriteRange
+            } else if write_region_states_index_range.end() <= request_states_index_range.begin() {
+                RequestRangeMissingStates::IsAfterWriteRange
             } else {
-                // The current write region's and the original input request's beginnings are
-                // in different Minimum Write Blocks. In particular, all states filled up for
-                // aligning the former will get inserted after the latter.
-                debug_assert_ne!(
-                    (u64::from(states[write_region_states_index_range.begin()].get_target_allocation_blocks_begin())
-                        ^ u64::from(states[request_states_index_range.begin()].get_target_allocation_blocks_begin()))
-                        >> min_write_block_allocation_blocks_log2,
-                    0
-                );
-                None
-            };
-            // The number of missing states within the write region index range overlapping
-            // with the request index range's tail, if any. It's the difference of
-            // what is expected and what's already there.
-            let request_range_missing_tail_states_in_write_range_count =
-                if write_region_states_index_range.end() >= request_states_index_range.end() {
+                debug_assert!(request_states_index_range.begin() < write_region_states_index_range.end());
+                debug_assert!(request_states_index_range.end() > write_region_states_index_range.begin());
+                // The number of missing states within the write region index range and before
+                // the request index range, if any. It's the difference of what is
+                // expected and what's already there.
+                let request_range_missing_states_before_in_write_range_count =
+                    if write_region_states_index_range.begin() <= request_states_index_range.begin() {
+                        let request_range_begin_auth_tree_data_blocks_offset_in_write_range = u64::from(
+                            states[request_states_index_range.begin()].get_target_allocation_blocks_begin()
+                                - states[write_region_states_index_range.begin()].get_target_allocation_blocks_begin(),
+                        )
+                            >> auth_tree_data_block_allocation_blocks_log2;
+                        Some(
+                            request_range_begin_auth_tree_data_blocks_offset_in_write_range
+                                - AuthTreeDataBlocksUpdateStatesIndexRange::new(
+                                    write_region_states_index_range.begin(),
+                                    request_states_index_range.begin(),
+                                )
+                                .len() as u64,
+                        )
+                    } else {
+                        // The current write region's and the original input request's beginnings are
+                        // in different Minimum Write Blocks. In particular, all states filled up for
+                        // aligning the former will get inserted after the latter.
+                        debug_assert_ne!(
+                            (u64::from(
+                                states[write_region_states_index_range.begin()].get_target_allocation_blocks_begin()
+                            ) ^ u64::from(
+                                states[request_states_index_range.begin()].get_target_allocation_blocks_begin()
+                            )) >> min_write_block_allocation_blocks_log2,
+                            0
+                        );
+                        None
+                    };
+                // The number of missing states within the write region index range overlapping
+                // with the request index range's tail, if any. It's the difference of
+                // what is expected and what's already there.
+                let request_range_missing_tail_states_in_write_range_count = if write_region_states_index_range.end()
+                    >= request_states_index_range.end()
+                {
                     let request_range_end_auth_tree_data_blocks_offset_in_write_range = (u64::from(
                         states[request_states_index_range
                             .end()
@@ -746,10 +766,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteDirtyDataFu
                     None
                 };
 
-            (
-                request_range_missing_states_before_in_write_range_count,
-                request_range_missing_tail_states_in_write_range_count,
-            )
+                RequestRangeMissingStates::OverlapsWithWriteRange {
+                    request_range_missing_states_before_in_write_range_count,
+                    request_range_missing_tail_states_in_write_range_count,
+                }
+            }
         };
 
         // Do the actual fillup.
@@ -769,36 +790,67 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteDirtyDataFu
         if let Some(write_range_states_insertion_info) = write_range_states_insertion_info {
             // Handle the original input request range first, so that the accumulated needed
             // adjustments can eventually get returned back from the future.
-            let cur_request_states_range_offsets = {
-                let inserted_states_before_request_range_count =
-                    request_range_missing_states_before_in_write_range_count
-                        .map(|request_range_missing_states_before_in_write_range_count| {
-                            (write_range_states_insertion_info.total_inserted_states_count() as u64).min(
-                                write_range_states_insertion_info.inserted_states_before_range_count as u64
-                                    + request_range_missing_states_before_in_write_range_count,
-                            ) as usize
-                        })
-                        .unwrap_or(0);
-                let remaining_inserted_states_count = write_range_states_insertion_info.total_inserted_states_count()
-                    - inserted_states_before_request_range_count;
+            let cur_request_states_range_offsets = match request_range_missing_states {
+                RequestRangeMissingStates::IsBeforeWriteRange => {
+                    // The request and write range end and begin in different Minimum Write Blocks
+                    // respectively, so all states got inserted after the
+                    // former.
+                    AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
+                        inserted_states_before_range_count: 0,
+                        inserted_states_within_range_count: 0,
+                        inserted_states_after_range_count: write_range_states_insertion_info
+                            .total_inserted_states_count(),
+                        max_target_allocations_blocks_alignment_log2: min_write_block_allocation_blocks_log2,
+                    }
+                }
+                RequestRangeMissingStates::IsAfterWriteRange => {
+                    // The write and request range end and begin in different Minimum Write Blocks
+                    // respectively, so all states got inserted before the
+                    // latter.
+                    AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
+                        inserted_states_before_range_count: write_range_states_insertion_info
+                            .total_inserted_states_count(),
+                        inserted_states_within_range_count: 0,
+                        inserted_states_after_range_count: 0,
+                        max_target_allocations_blocks_alignment_log2: min_write_block_allocation_blocks_log2,
+                    }
+                }
+                RequestRangeMissingStates::OverlapsWithWriteRange {
+                    request_range_missing_states_before_in_write_range_count,
+                    request_range_missing_tail_states_in_write_range_count,
+                } => {
+                    let inserted_states_before_request_range_count =
+                        request_range_missing_states_before_in_write_range_count
+                            .map(|request_range_missing_states_before_in_write_range_count| {
+                                (write_range_states_insertion_info.total_inserted_states_count() as u64).min(
+                                    write_range_states_insertion_info.inserted_states_before_range_count as u64
+                                        + request_range_missing_states_before_in_write_range_count,
+                                ) as usize
+                            })
+                            .unwrap_or(0);
+                    let remaining_inserted_states_count = write_range_states_insertion_info
+                        .total_inserted_states_count()
+                        - inserted_states_before_request_range_count;
 
-                let inserted_states_within_request_range_count = request_range_missing_tail_states_in_write_range_count
-                    .map(|request_range_missing_tail_states_in_write_range_count| {
-                        (remaining_inserted_states_count as u64)
-                            .min(request_range_missing_tail_states_in_write_range_count)
-                            as usize
-                    })
-                    .unwrap_or(remaining_inserted_states_count);
-                let remaining_inserted_states_count =
-                    remaining_inserted_states_count - inserted_states_within_request_range_count;
+                    let inserted_states_within_request_range_count =
+                        request_range_missing_tail_states_in_write_range_count
+                            .map(|request_range_missing_tail_states_in_write_range_count| {
+                                (remaining_inserted_states_count as u64)
+                                    .min(request_range_missing_tail_states_in_write_range_count)
+                                    as usize
+                            })
+                            .unwrap_or(remaining_inserted_states_count);
+                    let remaining_inserted_states_count =
+                        remaining_inserted_states_count - inserted_states_within_request_range_count;
 
-                let inserted_states_after_request_range_count = remaining_inserted_states_count;
+                    let inserted_states_after_request_range_count = remaining_inserted_states_count;
 
-                AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
-                    inserted_states_before_range_count: inserted_states_before_request_range_count,
-                    inserted_states_within_range_count: inserted_states_within_request_range_count,
-                    inserted_states_after_range_count: inserted_states_after_request_range_count,
-                    max_target_allocations_blocks_alignment_log2: min_write_block_allocation_blocks_log2,
+                    AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
+                        inserted_states_before_range_count: inserted_states_before_request_range_count,
+                        inserted_states_within_range_count: inserted_states_within_request_range_count,
+                        inserted_states_after_range_count: inserted_states_after_request_range_count,
+                        max_target_allocations_blocks_alignment_log2: min_write_block_allocation_blocks_log2,
+                    }
                 }
             };
             self.request_states_allocation_blocks_index_range = self
