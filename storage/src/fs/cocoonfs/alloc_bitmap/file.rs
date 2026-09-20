@@ -1341,17 +1341,20 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
                             }
                         };
 
+                        let file_block_allocation_blocks_log2 =
+                            image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32;
                         let remainder_encrypted_file_blocks = match FixedVec::new_from_fn(
-                            u64::from(
+                            (u64::from(
                                 *cur_file_extent_range_allocation_blocks_end
                                     - *cur_file_extent_range_write_allocation_blocks_end,
-                            ) as usize,
+                            ) >> file_block_allocation_blocks_log2) as usize,
                             |i| -> Result<FixedVec<u8, 7>, convert::Infallible> {
                                 Ok(mem::take(
-                                    &mut this.encrypted_file_blocks[u64::from(
+                                    &mut this.encrypted_file_blocks[(u64::from(
                                         *cur_file_extent_range_write_allocation_blocks_end
                                             - *cur_file_extent_range_allocation_blocks_begin,
-                                    ) as usize
+                                    ) >> file_block_allocation_blocks_log2)
+                                        as usize
                                         + i],
                                 ))
                             },
