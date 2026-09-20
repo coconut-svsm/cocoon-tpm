@@ -2011,6 +2011,21 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                         {
                             break;
                         }
+
+                        // Account for possible gaps between fragments.
+                        // Note that since we're reading from a single allocation bitmap file extent,
+                        // which is contiguous on storage by definition, the gap is a multiple of the
+                        // allocation bitmap file block size.
+                        let gap_allocation_blocks =
+                            u64::from(cur_fragment_allocation_blocks_begin - cur_read_region_allocation_blocks_end);
+                        debug_assert!(gap_allocation_blocks.is_aligned_pow2(fragment_allocation_blocks_log2));
+                        if gap_allocation_blocks < cur_read_region_max_end_distance_allocation_blocks {
+                            cur_read_region_allocation_blocks_end +=
+                                layout::AllocBlockCount::from(gap_allocation_blocks);
+                            cur_read_region_max_end_distance_allocation_blocks -= gap_allocation_blocks;
+                        } else {
+                            break;
+                        }
                     }
 
                     debug_assert_ne!(
