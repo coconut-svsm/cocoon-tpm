@@ -20,7 +20,7 @@ use crate::{
             FormatError, auth_tree, encryption_entities, extents, inode_index,
             journal::{self, extents_covering_auth_digests::ExtentsCoveringAuthDigests},
             keys,
-            layout::{self, BlockIndex as _},
+            layout::{self, BlockCount as _},
             read_buffer, transaction,
         },
     },
@@ -1076,9 +1076,9 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileInitializeFuture<B> {
                     }
 
                     let cur_file_extent_range_allocation_blocks_end = (this.next_file_extent_allocation_block_index
-                        + layout::AllocBlockCount::from(1))
-                    .align_up(this.preferred_bulk_allocation_blocks_log2 as u32)
-                    .unwrap_or(this.file_extent.end())
+                        + layout::AllocBlockCount::from(1u64 << file_block_allocation_blocks_log2)
+                            .align_up(this.preferred_bulk_allocation_blocks_log2 as u32)
+                            .unwrap_or(layout::AllocBlockCount::from(1u64 << file_block_allocation_blocks_log2)))
                     .min(this.file_extent.end());
                     // We started at file_extent.begin(), which is known to be aligned to the IO
                     // block as well as to the Authentication Tree Data Block size. From there, we
@@ -1802,8 +1802,11 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                         {
                             debug_assert_eq!(u64::from(*offset_allocation_blocks_in_fragment_auth_tree_data_block), 0);
                             debug_assert!(
-                                u64::from(cur_read_region_allocation_blocks_begin)
-                                    .is_aligned_pow2(fragment_allocation_blocks_log2)
+                                u64::from(
+                                    cur_read_region_allocation_blocks_begin
+                                        - this.fragments_auth_digests[this.fragments_auth_digests_index].0
+                                )
+                                .is_aligned_pow2(fragment_allocation_blocks_log2)
                             );
                             this.fut_state = AllocBitmapFileReadJournalFragmentsFutureState::Process {
                                 fragments_auth_digests_index: *fragments_auth_digests_index,
@@ -2227,11 +2230,17 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                     let fragment_allocation_blocks_log2 =
                         file_block_auth_tree_data_blocks_log2 + auth_tree_data_block_allocation_blocks_log2;
 
+                    let cur_file_extent = file
+                        .extents
+                        .get_extent(this.ordered_file_extents[this.ordered_file_extents_index]);
+
                     let read_buffers_base_target_allocation_block_index =
                         this.fragments_auth_digests[this.fragments_auth_digests_index].0;
                     debug_assert!(
-                        u64::from(read_buffers_base_target_allocation_block_index)
-                            .is_aligned_pow2(fragment_allocation_blocks_log2)
+                        u64::from(
+                            read_buffers_base_target_allocation_block_index - cur_file_extent.physical_range().begin()
+                        )
+                        .is_aligned_pow2(fragment_allocation_blocks_log2)
                     );
                     // All of the read_buffers' contents comes from a single physically contiguous
                     // Allocation Bitmap File extent, hence its also contiguous
@@ -2239,9 +2248,6 @@ impl<B: blkdev::NvBlkDev> AllocBitmapFileReadJournalFragmentsFuture<B> {
                     let read_buffers_base_auth_tree_data_block_index = auth_tree_config
                         .translate_physical_to_data_block_index(read_buffers_base_target_allocation_block_index);
 
-                    let cur_file_extent = file
-                        .extents
-                        .get_extent(this.ordered_file_extents[this.ordered_file_extents_index]);
                     let bitmap = match this.bitmap.as_mut() {
                         Some(bitmap) => bitmap,
                         None => {
