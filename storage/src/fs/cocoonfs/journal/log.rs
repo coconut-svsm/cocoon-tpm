@@ -1221,7 +1221,7 @@ impl JournalLog {
             encoded_alloc_bitmap_file_fragments_auth_digests.as_ref(),
             image_layout.auth_tree_data_block_allocation_blocks_log2,
             image_layout.allocation_block_size_128b_log2,
-            hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as usize,
+            hash::hash_alg_digest_len(image_layout.auth_tree_data_hmac_hash_alg) as usize,
         )?;
         if !encoded_alloc_bitmap_file_fragments_auth_digests.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
