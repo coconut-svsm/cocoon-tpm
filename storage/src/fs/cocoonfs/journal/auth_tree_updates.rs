@@ -11,11 +11,15 @@ use crate::{
     fs::{
         NvFsError,
         cocoonfs::{
-            FormatError, alloc_bitmap, auth_tree, extents,
-            journal::apply_script::JournalUpdateAuthDigestsScriptIterator, layout,
+            FormatError, alloc_bitmap,
+            auth_tree::{self, AuthTreeDataBlockIndex},
+            extents,
+            journal::apply_script::JournalUpdateAuthDigestsScriptIterator,
+            layout,
         },
     },
     nvfs_err_internal,
+    utils_common::bitmanip::{BitManip as _, UBitManip as _},
 };
 use core::cmp;
 
@@ -62,10 +66,16 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
     let auth_tree_data_block_allocation_blocks_log2 = auth_tree_data_block_allocation_blocks_log2 as u32;
     let mut alloc_bitmap_file_block_indices = Vec::<u64>::new();
 
-    let mut covered_physical_allocation_blocks_end = layout::PhysicalAllocBlockIndex::from(0u64);
+    let mut alloc_bitmap_covered_physical_allocation_blocks_end = layout::PhysicalAllocBlockIndex::from(0u64);
+    let mut auth_tree_covered_physical_allocation_blocks_end = layout::PhysicalAllocBlockIndex::from(0u64);
     while let Some(update_auth_digests_script_entry) = update_auth_digests_script_iter.next()? {
+        debug_assert!(
+            alloc_bitmap_covered_physical_allocation_blocks_end >= auth_tree_covered_physical_allocation_blocks_end
+        );
+        // If all authentication tree leaf nodes covering this entry have been processed
+        // already, there's nothing more to do.
         let updated_physical_allocation_blocks_range = update_auth_digests_script_entry.get_target_range();
-        if updated_physical_allocation_blocks_range.end() <= covered_physical_allocation_blocks_end {
+        if updated_physical_allocation_blocks_range.end() <= auth_tree_covered_physical_allocation_blocks_end {
             continue;
         }
 
@@ -86,7 +96,7 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
         let updated_physical_allocation_blocks_range = layout::PhysicalAllocBlockRange::new(
             updated_physical_allocation_blocks_range
                 .begin()
-                .max(covered_physical_allocation_blocks_end)
+                .max(auth_tree_covered_physical_allocation_blocks_end)
                 .align_down(auth_tree_data_block_allocation_blocks_log2),
             updated_physical_allocation_blocks_range.end(),
         );
@@ -135,17 +145,19 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
                     .end()
                     .min(layout::PhysicalAllocBlockIndex::from(0u64) + image_size),
             );
-            if needed_physical_allocation_blocks_range.end() <= covered_physical_allocation_blocks_end {
+            auth_tree_covered_physical_allocation_blocks_end = needed_physical_allocation_blocks_range.end();
+            if needed_physical_allocation_blocks_range.end() <= alloc_bitmap_covered_physical_allocation_blocks_end {
                 continue;
             }
 
             // And collect all allocation bitmap file blocks tracking any Allocation Block
             // within the current physical data range.
-            covered_physical_allocation_blocks_end =
-                covered_physical_allocation_blocks_end.max(needed_physical_allocation_blocks_range.begin());
-            while covered_physical_allocation_blocks_end < needed_physical_allocation_blocks_range.end() {
+            alloc_bitmap_covered_physical_allocation_blocks_end = alloc_bitmap_covered_physical_allocation_blocks_end
+                .max(needed_physical_allocation_blocks_range.begin());
+            while alloc_bitmap_covered_physical_allocation_blocks_end < needed_physical_allocation_blocks_range.end() {
                 let alloc_bitmap_file_block_index = alloc_bitmap_file.bitmap_word_index_to_file_block_index(
-                    u64::from(covered_physical_allocation_blocks_end) >> alloc_bitmap::BITMAP_WORD_BITS_LOG2,
+                    u64::from(alloc_bitmap_covered_physical_allocation_blocks_end)
+                        >> alloc_bitmap::BITMAP_WORD_BITS_LOG2,
                 )?;
                 debug_assert!(
                     alloc_bitmap_file_block_indices
@@ -156,11 +168,55 @@ pub fn collect_alloc_bitmap_blocks_for_auth_tree_reconstruction<UI: JournalUpdat
                 alloc_bitmap_file_block_indices.try_reserve(1)?;
                 alloc_bitmap_file_block_indices.push(alloc_bitmap_file_block_index);
 
-                covered_physical_allocation_blocks_end =
+                alloc_bitmap_covered_physical_allocation_blocks_end =
                     layout::PhysicalAllocBlockIndex::from((alloc_bitmap_file_block_index + 1).saturating_mul(
                         alloc_bitmap_file.get_bitmap_words_per_file_block() << alloc_bitmap::BITMAP_WORD_BITS_LOG2,
                     ));
             }
+        }
+
+        // One allocation bitmap file block tracks a large number of Allocation Bits,
+        // typically, and may cover some more authentication tree leaf nodes'
+        // associated data regions in full. Optimistically advance
+        // auth_tree_covered_physical_allocation_blocks_end accordingly to
+        // possibly save some lookups.
+        debug_assert!(
+            alloc_bitmap_covered_physical_allocation_blocks_end >= auth_tree_covered_physical_allocation_blocks_end
+        );
+        // Guard by a necessary condition: if the excess
+        // alloc_bitmap_covered_physical_allocation_blocks_end cannot contain
+        // one more leaf node's associated region, even without considering alignment
+        // constraints, then advancing is not possible.
+        if auth_tree_covered_physical_allocation_blocks_end < layout::PhysicalAllocBlockIndex::from(0u64) + image_size
+            && u64::from(
+                alloc_bitmap_covered_physical_allocation_blocks_end - auth_tree_covered_physical_allocation_blocks_end,
+            ) >> (auth_tree_config.covered_data_blocks_per_leaf_node_log2() as u32
+                + auth_tree_data_block_allocation_blocks_log2)
+                != 0
+        {
+            // Translate alloc_bitmap_covered_physical_allocation_blocks_end into the
+            // authentication tree data block domain. Careful, use the _safe()
+            // variant, it could be contained in one of the authentication
+            // tree's extents.
+            let alloc_bitmap_covered_auth_tree_data_blocks_end = AuthTreeDataBlockIndex::from(u64::from(
+                auth_tree_config.translate_physical_to_data_block_index_safe(layout::PhysicalAllocBlockIndex::from(
+                    u64::from(alloc_bitmap_covered_physical_allocation_blocks_end),
+                )),
+            ));
+            // Align down to an integral multiple of the authentication tree data block
+            // domain range covered by single leaf node.
+            let auth_tree_covered_auth_tree_data_blocks_end = AuthTreeDataBlockIndex::from(
+                u64::from(alloc_bitmap_covered_auth_tree_data_blocks_end)
+                    .round_down_pow2(auth_tree_config.covered_data_blocks_per_leaf_node_log2() as u32),
+            );
+            // And translate back to physical.
+            auth_tree_covered_physical_allocation_blocks_end =
+                auth_tree_config.translate_data_block_index_to_physical(AuthTreeDataBlockIndex::from(
+                    u64::from(auth_tree_covered_auth_tree_data_blocks_end) - 1,
+                )) + layout::AllocBlockCount::from(1u64 << auth_tree_data_block_allocation_blocks_log2);
+            debug_assert!(
+                alloc_bitmap_covered_physical_allocation_blocks_end >= auth_tree_covered_physical_allocation_blocks_end
+            );
         }
     }
 

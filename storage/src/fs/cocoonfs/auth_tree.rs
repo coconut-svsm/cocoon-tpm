@@ -623,6 +623,54 @@ impl AuthTreeDataAllocationBlocksMap {
         ))
     }
 
+    /// Map a
+    /// [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) into the
+    /// [Authentication Tree Data Block index
+    /// domain](AuthTreeDataAllocBlockIndex), with safe handling of locations
+    /// within the authentication tree's own storage extents.
+    ///
+    /// Physical locations in the interior of any of the authentication tree's
+    /// extents are outside the authentication tree's covered data domain.
+    /// If `physical_allocation_block_index` is found to be contained in
+    /// such an extent, the [Authentication Tree Data Block
+    /// index](AuthTreeDataAllocBlockIndex) corresponding to that extent's
+    /// beginning will get returned for definiteness.
+    ///
+    /// # Arguments:
+    ///
+    /// * `physical_allocation_block_index` - The physical location to map into
+    ///   the [Authentication Tree Data Block index
+    ///   domain](AuthTreeDataBlockIndex).
+    fn translate_physical_to_data_allocation_block_index_safe(
+        &self,
+        mut physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
+    ) -> AuthTreeDataAllocBlockIndex {
+        // Convert the physical Allocation Block index to an Authentication Tree Data
+        // one by subtracting from the former the space occupied by any
+        // authentication tree nodes located before it in the image.
+        let i = self
+            .auth_tree_storage_physical_extents
+            .partition_point(|e| e.0 <= u64::from(physical_allocation_block_index));
+        let auth_tree_storage_accumulated_block_count = if i != 0 {
+            self.auth_tree_storage_physical_extents[i - 1].1
+        } else {
+            0
+        };
+        // If the physical_allocation_block_index is located within
+        // the next authentication tree extent, move it right at its beginning.
+        if i < self.auth_tree_storage_physical_extents.len() {
+            let next = self.auth_tree_storage_physical_extents[i];
+            let next_begin = next.0 - (next.1 - auth_tree_storage_accumulated_block_count);
+            let next_begin = layout::PhysicalAllocBlockIndex::from(next_begin);
+            if next_begin < physical_allocation_block_index {
+                physical_allocation_block_index = next_begin;
+            }
+        }
+        AuthTreeDataAllocBlockIndex::from(
+            u64::from(physical_allocation_block_index) - auth_tree_storage_accumulated_block_count,
+        )
+    }
+
     /// Map an [`AuthTreeDataAllocBlockIndex`] to the associated
     /// [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex).
     ///
@@ -1759,6 +1807,39 @@ impl AuthTreeConfig {
             self.auth_tree_data_allocation_blocks_map
                 .map_physical_to_data_allocation_blocks(&physical_data_block_allocation_blocks_range)
                 .begin(),
+            self.data_block_allocation_blocks_log2 as u32,
+        )
+    }
+
+    /// Map a [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) into
+    /// the [Authentication Tree Data Block index
+    /// domain](AuthTreeDataBlockIndex), with safe handling of locations
+    /// within the authentication tree's own storage extents.
+    ///
+    /// Physical locations in the interior of any of the authentication tree's
+    /// extents are outside the authentication tree's covered data domain.
+    /// If `physical_allocation_block_index` is found to be contained in
+    /// such an extent, the [Authentication Tree Data Block
+    /// index](AuthTreeDataBlockIndex) corresponding to that extent's beginning
+    /// will get returned for definiteness.
+    ///
+    /// Otherwise return the [`AuthTreeDataBlockIndex`] for the [Authentication
+    /// Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// containing the specified `physical_allocation_block_index`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `physical_allocation_block_index` - The physical location to map into
+    ///   the [Authentication Tree Data Block index
+    ///   domain](AuthTreeDataBlockIndex).
+    pub fn translate_physical_to_data_block_index_safe(
+        &self,
+        physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
+    ) -> AuthTreeDataBlockIndex {
+        AuthTreeDataBlockIndex::new_from_data_allocation_block_index(
+            self.auth_tree_data_allocation_blocks_map
+                .translate_physical_to_data_allocation_block_index_safe(physical_allocation_block_index),
             self.data_block_allocation_blocks_log2 as u32,
         )
     }
