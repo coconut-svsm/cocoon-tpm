@@ -1611,7 +1611,6 @@ where
                                     }
                                     Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. }) | None => {}
                                 };
-                                continue;
                             } else {
                                 break NvFsError::from(match e {
                                     NvBlkDevIoError::OperationNotSupported => NvBlkDevIoError::IoBlockOutOfRange,
