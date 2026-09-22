@@ -1695,7 +1695,7 @@ impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> 
         Result<(Box<Transaction>, usize), (Option<Box<Transaction>>, NvFsError)>,
     )> {
         let this = pin::Pin::into_inner(self);
-        loop {
+        'outer: loop {
             match &mut this.fut_state {
                 TransactionCollectExtentsCoveringAuthDigestsFutureState::Init => {
                     if this.covered_extents.is_empty() {
@@ -1968,139 +1968,12 @@ impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> 
                             *cur_auth_tree_data_block_allocation_blocks_begin;
                         *cur_auth_tree_data_block_index += auth_tree::AuthTreeDataBlockCount::from(1u64);
 
-                        // Advance the position within the to be covered extent to the end of what's
-                        // been covered up to now.
                         let mut crossed_extent = false;
-                        let mut cur_covered_extent =
-                            this.covered_extents.get_extent_range(this.next_covered_extents_index);
-                        while cur_covered_extent.end() <= this.last_auth_tree_data_block_allocation_blocks_end {
-                            let last_extent_allocation_blocks_end = cur_covered_extent.end();
-                            this.next_covered_extents_index += 1;
-                            if this.next_covered_extents_index == this.covered_extents.len() {
-                                this.fut_state = TransactionCollectExtentsCoveringAuthDigestsFutureState::Done;
-                                return task::Poll::Ready((
-                                    mem::take(&mut this.out_buffer),
-                                    Ok((transaction, this.out_buffer_pos)),
-                                ));
-                            }
-                            crossed_extent = true;
-                            cur_covered_extent = this.covered_extents.get_extent_range(this.next_covered_extents_index);
-                            if cur_covered_extent.begin() < last_extent_allocation_blocks_end {
-                                // The extents are not sorted, but they should.
-                                this.fut_state = TransactionCollectExtentsCoveringAuthDigestsFutureState::Done;
-                                return task::Poll::Ready((
-                                    mem::take(&mut this.out_buffer),
-                                    Err((Some(transaction), nvfs_err_internal!())),
-                                ));
-                            }
-                            *cur_auth_tree_data_block_allocation_blocks_begin = cur_covered_extent
-                                .begin()
-                                .align_down(auth_tree_data_block_allocation_blocks_log2)
-                                .max(this.last_auth_tree_data_block_allocation_blocks_end);
-                        }
-                        debug_assert_ne!(this.next_covered_extents_index, this.covered_extents.len());
-
-                        if usize::from(*next_transaction_update_states_index) != transaction_update_states.len()
-                            && transaction_update_states[*next_transaction_update_states_index]
-                                .get_target_allocation_blocks_begin()
-                                < *cur_auth_tree_data_block_allocation_blocks_begin
-                        {
-                            // The current cursor into the transaction's update states corresponds
-                            // to a position before the current one (which is possible only if the
-                            // code above advanced to the next extent in covered_extents). If the
-                            // latter is still covered by the current containing Authentication Tree
-                            // leaf node, then simply advance by a linear search (of bounded
-                            // distance). Otherwise continue from scratch with a binary search
-                            // lookup within the update states.
-
-                            // If in a new extent, then the Authentication Tree Data Block index cannot
-                            // simply get incremented linearly (as it's been
-                            // done up to point), but must be found through a lookup.
-                            if crossed_extent {
-                                *cur_auth_tree_data_block_index = auth_tree_config
-                                    .translate_physical_to_data_block_index(
-                                        *cur_auth_tree_data_block_allocation_blocks_begin,
-                                    );
-                                crossed_extent = false;
-                            }
-                            debug_assert!(u64::from(*cur_auth_tree_data_block_index) != 0);
-                            if auth_tree::AuthTreeDataBlockIndex::from(
-                                u64::from(*cur_auth_tree_data_block_index) - 1u64,
-                            ) <= auth_tree_leaf_node_last_covered_data_block_index
-                            {
-                                loop {
-                                    *next_transaction_update_states_index = next_transaction_update_states_index.step();
-                                    if usize::from(*next_transaction_update_states_index)
-                                        == transaction_update_states.len()
-                                        || transaction_update_states[*next_transaction_update_states_index]
-                                            .get_target_allocation_blocks_begin()
-                                            >= *cur_auth_tree_data_block_allocation_blocks_begin
-                                    {
-                                        break;
-                                    }
-                                }
-                            } else {
-                                this.transaction = Some(transaction);
-                                this.fut_state =
-                                    TransactionCollectExtentsCoveringAuthDigestsFutureState::LookupModified;
-                                break;
-                            }
-                        }
-                        debug_assert!(
-                            usize::from(*next_transaction_update_states_index) == transaction_update_states.len()
-                                || transaction_update_states[*next_transaction_update_states_index]
-                                    .get_target_allocation_blocks_begin()
-                                    >= *cur_auth_tree_data_block_allocation_blocks_begin
-                        );
-
-                        while usize::from(*next_transaction_update_states_index) != transaction_update_states.len()
-                            && *cur_auth_tree_data_block_allocation_blocks_begin
-                                == transaction_update_states[*next_transaction_update_states_index]
-                                    .get_target_allocation_blocks_begin()
-                        {
-                            let auth_tree_data_block_digest = match transaction_update_states
-                                [*next_transaction_update_states_index]
-                                .get_auth_digest()
-                            {
-                                Some(auth_tree_data_block_digest) => auth_tree_data_block_digest,
-                                None => {
-                                    // The Authentication Tree Data Block's update state has no
-                                    // authentication digest, meaning there are no modifications to it.
-                                    *next_transaction_update_states_index = next_transaction_update_states_index.step();
-                                    break;
-                                }
-                            };
-                            let out_buffer = &mut this.out_buffer[this.out_buffer_pos..];
-                            let remaining_len = leb128::leb128u_u64_encode(
-                                out_buffer,
-                                u64::from(
-                                    *cur_auth_tree_data_block_allocation_blocks_begin
-                                        - this.last_auth_tree_data_block_allocation_blocks_end,
-                                ) >> auth_tree_data_block_allocation_blocks_log2,
-                            )
-                            .len();
-                            this.out_buffer_pos += out_buffer.len() - remaining_len;
-                            let digest_len = auth_tree_data_block_digest.len();
-                            if digest_len > remaining_len {
-                                this.fut_state = TransactionCollectExtentsCoveringAuthDigestsFutureState::Done;
-                                return task::Poll::Ready((
-                                    mem::take(&mut this.out_buffer),
-                                    Err((Some(transaction), nvfs_err_internal!())),
-                                ));
-                            }
-                            this.out_buffer[this.out_buffer_pos..this.out_buffer_pos + digest_len]
-                                .copy_from_slice(auth_tree_data_block_digest);
-                            this.out_buffer_pos += digest_len;
-
-                            *cur_auth_tree_data_block_allocation_blocks_begin +=
-                                layout::AllocBlockCount::from(1u64 << auth_tree_data_block_allocation_blocks_log2);
-                            this.last_auth_tree_data_block_allocation_blocks_end =
-                                *cur_auth_tree_data_block_allocation_blocks_begin;
-                            *cur_auth_tree_data_block_index += auth_tree::AuthTreeDataBlockCount::from(1u64);
-                            *next_transaction_update_states_index = next_transaction_update_states_index.step();
-
+                        loop {
                             // Advance the position within the to be covered extent to the end of what's
                             // been covered up to now.
+                            let mut cur_covered_extent =
+                                this.covered_extents.get_extent_range(this.next_covered_extents_index);
                             while cur_covered_extent.end() <= this.last_auth_tree_data_block_allocation_blocks_end {
                                 let last_extent_allocation_blocks_end = cur_covered_extent.end();
                                 this.next_covered_extents_index += 1;
@@ -2127,14 +2000,133 @@ impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> 
                                     .align_down(auth_tree_data_block_allocation_blocks_log2)
                                     .max(this.last_auth_tree_data_block_allocation_blocks_end);
                             }
-                        }
-                        debug_assert_ne!(this.next_covered_extents_index, this.covered_extents.len());
-                        debug_assert!(
-                            usize::from(*next_transaction_update_states_index) == transaction_update_states.len()
-                                || *cur_auth_tree_data_block_allocation_blocks_begin
-                                    < transaction_update_states[*next_transaction_update_states_index]
+                            debug_assert_ne!(this.next_covered_extents_index, this.covered_extents.len());
+
+                            if usize::from(*next_transaction_update_states_index) != transaction_update_states.len()
+                                && transaction_update_states[*next_transaction_update_states_index]
+                                    .get_target_allocation_blocks_begin()
+                                    < *cur_auth_tree_data_block_allocation_blocks_begin
+                            {
+                                // The current cursor into the transaction's update states corresponds
+                                // to a position before the current one (which is possible only if the
+                                // code above advanced to the next extent in covered_extents). If the
+                                // latter is still covered by the current containing Authentication Tree
+                                // leaf node, then simply advance by a linear search (of bounded
+                                // distance). Otherwise continue from scratch with a binary search
+                                // lookup within the update states.
+
+                                // If in a new extent, then the Authentication Tree Data Block index cannot
+                                // simply get incremented linearly (as it's been
+                                // done up to point), but must be found through a lookup.
+                                if crossed_extent {
+                                    *cur_auth_tree_data_block_index = auth_tree_config
+                                        .translate_physical_to_data_block_index(
+                                            *cur_auth_tree_data_block_allocation_blocks_begin,
+                                        );
+                                    crossed_extent = false;
+                                }
+                                debug_assert!(u64::from(*cur_auth_tree_data_block_index) != 0);
+                                if auth_tree::AuthTreeDataBlockIndex::from(
+                                    u64::from(*cur_auth_tree_data_block_index) - 1u64,
+                                ) <= auth_tree_leaf_node_last_covered_data_block_index
+                                {
+                                    loop {
+                                        *next_transaction_update_states_index =
+                                            next_transaction_update_states_index.step();
+                                        if usize::from(*next_transaction_update_states_index)
+                                            == transaction_update_states.len()
+                                            || transaction_update_states[*next_transaction_update_states_index]
+                                                .get_target_allocation_blocks_begin()
+                                                >= *cur_auth_tree_data_block_allocation_blocks_begin
+                                        {
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    this.transaction = Some(transaction);
+                                    this.fut_state =
+                                        TransactionCollectExtentsCoveringAuthDigestsFutureState::LookupModified;
+                                    continue 'outer;
+                                }
+                            }
+                            debug_assert!(
+                                usize::from(*next_transaction_update_states_index) == transaction_update_states.len()
+                                    || transaction_update_states[*next_transaction_update_states_index]
                                         .get_target_allocation_blocks_begin()
-                        );
+                                        >= *cur_auth_tree_data_block_allocation_blocks_begin
+                            );
+
+                            if usize::from(*next_transaction_update_states_index) == transaction_update_states.len()
+                                || transaction_update_states[*next_transaction_update_states_index]
+                                    .get_target_allocation_blocks_begin()
+                                    > *cur_auth_tree_data_block_allocation_blocks_begin
+                            {
+                                // Continue with entries from the authentication tree leaf node.
+                                break;
+                            }
+
+                            while *cur_auth_tree_data_block_allocation_blocks_begin < cur_covered_extent.end()
+                                && usize::from(*next_transaction_update_states_index) != transaction_update_states.len()
+                                && *cur_auth_tree_data_block_allocation_blocks_begin
+                                    == transaction_update_states[*next_transaction_update_states_index]
+                                        .get_target_allocation_blocks_begin()
+                            {
+                                let auth_tree_data_block_digest = match transaction_update_states
+                                    [*next_transaction_update_states_index]
+                                    .get_auth_digest()
+                                {
+                                    Some(auth_tree_data_block_digest) => auth_tree_data_block_digest,
+                                    None => {
+                                        // The Authentication Tree Data Block's update state has no
+                                        // authentication digest, meaning there are no modifications to it.
+                                        *next_transaction_update_states_index =
+                                            next_transaction_update_states_index.step();
+                                        break;
+                                    }
+                                };
+                                let out_buffer = &mut this.out_buffer[this.out_buffer_pos..];
+                                let remaining_len = leb128::leb128u_u64_encode(
+                                    out_buffer,
+                                    u64::from(
+                                        *cur_auth_tree_data_block_allocation_blocks_begin
+                                            - this.last_auth_tree_data_block_allocation_blocks_end,
+                                    ) >> auth_tree_data_block_allocation_blocks_log2,
+                                )
+                                .len();
+                                this.out_buffer_pos += out_buffer.len() - remaining_len;
+                                let digest_len = auth_tree_data_block_digest.len();
+                                if digest_len > remaining_len {
+                                    this.fut_state = TransactionCollectExtentsCoveringAuthDigestsFutureState::Done;
+                                    return task::Poll::Ready((
+                                        mem::take(&mut this.out_buffer),
+                                        Err((Some(transaction), nvfs_err_internal!())),
+                                    ));
+                                }
+                                this.out_buffer[this.out_buffer_pos..this.out_buffer_pos + digest_len]
+                                    .copy_from_slice(auth_tree_data_block_digest);
+                                this.out_buffer_pos += digest_len;
+
+                                *cur_auth_tree_data_block_allocation_blocks_begin +=
+                                    layout::AllocBlockCount::from(1u64 << auth_tree_data_block_allocation_blocks_log2);
+                                this.last_auth_tree_data_block_allocation_blocks_end =
+                                    *cur_auth_tree_data_block_allocation_blocks_begin;
+                                *cur_auth_tree_data_block_index += auth_tree::AuthTreeDataBlockCount::from(1u64);
+                                *next_transaction_update_states_index = next_transaction_update_states_index.step();
+                            }
+                            debug_assert_ne!(this.next_covered_extents_index, this.covered_extents.len());
+                            debug_assert!(
+                                *cur_auth_tree_data_block_allocation_blocks_begin == cur_covered_extent.end()
+                                    || usize::from(*next_transaction_update_states_index)
+                                        == transaction_update_states.len()
+                                    || *cur_auth_tree_data_block_allocation_blocks_begin
+                                        < transaction_update_states[*next_transaction_update_states_index]
+                                            .get_target_allocation_blocks_begin()
+                            );
+                            if *cur_auth_tree_data_block_allocation_blocks_begin < cur_covered_extent.end() {
+                                break;
+                            }
+                        }
+
                         // If in a new extent, then the Authentication Tree Data Block index cannot
                         // simply get incremented linearly (as it's been
                         // done up to point), but must be found through a lookup.
