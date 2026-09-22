@@ -4496,6 +4496,11 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let new_update_group1_extents_begin = this.new_extents.len();
                             for extent in allocated_extents.iter().enumerate() {
                                 if let Err(e) = this.new_extents.push_extent(&extent.1, true) {
+                                    transaction
+                                        .allocs
+                                        .pending_allocs
+                                        .remove_extents(allocated_extents.iter());
+                                    transaction.allocs.pending_allocs.reset_remove_rollback();
                                     // Failure to add is non-fatal, the extents will still be recorded at
                                     // the CocoonFsPendingTransactionsSyncState and trimmed, if enabled.
                                     // All that would happen on failure is that this transaction cannot subsequently
