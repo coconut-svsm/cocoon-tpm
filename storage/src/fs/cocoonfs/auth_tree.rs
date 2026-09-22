@@ -275,7 +275,7 @@ impl layout::BlockIndex<AuthTreeDataBlockCount> for AuthTreeDataBlockIndex {
 pub type AuthTreeDataBlockRange = layout::BlockRange<AuthTreeDataBlockIndex, AuthTreeDataBlockCount>;
 
 /// Authentication tree node identifier.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AuthTreeNodeId {
     /// First Authentication Tree Data block authenticated by the node's
     /// leftmost leaf descandant.
@@ -2945,12 +2945,15 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
         src_buf: FixedVec<u8, 7>,
-    ) -> Result<Result<Self, (FixedVec<u8, 7>, NvFsError)>, NvFsError> {
+    ) -> Result<Self, (FixedVec<u8, 7>, NvFsError)> {
         if src_buf.len() != tree_config.node_size() {
-            return Err(nvfs_err_internal!());
+            return Err((src_buf, nvfs_err_internal!()));
         }
 
-        let node_location = tree_config.node_physical_location(node_id)?;
+        let node_location = match tree_config.node_physical_location(node_id) {
+            Ok(node_location) => node_location,
+            Err(e) => return Err((src_buf, e)),
+        };
         let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
             u64::from(node_location.begin()),
             u64::from(node_location.block_count()),
@@ -2959,7 +2962,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
             0,
             tree_config.node_allocation_blocks_log2 + tree_config.allocation_block_size_128b_log2,
         );
-        Ok(Ok(Self { write_fut }))
+        Ok(Self { write_fut })
     }
 }
 
@@ -4247,6 +4250,7 @@ impl<'a> Iterator for AuthTreeNodeUpdatedDigestsIterator<'a> {
 pub struct AuthTreeApplyUpdatesFuture<B: blkdev::NvBlkDev> {
     pending_nodes_updates: AuthTreePendingNodesUpdates,
     cur_pending_nodes_updates_index: usize,
+    failed_nodes_writes: AuthTreeFailedUpdatesApplyNodesWrites,
     fut_state: AuthTreeApplyUpdatesFutureState<B>,
 }
 
@@ -4265,10 +4269,17 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     /// # Arguments:
     ///
     /// * `pending_nodes_updates` - The updates to apply.
-    pub fn new(pending_nodes_updates: AuthTreePendingNodesUpdates) -> Self {
+    /// * failed_nodes_writes` - The [`AuthTreeFailedUpdatesApplyNodesWrites`]
+    ///   returned from a prior failed attempt to write the transaction's
+    ///   authentication tree updates to storage.
+    pub fn new(
+        pending_nodes_updates: AuthTreePendingNodesUpdates,
+        failed_nodes_writes: AuthTreeFailedUpdatesApplyNodesWrites,
+    ) -> Self {
         Self {
             pending_nodes_updates,
             cur_pending_nodes_updates_index: 0,
+            failed_nodes_writes,
             fut_state: AuthTreeApplyUpdatesFutureState::Init {
                 node_data_buf: FixedVec::new_empty(),
             },
@@ -4279,7 +4290,11 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     ///
     /// Upon future completion, a pair of the input
     /// [`AuthTreePendingNodesUpdates`] and the operation's result will get
-    /// returned.
+    /// returned. On failure, the [error reason](NvFsError) is returned
+    /// alongside an accumulated [`AuthTreeFailedUpdatesApplyNodesWrites`],
+    /// supposed to get passed along to [`new()`](Self::new) in a subsequent
+    /// attempt to apply the transaction's authentication tree updates to
+    /// storage.
     ///
     /// # Arguments:
     ///
@@ -4291,6 +4306,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     ///   filesystem update counter.
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
+    #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
         blkdev: &B,
@@ -4298,7 +4314,19 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
         updated_root_hmac_digest: &[u8],
         updated_encrypted_filesystem_update_counter: &[u8],
         cx: &mut task::Context<'_>,
-    ) -> task::Poll<(AuthTreePendingNodesUpdates, Result<(), NvFsError>)> {
+    ) -> task::Poll<
+        Result<
+            Result<
+                (),
+                (
+                    AuthTreePendingNodesUpdates,
+                    AuthTreeFailedUpdatesApplyNodesWrites,
+                    NvFsError,
+                ),
+            >,
+            NvFsError,
+        >,
+    > {
         let this = pin::Pin::into_inner(self);
         let result = loop {
             match &mut this.fut_state {
@@ -4333,7 +4361,23 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                     };
                     debug_assert!(node_data_buf.len() >= digest_entry_len << digest_entries_in_node_log2);
 
-                    if let Some(node_cache_entry) = tree.node_cache.get_mut().lookup(&cur_pending_node_updates.node_id)
+                    if let Some(failed_node_write) = this
+                        .failed_nodes_writes
+                        .failed_nodes_writes
+                        .pop_if(|failed_node_write| failed_node_write.node_id == cur_pending_node_updates.node_id)
+                    {
+                        // A prior attempt to write to the node from some
+                        // AuthTreeApplyUpdatesFuture instance for the
+                        // transaction failed. The node's backing storage is in an indeterminate state.
+                        // Take the in-memory copy of the data stashed away after that prior write
+                        // failure. No need to update an entry in the cache, if
+                        // any, again: that would have happened in the course of
+                        // that prior attempt already.
+                        this.fut_state = AuthTreeApplyUpdatesFutureState::WriteUpdatedNodePrepare {
+                            updated_node_data: failed_node_write.node_data,
+                        };
+                    } else if let Some(node_cache_entry) =
+                        tree.node_cache.get_mut().lookup(&cur_pending_node_updates.node_id)
                     {
                         // The node is in the node cache, update the cache entry and copy the
                         // node data to write out from there.
@@ -4370,6 +4414,12 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                         };
                         this.fut_state = AuthTreeApplyUpdatesFutureState::ReadUnmodifiedNode { read_node_fut };
                     }
+
+                    // In case the node data got popped from failed_nodes_writes above, this is a
+                    // nop/infallible.
+                    if let Err(e) = this.failed_nodes_writes.failed_nodes_writes.try_reserve(1) {
+                        break Err(NvFsError::from(e));
+                    }
                 }
                 AuthTreeApplyUpdatesFutureState::ReadUnmodifiedNode { read_node_fut } => {
                     let mut node_data = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_node_fut), blkdev, cx) {
@@ -4393,18 +4443,42 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                         &tree.config,
                         &cur_pending_node_updates.node_id,
                         mem::take(updated_node_data),
-                    )
-                    .and_then(|result| result.map_err(|(_, e)| e))
-                    {
+                    ) {
                         Ok(write_node_fut) => write_node_fut,
-                        Err(e) => break Err(e),
+                        Err((updated_node_data, e)) => {
+                            // The updated_node_data might have been taken from failed_nodes_writes. Install
+                            // it back.
+                            this.failed_nodes_writes
+                                .failed_nodes_writes
+                                .push(AuthTreeFailedUpdatesApplyNodeWrite {
+                                    node_id: cur_pending_node_updates.node_id,
+                                    node_data: updated_node_data,
+                                });
+                            break Err(e);
+                        }
                     };
                     this.fut_state = AuthTreeApplyUpdatesFutureState::WriteUpdatedNode { write_node_fut };
                 }
                 AuthTreeApplyUpdatesFutureState::WriteUpdatedNode { write_node_fut } => {
                     let node_data_buf = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_node_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((node_data_buf, Ok(())))) => node_data_buf,
-                        task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => break Err(e),
+                        task::Poll::Ready(Ok((node_data_buf, Err(e)))) => {
+                            let cur_pending_node_updates =
+                                &this.pending_nodes_updates.nodes_updates[this.cur_pending_nodes_updates_index];
+                            this.failed_nodes_writes
+                                .failed_nodes_writes
+                                .push(AuthTreeFailedUpdatesApplyNodeWrite {
+                                    node_id: cur_pending_node_updates.node_id,
+                                    node_data: node_data_buf,
+                                });
+                            break Err(e);
+                        }
+                        task::Poll::Ready(Err(e)) => {
+                            // Internal error and the NvBlkDev consumed the buffer. There's no way to
+                            // add the node the failed_nodes_writes.
+                            this.fut_state = AuthTreeApplyUpdatesFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
@@ -4416,7 +4490,14 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
         };
 
         this.fut_state = AuthTreeApplyUpdatesFutureState::Done;
-        task::Poll::Ready((mem::take(&mut this.pending_nodes_updates), result))
+        let result = match result {
+            Ok(()) => {
+                debug_assert!(this.failed_nodes_writes.failed_nodes_writes.is_empty());
+                Ok(())
+            }
+            Err(e) => Err((mem::take(&mut this.pending_nodes_updates), mem::take(&mut this.failed_nodes_writes), e)),
+        };
+        task::Poll::Ready(Ok(result))
     }
 
     fn apply_pending_node_updates_to_buf(
@@ -4446,6 +4527,30 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                 .copy_from_slice(&node_entry_update.updated_digest);
         }
     }
+}
+
+#[derive(Debug)]
+struct AuthTreeFailedUpdatesApplyNodeWrite {
+    node_id: AuthTreeNodeId,
+    node_data: FixedVec<u8, 7>,
+}
+
+/// State returned on error from [`AuthTreeApplyUpdatesFuture::poll()`] on
+/// error.
+///
+/// Once a write to a node fails, the data on storage is in an indeterminate
+/// state. However, a subsequent retry to apply a transaction's authentication
+/// tree updates to storage through a fresh [`AuthTreeApplyUpdatesFuture`]
+/// instance will need that data, at least when only parts of the
+/// node got updated. Re-reading from storage is not an option, so the data is
+/// kept in memory for any node to which a prior write operation failed.
+/// `AuthTreeFailedUpdatesApplyNodeWrite` keeps the node data for any node whose
+/// backing storage might be in an indeterminate state due to write failures
+/// over the course of possibly multiple attempts to apply a transaction's
+/// authentication tree updates.
+#[derive(Default, Debug)]
+pub struct AuthTreeFailedUpdatesApplyNodesWrites {
+    failed_nodes_writes: Vec<AuthTreeFailedUpdatesApplyNodeWrite>,
 }
 
 /// Compute the number of nodes in an (assumed) complete subtree.
@@ -6155,8 +6260,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeInitializationCursorWritePartFuture<B> {
 
                     // And write it out.
                     let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &cur_node_id, cur_node_data) {
-                        Ok(Ok(write_fut)) => write_fut,
-                        Ok(Err((_, e))) | Err(e) => {
+                        Ok(write_fut) => write_fut,
+                        Err((_, e)) => {
                             this.fut_state = AuthTreeInitializationCursorWritePartFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }
@@ -6857,8 +6962,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                         );
                         cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
                         let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &node_id, node) {
-                            Ok(Ok(write_fut)) => write_fut,
-                            Err(e) | Ok(Err((_, e))) => break Err(e),
+                            Ok(write_fut) => write_fut,
+                            Err((_, e)) => break Err(e),
                         };
                         this.fut_state =
                             AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState::WriteNode { node_id, write_fut };
@@ -8279,8 +8384,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture
                     );
                     cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
                     let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &node_id, node) {
-                        Ok(Ok(write_fut)) => write_fut,
-                        Err(e) | Ok(Err((_, e))) => {
+                        Ok(write_fut) => write_fut,
+                        Err((_, e)) => {
                             this.fut_state = AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }

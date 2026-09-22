@@ -239,9 +239,10 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         None => break (None, nvfs_err_internal!()),
                     };
 
-                    let auth_tree_apply_updates_fut = auth_tree::AuthTreeApplyUpdatesFuture::new(mem::take(
-                        &mut transaction.pending_auth_tree_updates.pending_nodes_updates,
-                    ));
+                    let auth_tree_apply_updates_fut = auth_tree::AuthTreeApplyUpdatesFuture::new(
+                        mem::take(&mut transaction.pending_auth_tree_updates.pending_nodes_updates),
+                        mem::take(&mut transaction.failed_auth_tree_updates_nodes_writes),
+                    );
                     this.fut_state = TransactionApplyJournalFutureState::ApplyAuthTreeUpdates {
                         transaction: Some(transaction),
                         auth_tree_apply_updates_fut,
@@ -276,32 +277,43 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         &transaction.encrypted_filesystem_update_counter,
                         cx,
                     ) {
-                        task::Poll::Ready((pending_auth_tree_nodes_updates, result)) => {
-                            // Idempotency on error: move the pending_nodes_updates back into
-                            // the transaction on error. Note that if an error happened in a later
-                            // stage, the Authentication Tree updates application on an empty
-                            // pending_nodes_updates upon retry would be a nop.
-                            if let Err(e) = result {
-                                transaction.pending_auth_tree_updates.pending_nodes_updates =
-                                    pending_auth_tree_nodes_updates;
-
-                                drop(fs_instance);
-                                if e == NvFsError::MemoryAllocationFailure
-                                    && this.enter_low_memory(&mut transaction, fs_instance_sync_state.make_borrow())
-                                {
-                                    // Some additional memory could potentially get freed. Retry.
-                                    this.fut_state = TransactionApplyJournalFutureState::ApplyAuthTreeUpdatesPrepare {
-                                        transaction: Some(transaction),
-                                    };
-                                    continue;
-                                }
-
-                                break (Some(transaction), e);
-                            }
-
-                            // The filesystem instance's encrypted filesystem update counter got
+                        task::Poll::Ready(Ok(Ok(()))) => {
+                            // Done writing the authentication tree updates. Note that if an error happened
+                            // in a later stage, the Authentication Tree updates
+                            // application on an empty pending_nodes_updates
+                            // upon retry would be a nop. The filesystem
+                            // instance's encrypted filesystem update counter got
                             // updated now. Copy the plaintext copy as well.
                             fs_sync_state_filesystem_update_counter.value = transaction.filesystem_update_counter;
+                        }
+                        task::Poll::Ready(Ok(Err((
+                            pending_auth_tree_nodes_updates,
+                            failed_auth_tree_updates_nodes_writes,
+                            e,
+                        )))) => {
+                            // Idempotency on error: move the pending_nodes_updates back into
+                            // the transaction on error.
+                            transaction.pending_auth_tree_updates.pending_nodes_updates =
+                                pending_auth_tree_nodes_updates;
+                            transaction.failed_auth_tree_updates_nodes_writes = failed_auth_tree_updates_nodes_writes;
+
+                            drop(fs_instance);
+                            if e == NvFsError::MemoryAllocationFailure
+                                && this.enter_low_memory(&mut transaction, fs_instance_sync_state.make_borrow())
+                            {
+                                // Some additional memory could potentially get freed. Retry.
+                                this.fut_state = TransactionApplyJournalFutureState::ApplyAuthTreeUpdatesPrepare {
+                                    transaction: Some(transaction),
+                                };
+                                continue;
+                            }
+                            break (Some(transaction), e);
+                        }
+                        task::Poll::Ready(Err(e)) => {
+                            // Unrecoverable internal error. Deliberately consume the transaction to
+                            // prevent further retries on of applying an instance in an
+                            // inconsistent/incomplete state.
+                            break (None, e);
                         }
                         task::Poll::Pending => {
                             *fut_transaction = Some(transaction);

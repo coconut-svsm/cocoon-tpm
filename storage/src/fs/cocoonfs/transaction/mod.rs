@@ -106,6 +106,10 @@ pub struct Transaction {
     /// tree once the journal has been written.
     pending_auth_tree_updates: TransactionPendingAuthTreeUpdates,
 
+    /// Failed authentication tree node writes accumulated over prior attempt to
+    /// apply the transaction's authentication tree updates to storage.
+    failed_auth_tree_updates_nodes_writes: auth_tree::AuthTreeFailedUpdatesApplyNodesWrites,
+
     /// The extents allocated to the journal log's chained encrypted extents'
     /// tail.
     ///
@@ -169,6 +173,7 @@ impl Transaction {
             filesystem_update_counter: [0u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
             encrypted_filesystem_update_counter: FixedVec::new_empty(),
             pending_auth_tree_updates: TransactionPendingAuthTreeUpdates::new(),
+            failed_auth_tree_updates_nodes_writes: auth_tree::AuthTreeFailedUpdatesApplyNodesWrites::default(),
             journal_log_tail_extents: extents::PhysicalExtents::new(),
             #[cfg(test)]
             test_fail_apply_journal: false,
