@@ -226,6 +226,8 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                                 continue;
                             }
                         };
+                    let trim_block_allocation_blocks_log2 =
+                        auth_tree_data_block_allocation_blocks_log2.max(blkdev_io_block_allocation_blocks_log2);
                     let trim_region_allocation_blocks_begin =
                         first_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
                             .align_down(blkdev_io_block_allocation_blocks_log2);
@@ -255,11 +257,10 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                         }
                         if last_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
                             > cur_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
-                            || u64::from(
-                                cur_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
-                                    - last_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin,
-                            ) >> auth_tree_data_block_allocation_blocks_log2
-                                .max(blkdev_io_block_allocation_blocks_log2)
+                            || (u64::from(cur_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin)
+                                >> trim_block_allocation_blocks_log2)
+                                - (u64::from(last_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin)
+                                    >> trim_block_allocation_blocks_log2)
                                 > 1
                         {
                             // There's a gap, stop and process anything up to it.
@@ -285,9 +286,8 @@ impl<B: blkdev::NvBlkDev> TransactionTrimJournalFuture<B> {
                         match (last_auth_tree_data_block_journal_staging_copy_allocation_blocks_begin
                             - trim_region_allocation_blocks_begin
                             + layout::AllocBlockCount::from(1))
-                        .align_up(
-                            auth_tree_data_block_allocation_blocks_log2.max(blkdev_io_block_allocation_blocks_log2),
-                        ) {
+                        .align_up(trim_block_allocation_blocks_log2)
+                        {
                             Some(trim_region_allocation_blocks_count) => trim_region_allocation_blocks_count,
                             None => {
                                 // Cannot happen, but any failure to trim is considered non-fatal anyway.
