@@ -4635,7 +4635,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexEnumerateCursor<S
         inodes_enumer_range: ops::RangeInclusive<InodeIndexKeyType>,
     ) -> Result<Box<Self>, (Option<Box<transaction::Transaction>>, NvFsError)> {
         let inodes_enumerate_range = ops::RangeInclusive::new(
-            (*inodes_enumer_range.start()).max(SPECIAL_INODE_MAX),
+            (*inodes_enumer_range.start()).max(SPECIAL_INODE_MAX + 1),
             *inodes_enumer_range.end(),
         );
 
@@ -8581,7 +8581,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> InodeIndexUnlinkCursor<ST, 
         inodes_unlink_range: ops::RangeInclusive<InodeIndexKeyType>,
     ) -> Result<Box<Self>, (Box<transaction::Transaction>, NvFsError)> {
         let inodes_unlink_range = ops::RangeInclusive::new(
-            (*inodes_unlink_range.start()).max(SPECIAL_INODE_MAX),
+            (*inodes_unlink_range.start()).max(SPECIAL_INODE_MAX + 1),
             *inodes_unlink_range.end(),
         );
 
