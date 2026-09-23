@@ -468,15 +468,15 @@ where
     for b in commit_id.iter_mut() {
         *b ^= xor_mask;
     }
-    debug_assert_ne!(commit_id[0], last_commit_ids_tails[0][0]);
-    debug_assert_ne!(commit_id[0], last_commit_ids_tails[1][0]);
+    debug_assert_ne!(commit_id[0], last_commit_ids_tails[0][0] ^ checksum[0]);
+    debug_assert_ne!(commit_id[0], last_commit_ids_tails[1][0] ^ checksum[0]);
     debug_assert_ne!(
         commit_id[checksum::CHECKSUM_LEN as usize - 1],
-        last_commit_ids_tails[0][1]
+        last_commit_ids_tails[0][1] ^ checksum[checksum::CHECKSUM_LEN as usize - 1],
     );
     debug_assert_ne!(
         commit_id[checksum::CHECKSUM_LEN as usize - 1],
-        last_commit_ids_tails[1][1]
+        last_commit_ids_tails[1][1] ^ checksum[checksum::CHECKSUM_LEN as usize - 1],
     );
     (&mut extent)
         .take_exact(checksum::CHECKSUM_LEN as usize)
