@@ -4827,8 +4827,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     match &mut cursor.tree_position {
                         None => {
                             // First time to retrieve the next inode on this cursor.
-                            debug_assert!(!cursor.at_end);
-                            if cursor.inodes_enumerate_range.is_empty() {
+                            if cursor.inodes_enumerate_range.is_empty() || cursor.at_end {
                                 this.fut_state = InodeIndexEnumerateCursorNextFutureState::InodesRangeExhausted {
                                     cursor: Some(cursor),
                                 };
@@ -8823,8 +8822,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     match &mut cursor.tree_position {
                         None => {
                             // First time to retrieve the next inode on this cursor.
-                            debug_assert!(!cursor.at_end);
-                            if cursor.inodes_unlink_range.is_empty() {
+                            if cursor.inodes_unlink_range.is_empty() || cursor.at_end {
                                 cursor.transaction = Some(transaction);
                                 this.fut_state = InodeIndexUnlinkCursorNextFutureState::InodesRangeExhausted {
                                     cursor: Some(cursor),
