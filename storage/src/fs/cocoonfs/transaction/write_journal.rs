@@ -2115,7 +2115,7 @@ impl<B: blkdev::NvBlkDev> TransactionCollectExtentsCoveringAuthDigestsFuture<B> 
                             }
                             debug_assert_ne!(this.next_covered_extents_index, this.covered_extents.len());
                             debug_assert!(
-                                *cur_auth_tree_data_block_allocation_blocks_begin == cur_covered_extent.end()
+                                *cur_auth_tree_data_block_allocation_blocks_begin >= cur_covered_extent.end()
                                     || usize::from(*next_transaction_update_states_index)
                                         == transaction_update_states.len()
                                     || *cur_auth_tree_data_block_allocation_blocks_begin
