@@ -326,8 +326,7 @@ An encoded extent pointer is formed as follows:
 * Or the two values together, set the least significant bit if the referenced extent's type is "indirect", encode the
   resulting integer in little-endian format.
 
-The value of all-zeros denotes a special "NIL" value -- as the static image header is located at the filesystem image's
-beginning, no extent can ever start at position 0.
+The value of all-ones denotes a special "NIL" value.
 
 Note that with a maximum supported filesystem image size of $2^{64} - 1$ rounded down to the Allocation Block size, and
 a minimum Allocation Block size of 128B, any Allocation Block index always has its upper 7 bits clear, so the shift in
@@ -340,8 +339,7 @@ extent whose length is a fixed power of two implicit from the context.
 An encoded block pointer is formed by shifting the block's beginning on storage in units of Allocation Blocks
 represented as a 64 bit integer to the left by 7 bits. The lower 7 bits are reserved for future use.
 
-The value of all-zeros denotes a special "NIL" value -- as the static image header is located at the filesystem image's
-beginning, no block can ever start at position 0.
+The value of all-ones denotes a special "NIL" value.
 
 #### [Encoded extents list]{#sec-enc-extents-list}
 An *encoded extents list* specifies the location of one or more [extents](#def-extent).
@@ -446,7 +444,7 @@ before the full Merkle tree based authentication has been bootstrapped.
 
 The first extent may store some optional plaintext header at its beginning, like e.g. a magic for the journal log head,
 followed by the mandatory IV. For the inline authenticated variant an authentication tag is stored in each extent in the
-chain: after the IV for the first extent, at the extents' beginnings for any subsequent continuation extent. Randomized
+chain: before the IV for the first extent, at the extents' beginnings for any subsequent continuation extent. Randomized
 padding is then inserted at the current position in each extent in order to align its remainder to an integral multiple
 of the block cipher block size.
 
@@ -467,9 +465,12 @@ For the inline-authenticated variant, the extents' authentication tags are compu
    1. For a continuation extent only: the IV used for the extent's CBC encryption, i.e. the IV output from the previous
       extent's encryption.
    2. Possibly empty authenticated associated data common to all extents.
-   3. A single byte set to 0 for the first extent, or to 1 for any subsequent continuation extent.
-   4. An authentication context format version identifier byte of constant 0.
-   5. An authentication context subject identifier byte of constant
+   3. The length of the authenticated associated data as a 64 bit integer, encoded in little-endian format.
+   4. [`block_cipher_alg`](#def-image-layout) encoded as a pair of two 16 bit integers, encoded in big-endian format
+      each.
+   5. A single byte set to 0 for the first extent, or to 1 for any subsequent continuation extent.
+   6. An authentication context format version identifier byte of constant 0.
+   7. An authentication context subject identifier byte of constant
       [`AUTH_SUBJECT_ID_ENCRYPTION_ENTITY_CHAINED_EXTENTS`](#def-auth-subject-id) identifying the authenticated subject.
 
 The security strength of authenticating the individual extents with a HMAC is that of the underlying hash's preimage
@@ -994,11 +995,13 @@ The root key is derived from the externally supplied key material by invoking `K
    5. [`auth_tree_node_hash_alg`](#def-image-layout) encoded as a 16 bit integer in big-endian format.
    6. [`auth_tree_data_hmac_hash_alg`](#def-image-layout) encoded as a 16 bit integer in big-endian format.
    7. [`preauth_cca_protection_hmac_hash_alg`](#def-image-layout) encoded as a 16 bit integer in big-endian format.
-   7. [`block_cipher_alg`](#def-image-layout) encoded as a pair of two 16 bit integers, encoded in big-endian format
+   8. The [TCG Algorithm Registry](#bib-tcgalg25) identifier`TPM_ALG_CBC`, i.e. `0x0042`, as a 16 bit integer, encoded
+      in big-endian format.
+   9. [`block_cipher_alg`](#def-image-layout) encoded as a pair of two 16 bit integers, encoded in big-endian format
       each.
-   8. The filesystem image salt as found in the [static image header](#sec-static-image-header), encoded as a single
-      byte specifying the salt length, followed by the salt itself.
-* `bits` - The digest size produced by the `hashAlg` of SHA-512, i.e. 512.
+   10. The filesystem image salt as found in the [static image header](#sec-static-image-header), encoded as a single
+       byte specifying the salt length, followed by the salt itself.
+* `bits` - The digest size produced by the [`kdf_hash_alg`](#def-image-layout).
 
 #### [Subkey derivation]{#sec-key-derivation-subkey}
 The input parameters to subkey derivation are
@@ -1012,9 +1015,9 @@ of
 +----------------------------------+-----+---------------------------------------------------------------+
 |Name                              |Value|Description                                                    |
 +==================================+=====+===============================================================+
-|`INODE_KEY_SUBDOMAIN_DATA`        |1    |The key will be used for processing the inode's data.          |
+|`INODE_KEY_SUBDOMAIN_EXTENTS_LIST`|1    |The key will be used for processing the inode's extents list.  |
 +----------------------------------+-----+---------------------------------------------------------------+
-|`INODE_KEY_SUBDOMAIN_EXTENTS_LIST`|2    |The key will be used for processing the inode's extents list.  |
+|`INODE_KEY_SUBDOMAIN_DATA`        |2    |The key will be used for processing the inode's data.          |
 +----------------------------------+-----+---------------------------------------------------------------+
 
 The subkey is derived from the [root key](#sec-key-derivation-root) by
@@ -1148,7 +1151,8 @@ The HMAC is formed with a hash algorithm of [`auth_tree_data_hmac_hash_alg`](#de
    filesystem metadata extents](#sec-aux-fs-metadata-formatted),
 2. and an [authentication context](#sec-auth-context) formed as follows:
    1. A 64 bit allocation bitmap word specifying the allocation status of each of the Authentication Tree Data Block's
-      constituent Allocation Blocks, encoded in little-endian format.
+      constituent Allocation Blocks, encoded in little-endian format. The bits corresponding to any of the special
+      cases authenticated as if unallocated listed above are clear.
    2. The Authentication Tree Data Block's Authentication Tree Data Block's index in the Authentication Tree Data Block
       index domain, encoded as a 64 bit integer in little-endian format.
    4. An authentication context format version identifier byte of constant 0.
@@ -1315,10 +1319,10 @@ $m_\textrm{leaf}$ nodes may exist, except for possibly at the tree root.
 ### Inode index internal node format
 Let $B_{\textrm{internal}}$ denote a decrypted index internal node's maximum possible payload size in units of
 bytes. The maximum number of entries, i.e. separating keys, in an internal node is then given by
-$M_{\textrm{internal}} = \left\lfloor\frac{B_{\textrm{internal}} - 12}{12}\right\rfloor$.
+$M_{\textrm{internal}} = \left\lfloor\frac{B_{\textrm{internal}} - 12}{16}\right\rfloor$.
 The minimum internal node fill level is set to
 $m_\textrm{internal} = \left\lfloor\frac{M_\textrm{internal} - 1}{2}\right\rfloor$. $B_{\textrm{internal}}$ must be
-large enough so that the constraint $m_\textrm{leaf} >= 1$ holds. Note that with a minimum inode index internal node
+large enough so that the constraint $m_\textrm{internal} >= 1$ holds. Note that with a minimum inode index internal node
 block size of 128B, and a maximum IV length of 16B, the $m_\textrm{internal} >= 1$ is automatically fulfilled.
 
 Implementations might want to preemptively split full nodes or merge pairs of nodes at minimum fill level when walking
@@ -1332,10 +1336,10 @@ values of $M_\textrm{internal}$.
 |$0$ to $8 + 8\cdot M_\textrm{internal}$                                |[Encoded block pointers](#sec-enc-block-ptr)  |
 |                                                                       |to the node's children.                       |
 +-----------------------------------------------------------------------+----------------------------------------------+
-|$8 + 8\cdot M_\textrm{internal}$ to $8 + 12\cdot M_\textrm{internal}$  |The separator keys, encoded as 64 bit integers|
+|$8 + 8\cdot M_\textrm{internal}$ to $8 + 16\cdot M_\textrm{internal}$  |The separator keys, encoded as 64 bit integers|
 |                                                                       |in little-endian format.                      |
 +-----------------------------------------------------------------------+----------------------------------------------+
-|$8 + 12\cdot M_\textrm{internal}$ to $12 + 12\cdot M_\textrm{internal}$|The node level, counted 1-based from the leaf |
+|$8 + 16\cdot M_\textrm{internal}$ to $12 + 16\cdot M_\textrm{internal}$|The node level, counted 1-based from the leaf |
 |                                                                       |upwards, encoded as a 32 bit integer in       |
 |                                                                       |little-endian format.                         |
 +-----------------------------------------------------------------------+----------------------------------------------+
@@ -1626,7 +1630,7 @@ staging copy disguising is enabled, with the encryption algorithm and key as spe
 The journal staging copy disguising is implemented by encrypting each [Allocation Block](#def-allocation-block) from the
 journal staging copy with the specified block cipher in CBC mode and an IV obtained as follows:
 
-1. Concatenate the [Allocation Block's](#def-allocation-block) target location to its journal staging copy location,
+1. Concatenate the [Allocation Block's](#def-allocation-block) target location and its journal staging copy location,
    both represented as Allocation Block indices within the filesystem image and encoded as 64 bit integers in
    little-endian format.
 2. Truncate or pad the result at the beginning so that its length becomes equal to the block cipher block size.
