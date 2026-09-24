@@ -1491,6 +1491,9 @@ impl EncryptedChainedExtentsEncryptionInstance {
                     io_slices::SingletonIoSlice::new(prev_extent_inline_authentication_digest).map_infallible_err(),
                 )
                 .map_err(CryptoError::from)?;
+        } else if is_first {
+            dst.skip(self.layout.plain_data_extents_hdr_len)
+                .map_err(CryptoError::from)?;
         }
         debug_assert_eq!(
             dst.total_len()?,
