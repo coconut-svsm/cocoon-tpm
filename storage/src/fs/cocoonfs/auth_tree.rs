@@ -4109,6 +4109,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                         ) {
                             break Err((e, next_updated_data_block));
                         };
+                        if popped_node_pending_updates.updated_entries.is_empty() {
+                            // Empty transaction, the root node's contents haven't changed. Remove
+                            // it from the pending_nodes_updates so that it won't get written.
+                            debug_assert_eq!(this.pending_nodes_updates.nodes_updates.len(), 1);
+                            this.pending_nodes_updates.nodes_updates = Vec::new();
+                        }
                         break Ok(popped_node_digest_dst);
                     }
                 }
@@ -4495,7 +4501,11 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                 debug_assert!(this.failed_nodes_writes.failed_nodes_writes.is_empty());
                 Ok(())
             }
-            Err(e) => Err((mem::take(&mut this.pending_nodes_updates), mem::take(&mut this.failed_nodes_writes), e)),
+            Err(e) => Err((
+                mem::take(&mut this.pending_nodes_updates),
+                mem::take(&mut this.failed_nodes_writes),
+                e,
+            )),
         };
         task::Poll::Ready(Ok(result))
     }
