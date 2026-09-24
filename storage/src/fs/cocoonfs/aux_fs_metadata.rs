@@ -4397,6 +4397,29 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         }
                     }
 
+                    // AuxFsMetadata are tracked as allocated, but authenticated as unallocated.
+                    // Make sure to stage Deallocate updates at the AuthTreeDataBlocksUpdateStates
+                    // in the range so that nothing would attempt to authenticate them, should the
+                    // freed extents subsequently get repurposed.
+                    for extent in this.original_aux_fs_metadata_extents.iter() {
+                        let extent_updates_states_index_range =
+                            match transaction.auth_tree_data_blocks_update_states.insert_missing_in_range(
+                                extent,
+                                &fs_instance_sync_state.alloc_bitmap,
+                                &transaction.allocs.pending_frees,
+                                None,
+                            ) {
+                                Ok(extent_updates_states_index_range) => extent_updates_states_index_range.0,
+                                Err(e) => break 'outer (Some(transaction), Err(e.0)),
+                            };
+                        for allocation_block_update_state in transaction
+                            .auth_tree_data_blocks_update_states
+                            .iter_allocation_blocks_mut(Some(&extent_updates_states_index_range))
+                        {
+                            allocation_block_update_state.1.stage_deallocation_update();
+                        }
+                    }
+
                     this.fut_state = TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare {
                         transaction: Some(transaction),
                     };
@@ -4593,6 +4616,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                 } else {
                     if transaction.aux_fs_metadata_update.as_ref().is_none() {
                         // Rollback.
+                        transaction
+                            .auth_tree_data_blocks_update_states
+                            .reset_staged_extents_updates(this.original_aux_fs_metadata_extents.iter());
                         transaction
                             .allocs
                             .pending_frees

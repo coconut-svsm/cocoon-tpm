@@ -394,6 +394,20 @@ impl AllocationBlockUpdateState {
             },
         }
     }
+
+    /// Stage [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate)
+    /// updates for the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2).
+    pub fn stage_deallocation_update(&mut self) {
+        // In case the NV sync status is already in unallocated state, only reset any
+        // currently staged update not yet applied to the NV sync state, if
+        // any.
+        self.staged_update = if !matches!(self.nv_sync_state, AllocationBlockUpdateNvSyncState::Unallocated(_)) {
+            AllocationBlockUpdateStagedUpdate::Deallocate
+        } else {
+            AllocationBlockUpdateStagedUpdate::None
+        };
+    }
 }
 
 /// Track a [transaction's](super::Transaction) accumulated data updates to a
@@ -2939,14 +2953,7 @@ impl AuthTreeDataBlocksUpdateStates {
             // In case the NV sync status is already in unallocated state, only reset any
             // currently staged update not yet applied to the NV sync state, if
             // any.
-            allocation_block_state.staged_update = if !matches!(
-                allocation_block_state.nv_sync_state,
-                AllocationBlockUpdateNvSyncState::Unallocated(_)
-            ) {
-                AllocationBlockUpdateStagedUpdate::Deallocate
-            } else {
-                AllocationBlockUpdateStagedUpdate::None
-            };
+            allocation_block_state.stage_deallocation_update();
             cur_states_allocation_block_index =
                 cur_states_allocation_block_index.step(auth_tree_data_block_allocation_blocks_log2);
         }
