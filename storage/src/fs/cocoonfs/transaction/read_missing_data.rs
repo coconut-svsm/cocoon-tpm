@@ -960,7 +960,13 @@ impl<B: blkdev::NvBlkDev> TransactionReadMissingDataFuture<B> {
                 let inserted_states_within_request_range_count = request_range_missing_tail_states_in_read_range_count
                     .map(|request_range_missing_tail_states_in_read_range_count| {
                         (remaining_inserted_states_count as u64)
-                            .min(request_range_missing_tail_states_in_read_range_count) as usize
+                            .min(
+                                if request_range_missing_states_before_in_read_range_count.is_none() {
+                                    read_states_range_offsets.inserted_states_before_range_count as u64
+                                } else {
+                                    0
+                                } +
+                                request_range_missing_tail_states_in_read_range_count) as usize
                     })
                     .unwrap_or(remaining_inserted_states_count);
                 let remaining_inserted_states_count =

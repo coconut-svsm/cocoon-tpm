@@ -835,9 +835,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> TransactionWriteDirtyDataFu
                     let inserted_states_within_request_range_count =
                         request_range_missing_tail_states_in_write_range_count
                             .map(|request_range_missing_tail_states_in_write_range_count| {
-                                (remaining_inserted_states_count as u64)
-                                    .min(request_range_missing_tail_states_in_write_range_count)
-                                    as usize
+                                (remaining_inserted_states_count as u64).min(
+                                    if request_range_missing_states_before_in_write_range_count.is_none() {
+                                        write_range_states_insertion_info.inserted_states_before_range_count as u64
+                                    } else {
+                                        0
+                                    } + request_range_missing_tail_states_in_write_range_count,
+                                ) as usize
                             })
                             .unwrap_or(remaining_inserted_states_count);
                     let remaining_inserted_states_count =
