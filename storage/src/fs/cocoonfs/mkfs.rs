@@ -104,6 +104,16 @@ impl MkFsLayout {
                 .is_aligned_pow2(journal_block_allocation_blocks_log2)
         );
 
+        // The authentication tree dimensioning below would return
+        // FormatError::InvalidAuthTreeDimensions if there's not enough space to
+        // accomodate for even a single node. Check for that upfront and return
+        // a more suitable error code then.
+        if u64::from(image_size)
+            >> (image_layout.auth_tree_node_io_blocks_log2 as u32 + io_block_allocation_blocks_log2)
+            == 0
+        {
+            return Err(NvFsError::NoSpace);
+        }
         let (auth_tree_node_count, uncovered_image_allocation_blocks_remainder) =
             auth_tree::AuthTreeConfig::image_allocation_blocks_to_auth_tree_node_count(image_layout, image_size)?;
         let auth_tree_extent_allocation_blocks = layout::AllocBlockCount::from(
