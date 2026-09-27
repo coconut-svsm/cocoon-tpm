@@ -93,6 +93,9 @@ impl MkFsLayout {
         let image_size = image_size.min(layout::AllocBlockCount::from(
             u64::MAX >> (allocation_block_size_128b_log2 + 7),
         ));
+        // Align the image_size downwards to the IO block size, as it makes no
+        // sense to have a last partial IO block.
+        let image_size = image_size.align_down(io_block_allocation_blocks_log2);
 
         let journal_log_head_extent =
             journal::log::JournalLog::head_extent_physical_location(image_layout, image_header_end)?.0;
@@ -122,9 +125,6 @@ impl MkFsLayout {
             - layout::AllocBlockCount::from(u64::from(uncovered_image_allocation_blocks_remainder).saturating_sub(
                 u64::from(aligned_auth_tree_extent_allocation_blocks) - u64::from(auth_tree_extent_allocation_blocks),
             ));
-        // Finally align the image_size downwards to the IO block size, as it makes no
-        // sense to have a last partial IO block.
-        let image_size = image_size.align_down(io_block_allocation_blocks_log2);
         if image_size < aligned_auth_tree_extent_allocation_blocks
             || u64::from(image_size - aligned_auth_tree_extent_allocation_blocks)
                 < u64::from(journal_log_head_extent.end())
