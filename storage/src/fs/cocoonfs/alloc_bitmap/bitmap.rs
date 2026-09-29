@@ -3333,7 +3333,7 @@ impl AllocBitmap {
             // remaining_effective_payload_len() still in the
             // max_subword_extent_effective_payload_len realm. In general, truncating a full
             // bitmap word block / extent alignment block removes
-            // max_alignedallocated_effective_payload_excess_len +
+            // max_aligned_allocated_effective_payload_excess_len +
             // max_subword_extent_effective_payload_len, *plus* one payload aligment unit
             // worth of payload. This would make remaining to exceed the
             // max_subword_extent_effective_payload_len, yielding an invalid configuration.
@@ -3388,12 +3388,26 @@ impl AllocBitmap {
                             shortest_extent = Some((cur_extent_index, cur_extent_updated_allocation_blocks));
                         }
 
-                        // That's it, no more shrinkings possible: the excess is at zero now, and for
-                        // another shrinking operation to be feasible, it must be >=
+                        // That's it, no more shrinkings possible, as for another shrinking
+                        // operation to be feasible, the excess must be >=
                         // max_aligned_allocated_effective_payload_excess_len. However,
-                        // max_aligned_allocated_effective_payload_excess_len is non-zero by the
-                        // if-guard.
-                        debug_assert_eq!(progress.allocated_excess_effective_payload_len, 0);
+                        // - If max_subword_extent_effective_payload_len != 0, i.e. if subword extents
+                        //   may be used for the allocation, then allocated_excess_effective_payload_len
+                        //   is zero, while max_aligned_allocated_effective_payload_excess_len is
+                        //   non-zero by the if-guard.
+                        // - If max_subword_extent_effective_payload_len == 0, then
+                        //   allocated_excess_effective_payload_len is not necessarily zero, but always
+                        //   smaller than one payload length alignment unit.
+                        //   max_aligned_allocated_effective_payload_excess_len is a non-zero multiple
+                        //   of that payload length alignment unit in this case, so it's always larger.
+                        debug_assert!(
+                            max_subword_extent_effective_payload_len == 0
+                                || progress.allocated_excess_effective_payload_len == 0
+                        );
+                        debug_assert!(
+                            progress.allocated_excess_effective_payload_len
+                                < allocation_request.get_layout().extent_payload_len_alignment as u64
+                        );
                         debug_assert!(
                             progress.remaining_effective_payload_len() <= max_subword_extent_effective_payload_len
                         );
