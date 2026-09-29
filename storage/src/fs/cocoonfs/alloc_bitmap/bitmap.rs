@@ -3490,7 +3490,14 @@ impl AllocBitmap {
             }
         }
 
-        let result = if progress.remaining_effective_payload_len() <= max_subword_extent_effective_payload_len {
+        // If no extent at all could be allocated, the request cannot get satisfied by a
+        // subword remainder extent either: the latter would then have to store
+        // the extents header, but this function is entered only if the head
+        // extent needs at least a fullword block, c.f. the check at the
+        // beginning.
+        let result = if !extents.is_empty()
+            && progress.remaining_effective_payload_len() <= max_subword_extent_effective_payload_len
+        {
             // The request could be satisfied within the budget.
             // Sort the extents by (in this order)
             // a.) extent lengths (so that a potential future truncation
