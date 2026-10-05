@@ -151,15 +151,16 @@ impl<T: marker::Send> SyncVec<T> {
         // pending reallocations, just return. Otherwise announce
         // the pending allocation (i.e. the additional capacity required), drop
         // the lock, allocate, and install the reallocated Vec.
-        let reallocated_capacity = match guard
-            .v
-            .len()
-            .checked_add(guard.pending_reservations_additional_capacity)
-            .and_then(|c| c.checked_add(additional_capacity))
-        {
-            Some(reallocated_capacity) => reallocated_capacity,
-            None => return (guard, Err(SyncVecError::MemoryAllocationFailure)),
-        };
+        // Note that as per the logic of this function, the addition of v.len() and
+        // pending_reservations_additional_capacity can overflow only on misuse of this
+        // API, i.e. when either pushing outside the lock guard instance
+        // returned by this function, or when pushing more elements than have
+        // been allocated.
+        let reallocated_capacity =
+            match (guard.v.len() + guard.pending_reservations_additional_capacity).checked_add(additional_capacity) {
+                Some(reallocated_capacity) => reallocated_capacity,
+                None => return (guard, Err(SyncVecError::MemoryAllocationFailure)),
+            };
 
         if guard.v.capacity() >= reallocated_capacity {
             return (guard, Ok(()));
@@ -183,6 +184,9 @@ impl<T: marker::Send> SyncVec<T> {
         }
 
         let mut guard = this.lock();
+        // Here as well, the addition of v.len() and
+        // pending_reservations_additional_capacity can overflow only upon
+        // misuse of this API.
         if guard.v.capacity()
             >= reallocated_capacity.min(guard.v.len() + guard.pending_reservations_additional_capacity)
         {

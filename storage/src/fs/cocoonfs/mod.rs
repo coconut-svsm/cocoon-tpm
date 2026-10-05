@@ -111,6 +111,8 @@ pub enum FormatError {
     InvalidJournalUpdateAuthDigestsScriptEntry = 51,
     InvalidJournalTrimsScriptFormat = 52,
     InvalidJournalTrimsScriptEntry = 53,
+
+    InvalidJournalStagingCopyUndisguiseFormat = 54,
 }
 
 impl convert::From<FormatError> for NvFsError {

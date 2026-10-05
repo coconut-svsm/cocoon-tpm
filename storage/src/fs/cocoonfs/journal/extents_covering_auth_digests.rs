@@ -66,7 +66,7 @@ impl ExtentsCoveringAuthDigests {
         for covered_extent in covered_extents.iter() {
             // covered_extents is assumed to be sorted and all its extents must be
             // non-overlapping.
-            if covered_extent.begin() <= last_extent_allocation_blocks_end {
+            if covered_extent.begin() < last_extent_allocation_blocks_end {
                 return Err(nvfs_err_internal!());
             }
             last_extent_allocation_blocks_end = covered_extent.end();

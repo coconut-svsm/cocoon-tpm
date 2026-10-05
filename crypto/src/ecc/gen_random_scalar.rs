@@ -131,18 +131,18 @@ fn test_gen_random_scalar() {
         TestVec {
             drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha384,
             expected: &cmpa::hexstr::bytes_from_hexstr_cnst::<66>(
-                "011a451ca64470ac10117e0e5e3aab756d8ac53ca6bfe8c13a5d1a75c5cd0854\
-                 dfbb10ab58d193ca44764f36f8a2e2a4e9a2381bfdd6e2f813b4c7972c6a16c1\
-                 caa1",
+                "009b55a93b4e5d85bff35d844f31afd77f8fb0eaa3b29898011d2fbf78a69550\
+                 3db634ec626fd921fca2b8606f76e6c345739f4ce619db70747b18d3a6d0753d\
+                 c216",
             ),
         },
         #[cfg(feature = "sha512")]
         TestVec {
             drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha512,
             expected: &cmpa::hexstr::bytes_from_hexstr_cnst::<66>(
-                "017cdd5517cda978bd21f00f91a6f9bff20654ce16eb92cc57072403f69830eb\
-                 1507194e73d8f89204bc634255da88a1756598f834a51f707b22604c802a1abd\
-                 0dc6",
+                "01dd78ed60a9d07b9545b6d4fab5f7ceb79f6404125e669672cf8aca101b68a1\
+                 41ac41e8565bd3e86ecbb0ea58575b7aabbd64e0d0caecc9e344d3c97e109ecd\
+                 c9b3",
             ),
         },
         #[cfg(feature = "sha3_256")]
@@ -158,18 +158,18 @@ fn test_gen_random_scalar() {
         TestVec {
             drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha3_384,
             expected: &cmpa::hexstr::bytes_from_hexstr_cnst::<66>(
-                "00ea367c6e351b30c592b331981a069622d19d36c2ff22b197066c58eb5df063\
-                 f00b69a68197382fe0737d71607d0a5b67d1a6fa3286e22b631e084665fdf5f8\
-                 76d0",
+                "003c629c2d1990675787ef116d6cd01ea1e20f5c517af7a96bcc7bf48d658dd9\
+                 6b7dad7a2e9181b6cb997ddc44a076768ff519e36c5e30237d745941d49880b0\
+                 c595",
             ),
         },
         #[cfg(feature = "sha3_512")]
         TestVec {
             drbg_hash_alg: tpm2_interface::TpmiAlgHash::Sha3_512,
             expected: &cmpa::hexstr::bytes_from_hexstr_cnst::<66>(
-                "00a2497b72e68537aa1f9cadeb0191ac9b6c31f1c294fe0c0ee991817c64aca9\
-                 709b136e431c32a36443f309e75cc70451b9070898dcf4cae844d097fd223577\
-                 dc63",
+                "0148aad547b6804f42b19189d77d9fe942f8129c88238f1c609ed8ea41c6d5b1\
+                 b178d02986c119f3f86bc3ea3f644db2c262e02cda69a20cebd6c0ca653e4808\
+                 39cf",
             ),
         },
         #[cfg(feature = "sm3_256")]

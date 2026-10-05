@@ -810,9 +810,9 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     ///       [`Ok`] is returned:
     ///         * `Ok((read_context, Ok(None)))` - The inode attempted to read
     ///           does not exist.
-    ///         * `Ok((read_context, Ok(Some((inode_flags, data)))))` - The inode
-    ///           exists and its inode flags and data are available as `inode_flags`
-    ///           and `data` respectively.
+    ///         * `Ok((read_context, Ok(Some((inode_flags, data)))))` - The
+    ///           inode exists and its inode flags and data are available as
+    ///           `inode_flags` and `data` respectively.
     type ReadInodeFut: NvFsFuture<
             Self,
             Output = Result<
@@ -917,12 +917,13 @@ pub trait NvFs: Sized + marker::Send + marker::Sync + 'static {
     ///
     /// # Arguments:
     ///
-    /// * `transaction` - The [transaction](Self::Transaction) to stage the update at.
+    /// * `transaction` - The [transaction](Self::Transaction) to stage the
+    ///   update at.
     /// * `inode` - The inode to update.
-    /// * `inode_flags` - The flags to associate with `inode`. The value is masked by
-    ///   `inode_flags_mask`. If `inode` exists already, then only the bits set in
-    ///   `inode_flags_mask` are updated to the value specified at the corresponding position in
-    ///   `inode_flags`.
+    /// * `inode_flags` - The flags to associate with `inode`. The value is
+    ///   masked by `inode_flags_mask`. If `inode` exists already, then only the
+    ///   bits set in `inode_flags_mask` are updated to the value specified at
+    ///   the corresponding position in `inode_flags`.
     /// * `inode_flags_mask` - The bitmask to apply to `inode_flags`.
     /// * `data` - The data to write.
     fn write_inode(
@@ -1081,9 +1082,9 @@ pub trait NvFsEnumerateCursor<FS: NvFs>: Sized {
     ///       [`Ok`] is returned:
     ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
     ///           specified enumeration range.
-    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next inode
-    ///           existing in the specified enumeration range has number `inode`
-    ///           and flags `inode_flags`.
+    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next
+    ///           inode existing in the specified enumeration range has number
+    ///           `inode` and flags `inode_flags`.
     type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<(u64, u8)>, NvFsError>), NvFsError>>;
 
     /// Move the cursor to the next existing inode in the enumeration range.
@@ -1183,9 +1184,9 @@ pub trait NvFsUnlinkCursor<FS: NvFs>: Sized {
     ///       [`Ok`] is returned:
     ///         * `Ok((cursor, Ok(None)))` - No further inodes exist in the
     ///           specified unlinking range.
-    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next inode
-    ///           existing in the specified unlinking range has number `inode` and
-    ///           flags `inode_flags`.
+    ///         * `Ok((cursor, Ok(Some((inode, inode_flags)))))` - The next
+    ///           inode existing in the specified unlinking range has number
+    ///           `inode` and flags `inode_flags`.
     type NextFut: NvFsFuture<FS, Output = Result<(Self, Result<Option<(u64, u8)>, NvFsError>), NvFsError>>;
 
     /// Move the cursor to the next existing inode in the unlinking range.

@@ -1060,7 +1060,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ReadCoreImageHeaderFutur
                     let blkdev_io_block_allocation_blocks_log2 =
                         blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
                     let allocation_block_blkdev_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
                     let mkfsinfo_header_allocation_blocks_begin = layout::PhysicalAllocBlockIndex::from(
                         *mkfsinfo_header_blkdev_io_blocks_begin << blkdev_io_block_allocation_blocks_log2
                             >> allocation_block_blkdev_io_blocks_log2,

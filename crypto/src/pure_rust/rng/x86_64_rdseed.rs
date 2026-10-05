@@ -28,7 +28,7 @@ impl convert::From<RdSeedError> for CryptoError {
     }
 }
 
-const MAX_RDSEED_RETRIES: u8 = 5;
+const MAX_RDSEED_RETRIES: u8 = 10;
 
 #[inline(never)]
 fn rdseed() -> Result<u64, RdSeedError> {
@@ -51,6 +51,7 @@ fn rdseed() -> Result<u64, RdSeedError> {
             if retries >= MAX_RDSEED_RETRIES {
                 return Err(RdSeedError::MaxRetriesExhausted);
             }
+            unsafe { asm!("pause\n") };
             continue;
         }
         break result;

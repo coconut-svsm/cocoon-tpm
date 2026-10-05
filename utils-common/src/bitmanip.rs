@@ -19,11 +19,6 @@ macro_rules! impl_bitmanip_common {
             ((value | value.wrapping_neg()) >> (<$ut>::BITS - 1)) as $t
         }
 
-        fn is_pow2(self) -> bool {
-            let value = <Self as BitManip>::abs(self);
-            value & value.wrapping_sub(1) == 0
-        }
-
         fn is_aligned_pow2(self, pow2_log2: u32) -> bool {
             <Self as BitManip>::abs(self) & <$ut as BitManip>::trailing_bits_mask(pow2_log2) == 0
         }
@@ -54,6 +49,7 @@ macro_rules! impl_bitmanip_u {
             }
 
             fn sign_extend(self, sign_bit_pos: u32) -> Self {
+                debug_assert!(sign_bit_pos < <$ut>::BITS);
                 let leading_bits = <$ut>::BITS - sign_bit_pos - 1;
                 (((self << leading_bits) as $st) >> leading_bits) as $ut
             }
@@ -87,12 +83,8 @@ macro_rules! impl_ubitmanip {
                 if lz != 0 {
                     Some((1 as $ut) << (<$ut>::BITS - lz))
                 } else {
-                    if self & t == 0 {
-                        // Is maximum possible power of two already.
-                        Some(t)
-                    } else {
-                        None
-                    }
+                    // Is either 0 or > the largest representable power of two.
+                    if self == 0 { Some(self) } else { None }
                 }
             }
 
@@ -209,7 +201,7 @@ pub trait BitManip: Copy {
 
     /// Test if non-zero.
     ///
-    /// Returns `1` if not, `0` if yes.
+    /// Returns `0` if not, `1` if yes.
     fn is_nonzero(self) -> Self;
 
     /// Raise two to a given power.
@@ -218,9 +210,6 @@ pub trait BitManip: Copy {
     ///
     /// * `pow2_log2` - The base-2 logarithm of the desired power of two.
     fn exp2(pow2_log2: u32) -> Self;
-
-    /// Test whether a value is a power of two.
-    fn is_pow2(self) -> bool;
 
     /// Test whether a value is a multiple of a given power of two.
     ///
@@ -270,10 +259,16 @@ pub trait UBitManip: Sized + BitManip<UnsignedType = Self> {
     ///
     /// Returns `None` on overflow, otherwise the rounded value wrapped in a
     /// `Some`.
+    ///
+    /// On input `0`, `Some(0)` is getting returned, even though that's not
+    /// a power of two.
     fn round_up_next_pow2(self) -> Option<Self>;
 
     /// Round a value downwards to the next power of two smaller than or equal
     /// to it.
+    ///
+    /// On input `0`, `0` is getting returned, even though that's not a power of
+    /// two.
     fn round_down_next_pow2(self) -> Self;
 
     /// Expand from right operation.

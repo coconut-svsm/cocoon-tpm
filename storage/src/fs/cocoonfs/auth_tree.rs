@@ -275,7 +275,7 @@ impl layout::BlockIndex<AuthTreeDataBlockCount> for AuthTreeDataBlockIndex {
 pub type AuthTreeDataBlockRange = layout::BlockRange<AuthTreeDataBlockIndex, AuthTreeDataBlockCount>;
 
 /// Authentication tree node identifier.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AuthTreeNodeId {
     /// First Authentication Tree Data block authenticated by the node's
     /// leftmost leaf descandant.
@@ -450,9 +450,15 @@ impl cmp::Ord for AuthTreeNodeId {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         // Implement DFS pre order.
         let max_level = self.level.max(other.level);
-        if (u64::from(self.covered_data_blocks_begin) ^ u64::from(other.covered_data_blocks_begin))
-            >> (max_level * self.node_digests_per_node_log2 + self.data_digests_per_node_log2)
-            == 0
+        let max_level_covered_data_block_index_bits = Self::level_covered_data_block_index_bits(
+            max_level as u32,
+            self.node_digests_per_node_log2 as u32,
+            self.data_digests_per_node_log2 as u32,
+        );
+        if max_level_covered_data_block_index_bits >= u64::BITS
+            || (u64::from(self.covered_data_blocks_begin) ^ u64::from(other.covered_data_blocks_begin))
+                >> max_level_covered_data_block_index_bits
+                == 0
         {
             // One is the parent of the other, the child compares as greater.
             return match self.level.cmp(&other.level) {
@@ -575,46 +581,94 @@ impl AuthTreeDataAllocationBlocksMap {
         })
     }
 
-    /// Map a contiguous
-    /// [`PhysicalAllocBlockRange`](layout::PhysicalAllocBlockRange) into the
+    /// Map a
+    /// [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) into the
     /// [Authentication Tree Data Block index
     /// domain](AuthTreeDataAllocBlockIndex).
     ///
+    /// `physical_allocation_block_index` must not be located within any of the
+    /// authentication tree's extents or an error would get returned.
+    ///
     /// # Arguments:
     ///
-    /// * `physical_range` - The
-    ///   [`PhysicalAllocBlockRange`](layout::PhysicalAllocBlockRange) to map.
-    ///   Must not overlap with any of the authentication tree nodes storage
-    ///   extents.
-    fn map_physical_to_data_allocation_blocks(
+    /// * `physical_allocation_block_index` - The physical location to map into
+    ///   the [Authentication Tree Data Block index
+    ///   domain](AuthTreeDataBlockIndex). Must not be within any of the
+    ///   authentication tree's extents.
+    fn translate_physical_to_data_allocation_block_index(
         &self,
-        physical_range: &layout::PhysicalAllocBlockRange,
-    ) -> AuthTreeDataAllocBlockRange {
+        physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
+    ) -> Result<AuthTreeDataAllocBlockIndex, NvFsError> {
         // Convert the physical Allocation Block index to an Authentication Tree Data
         // one by subtracting from the former the space occupied by any
         // authentication tree nodes located before it in the image.
         let i = self
             .auth_tree_storage_physical_extents
-            .partition_point(|e| e.0 <= u64::from(physical_range.begin()));
+            .partition_point(|e| e.0 <= u64::from(physical_allocation_block_index));
         let auth_tree_storage_accumulated_block_count = if i != 0 {
             self.auth_tree_storage_physical_extents[i - 1].1
         } else {
             0
         };
-        // The physical allocation block range shall not intersect with any
-        // authentication tree nodes.
         if i < self.auth_tree_storage_physical_extents.len() {
             let next = self.auth_tree_storage_physical_extents[i];
             let next_begin = next.0 - (next.1 - auth_tree_storage_accumulated_block_count);
             let next_begin = layout::PhysicalAllocBlockIndex::from(next_begin);
-            debug_assert!(next_begin >= physical_range.end());
+            if next_begin <= physical_allocation_block_index {
+                return Err(NvFsError::from(FormatError::InvalidExtents));
+            }
         }
-        AuthTreeDataAllocBlockRange::from((
-            AuthTreeDataAllocBlockIndex::from(
-                u64::from(physical_range.begin()) - auth_tree_storage_accumulated_block_count,
-            ),
-            physical_range.block_count(),
+        Ok(AuthTreeDataAllocBlockIndex::from(
+            u64::from(physical_allocation_block_index) - auth_tree_storage_accumulated_block_count,
         ))
+    }
+
+    /// Map a
+    /// [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) into the
+    /// [Authentication Tree Data Block index
+    /// domain](AuthTreeDataAllocBlockIndex), with safe handling of locations
+    /// within the authentication tree's own storage extents.
+    ///
+    /// Physical locations in the interior of any of the authentication tree's
+    /// extents are outside the authentication tree's covered data domain.
+    /// If `physical_allocation_block_index` is found to be contained in
+    /// such an extent, the [Authentication Tree Data Block
+    /// index](AuthTreeDataAllocBlockIndex) corresponding to that extent's
+    /// beginning will get returned for definiteness.
+    ///
+    /// # Arguments:
+    ///
+    /// * `physical_allocation_block_index` - The physical location to map into
+    ///   the [Authentication Tree Data Block index
+    ///   domain](AuthTreeDataBlockIndex).
+    fn translate_physical_to_data_allocation_block_index_safe(
+        &self,
+        mut physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
+    ) -> AuthTreeDataAllocBlockIndex {
+        // Convert the physical Allocation Block index to an Authentication Tree Data
+        // one by subtracting from the former the space occupied by any
+        // authentication tree nodes located before it in the image.
+        let i = self
+            .auth_tree_storage_physical_extents
+            .partition_point(|e| e.0 <= u64::from(physical_allocation_block_index));
+        let auth_tree_storage_accumulated_block_count = if i != 0 {
+            self.auth_tree_storage_physical_extents[i - 1].1
+        } else {
+            0
+        };
+        // If the physical_allocation_block_index is located within
+        // the next authentication tree extent, move it right at its beginning.
+        if i < self.auth_tree_storage_physical_extents.len() {
+            let next = self.auth_tree_storage_physical_extents[i];
+            let next_begin = next.0 - (next.1 - auth_tree_storage_accumulated_block_count);
+            let next_begin = layout::PhysicalAllocBlockIndex::from(next_begin);
+            if next_begin < physical_allocation_block_index {
+                physical_allocation_block_index = next_begin;
+            }
+        }
+        AuthTreeDataAllocBlockIndex::from(
+            u64::from(physical_allocation_block_index) - auth_tree_storage_accumulated_block_count,
+        )
     }
 
     /// Map an [`AuthTreeDataAllocBlockIndex`] to the associated
@@ -650,7 +704,7 @@ impl AuthTreeDataAllocationBlocksMap {
             .partition_point(|e| e.0 - e.1 <= u64::from(data_allocation_block_index));
         if map_index != 0 {
             layout::PhysicalAllocBlockIndex::from(
-                u64::from(data_allocation_block_index) + self.auth_tree_storage_physical_extents[map_index].1,
+                u64::from(data_allocation_block_index) + self.auth_tree_storage_physical_extents[map_index - 1].1,
             )
         } else {
             layout::PhysicalAllocBlockIndex::from(u64::from(data_allocation_block_index))
@@ -809,47 +863,29 @@ fn test_auth_tree_data_allocation_blocks_map_from_phys() {
         .unwrap();
     let map = AuthTreeDataAllocationBlocksMap::new(&logical_auth_tree_extents).unwrap();
 
-    let auth_tree_data_range = map.map_physical_to_data_allocation_blocks(&layout::PhysicalAllocBlockRange::from((
-        layout::PhysicalAllocBlockIndex::from(0),
-        layout::AllocBlockCount::from(1),
-    )));
-    assert_eq!(u64::from(auth_tree_data_range.begin()), 0);
-    assert_eq!(u64::from(auth_tree_data_range.end()), 1);
+    let auth_tree_data_block_index =
+        map.translate_physical_to_data_allocation_block_index_safe(layout::PhysicalAllocBlockIndex::from(0));
+    assert_eq!(u64::from(auth_tree_data_block_index), 0);
 
-    let auth_tree_data_range = map.map_physical_to_data_allocation_blocks(&layout::PhysicalAllocBlockRange::from((
-        layout::PhysicalAllocBlockIndex::from(2),
-        layout::AllocBlockCount::from(1),
-    )));
-    assert_eq!(u64::from(auth_tree_data_range.begin()), 1);
-    assert_eq!(u64::from(auth_tree_data_range.end()), 2);
+    let auth_tree_data_block_index =
+        map.translate_physical_to_data_allocation_block_index_safe(layout::PhysicalAllocBlockIndex::from(2));
+    assert_eq!(u64::from(auth_tree_data_block_index), 1);
 
-    let auth_tree_data_range = map.map_physical_to_data_allocation_blocks(&layout::PhysicalAllocBlockRange::from((
-        layout::PhysicalAllocBlockIndex::from(3),
-        layout::AllocBlockCount::from(1),
-    )));
-    assert_eq!(u64::from(auth_tree_data_range.begin()), 2);
-    assert_eq!(u64::from(auth_tree_data_range.end()), 3);
+    let auth_tree_data_block_index =
+        map.translate_physical_to_data_allocation_block_index_safe(layout::PhysicalAllocBlockIndex::from(3));
+    assert_eq!(u64::from(auth_tree_data_block_index), 2);
 
-    let auth_tree_data_range = map.map_physical_to_data_allocation_blocks(&layout::PhysicalAllocBlockRange::from((
-        layout::PhysicalAllocBlockIndex::from(2),
-        layout::AllocBlockCount::from(2),
-    )));
-    assert_eq!(u64::from(auth_tree_data_range.begin()), 1);
-    assert_eq!(u64::from(auth_tree_data_range.end()), 3);
+    let auth_tree_data_block_index =
+        map.translate_physical_to_data_allocation_block_index_safe(layout::PhysicalAllocBlockIndex::from(2));
+    assert_eq!(u64::from(auth_tree_data_block_index), 1);
 
-    let auth_tree_data_range = map.map_physical_to_data_allocation_blocks(&layout::PhysicalAllocBlockRange::from((
-        layout::PhysicalAllocBlockIndex::from(5),
-        layout::AllocBlockCount::from(1),
-    )));
-    assert_eq!(u64::from(auth_tree_data_range.begin()), 3);
-    assert_eq!(u64::from(auth_tree_data_range.end()), 4);
+    let auth_tree_data_block_index =
+        map.translate_physical_to_data_allocation_block_index_safe(layout::PhysicalAllocBlockIndex::from(5));
+    assert_eq!(u64::from(auth_tree_data_block_index), 3);
 
-    let auth_tree_data_range = map.map_physical_to_data_allocation_blocks(&layout::PhysicalAllocBlockRange::from((
-        layout::PhysicalAllocBlockIndex::from(6),
-        layout::AllocBlockCount::from(1),
-    )));
-    assert_eq!(u64::from(auth_tree_data_range.begin()), 4);
-    assert_eq!(u64::from(auth_tree_data_range.end()), 5);
+    let auth_tree_data_block_index =
+        map.translate_physical_to_data_allocation_block_index_safe(layout::PhysicalAllocBlockIndex::from(6));
+    assert_eq!(u64::from(auth_tree_data_block_index), 4);
 }
 
 #[test]
@@ -1093,7 +1129,7 @@ impl AuthTreeNodeCacheMapNodeIdToSetAssocCacheSet {
         debug_assert!(cache_sets_count <= 64);
 
         // Logarithm by two, rounded up.
-        let auth_tree_levels_log2 = auth_tree_levels.ilog2() + !auth_tree_levels.is_pow2() as u32;
+        let auth_tree_levels_log2 = auth_tree_levels.ilog2() + !auth_tree_levels.is_power_of_two() as u32;
         let auth_tree_levels_inv_shift = 16 + auth_tree_levels_log2;
         let auth_tree_levels_inv_multiplier = (1u32 << auth_tree_levels_inv_shift).div_ceil(auth_tree_levels);
         debug_assert!(auth_tree_levels_inv_multiplier < 1u32 << (16 + 1));
@@ -1470,7 +1506,7 @@ impl AuthTreeConfig {
             let physical_range = extent.physical_range();
             if !(u64::from(physical_range.begin()) | u64::from(physical_range.end()))
                 .is_aligned_pow2(auth_tree_extents_min_alignment_allocation_blocks_log2)
-                || !u64::from(physical_range.block_count()).is_aligned_pow2(io_block_allocation_blocks_log2)
+                || !u64::from(physical_range.block_count()).is_aligned_pow2(node_allocation_blocks_log2 as u32)
             {
                 return Err(FormatError::UnalignedAuthTreeExtents.into());
             }
@@ -1486,7 +1522,8 @@ impl AuthTreeConfig {
         let auth_tree_data_allocation_blocks_map = AuthTreeDataAllocationBlocksMap::new(&auth_tree_extents)?;
 
         // Deduce the Authentication Tree dimensions from the node count.
-        let auth_tree_node_count = u64::from(auth_tree_nodes_allocation_block_count) >> node_allocation_blocks_log2;
+        let auth_tree_node_count =
+            u64::from(auth_tree_nodes_allocation_block_count) >> (node_allocation_blocks_log2 as u32);
         let auth_tree_levels = auth_tree_node_count_to_auth_tree_levels(
             auth_tree_node_count,
             node_digests_per_node_log2 as u32,
@@ -1741,17 +1778,43 @@ impl AuthTreeConfig {
     pub fn translate_physical_to_data_block_index(
         &self,
         physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
+    ) -> Result<AuthTreeDataBlockIndex, NvFsError> {
+        Ok(AuthTreeDataBlockIndex::new_from_data_allocation_block_index(
+            self.auth_tree_data_allocation_blocks_map
+                .translate_physical_to_data_allocation_block_index(physical_allocation_block_index)?,
+            self.data_block_allocation_blocks_log2 as u32,
+        ))
+    }
+
+    /// Map a [`PhysicalAllocBlockIndex`](layout::PhysicalAllocBlockIndex) into
+    /// the [Authentication Tree Data Block index
+    /// domain](AuthTreeDataBlockIndex), with safe handling of locations
+    /// within the authentication tree's own storage extents.
+    ///
+    /// Physical locations in the interior of any of the authentication tree's
+    /// extents are outside the authentication tree's covered data domain.
+    /// If `physical_allocation_block_index` is found to be contained in
+    /// such an extent, the [Authentication Tree Data Block
+    /// index](AuthTreeDataBlockIndex) corresponding to that extent's beginning
+    /// will get returned for definiteness.
+    ///
+    /// Otherwise return the [`AuthTreeDataBlockIndex`] for the [Authentication
+    /// Tree Data
+    /// Block](ImageLayout::auth_tree_data_block_allocation_blocks_log2)
+    /// containing the specified `physical_allocation_block_index`.
+    ///
+    /// # Arguments:
+    ///
+    /// * `physical_allocation_block_index` - The physical location to map into
+    ///   the [Authentication Tree Data Block index
+    ///   domain](AuthTreeDataBlockIndex).
+    pub fn translate_physical_to_data_block_index_safe(
+        &self,
+        physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
     ) -> AuthTreeDataBlockIndex {
-        let physical_data_block_allocation_blocks_begin =
-            physical_allocation_block_index.align_down(self.data_block_allocation_blocks_log2 as u32);
-        let physical_data_block_allocation_blocks_range = layout::PhysicalAllocBlockRange::from((
-            physical_data_block_allocation_blocks_begin,
-            layout::AllocBlockCount::from(1u64 << self.data_block_allocation_blocks_log2),
-        ));
         AuthTreeDataBlockIndex::new_from_data_allocation_block_index(
             self.auth_tree_data_allocation_blocks_map
-                .map_physical_to_data_allocation_blocks(&physical_data_block_allocation_blocks_range)
-                .begin(),
+                .translate_physical_to_data_allocation_block_index_safe(physical_allocation_block_index),
             self.data_block_allocation_blocks_log2 as u32,
         )
     }
@@ -2123,7 +2186,7 @@ impl AuthTreeConfig {
         } else {
             (self.data_digest_len as usize, self.data_digests_per_node_log2)
         };
-        debug_assert!(node_data.len() >= digest_entry_len << self.node_digests_per_node_log2);
+        debug_assert!(node_data.len() >= digest_entry_len << digest_entries_in_node_log2);
         let node_digest = self.digest_descendant_node(
             node_id,
             node_data
@@ -2857,12 +2920,15 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
         tree_config: &AuthTreeConfig,
         node_id: &AuthTreeNodeId,
         src_buf: FixedVec<u8, 7>,
-    ) -> Result<Result<Self, (FixedVec<u8, 7>, NvFsError)>, NvFsError> {
+    ) -> Result<Self, (FixedVec<u8, 7>, NvFsError)> {
         if src_buf.len() != tree_config.node_size() {
-            return Err(nvfs_err_internal!());
+            return Err((src_buf, nvfs_err_internal!()));
         }
 
-        let node_location = tree_config.node_physical_location(node_id)?;
+        let node_location = match tree_config.node_physical_location(node_id) {
+            Ok(node_location) => node_location,
+            Err(e) => return Err((src_buf, e)),
+        };
         let write_fut = blkdev::helpers::NvBlkDevWriteRegionFuture::new(
             u64::from(node_location.begin()),
             u64::from(node_location.block_count()),
@@ -2871,7 +2937,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeNodeWriteFuture<B> {
             0,
             tree_config.node_allocation_blocks_log2 + tree_config.allocation_block_size_128b_log2,
         );
-        Ok(Ok(Self { write_fut }))
+        Ok(Self { write_fut })
     }
 }
 
@@ -3712,13 +3778,22 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                         task::Poll::Pending => return task::Poll::Pending,
                     };
                     let tree_config = fs_instance_sync_state.auth_tree.get_config();
-                    let next_updated_data_block =
-                        next_updated_data_block.map(|next_updated_data_block| LogicalAuthTreeDataBlockUpdate {
-                            data_block_index: tree_config.translate_physical_to_data_block_index(
-                                next_updated_data_block.data_block_allocation_blocks_begin,
-                            ),
-                            data_block_digest: next_updated_data_block.data_block_digest,
-                        });
+                    let next_updated_data_block = match next_updated_data_block {
+                        Some(next_updated_data_block) => {
+                            let next_updated_data_block_index = match tree_config
+                                .translate_physical_to_data_block_index(
+                                    next_updated_data_block.data_block_allocation_blocks_begin,
+                                ) {
+                                Ok(next_updated_data_block_index) => next_updated_data_block_index,
+                                Err(e) => break Err((e, None)),
+                            };
+                            Some(LogicalAuthTreeDataBlockUpdate {
+                                data_block_index: next_updated_data_block_index,
+                                data_block_digest: next_updated_data_block.data_block_digest,
+                            })
+                        }
+                        None => None,
+                    };
                     this.fut_state = AuthTreePrepareUpdatesFutureState::AdvanceCursor {
                         next_updated_data_block,
                     };
@@ -3988,11 +4063,13 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                         // Popped node is not the root, digest its updated contents into the
                         // associated parent entry.
                         let popped_node_id = popped_node_pending_updates.node_id;
-                        auth_tree_config.digest_descendant_node_into(
+                        if let Err(e) = auth_tree_config.digest_descendant_node_into(
                             &mut popped_node_digest_dst,
                             &popped_node_id,
                             popped_node_updated_digests,
-                        )?;
+                        ) {
+                            break Err((e, next_updated_data_block));
+                        };
                         drop(popped_node_original); // Drop the locks before doing the memory allocation below.
                         if let Err((e, _)) = this.pending_bottom_node_updates_push(
                             popped_node_id.covered_data_blocks_begin,
@@ -4016,6 +4093,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev, DUI: AuthTreeDataBlocksUpda
                         ) {
                             break Err((e, next_updated_data_block));
                         };
+                        if popped_node_pending_updates.updated_entries.is_empty() {
+                            // Empty transaction, the root node's contents haven't changed. Remove
+                            // it from the pending_nodes_updates so that it won't get written.
+                            debug_assert_eq!(this.pending_nodes_updates.nodes_updates.len(), 1);
+                            this.pending_nodes_updates.nodes_updates = Vec::new();
+                        }
                         break Ok(popped_node_digest_dst);
                     }
                 }
@@ -4157,6 +4240,7 @@ impl<'a> Iterator for AuthTreeNodeUpdatedDigestsIterator<'a> {
 pub struct AuthTreeApplyUpdatesFuture<B: blkdev::NvBlkDev> {
     pending_nodes_updates: AuthTreePendingNodesUpdates,
     cur_pending_nodes_updates_index: usize,
+    failed_nodes_writes: AuthTreeFailedUpdatesApplyNodesWrites,
     fut_state: AuthTreeApplyUpdatesFutureState<B>,
 }
 
@@ -4175,10 +4259,17 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     /// # Arguments:
     ///
     /// * `pending_nodes_updates` - The updates to apply.
-    pub fn new(pending_nodes_updates: AuthTreePendingNodesUpdates) -> Self {
+    /// * failed_nodes_writes` - The [`AuthTreeFailedUpdatesApplyNodesWrites`]
+    ///   returned from a prior failed attempt to write the transaction's
+    ///   authentication tree updates to storage.
+    pub fn new(
+        pending_nodes_updates: AuthTreePendingNodesUpdates,
+        failed_nodes_writes: AuthTreeFailedUpdatesApplyNodesWrites,
+    ) -> Self {
         Self {
             pending_nodes_updates,
             cur_pending_nodes_updates_index: 0,
+            failed_nodes_writes,
             fut_state: AuthTreeApplyUpdatesFutureState::Init {
                 node_data_buf: FixedVec::new_empty(),
             },
@@ -4189,7 +4280,11 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     ///
     /// Upon future completion, a pair of the input
     /// [`AuthTreePendingNodesUpdates`] and the operation's result will get
-    /// returned.
+    /// returned. On failure, the [error reason](NvFsError) is returned
+    /// alongside an accumulated [`AuthTreeFailedUpdatesApplyNodesWrites`],
+    /// supposed to get passed along to [`new()`](Self::new) in a subsequent
+    /// attempt to apply the transaction's authentication tree updates to
+    /// storage.
     ///
     /// # Arguments:
     ///
@@ -4201,6 +4296,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
     ///   filesystem update counter.
     /// * `cx` - The context of the asynchronous task on whose behalf the future
     ///   is being polled.
+    #[allow(clippy::type_complexity)]
     pub fn poll<ST: sync_types::SyncTypes>(
         self: pin::Pin<&mut Self>,
         blkdev: &B,
@@ -4208,7 +4304,19 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
         updated_root_hmac_digest: &[u8],
         updated_encrypted_filesystem_update_counter: &[u8],
         cx: &mut task::Context<'_>,
-    ) -> task::Poll<(AuthTreePendingNodesUpdates, Result<(), NvFsError>)> {
+    ) -> task::Poll<
+        Result<
+            Result<
+                (),
+                (
+                    AuthTreePendingNodesUpdates,
+                    AuthTreeFailedUpdatesApplyNodesWrites,
+                    NvFsError,
+                ),
+            >,
+            NvFsError,
+        >,
+    > {
         let this = pin::Pin::into_inner(self);
         let result = loop {
             match &mut this.fut_state {
@@ -4218,13 +4326,6 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                         tree.encrypted_filesystem_update_counter
                             .copy_from_slice(updated_encrypted_filesystem_update_counter);
                         break Ok(());
-                    }
-
-                    if node_data_buf.is_empty() {
-                        *node_data_buf = match FixedVec::new_with_default(tree.config.node_size()) {
-                            Ok(node_data_buf) => node_data_buf,
-                            Err(e) => break Err(NvFsError::from(e)),
-                        };
                     }
 
                     let cur_pending_node_updates =
@@ -4241,9 +4342,36 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                             tree.config.data_digests_per_node_log2,
                         )
                     };
-                    debug_assert!(node_data_buf.len() >= digest_entry_len << digest_entries_in_node_log2);
 
-                    if let Some(node_cache_entry) = tree.node_cache.get_mut().lookup(&cur_pending_node_updates.node_id)
+                    if node_data_buf.is_empty() {
+                        *node_data_buf = match FixedVec::new_with_default(tree.config.node_size()) {
+                            Ok(node_data_buf) => node_data_buf,
+                            Err(e) => break Err(NvFsError::from(e)),
+                        };
+                    } else {
+                        // The node_data_buf got recycled. Zeroize the tail -- the tail lengths
+                        // might be different between internal and leaf nodes.
+                        debug_assert!(node_data_buf.len() >= digest_entry_len << digest_entries_in_node_log2);
+                        node_data_buf[digest_entry_len << digest_entries_in_node_log2..].fill(0);
+                    }
+
+                    if let Some(failed_node_write) = this
+                        .failed_nodes_writes
+                        .failed_nodes_writes
+                        .pop_if(|failed_node_write| failed_node_write.node_id == cur_pending_node_updates.node_id)
+                    {
+                        // A prior attempt to write to the node from some
+                        // AuthTreeApplyUpdatesFuture instance for the
+                        // transaction failed. The node's backing storage is in an indeterminate state.
+                        // Take the in-memory copy of the data stashed away after that prior write
+                        // failure. No need to update an entry in the cache, if
+                        // any, again: that would have happened in the course of
+                        // that prior attempt already.
+                        this.fut_state = AuthTreeApplyUpdatesFutureState::WriteUpdatedNodePrepare {
+                            updated_node_data: failed_node_write.node_data,
+                        };
+                    } else if let Some(node_cache_entry) =
+                        tree.node_cache.get_mut().lookup(&cur_pending_node_updates.node_id)
                     {
                         // The node is in the node cache, update the cache entry and copy the
                         // node data to write out from there.
@@ -4280,6 +4408,12 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                         };
                         this.fut_state = AuthTreeApplyUpdatesFutureState::ReadUnmodifiedNode { read_node_fut };
                     }
+
+                    // In case the node data got popped from failed_nodes_writes above, this is a
+                    // nop/infallible.
+                    if let Err(e) = this.failed_nodes_writes.failed_nodes_writes.try_reserve(1) {
+                        break Err(NvFsError::from(e));
+                    }
                 }
                 AuthTreeApplyUpdatesFutureState::ReadUnmodifiedNode { read_node_fut } => {
                     let mut node_data = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(read_node_fut), blkdev, cx) {
@@ -4303,18 +4437,42 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                         &tree.config,
                         &cur_pending_node_updates.node_id,
                         mem::take(updated_node_data),
-                    )
-                    .and_then(|result| result.map_err(|(_, e)| e))
-                    {
+                    ) {
                         Ok(write_node_fut) => write_node_fut,
-                        Err(e) => break Err(e),
+                        Err((updated_node_data, e)) => {
+                            // The updated_node_data might have been taken from failed_nodes_writes. Install
+                            // it back.
+                            this.failed_nodes_writes
+                                .failed_nodes_writes
+                                .push(AuthTreeFailedUpdatesApplyNodeWrite {
+                                    node_id: cur_pending_node_updates.node_id,
+                                    node_data: updated_node_data,
+                                });
+                            break Err(e);
+                        }
                     };
                     this.fut_state = AuthTreeApplyUpdatesFutureState::WriteUpdatedNode { write_node_fut };
                 }
                 AuthTreeApplyUpdatesFutureState::WriteUpdatedNode { write_node_fut } => {
                     let node_data_buf = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_node_fut), blkdev, cx) {
                         task::Poll::Ready(Ok((node_data_buf, Ok(())))) => node_data_buf,
-                        task::Poll::Ready(Err(e) | Ok((_, Err(e)))) => break Err(e),
+                        task::Poll::Ready(Ok((node_data_buf, Err(e)))) => {
+                            let cur_pending_node_updates =
+                                &this.pending_nodes_updates.nodes_updates[this.cur_pending_nodes_updates_index];
+                            this.failed_nodes_writes
+                                .failed_nodes_writes
+                                .push(AuthTreeFailedUpdatesApplyNodeWrite {
+                                    node_id: cur_pending_node_updates.node_id,
+                                    node_data: node_data_buf,
+                                });
+                            break Err(e);
+                        }
+                        task::Poll::Ready(Err(e)) => {
+                            // Internal error and the NvBlkDev consumed the buffer. There's no way to
+                            // add the node the failed_nodes_writes.
+                            this.fut_state = AuthTreeApplyUpdatesFutureState::Done;
+                            return task::Poll::Ready(Err(e));
+                        }
                         task::Poll::Pending => return task::Poll::Pending,
                     };
 
@@ -4326,7 +4484,18 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
         };
 
         this.fut_state = AuthTreeApplyUpdatesFutureState::Done;
-        task::Poll::Ready((mem::take(&mut this.pending_nodes_updates), result))
+        let result = match result {
+            Ok(()) => {
+                debug_assert!(this.failed_nodes_writes.failed_nodes_writes.is_empty());
+                Ok(())
+            }
+            Err(e) => Err((
+                mem::take(&mut this.pending_nodes_updates),
+                mem::take(&mut this.failed_nodes_writes),
+                e,
+            )),
+        };
+        task::Poll::Ready(Ok(result))
     }
 
     fn apply_pending_node_updates_to_buf(
@@ -4356,6 +4525,30 @@ impl<B: blkdev::NvBlkDev> AuthTreeApplyUpdatesFuture<B> {
                 .copy_from_slice(&node_entry_update.updated_digest);
         }
     }
+}
+
+#[derive(Debug)]
+struct AuthTreeFailedUpdatesApplyNodeWrite {
+    node_id: AuthTreeNodeId,
+    node_data: FixedVec<u8, 7>,
+}
+
+/// State returned on error from [`AuthTreeApplyUpdatesFuture::poll()`] on
+/// error.
+///
+/// Once a write to a node fails, the data on storage is in an indeterminate
+/// state. However, a subsequent retry to apply a transaction's authentication
+/// tree updates to storage through a fresh [`AuthTreeApplyUpdatesFuture`]
+/// instance will need that data, at least when only parts of the
+/// node got updated. Re-reading from storage is not an option, so the data is
+/// kept in memory for any node to which a prior write operation failed.
+/// `AuthTreeFailedUpdatesApplyNodeWrite` keeps the node data for any node whose
+/// backing storage might be in an indeterminate state due to write failures
+/// over the course of possibly multiple attempts to apply a transaction's
+/// authentication tree updates.
+#[derive(Default, Debug)]
+pub struct AuthTreeFailedUpdatesApplyNodesWrites {
+    failed_nodes_writes: Vec<AuthTreeFailedUpdatesApplyNodeWrite>,
 }
 
 /// Compute the number of nodes in an (assumed) complete subtree.
@@ -4887,57 +5080,66 @@ fn image_allocation_blocks_to_auth_tree_node_count(
         return (0, layout::AllocBlockCount::from(image_allocation_blocks));
     }
 
-    // Number of nodes in a complete subtree emerging from a node at the current
-    // level and data range covered by a complete subtree emerging from a node
-    // at the current level.
-    let (mut entry_subtree_node_count, mut entry_subtree_data_allocation_blocks) = if auth_tree_levels >= 2 {
-        (
-            auth_subtree_node_count(
-                auth_tree_levels - 2,
-                auth_tree_levels - 1,
-                node_digests_per_node_log2,
-                node_digests_per_node_minus_one_inv_mod_u64,
-            ),
-            1u64 << ((auth_tree_levels - 2) as u32 * node_digests_per_node_log2
-                + data_digests_per_node_log2
-                + data_block_allocation_blocks_log2),
-        )
-    } else {
-        (
-            0,
-            1u64 << (data_digests_per_node_log2 + data_block_allocation_blocks_log2),
-        )
-    };
-
     let mut auth_tree_node_count = 0;
-    let mut level = auth_tree_levels;
-    while level > 0 {
-        level -= 1;
+    if auth_tree_levels >= 2 {
+        // Number of nodes in a complete subtree emerging from a node at the current
+        // level and data range covered by a complete subtree emerging from a node
+        // at the current level.
+        let mut entry_subtree_node_count = auth_subtree_node_count(
+            auth_tree_levels - 2,
+            auth_tree_levels - 1,
+            node_digests_per_node_log2,
+            node_digests_per_node_minus_one_inv_mod_u64,
+        );
+        let mut entry_subtree_data_allocation_blocks = 1u64
+            << ((auth_tree_levels - 2) as u32 * node_digests_per_node_log2
+                + data_digests_per_node_log2
+                + data_block_allocation_blocks_log2);
 
-        let entry_subtree_total_allocation_blocks =
-            (entry_subtree_node_count << node_allocation_blocks_log2) + entry_subtree_data_allocation_blocks;
+        let mut level = auth_tree_levels;
+        while level > 1 {
+            level -= 1;
 
-        // Account for the current root node itself.
-        image_allocation_blocks -= node_allocation_blocks;
-        auth_tree_node_count += 1;
-        // Complete subtrees descendant of the current root node.
-        let full_subtree_count = image_allocation_blocks / entry_subtree_total_allocation_blocks;
-        image_allocation_blocks -= full_subtree_count * entry_subtree_total_allocation_blocks;
-        auth_tree_node_count += full_subtree_count * entry_subtree_node_count;
+            let entry_subtree_total_allocation_blocks =
+                (entry_subtree_node_count << node_allocation_blocks_log2) + entry_subtree_data_allocation_blocks;
 
-        if image_allocation_blocks < (level as u64) << node_allocation_blocks_log2 {
-            // Not enough space left for even a single tree path down to the bottom.
-            break;
-        }
+            // Account for the current root node itself.
+            image_allocation_blocks -= node_allocation_blocks;
+            auth_tree_node_count += 1;
+            // Complete subtrees descendant of the current root node.
+            let full_subtree_count = image_allocation_blocks / entry_subtree_total_allocation_blocks;
+            debug_assert!(full_subtree_count <= 1u64 << node_digests_per_node_log2);
+            image_allocation_blocks -= full_subtree_count * entry_subtree_total_allocation_blocks;
+            auth_tree_node_count += full_subtree_count * entry_subtree_node_count;
 
-        if level != 0 {
+            if full_subtree_count == 1u64 << node_digests_per_node_log2
+                || image_allocation_blocks < (level as u64) << node_allocation_blocks_log2
+            {
+                // Either the subtree at the current level is full and we're done, or there's
+                // not enough space left for even a single tree path down to the
+                // bottom.
+                return (
+                    auth_tree_node_count,
+                    layout::AllocBlockCount::from(image_allocation_blocks),
+                );
+            }
+
             // Update for the next iteration.
             entry_subtree_node_count = (entry_subtree_node_count - 1) >> node_digests_per_node_log2;
             entry_subtree_data_allocation_blocks >>= node_digests_per_node_log2;
         }
     }
 
-    debug_assert!(level != 0 || image_allocation_blocks < (1u64 << data_block_allocation_blocks_log2));
+    // Take care of the partial leaf node.
+    debug_assert!(image_allocation_blocks >= node_allocation_blocks);
+    // Account for the leaf node itself.
+    image_allocation_blocks -= node_allocation_blocks;
+    auth_tree_node_count += 1;
+    // And the Authentication Tree Data Blocks authenticated by the leaf node.
+    let used_digest_entries_count = image_allocation_blocks >> data_block_allocation_blocks_log2;
+    debug_assert!(used_digest_entries_count <= 1u64 << data_digests_per_node_log2);
+    image_allocation_blocks -= used_digest_entries_count << data_block_allocation_blocks_log2;
+    debug_assert!(image_allocation_blocks < (1u64 << data_block_allocation_blocks_log2));
 
     (
         auth_tree_node_count,
@@ -6056,8 +6258,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeInitializationCursorWritePartFuture<B> {
 
                     // And write it out.
                     let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &cur_node_id, cur_node_data) {
-                        Ok(Ok(write_fut)) => write_fut,
-                        Ok(Err((_, e))) | Err(e) => {
+                        Ok(write_fut) => write_fut,
+                        Err((_, e)) => {
                             this.fut_state = AuthTreeInitializationCursorWritePartFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }
@@ -6122,6 +6324,7 @@ pub struct AuthTreeReplayJournalUpdateScriptCursor {
     cur_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
     cur_data_allocation_block_index: AuthTreeDataAllocBlockIndex,
     cur_contiguous_data_allocation_blocks_range_end: AuthTreeDataAllocBlockIndex,
+    io_block_allocation_blocks_log2: u8,
     at_end: bool,
 }
 
@@ -6212,6 +6415,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
             cur_physical_allocation_block_index: layout::PhysicalAllocBlockIndex::from(0u64),
             cur_data_allocation_block_index: AuthTreeDataAllocBlockIndex::from(0u64),
             cur_contiguous_data_allocation_blocks_range_end: AuthTreeDataAllocBlockIndex::from(0u64),
+            io_block_allocation_blocks_log2: image_layout.io_block_allocation_blocks_log2,
             at_end: false,
         })
         .map_err(NvFsError::from)
@@ -6264,27 +6468,100 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
     ///   [`AuthTreeReplayJournalUpdateScriptCursorUpdateResult::Done`].
     pub fn update<B: blkdev::NvBlkDev>(
         mut self: Box<Self>,
+        blkdev: &B,
         tree_config: &AuthTreeConfig,
+        physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
         allocation_block_data: &[u8],
     ) -> Result<AuthTreeReplayJournalUpdateScriptCursorUpdateResult<B>, NvFsError> {
         if self.cur_data_allocation_block_index >= self.cur_contiguous_data_allocation_blocks_range_end {
             self.update_physical_position(tree_config)?;
         }
+        // If the Allocation Block is before the current physical position,
+        // then it's been skipped over by advance_to(), because it's not covered by a
+        // JournalUpdateAuthDigestsScriptEntry.
+        if physical_allocation_block_index < self.cur_physical_allocation_block_index {
+            return Ok(AuthTreeReplayJournalUpdateScriptCursorUpdateResult::Done { cursor: self });
+        }
+        debug_assert_eq!(
+            physical_allocation_block_index,
+            self.cur_physical_allocation_block_index
+        );
         if self.cur_physical_allocation_block_index >= layout::PhysicalAllocBlockIndex::from(0u64) + self.image_size {
             return Err(nvfs_err_internal!());
         }
 
         // Push missing nodes all the way to the bottom.
-        while self.root_path_nodes.len() != tree_config.auth_tree_levels as usize {
-            let node = FixedVec::new_with_default(tree_config.node_size())?;
-            self.root_path_nodes.push(AuthTreeNode { data: node });
-            debug_assert!(u64::from(self.cur_data_allocation_block_index).is_aligned_pow2(
-                AuthTreeNodeId::level_covered_data_block_index_bits(
-                    (tree_config.auth_tree_levels as usize - self.root_path_nodes.len()) as u32,
-                    tree_config.node_digests_per_node_log2 as u32,
-                    tree_config.data_digests_per_node_log2 as u32
-                )
-            ));
+        // Be careful to not enter leaf nodes for whose covered data range no
+        // JournalUpdateAuthDigestsScriptEntry entry exists: in this case we might
+        // not have the allocation bitmap file fragments required for the
+        // reconstruction.
+        if self.root_path_nodes.len() != tree_config.auth_tree_levels as usize {
+            while self.journal_update_script_index != self.journal_update_script.len()
+                && self.journal_update_script[self.journal_update_script_index]
+                    .get_target_range()
+                    .end()
+                    <= self.cur_physical_allocation_block_index
+            {
+                self.journal_update_script_index += 1;
+            }
+
+            if self.journal_update_script_index == self.journal_update_script.len() {
+                // No more JournalUpdateAuthDigestsScriptEntry entries exist at all. Advamce the
+                // cursro all the way to the end, never entering a leaf node again.
+                let image_size = self.image_size;
+                return Ok(AuthTreeReplayJournalUpdateScriptCursorUpdateResult::NeedCursorAdvance {
+                    advance_fut: AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::new(
+                        blkdev,
+                        self,
+                        layout::PhysicalAllocBlockIndex::from(0u64) + image_size,
+                        tree_config,
+                    )?,
+                });
+            } else {
+                let next_journal_update_script_entry_target_allocation_blocks_begin = self.journal_update_script
+                    [self.journal_update_script_index]
+                    .get_target_range()
+                    .begin();
+                if physical_allocation_block_index < next_journal_update_script_entry_target_allocation_blocks_begin
+                    && (u64::from(tree_config.translate_physical_to_data_block_index(
+                        next_journal_update_script_entry_target_allocation_blocks_begin,
+                    )?) ^ u64::from(
+                        tree_config.translate_physical_to_data_block_index(physical_allocation_block_index)?,
+                    )) >> tree_config.covered_data_blocks_per_leaf_node_log2()
+                        != 0
+                {
+                    // The leaf node covering the physical_allocation_block_index has no
+                    // JournalUpdateAuthDigestsScriptEntry in its range. Advance over it.
+                    let physical_allocation_block_index = physical_allocation_block_index
+                        + layout::AllocBlockCount::from(1u64 << self.io_block_allocation_blocks_log2 as u32);
+                    return Ok(AuthTreeReplayJournalUpdateScriptCursorUpdateResult::NeedCursorAdvance {
+                        advance_fut: AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::new(
+                            blkdev,
+                            self,
+                            physical_allocation_block_index,
+                            tree_config,
+                        )?,
+                    });
+                }
+            }
+
+            // Ok, the leaf node about to get entered has at least one
+            // JournalUpdateAuthDigestsScriptEntry in its covered data range.
+            // Push missing nodes all the way to the bottom.
+            loop {
+                let node = FixedVec::new_with_default(tree_config.node_size())?;
+                self.root_path_nodes.push(AuthTreeNode { data: node });
+                debug_assert!(u64::from(self.cur_data_allocation_block_index).is_aligned_pow2(
+                    AuthTreeNodeId::level_covered_data_block_index_bits(
+                        (tree_config.auth_tree_levels as usize - self.root_path_nodes.len()) as u32,
+                        tree_config.node_digests_per_node_log2 as u32,
+                        tree_config.data_digests_per_node_log2 as u32
+                    )
+                ));
+                if self.root_path_nodes.len() == tree_config.auth_tree_levels as usize {
+                    break;
+                }
+            }
         }
 
         let digest_cur_data_block_context = match self.digest_cur_data_block_context.as_mut() {
@@ -6386,7 +6663,7 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
             Some((cur_contiguous_data_allocation_blocks_range, cur_physical_allocation_block_index)) => {
                 // The cur_physical_allocation_block_index only ever gets moved in the forward
                 // direction. More specifically whenever crossing an
-                // Authentication Tree extent, that extent's length gets added.
+                // authentication tree extent, that extent's length gets added.
                 debug_assert!(cur_physical_allocation_block_index >= self.cur_physical_allocation_block_index);
                 if cur_physical_allocation_block_index
                     <= layout::PhysicalAllocBlockIndex::from(0u64) + self.aligned_image_size
@@ -6394,6 +6671,19 @@ impl AuthTreeReplayJournalUpdateScriptCursor {
                     self.cur_physical_allocation_block_index = cur_physical_allocation_block_index;
                     self.cur_contiguous_data_allocation_blocks_range_end =
                         cur_contiguous_data_allocation_blocks_range.end();
+
+                    // Advance the update script position to avoid infinite loops on malformed
+                    // images in case the update script's entry specifies a
+                    // location within an authentication tree's extent.
+                    while self.journal_update_script_index < self.journal_update_script.len()
+                        && self.journal_update_script[self.journal_update_script_index]
+                            .get_target_range()
+                            .end()
+                            <= cur_physical_allocation_block_index
+                    {
+                        self.journal_update_script_index += 1;
+                    }
+
                     Ok(())
                 } else {
                     Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange))
@@ -6416,6 +6706,10 @@ pub enum AuthTreeReplayJournalUpdateScriptCursorUpdateResult<B: blkdev::NvBlkDev
     /// implemented by polling `write_fut` to completion.
     NeedAuthTreePartWrite {
         write_fut: AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B>,
+    },
+    /// The [`AuthTreeReplayJournalUpdateScriptCursor`] needs to get advanced.
+    NeedCursorAdvance {
+        advance_fut: AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B>,
     },
 }
 
@@ -6461,7 +6755,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
     fn new(
         blkdev: &B,
         cursor: Box<AuthTreeReplayJournalUpdateScriptCursor>,
-        mut to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
+        to_physical_allocation_block_index: layout::PhysicalAllocBlockIndex,
         tree_config: &AuthTreeConfig,
     ) -> Result<Self, NvFsError> {
         let blkdev_io_block_allocation_blocks_log2 = blkdev
@@ -6470,6 +6764,99 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
         if !u64::from(to_physical_allocation_block_index).is_aligned_pow2(blkdev_io_block_allocation_blocks_log2) {
             return Err(nvfs_err_internal!());
         }
+
+        // Be careful not to descend into leaves for which there exists no
+        // JournalUpdateAuthDigestsScriptEntry. In this case, there might not exist a
+        // corresponding allocation bitmap file fragment either, and we cannot
+        // reconstruct such a leaf. An example where this could happen is when
+        // advancing to the beginning of the mutable image header,
+        // which is always written by a transaction in practice, but which is exempt
+        // from the authentication as a special case.
+        let mut next_journal_update_script_index = cursor.journal_update_script_index;
+        while next_journal_update_script_index < cursor.journal_update_script.len()
+            && cursor.journal_update_script[next_journal_update_script_index]
+                .get_target_range()
+                .end()
+                <= to_physical_allocation_block_index
+        {
+            next_journal_update_script_index += 1;
+        }
+        let mut to_physical_allocation_block_index = if next_journal_update_script_index
+            != cursor.journal_update_script.len()
+        {
+            let next_journal_update_script_entry_target_allocation_blocks_begin = cursor.journal_update_script
+                [next_journal_update_script_index]
+                .get_target_range()
+                .begin();
+            if to_physical_allocation_block_index >= next_journal_update_script_entry_target_allocation_blocks_begin {
+                to_physical_allocation_block_index
+            } else if cursor.root_path_nodes.len() == tree_config.auth_tree_levels as usize
+                && (u64::from(AuthTreeDataBlockIndex::new_from_data_allocation_block_index(
+                    cursor.cur_data_allocation_block_index,
+                    tree_config.data_block_allocation_blocks_log2 as u32,
+                )) ^ u64::from(
+                    tree_config.translate_physical_to_data_block_index(to_physical_allocation_block_index)?,
+                )) >> tree_config.covered_data_blocks_per_leaf_node_log2()
+                    == 0
+            {
+                // The target location is not covered by any authentication tree data update
+                // script entry. The cursor is in a leaf node, and the target
+                // location is within its covered range. Being in the leaf node
+                // means we're certainly able to reconstruct it.  Simply move to
+                // the requested location, perhaps some subsequent
+                // Self::update() call may contribute to providing the data needed to completing
+                // the node.
+                to_physical_allocation_block_index
+            } else {
+                // The target location is not covered by any authentication tree data update
+                // script entry. Advance at least to the beginning of the next
+                // leaf node's covered
+                // range. If to_physical_allocation_block_index is contained in that, good,
+                // then some its data may perhaps get provided through subsequent Self::update()
+                // invocations and must not get read from storage. If not, also
+                // fine, Self::update() will dismiss the data then.
+                debug_assert!(
+                    tree_config.covered_data_blocks_per_leaf_node_log2()
+                        + tree_config.data_block_allocation_blocks_log2
+                        >= cursor.io_block_allocation_blocks_log2
+                );
+                let next_auth_tree_leaf_node_covered_physical_allocation_blocks_begin = tree_config
+                    .translate_data_block_index_to_physical(
+                        tree_config
+                            .translate_physical_to_data_block_index(
+                                next_journal_update_script_entry_target_allocation_blocks_begin,
+                            )?
+                            .align_down(tree_config.covered_data_blocks_per_leaf_node_log2() as u32),
+                    );
+                debug_assert!(
+                    u64::from(next_auth_tree_leaf_node_covered_physical_allocation_blocks_begin)
+                        .is_aligned_pow2(cursor.io_block_allocation_blocks_log2 as u32)
+                );
+                to_physical_allocation_block_index
+                    .max(next_auth_tree_leaf_node_covered_physical_allocation_blocks_begin)
+            }
+        } else {
+            // There are no more JournalUpdateAuthDigestsScriptEntrys.
+            if cursor.root_path_nodes.len() == tree_config.auth_tree_levels as usize
+                && (u64::from(AuthTreeDataBlockIndex::new_from_data_allocation_block_index(
+                    cursor.cur_data_allocation_block_index,
+                    tree_config.data_block_allocation_blocks_log2 as u32,
+                )) ^ u64::from(
+                    tree_config.translate_physical_to_data_block_index(to_physical_allocation_block_index)?,
+                )) >> tree_config.covered_data_blocks_per_leaf_node_log2()
+                    == 0
+            {
+                // The cursor is in a leaf node, and the target location is within its covered
+                // range. Being in the leaf node means we're certainly able to reconstruct it.
+                // Simply move to the requested location, perhaps some subsequent
+                // Self::update() call may contribute to providing the data needed to completing
+                // the node.
+                to_physical_allocation_block_index
+            } else {
+                layout::PhysicalAllocBlockIndex::from(0u64) + cursor.image_size
+            }
+        };
+
         let to_data_allocation_block_index =
             if to_physical_allocation_block_index >= layout::PhysicalAllocBlockIndex::from(0u64) + cursor.image_size {
                 to_physical_allocation_block_index =
@@ -6483,13 +6870,14 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                 AuthTreeDataAllocBlockIndex::from(0u64) + image_data_allocation_blocks
             } else {
                 AuthTreeDataAllocBlockIndex::new_from_data_block_index(
-                    tree_config.translate_physical_to_data_block_index(to_physical_allocation_block_index),
+                    tree_config.translate_physical_to_data_block_index(to_physical_allocation_block_index)?,
                     tree_config.data_block_allocation_blocks_log2 as u32,
                 ) + layout::AllocBlockCount::from(
                     u64::from(to_physical_allocation_block_index)
                         & u64::trailing_bits_mask(tree_config.data_block_allocation_blocks_log2 as u32),
                 )
             };
+
         Ok(Self {
             cursor: Some(cursor),
             fut_state: AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState::Init,
@@ -6584,8 +6972,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                         );
                         cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
                         let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &node_id, node) {
-                            Ok(Ok(write_fut)) => write_fut,
-                            Err(e) | Ok(Err((_, e))) => break Err(e),
+                            Ok(write_fut) => write_fut,
+                            Err((_, e)) => break Err(e),
                         };
                         this.fut_state =
                             AuthTreeReplayJournalUpdateScriptCursorAdvanceFutureState::WriteNode { node_id, write_fut };
@@ -6617,6 +7005,7 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                     // cur_data_allocation_block_index is at the beginning or end of the current
                     // node: if it aligns with a node boundary, then it's always at its end.
                     if cursor.cur_data_allocation_block_index == this.to_data_allocation_block_index {
+                        cursor.cur_physical_allocation_block_index = this.to_physical_allocation_block_index;
                         break Ok(());
                     }
 
@@ -6632,6 +7021,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                             // and there's nothing to do.
                             debug_assert_eq!(u64::from(cursor.cur_data_allocation_block_index), 0);
                             debug_assert!(cursor.journal_update_script.is_empty());
+                            cursor.cur_data_allocation_block_index = this.to_data_allocation_block_index;
+                            cursor.cur_physical_allocation_block_index = this.to_physical_allocation_block_index;
                             break Ok(());
                         }
 
@@ -6757,10 +7148,14 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                                 );
                                 if cursor.cur_physical_allocation_block_index < journal_update_script_entry_range_begin
                                 {
+                                    let next_stop_data_block_index = match tree_config
+                                        .translate_physical_to_data_block_index(journal_update_script_entry_range_begin)
+                                    {
+                                        Ok(next_stop_data_block_index) => next_stop_data_block_index,
+                                        Err(e) => break Err(e),
+                                    };
                                     AuthTreeDataAllocBlockIndex::new_from_data_block_index(
-                                        tree_config.translate_physical_to_data_block_index(
-                                            journal_update_script_entry_range_begin,
-                                        ),
+                                        next_stop_data_block_index,
                                         tree_config.data_block_allocation_blocks_log2 as u32,
                                     ) + layout::AllocBlockCount::from(
                                         u64::from(journal_update_script_entry_range_begin)
@@ -6796,10 +7191,15 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B
                                                     ));
                                                 }
                                             };
-                                        AuthTreeDataAllocBlockIndex::new_from_data_block_index(
-                                            tree_config.translate_physical_to_data_block_index(
+                                        let next_stop_data_block_index = match tree_config
+                                            .translate_physical_to_data_block_index(
                                                 journal_update_script_entry_range_end,
-                                            ),
+                                            ) {
+                                            Ok(next_stop_data_block_index) => next_stop_data_block_index,
+                                            Err(e) => break Err(e),
+                                        };
+                                        AuthTreeDataAllocBlockIndex::new_from_data_block_index(
+                                            next_stop_data_block_index,
                                             tree_config.data_block_allocation_blocks_log2 as u32,
                                         ) + layout::AllocBlockCount::from(
                                             u64::from(journal_update_script_entry_range_end)
@@ -8003,8 +8403,8 @@ impl<B: blkdev::NvBlkDev> AuthTreeReplayJournalUpdateScriptCursorWritePartFuture
                     );
                     cursor.root_path_nodes.truncate(root_path_nodes_len - 1);
                     let write_fut = match AuthTreeNodeWriteFuture::new(tree_config, &node_id, node) {
-                        Ok(Ok(write_fut)) => write_fut,
-                        Err(e) | Ok(Err((_, e))) => {
+                        Ok(write_fut) => write_fut,
+                        Err((_, e)) => {
                             this.fut_state = AuthTreeReplayJournalUpdateScriptCursorWritePartFutureState::Done;
                             return task::Poll::Ready(Err(e));
                         }

@@ -93,6 +93,9 @@ impl MkFsLayout {
         let image_size = image_size.min(layout::AllocBlockCount::from(
             u64::MAX >> (allocation_block_size_128b_log2 + 7),
         ));
+        // Align the image_size downwards to the IO block size, as it makes no
+        // sense to have a last partial IO block.
+        let image_size = image_size.align_down(io_block_allocation_blocks_log2);
 
         let journal_log_head_extent =
             journal::log::JournalLog::head_extent_physical_location(image_layout, image_header_end)?.0;
@@ -101,6 +104,16 @@ impl MkFsLayout {
                 .is_aligned_pow2(journal_block_allocation_blocks_log2)
         );
 
+        // The authentication tree dimensioning below would return
+        // FormatError::InvalidAuthTreeDimensions if there's not enough space to
+        // accomodate for even a single node. Check for that upfront and return
+        // a more suitable error code then.
+        if u64::from(image_size)
+            >> (image_layout.auth_tree_node_io_blocks_log2 as u32 + io_block_allocation_blocks_log2)
+            == 0
+        {
+            return Err(NvFsError::NoSpace);
+        }
         let (auth_tree_node_count, uncovered_image_allocation_blocks_remainder) =
             auth_tree::AuthTreeConfig::image_allocation_blocks_to_auth_tree_node_count(image_layout, image_size)?;
         let auth_tree_extent_allocation_blocks = layout::AllocBlockCount::from(
@@ -122,9 +135,6 @@ impl MkFsLayout {
             - layout::AllocBlockCount::from(u64::from(uncovered_image_allocation_blocks_remainder).saturating_sub(
                 u64::from(aligned_auth_tree_extent_allocation_blocks) - u64::from(auth_tree_extent_allocation_blocks),
             ));
-        // Finally align the image_size downwards to the IO block size, as it makes no
-        // sense to have a last partial IO block.
-        let image_size = image_size.align_down(io_block_allocation_blocks_log2);
         if image_size < aligned_auth_tree_extent_allocation_blocks
             || u64::from(image_size - aligned_auth_tree_extent_allocation_blocks)
                 < u64::from(journal_log_head_extent.end())
@@ -236,7 +246,9 @@ impl MkFsLayout {
         let alloc_bitmap_file_allocation_blocks = alloc_bitmap_file_allocation_blocks
             .align_up(auth_tree_data_block_allocation_blocks_log2)
             .ok_or(NvFsError::NoSpace)?;
-        if u64::from(image_size) - u64::from(auth_tree_extent.end()) < u64::from(alloc_bitmap_file_allocation_blocks) {
+        if u64::from(image_size) - u64::from(allocated_image_allocation_blocks_end)
+            < u64::from(alloc_bitmap_file_allocation_blocks)
+        {
             return Err(NvFsError::NoSpace);
         }
         let alloc_bitmap_file_extent = layout::PhysicalAllocBlockRange::new(
@@ -872,7 +884,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> MkFsFuture<ST, B> {
                     // MkFsInfoHeader, it's associated AuxFsMetadata or to the initial metadata
                     // structures to be written out.
                     if mkfsinfo_data_location.end() > backup_mkfsinfo_data_location.begin()
-                        || mkfs_layout.allocated_image_allocation_blocks_end > backup_mkfsinfo_data_location.end()
+                        || mkfs_layout.allocated_image_allocation_blocks_end > backup_mkfsinfo_data_location.begin()
                     {
                         return Err((blkdev, rng, NvFsError::NoSpace));
                     }
@@ -1609,7 +1621,6 @@ where
                                     }
                                     Some(MkFsFutureBackupMkFsInfoHeaderWriteControl::RetainExisting { .. }) | None => {}
                                 };
-                                continue;
                             } else {
                                 break NvFsError::from(match e {
                                     NvBlkDevIoError::OperationNotSupported => NvBlkDevIoError::IoBlockOutOfRange,
@@ -1969,7 +1980,7 @@ where
                     // Device IO block size in length.
                     debug_assert_eq!(
                         (u64::from(mkfs_layout.alloc_bitmap_file_extent.end() - tail_data_allocation_blocks_begin)
-                            >> (image_layout.index_tree_leaf_node_allocation_blocks_log2 as u32))
+                            >> (image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32))
                             as usize,
                         alloc_bitmap_partial_blkdev_io_block_file_blocks.len(),
                     );
@@ -3559,6 +3570,10 @@ enum WriteMkFsInfoHeaderDataFutureState<B: blkdev::NvBlkDev> {
     Init {
         to_backup_location: bool,
     },
+    WriteBarrierBeforeInvalidate {
+        write_barrier_fut: B::WriteBarrierFuture,
+        mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
+    },
     InvalidateHeader {
         invalidate_fut: ExtentIntegrityProtectionsInvalidateFuture<B>,
         mkfsinfo_header_location: layout::PhysicalAllocBlockRange,
@@ -3705,9 +3720,42 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                         return task::Poll::Ready(Err(NvFsError::DimensionsNotSupported));
                     }
 
-                    // Before writing anything to storage, invalidate the integrity protections,
-                    // so that any partial writes from here will not be considered until all is
-                    // done.
+                    // The copy not to get written to, if there is any, is the
+                    // only other valid one
+                    // while the current one is under write. Its most recent
+                    // write might still be unordered (a
+                    // previously failed operation's concluding write barrier),
+                    // so fence before destroying the
+                    // currently active one.
+                    let write_barrier_fut = match blkdev.write_barrier() {
+                        Ok(write_barrier_fut) => write_barrier_fut,
+                        Err(e) => {
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                    };
+                    this.fut_state = WriteMkFsInfoHeaderDataFutureState::WriteBarrierBeforeInvalidate {
+                        write_barrier_fut,
+                        mkfsinfo_header_location,
+                    };
+                }
+                WriteMkFsInfoHeaderDataFutureState::WriteBarrierBeforeInvalidate {
+                    write_barrier_fut,
+                    mkfsinfo_header_location,
+                } => {
+                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
+                        task::Poll::Ready(Ok(())) => (),
+                        task::Poll::Ready(Err(e)) => {
+                            this.fut_state = WriteMkFsInfoHeaderDataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(e)));
+                        }
+                        task::Poll::Pending => return task::Poll::Pending,
+                    };
+
+                    // Before writing anything to storage, invalidate the
+                    // integrity protections, so that any
+                    // partial writes from here will not be considered until all
+                    // is done.
                     let invalidate_fut = ExtentIntegrityProtectionsInvalidateFuture::new(
                         mkfsinfo_header_location.begin(),
                         image_layout.allocation_block_size_128b_log2,
@@ -3715,7 +3763,7 @@ impl<B: blkdev::NvBlkDev> WriteMkFsInfoHeaderDataFuture<B> {
                     );
                     this.fut_state = WriteMkFsInfoHeaderDataFutureState::InvalidateHeader {
                         invalidate_fut,
-                        mkfsinfo_header_location,
+                        mkfsinfo_header_location: *mkfsinfo_header_location,
                     };
                 }
                 WriteMkFsInfoHeaderDataFutureState::InvalidateHeader {
@@ -4330,10 +4378,6 @@ enum UpdateMkFsInfoAuxFsMetadataFutureState<B: blkdev::NvBlkDev> {
         updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
         write_backup_mkfsinfo_header_fut: WriteMkFsInfoHeaderDataFuture<B>,
     },
-    WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
-        updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
-        write_barrier_fut: B::WriteBarrierFuture,
-    },
     WriteUpdatedPrimaryMkFsInfoHeaderDataPrepare {
         updated_primary_mkfsinfo_data_allocation_blocks: layout::AllocBlockCount,
     },
@@ -4748,33 +4792,6 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for UpdateMkFsInfoAuxFsMetad
                         }
                         task::Poll::Pending => return task::Poll::Pending,
                     }
-
-                    let write_barrier_fut = match blkdev.write_barrier() {
-                        Ok(write_barrier_fut) => write_barrier_fut,
-                        Err(e) => {
-                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                    };
-                    this.fut_state =
-                        UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
-                            updated_primary_mkfsinfo_data_allocation_blocks:
-                                *updated_primary_mkfsinfo_data_allocation_blocks,
-                            write_barrier_fut,
-                        };
-                }
-                UpdateMkFsInfoAuxFsMetadataFutureState::WriteBarrierAfterBackupMkFsInfoHeaderDataWrite {
-                    updated_primary_mkfsinfo_data_allocation_blocks,
-                    write_barrier_fut,
-                } => {
-                    match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_barrier_fut), blkdev, cx) {
-                        task::Poll::Ready(Ok(())) => (),
-                        task::Poll::Ready(Err(e)) => {
-                            this.fut_state = UpdateMkFsInfoAuxFsMetadataFutureState::Done;
-                            return task::Poll::Ready(Err(NvFsError::from(e)));
-                        }
-                        task::Poll::Pending => return task::Poll::Pending,
-                    };
 
                     this.fut_state =
                         UpdateMkFsInfoAuxFsMetadataFutureState::WriteUpdatedPrimaryMkFsInfoHeaderDataPrepare {

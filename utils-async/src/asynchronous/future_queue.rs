@@ -233,10 +233,8 @@ impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> FutureQueue
     ///
     /// * `queue_entry_id` - The associated subscription id.
     fn cancel_queued(&self, queue_entry_id: broadcast_waker::BroadcastWakerSubscriptionId) {
-        self.wakers.unsubscribe(queue_entry_id, false);
-
         let mut state_guard = self.state.lock();
-        if let Some(sqe_index) = state_guard
+        let wake_remaining = if let Some(sqe_index) = state_guard
             .submission_queue
             .iter()
             .position(|sqe| sqe.0 == queue_entry_id)
@@ -251,6 +249,8 @@ impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> FutureQueue
             );
             let popped_cqe = state_guard.completion_queue.pop();
             debug_assert!(matches!(popped_cqe, Some(None)));
+
+            false
         } else if state_guard
             .active_queue_entry_id
             .map(|active_queue_entry_id| active_queue_entry_id == queue_entry_id)
@@ -263,12 +263,18 @@ impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> FutureQueue
             // the task actively polling will see the request for cancellation and do it
             // soon.
             state_guard.active_queue_entry_id = None;
-            if state_guard.polling_state == FutureQueuePollingState::Idle {
+            let wake_remaining = if state_guard.polling_state == FutureQueuePollingState::Idle {
                 let active_fut = self.active_fut.get();
                 // Safe, access is exclusive as per ->polling_state.
                 let active_fut = unsafe { &mut *active_fut };
                 *active_fut = None;
-            }
+                // The active future was the only one on whose behalf the broadcast waker could
+                // have been woken. Rearm the polling from the remaining
+                // subscribers.
+                true
+            } else {
+                false
+            };
 
             debug_assert!(
                 !state_guard
@@ -278,6 +284,8 @@ impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> FutureQueue
             );
             let popped_cqe = state_guard.completion_queue.pop();
             debug_assert!(matches!(popped_cqe, Some(None)));
+
+            wake_remaining
         } else {
             // Entry is not queued for polling anymore, it must have been completed then, if
             // anything.
@@ -288,7 +296,12 @@ impl<ST: sync_types::SyncTypes, T: marker::Send, F: QueuedFuture<T>> FutureQueue
             {
                 state_guard.completion_queue.remove(cqe_index);
             }
-        }
+
+            false
+        };
+
+        drop(state_guard);
+        self.wakers.unsubscribe(queue_entry_id, wake_remaining);
     }
 
     /// Poll the enqueued futures on behalf of an

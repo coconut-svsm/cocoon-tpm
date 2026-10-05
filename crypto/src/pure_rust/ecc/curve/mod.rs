@@ -16,7 +16,7 @@ use crate::{
     ecc::{curve, key},
     rng,
 };
-use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
+use cmpa::{self, MpMutUInt as _, MpUIntCommon as _, MpUIntSlice as _};
 
 mod weierstrass_arithmetic;
 
@@ -190,15 +190,19 @@ impl AffinePoint {
         y: &cmpa::MpBigEndianUIntByteSlice,
         curve_ops: &CurveOps,
     ) -> Result<Self, CryptoError> {
+        // Accept coordinates padded to beyond p_len for interoperability.
+        let x = x.shrink_to(cmpa::find_last_set_byte_mp(x));
+        let y = y.shrink_to(cmpa::find_last_set_byte_mp(y));
+
         let field_ops = curve_ops.get_field_ops();
         if !x.len_is_compatible_with(field_ops.p.len())
             || !y.len_is_compatible_with(field_ops.p.len())
-            || cmpa::ct_geq_mp_mp(x, &field_ops.p).unwrap() != 0
-            || cmpa::ct_geq_mp_mp(y, &field_ops.p).unwrap() != 0
+            || cmpa::ct_geq_mp_mp(&x, &field_ops.p).unwrap() != 0
+            || cmpa::ct_geq_mp_mp(&y, &field_ops.p).unwrap() != 0
         {
             return Err(CryptoError::InvalidPoint);
         }
-        Self::_try_from_plain_coordinates(x, y, field_ops)
+        Self::_try_from_plain_coordinates(&x, &y, field_ops)
     }
 
     /// Convert an `AffinePoint` into "plain" affine coordinates.

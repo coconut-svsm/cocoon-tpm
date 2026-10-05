@@ -317,7 +317,7 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
         min_extent_alignment_allocation_blocks_log2: u32,
     ) -> layout::AllocBlockCount {
         debug_assert!(
-            extent_accounted_target_effective_payload_len.wrapping_sub(self.allocated_excess_effective_payload_len)
+            extent_accounted_target_effective_payload_len.saturating_sub(self.allocated_excess_effective_payload_len)
                 <= self.allocated_effective_payload_len
         );
         let min_extent_alignment_allocation_blocks_log2 = min_extent_alignment_allocation_blocks_log2
@@ -568,7 +568,10 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
             // allocated_excess_effective_payload_len respectively.
             let mut gained_effective_payload_len =
                 original_extents_hdr_placement_cost - best_extents_hdr_placement_cost;
-            debug_assert!(gained_effective_payload_len < self.request.layout.extent_payload_len_alignment as u64);
+            // See the documentation to ExtentsLayout::extents_hdr_placement_cost(): it can
+            // take only two possible values at max, and these would differ by
+            // exactly the payload length alignment.
+            debug_assert!(gained_effective_payload_len <= self.request.layout.extent_payload_len_alignment as u64);
 
             // If there's more effective payload length to allocate, use the gained length
             // up to the point we'd get into the max_final_remaining_effective_payload_len
@@ -617,45 +620,30 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
                             original_shortest_extent_block_count - updated_shortest_extent_allocation_blocks,
                         );
                         debug_assert!(!removed);
-                        // In principle, a shrinking of the extent might have turned it into an even
-                        // better choice for the extents header placement. However, note that the
-                        // total sum of multiple successive header placement gains is still bounded
-                        // (strictly from above) by the payload alignment unit, because all those
-                        // stem from iteratively and monotonically decreasing the required alignment
-                        // padding.  When shortening (not removing in the general, but unrealistic
-                        // case!) an existing extent (like just done here), the allocated effective
-                        // payload "lost" is at least the size of a (two to the power of)
-                        // min_extent_alignment_allocation_blocks_log2 sized block, aligned
-                        // downwards to the requested payload alignment, which is at least one unit
-                        // of that payload alignment in size, c.f. ExtentsLayout::new(). Thus in,
-                        // summary, the net gain of the single extent shortening operation from
-                        // above and any sequence of extents header placement optimization gains,
-                        // including the initial placement optimization from above, is always
-                        // negative in terms of allocated effective payload.
-                        //
-                        // Now assume there is some other extent, which can get truncated,
-                        // i.e. shrunken by at least one (two to the power of)
-                        // min_extent_alignment_allocation_blocks_log2 unit. Note that the current
-                        // extent cannot have one more such unit removed, as per the fitting above.
-                        // As the difference between that hypothetical and the current extent can only
-                        // be due to different alignment paddings, it follows that
-                        // we're less than one payload alignment unit
-                        // into the max_final_remaining_effective_payload_len realm.
-                        //
-                        // Overall, in conclusion, it follows that another extent shrinking or
-                        // removal would not be affordable without getting outside the
-                        // max_final_remaining_effective_payload_len realm again.
+                        // One might think that a shrinking of the extent might have turned it into an
+                        // even better choice for the extents header placement,
+                        // that might enable further extent shrinkings and so on
+                        // and so on. However, ExtentsLayout::extents_hdr_placement_cost()
+                        // is two-valued, so another redistribution wouldn't yield any gain.
+                        // Furthemore, no more shrinkings of any other extents aren't possible either,
+                        // because of the successful shrinking just done.
+                        debug_assert_eq!(self.allocated_excess_effective_payload_len, 0);
                         if updated_shortest_extent_allocation_blocks >= head_extent_min_allocation_blocks {
                             let shortest_extent_extents_hdr_placement_cost = self
                                 .request
                                 .layout
                                 .extents_hdr_placement_cost(updated_shortest_extent_allocation_blocks);
+                            // As said, no further improvement possible.
+                            debug_assert!(
+                                shortest_extent_extents_hdr_placement_cost >= best_extents_hdr_placement_cost
+                            );
                             // On ties, prefer shorter extents, as in the initial search above.
                             if shortest_extent_extents_hdr_placement_cost <= best_extents_hdr_placement_cost {
                                 extents.swap_extents(0, shortest_extent.0);
                                 shortest_extent.0 = 0;
                                 let gained_effective_payload_len =
                                     best_extents_hdr_placement_cost - shortest_extent_extents_hdr_placement_cost;
+                                debug_assert_eq!(gained_effective_payload_len, 0);
                                 // The following assignment is dead, but for good measure do it anyway.
                                 best_extents_hdr_placement_cost = shortest_extent_extents_hdr_placement_cost;
                                 let x = gained_effective_payload_len.min(self.remaining_effective_payload_len());
@@ -714,15 +702,18 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
                         debug_assert!(!removed);
                         let shortest_extent =
                             if updated_prev_containing_extent_allocation_blocks >= head_extent_min_allocation_blocks {
-                                // In principle, a shrinking of the extent might have turned it into an even
-                                // better choice for the extents header placement, just as in the case of
-                                // when attempting to shrink the shortest extent
-                                // above. The same comment re the impossiblity of
-                                // multiple successive extent shrinkings apply.
+                                // The comment made above when attempting to shrink the shortest extent
+                                // applies here as well: another header redistribution will yield no gain,
+                                // and further extent shrinkings are not possible.
                                 let updated_prev_containing_extent_extents_hdr_placement_cost = self
                                     .request
                                     .layout
                                     .extents_hdr_placement_cost(updated_prev_containing_extent_allocation_blocks);
+                                // As said, no further improvement possible.
+                                debug_assert!(
+                                    updated_prev_containing_extent_extents_hdr_placement_cost
+                                        >= best_extents_hdr_placement_cost
+                                );
                                 let cur_best_placement_extent = extents.get_extent_range(0);
                                 // Prefer as in in the initial search above (in this order):
                                 // a.) extents with a smaller extents header placement cost
@@ -763,6 +754,7 @@ impl<'a> ExtentsAllocationRequestProgress<'a> {
                                     prev_containing_extent_index = 0;
                                     let gained_effective_payload_len = best_extents_hdr_placement_cost
                                         - updated_prev_containing_extent_extents_hdr_placement_cost;
+                                    debug_assert_eq!(gained_effective_payload_len, 0);
                                     let x = gained_effective_payload_len.min(self.remaining_effective_payload_len());
                                     self.allocated_effective_payload_len += x;
                                     self.allocated_excess_effective_payload_len += gained_effective_payload_len - x;
@@ -936,7 +928,7 @@ impl FindFreeFullwordChunksExtentCandidateFilterConstrainExtentsCount {
         // (roughly) to the set bits in the remaining allocation request size
         // each. In particular the maximum imposed lower bound would be less or equal to
         // roughly half the remaining allocation request size.
-        let mut budget = if allocation_request.total_effective_payload_len != 1 {
+        let mut budget = if allocation_request.total_effective_payload_len > 1 {
             (allocation_request.total_effective_payload_len - 1).ilog2() + 1
         } else {
             0
@@ -956,7 +948,7 @@ impl FindFreeFullwordChunksExtentCandiateFilter for FindFreeFullwordChunksExtent
     fn account_extent_added(&mut self) {
         // In case the maximum extent length is constrained by the request, we might
         // run out of budget early.
-        self.budget = self.budget.wrapping_sub(1)
+        self.budget = self.budget.saturating_sub(1)
     }
 
     fn account_extents_dropped(&mut self, n_extents_dropped: u32) {
@@ -1163,7 +1155,7 @@ impl AllocBitmap {
         let bitmap_words = ((u64::from(image_allocation_blocks) - 1) >> BITMAP_WORD_BITS_LOG2) + 1;
         let bitmap_words = usize::try_from(bitmap_words).map_err(|_| NvFsError::DimensionsNotSupported)?;
 
-        if bitmap_words < self.bitmap.len() {
+        if bitmap_words <= self.bitmap.len() {
             self.bitmap.truncate(bitmap_words);
             let bits_in_last_bitmap_word = u64::BITS
                 - ((u64::from(image_allocation_blocks).wrapping_neg() & u64::trailing_bits_mask(BITMAP_WORD_BITS_LOG2))
@@ -1335,8 +1327,8 @@ impl AllocBitmap {
     ///    size and alignment in units of [Allocation
     ///    Blocks](layout::ImageLayout::allocation_block_size_128b_log2). Must
     ///    be less than or equal to [`BitmapWord::BITS`].
-    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually
-    ///    as having been allocated, independent of the current state in the
+    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually as
+    ///    having been allocated, independent of the current state in the
     ///    [`AllocBitmap`].
     ///  * `allocated_fullword_chunks` - List of extents to consider virtually
     ///    as having been allocated, independent of the current state in the
@@ -1401,7 +1393,7 @@ impl AllocBitmap {
             }
             None => 0,
         };
-        debug_assert!(search_begin_bitmap_word_index < image_bitmap_words);
+        debug_assert!(image_bitmap_words == 0 || search_begin_bitmap_word_index < image_bitmap_words);
 
         let word_blocks_lsbs_mask_table = BitmapWordBlocksLsbsMaskTable::new();
         let word_blocks_lsbs_mask = word_blocks_lsbs_mask_table.get_blocks_lsbs_mask(block_allocation_blocks_log2);
@@ -1458,6 +1450,7 @@ impl AllocBitmap {
                         AllocBitmapWordIterator::new_at_bitmap_word_index(self, pending_allocs, pending_frees, 0)
                             .take(usize::try_from(search_begin_bitmap_word_index).unwrap_or(usize::MAX));
                     allocated_blocks_index = 0;
+                    next_allocated_fullword_chunk = None;
                 }
             }
 
@@ -1805,9 +1798,14 @@ impl AllocBitmap {
                     .extent_payload_len_to_allocation_blocks(remainder_extent_min_effective_payload_len, false)
                     .0;
                 // All the allocated excess comes from this remainder extent, compute it now.
-                let remainder_extent_allocated_effective_payload_len = allocation_request
-                    .layout
-                    .extent_effective_payload_len(remainder_extent_allocation_blocks, false);
+                let remainder_extent_allocated_effective_payload_len =
+                    if u64::from(remainder_extent_allocation_blocks) != 0 {
+                        allocation_request
+                            .layout
+                            .extent_effective_payload_len(remainder_extent_allocation_blocks, false)
+                    } else {
+                        0
+                    };
                 let allocated_excess_effective_payload_len =
                     remainder_extent_allocated_effective_payload_len - remainder_extent_min_effective_payload_len;
 
@@ -1849,7 +1847,8 @@ impl AllocBitmap {
                     allocation_request.layout.allocation_block_size_128b_log2,
                 )?;
                 let fullwords_allocation_request = ExtentsAllocationRequest::new(
-                    fullwords_extents_allocation_blocks << (allocation_request.layout.allocation_block_size_128b_log2),
+                    fullwords_extents_allocation_blocks
+                        << (allocation_request.layout.allocation_block_size_128b_log2 + 7),
                     &trivial_fullwords_extents_layout,
                 );
                 let fullwords_allocation_result = self.find_free_fullword_chunks(
@@ -1921,8 +1920,8 @@ impl AllocBitmap {
     ///
     /// # Arguments:
     ///
-    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually
-    ///    as having been allocated, independent of the current state in the
+    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually as
+    ///    having been allocated, independent of the current state in the
     ///    [`AllocBitmap`].
     ///  * `allocated_fullword_chunks` - List of extents to consider virtually
     ///    as having been allocated, independent of the current state in the
@@ -1951,9 +1950,10 @@ impl AllocBitmap {
             bitmaps_words_iter.take(usize::try_from(image_bitmap_words).unwrap_or(usize::MAX))
         {
             if bitmap_word == 0 {
-                // Check if the bitmap word is really free or has perhaps been previously allocated
-                // as part of a preceeding block (in case of a multi-block allocation) or fullword
-                // chunks allocation round for processing the very same request.
+                // Check if the bitmap word is really free or has perhaps been previously
+                // allocated as part of a preceeding block (in case of a
+                // multi-block allocation) or fullword chunks allocation round
+                // for processing the very same request.
                 if loop {
                     if allocated_blocks_index == allocated_blocks.len() {
                         break false;
@@ -2249,7 +2249,13 @@ impl AllocBitmap {
                 continue;
             }
 
-            if containing_blocks_max_aligned_maxstr_len == containing_block_allocation_blocks {
+            // If no stuitable sub-block chunk has been found yet and the
+            // containing_blocks_max_excess_len upper bound compared against above hasn't
+            // been refined yet, then the free blocks are a subset of the
+            // candidates. Otherwise no free block is among the candidates.
+            if !matches!(best, Some(FoundCandidate::ChunkInPartialContainingBlock { .. }))
+                && containing_blocks_max_aligned_maxstr_len == containing_block_allocation_blocks
+            {
                 // There is at least one fully free containing block.
                 let free_containing_blocks_lsbs = Self::bitmap_word_free_blocks_lsbs(
                     bitmap_word,
@@ -2320,6 +2326,14 @@ impl AllocBitmap {
                 // anyway.
                 containing_blocks_candidates_lsbs ^= free_containing_blocks_lsbs;
                 debug_assert_ne!(containing_blocks_candidates_lsbs, 0);
+            } else {
+                // The free blocks, if any, are not among the candidates.
+                let free_containing_blocks_lsbs = Self::bitmap_word_free_blocks_lsbs(
+                    bitmap_word,
+                    containing_block_allocation_blocks_log2,
+                    word_containing_blocks_lsbs_mask,
+                );
+                debug_assert_eq!(containing_blocks_candidates_lsbs & free_containing_blocks_lsbs, 0);
             }
 
             // At this point, all (remaining) containing candidate blocks are known to
@@ -2464,45 +2478,54 @@ impl AllocBitmap {
                         + excess_fixed_alignment_padding_tail,
                     excess_allocation_blocks
                 );
-                let max_movable_excess_block = u32::next_power_of_two(movable_excess_allocation_blocks + 1) >> 1;
-                // First option: the allocation is placed after the (movable part of the) excess
-                // space.
-                // This computes the amount of excess space after the point point of maximum
-                // alignment within the excess space, c.f. Hacker's Delight, 2nd edition, 3-3
-                // ("Detecting a Power-of-2 Boundary Crossing").
-                let movable_excess_aligned_blocks_set_after_1 = (containing_block_candidate_aligned_maxstr_begin
-                    | max_movable_excess_block.wrapping_neg())
-                .wrapping_add(movable_excess_allocation_blocks);
-                let movable_excess_aligned_blocks_set_after_0 =
-                    movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_after_1;
-                let movable_excess_aligned_blocks_set_after =
-                    movable_excess_aligned_blocks_set_after_0 | movable_excess_aligned_blocks_set_after_1;
-                // Second option: the allocation is placed before the (movable part of the)
-                // excess space.
-                let movable_excess_aligned_blocks_set_before_1 = ((containing_block_candidate_aligned_maxstr_begin
-                    + chunk_allocation_blocks)
-                    | max_movable_excess_block.wrapping_neg())
-                .wrapping_add(movable_excess_allocation_blocks);
-                let movable_excess_aligned_blocks_set_before_0 =
-                    movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_before_1;
-                let movable_excess_aligned_blocks_set_before =
-                    movable_excess_aligned_blocks_set_before_0 | movable_excess_aligned_blocks_set_before_1;
-                let (chunk_begin, excess_aligned_blocks_set) = if movable_excess_aligned_blocks_set_after
-                    > movable_excess_aligned_blocks_set_before
-                {
-                    (
-                        containing_block_candidate_aligned_maxstr_begin + movable_excess_allocation_blocks,
-                        movable_excess_aligned_blocks_set_after | excess_fixed_alignment_padding_aligned_blocks_set,
-                    )
+                let (chunk_begin, excess_aligned_blocks_set) = if movable_excess_allocation_blocks != 0 {
+                    let max_movable_excess_block = u32::next_power_of_two(movable_excess_allocation_blocks + 1) >> 1;
+                    // First option: the allocation is placed after the (movable part of the) excess
+                    // space.
+                    // This computes the amount of excess space after the point point of maximum
+                    // alignment within the excess space, c.f. Hacker's Delight, 2nd edition, 3-3
+                    // ("Detecting a Power-of-2 Boundary Crossing").
+                    let movable_excess_aligned_blocks_set_after_1 = (containing_block_candidate_aligned_maxstr_begin
+                        | max_movable_excess_block.wrapping_neg())
+                    .wrapping_add(movable_excess_allocation_blocks);
+                    let movable_excess_aligned_blocks_set_after_0 =
+                        movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_after_1;
+                    let movable_excess_aligned_blocks_set_after =
+                        movable_excess_aligned_blocks_set_after_0 | movable_excess_aligned_blocks_set_after_1;
+                    // Second option: the allocation is placed before the (movable part of the)
+                    // excess space.
+                    let movable_excess_aligned_blocks_set_before_1 = ((containing_block_candidate_aligned_maxstr_begin
+                        + chunk_allocation_blocks)
+                        | max_movable_excess_block.wrapping_neg())
+                    .wrapping_add(movable_excess_allocation_blocks);
+                    let movable_excess_aligned_blocks_set_before_0 =
+                        movable_excess_allocation_blocks - movable_excess_aligned_blocks_set_before_1;
+                    let movable_excess_aligned_blocks_set_before =
+                        movable_excess_aligned_blocks_set_before_0 | movable_excess_aligned_blocks_set_before_1;
+                    if movable_excess_aligned_blocks_set_after > movable_excess_aligned_blocks_set_before {
+                        (
+                            containing_block_candidate_aligned_maxstr_begin + movable_excess_allocation_blocks,
+                            movable_excess_aligned_blocks_set_after | excess_fixed_alignment_padding_aligned_blocks_set,
+                        )
+                    } else {
+                        (
+                            containing_block_candidate_aligned_maxstr_begin,
+                            movable_excess_aligned_blocks_set_before
+                                | excess_fixed_alignment_padding_aligned_blocks_set,
+                        )
+                    }
                 } else {
                     (
                         containing_block_candidate_aligned_maxstr_begin,
-                        movable_excess_aligned_blocks_set_before | excess_fixed_alignment_padding_aligned_blocks_set,
+                        excess_fixed_alignment_padding_aligned_blocks_set,
                     )
                 };
                 let chunk_begin = chunk_begin + containing_block_begin;
-                debug_assert!(excess_allocation_blocks < containing_block_allocation_blocks);
-                debug_assert!(best_excess_allocation_blocks == containing_block_allocation_blocks || best.is_some());
+                debug_assert!(excess_allocation_blocks < containing_block_allocation_blocks - chunk_allocation_blocks);
+                debug_assert!(
+                    best_excess_allocation_blocks == containing_block_allocation_blocks - chunk_allocation_blocks
+                        || best.is_some()
+                );
                 if excess_allocation_blocks < best_excess_allocation_blocks {
                     if best.is_none() {
                         // Something's been found, arm the placement optimization search distance limit.
@@ -2701,7 +2724,7 @@ impl AllocBitmap {
                             // Found something and no placement optimization requested, bail out.
                             return Some(layout::PhysicalAllocBlockIndex::from(
                                 ((bitmap_word_index - 1) << BITMAP_WORD_BITS_LOG2)
-                                    + (previous_bitmap_word & subword_rem_free_tail_word_mask).trailing_zeros() as u64,
+                                    + (BitmapWord::BITS - subword_rem_allocation_blocks) as u64,
                             ));
                         }
 
@@ -2962,7 +2985,13 @@ impl AllocBitmap {
                 .align_down(allocation_request.layout.extent_alignment_allocation_blocks_log2 as u32),
             tail_extent_min_allocation_blocks
         );
-        let (max_subword_extent_effective_payload_len, max_allocated_effective_payload_excess_len) =
+        let fullword_block_len =
+            (BitmapWord::BITS as u64) << (allocation_request.layout.allocation_block_size_128b_log2 + 7);
+        debug_assert_eq!(
+            fullword_block_len >> (allocation_request.layout.allocation_block_size_128b_log2 + 7),
+            BitmapWord::BITS as u64
+        );
+        let (max_subword_extent_effective_payload_len, max_aligned_allocated_effective_payload_excess_len) =
             if u64::from(tail_extent_min_allocation_blocks) < BitmapWord::BITS as u64 {
                 // Does not overflow, as per max_extent_allocation_blocks being >= the
                 // BitmapWord::BITS when here.
@@ -2974,28 +3003,81 @@ impl AllocBitmap {
                     false,
                 );
 
-                let fullword_block_len =
-                    (BitmapWord::BITS as u64) << (allocation_request.layout.allocation_block_size_128b_log2 + 7);
+                // Compute max_subword_extent_effective_payload_len such that the sum
+                // of it and max_subword_extent_effective_payload_len is the largest value
+                // that is
+                // - strictly less than fullword_block_len and
+                // - an even multiple of extent_payload_len_alignment.
+                // The actual excess might exceed it slightly, by up to
+                // extent_payload_len_alignment - 1, due to padding.
+                // If the actual excess is not less than
+                // max_aligned_allocated_effective_payload_excess_len +
+                // extent_payload_len_alignment, then it is always possible to
+                // remove a fullword block from the allocation with
+                // remaining_effective_payload_len() staying <=
+                // max_subword_extent_effective_payload_len.
+                let max_aligned_allocated_effective_payload_excess_len = (fullword_block_len - 1)
+                    - ((fullword_block_len - 1) % allocation_request.layout.extent_payload_len_alignment as u64)
+                    - max_subword_extent_effective_payload_len;
                 debug_assert_eq!(
-                    fullword_block_len >> (allocation_request.layout.allocation_block_size_128b_log2 + 7),
-                    BitmapWord::BITS as u64
+                    (max_subword_extent_effective_payload_len + max_aligned_allocated_effective_payload_excess_len)
+                        % allocation_request.layout.extent_payload_len_alignment as u64,
+                    0
                 );
-                let max_allocated_effective_payload_excess_len =
-                    fullword_block_len - max_subword_extent_effective_payload_len - 1;
+                debug_assert!(
+                    max_subword_extent_effective_payload_len + max_aligned_allocated_effective_payload_excess_len
+                        < fullword_block_len
+                );
+                // There's always one payload alignment unit in
+                // fullword_block_len - max_subword_extent_effective_payload_len: that is >= the
+                // extent alignment unit, and that's again >= the payload alignment,
+                // c.f. ExtentsLayout::new(). As per the computation above, that is either
+                // contained
+                // in the max_aligned_allocated_effective_payload_excess_len part, in which case
+                // there is additional padding in the fullword block remainder,
+                // or the fullword block remainder comprises exactly one such
+                // payload alignment unit.
+                debug_assert!(
+                    max_aligned_allocated_effective_payload_excess_len != 0
+                        || fullword_block_len - max_subword_extent_effective_payload_len
+                            == allocation_request.layout.extent_payload_len_alignment as u64
+                );
+
                 (
                     max_subword_extent_effective_payload_len,
-                    max_allocated_effective_payload_excess_len,
+                    max_aligned_allocated_effective_payload_excess_len,
                 )
             } else {
-                // The minimum extent length is > than what's covered by a single
-                // BitmapWord, and sub-BitmapWord extents are not possible. The maximum allowed
-                // excess is one less than what's provided by an extent of
-                // minimum possible length.
-                let max_allocated_effective_payload_excess_len = allocation_request
-                    .layout
-                    .extent_effective_payload_len(tail_extent_min_allocation_blocks, false)
-                    - 1;
-                (0, max_allocated_effective_payload_excess_len)
+                // The minimum extent length is >= than what's covered by a single BitmapWord,
+                // and sub-BitmapWord extents are not possible.  Compute
+                // max_aligned_allocated_effective_payload_excess_len in analogy to the other
+                // branch above.
+                let extent_alignment_block_len = 1u64
+                    << (allocation_request.layout.extent_alignment_allocation_blocks_log2
+                        + allocation_request.layout.allocation_block_size_128b_log2
+                        + 7);
+                let extent_alignment_block_len = extent_alignment_block_len.max(fullword_block_len);
+                let max_aligned_allocated_effective_payload_excess_len = (extent_alignment_block_len - 1)
+                    - ((extent_alignment_block_len - 1)
+                        % allocation_request.layout.extent_payload_len_alignment as u64);
+                debug_assert_eq!(
+                    max_aligned_allocated_effective_payload_excess_len
+                        % allocation_request.layout.extent_payload_len_alignment as u64,
+                    0
+                );
+                // There's always one payload alignment unit in extent_alignment_block_len, as
+                // that's >= the payload alignment, c.f. ExtentsLayout::new(). As per the
+                // computation above, that is either contained in the
+                // max_aligned_allocated_effective_payload_excess_len part, in which case there
+                // is additional padding in the extent alignment block
+                // remainder, or the exten alignment block remainder comprises
+                // exactly one such payload alignment unit.
+                debug_assert!(
+                    max_aligned_allocated_effective_payload_excess_len != 0
+                        || extent_alignment_block_len == allocation_request.layout.extent_payload_len_alignment as u64
+                );
+
+                (0, max_aligned_allocated_effective_payload_excess_len)
             };
 
         // Cached shortest extent found (and used) so far: pair of index and length in
@@ -3072,8 +3154,13 @@ impl AllocBitmap {
                     progress.allocated_excess_effective_payload_len == 0
                         || progress.remaining_effective_payload_len() == 0
                 );
+                // The allocated_excess_effective_payload_len is not necessarily aligned,
+                // due to unaligned extent_payload_hdr_len, so account for that.
                 debug_assert!(
-                    progress.allocated_excess_effective_payload_len <= max_allocated_effective_payload_excess_len
+                    progress
+                        .allocated_excess_effective_payload_len
+                        .saturating_sub(allocation_request.layout.extent_payload_len_alignment as u64 - 1)
+                        <= max_aligned_allocated_effective_payload_excess_len
                 );
 
                 shortest_extent = shortest_extent.or_else(|| {
@@ -3110,19 +3197,21 @@ impl AllocBitmap {
                 let shortest_extent_stores_extents_hdr = !extents_hdr_transferred
                     && allocation_request.layout.extents_hdr_len != 0
                     && shortest_extent_index == 0;
-                if shortest_extent_stores_extents_hdr
-                    && cur_extent_max_allocation_blocks >= head_extent_min_allocation_blocks
-                {
-                    // Recompute the current extent's maximum payload length if the extents header
-                    // was transferred to it.
-                    cur_extent_max_effective_payload_len = allocation_request
-                        .layout
-                        .extent_effective_payload_len(cur_extent_max_allocation_blocks, true);
-                    if cur_extent_used_effective_payload_len > cur_extent_max_effective_payload_len {
+                if shortest_extent_stores_extents_hdr {
+                    if cur_extent_max_allocation_blocks >= head_extent_min_allocation_blocks {
+                        // Recompute the current extent's maximum payload length if the extents header
+                        // was transferred to it.
+                        cur_extent_max_effective_payload_len = allocation_request
+                            .layout
+                            .extent_effective_payload_len(cur_extent_max_allocation_blocks, true);
+                        if cur_extent_used_effective_payload_len > cur_extent_max_effective_payload_len {
+                            break;
+                        }
+
+                        extents_hdr_transferred = true;
+                    } else {
                         break;
                     }
-
-                    extents_hdr_transferred = true;
                 }
 
                 let mut shortest_extent_used_effective_payload_len =
@@ -3170,8 +3259,13 @@ impl AllocBitmap {
                     progress.allocated_excess_effective_payload_len == 0
                         || progress.remaining_effective_payload_len() == 0
                 );
+                // The allocated_excess_effective_payload_len is not necessarily aligned,
+                // due to unaligned extent_payload_hdr_len, so account for that.
                 debug_assert!(
-                    progress.allocated_excess_effective_payload_len <= max_allocated_effective_payload_excess_len
+                    progress
+                        .allocated_excess_effective_payload_len
+                        .saturating_sub(allocation_request.layout.extent_payload_len_alignment as u64 - 1)
+                        <= max_aligned_allocated_effective_payload_excess_len
                 );
             }
 
@@ -3223,9 +3317,104 @@ impl AllocBitmap {
             debug_assert!(
                 progress.allocated_excess_effective_payload_len == 0 || progress.remaining_effective_payload_len() == 0
             );
+            // The allocated_excess_effective_payload_len is not necessarily aligned,
+            // due to unaligned extent_payload_hdr_len, so account for that.
             debug_assert!(
-                progress.allocated_excess_effective_payload_len <= max_allocated_effective_payload_excess_len
+                progress
+                    .allocated_excess_effective_payload_len
+                    .saturating_sub(allocation_request.layout.extent_payload_len_alignment as u64 - 1)
+                    <= max_aligned_allocated_effective_payload_excess_len
             );
+
+            // There is a subtle corner-case: if the allocated excess is >=
+            // max_aligned_allocated_effective_payload_excess_len, then it might be possible
+            // to remove a full bitmap word block / extent alignment block from
+            // another allocated extent with the resulting
+            // remaining_effective_payload_len() still in the
+            // max_subword_extent_effective_payload_len realm. In general, truncating a full
+            // bitmap word block / extent alignment block removes
+            // max_aligned_allocated_effective_payload_excess_len +
+            // max_subword_extent_effective_payload_len, *plus* one payload aligment unit
+            // worth of payload. This would make remaining to exceed the
+            // max_subword_extent_effective_payload_len, yielding an invalid configuration.
+            // However, in certain situations it's possible to get that extra
+            // payload length alignment unit back. Assume all of an extent's
+            // payload alignment units are aligned towards its end before the
+            // truncation. Then, if such a unit is straddling the truncated block's left
+            // boundary, the leftover part may combine with the former padding to form a new
+            // payload length unit, making up for the one removed by the
+            // truncation.  Finally note that if extent_payload_len_alignment is
+            // a power of two, then there's never such a leftover part which
+            // could possibly participate in forming a payload length alignment unit.
+            // The allocated_excess_effective_payload_len is not necessarily aligned, due to
+            // unaligned extent_payload_hdr_len, so account for that.
+            if progress.allocated_excess_effective_payload_len >= max_aligned_allocated_effective_payload_excess_len
+                && !allocation_request.layout.extent_payload_len_alignment.is_power_of_two()
+            {
+                for cur_extent_index in 0..extents.len() {
+                    let cur_extent_original_allocation_blocks =
+                        extents.get_extent_range(cur_extent_index).block_count();
+                    let cur_extent_stores_extents_hdr = !extents_hdr_transferred && cur_extent_index == 0;
+                    let cur_extent_effective_payload_len = allocation_request.layout.extent_effective_payload_len(
+                        cur_extent_original_allocation_blocks,
+                        cur_extent_stores_extents_hdr,
+                    );
+                    let cur_extent_updated_allocation_blocks = progress.fit_allocated_extent_to_effective_payload_len(
+                        cur_extent_effective_payload_len,
+                        cur_extent_stores_extents_hdr,
+                        max_subword_extent_effective_payload_len,
+                        BITMAP_WORD_BITS_LOG2,
+                    );
+                    debug_assert!(cur_extent_updated_allocation_blocks <= cur_extent_original_allocation_blocks);
+                    // As explained above, the padding needs to combine with the leftover to form
+                    // a new payload length alignment unit to make up for the lost one.
+                    debug_assert_ne!(u64::from(cur_extent_updated_allocation_blocks), 0);
+                    if cur_extent_updated_allocation_blocks < cur_extent_original_allocation_blocks {
+                        let removed = extents.shrink_extent_by(
+                            cur_extent_index,
+                            cur_extent_original_allocation_blocks - cur_extent_updated_allocation_blocks,
+                        );
+                        debug_assert!(!removed);
+
+                        // Possibly update shortest_extent if set. On ties, prefer larger indices.
+                        if shortest_extent
+                            .filter(|(shortest_extent_index, shortest_extent_allocation_blocks)| {
+                                *shortest_extent_allocation_blocks > cur_extent_updated_allocation_blocks
+                                    || (*shortest_extent_allocation_blocks == cur_extent_updated_allocation_blocks
+                                        && cur_extent_index > *shortest_extent_index)
+                            })
+                            .is_some()
+                        {
+                            shortest_extent = Some((cur_extent_index, cur_extent_updated_allocation_blocks));
+                        }
+
+                        // That's it, no more shrinkings possible, as for another shrinking
+                        // operation to be feasible, the excess must be >=
+                        // max_aligned_allocated_effective_payload_excess_len. However,
+                        // - If max_subword_extent_effective_payload_len != 0, i.e. if subword extents
+                        //   may be used for the allocation, then allocated_excess_effective_payload_len
+                        //   is zero, while max_aligned_allocated_effective_payload_excess_len is
+                        //   non-zero by the if-guard.
+                        // - If max_subword_extent_effective_payload_len == 0, then
+                        //   allocated_excess_effective_payload_len is not necessarily zero, but always
+                        //   smaller than one payload length alignment unit.
+                        //   max_aligned_allocated_effective_payload_excess_len is a non-zero multiple
+                        //   of that payload length alignment unit in this case, so it's always larger.
+                        debug_assert!(
+                            max_subword_extent_effective_payload_len == 0
+                                || progress.allocated_excess_effective_payload_len == 0
+                        );
+                        debug_assert!(
+                            progress.allocated_excess_effective_payload_len
+                                < allocation_request.get_layout().extent_payload_len_alignment as u64
+                        );
+                        debug_assert!(
+                            progress.remaining_effective_payload_len() <= max_subword_extent_effective_payload_len
+                        );
+                        break;
+                    }
+                }
+            }
 
             if u64::from(cur_extent_allocated_allocation_blocks) != 0 {
                 let cur_extent_begin = layout::PhysicalAllocBlockIndex::from(
@@ -3298,7 +3487,7 @@ impl AllocBitmap {
                                 >> BITMAP_WORD_BITS_LOG2
                         })
                         .count()
-                        == 1
+                        <= 1
                     {
                         break;
                     }
@@ -3315,7 +3504,14 @@ impl AllocBitmap {
             }
         }
 
-        let result = if progress.remaining_effective_payload_len() <= max_subword_extent_effective_payload_len {
+        // If no extent at all could be allocated, the request cannot get satisfied by a
+        // subword remainder extent either: the latter would then have to store
+        // the extents header, but this function is entered only if the head
+        // extent needs at least a fullword block, c.f. the check at the
+        // beginning.
+        let result = if !extents.is_empty()
+            && progress.remaining_effective_payload_len() <= max_subword_extent_effective_payload_len
+        {
             // The request could be satisfied within the budget.
             // Sort the extents by (in this order)
             // a.) extent lengths (so that a potential future truncation
@@ -3327,7 +3523,7 @@ impl AllocBitmap {
                 1
             };
             let sort_end_index = extents.len();
-            extents.sort_extents_by(
+            extents.sort_extents_unstable_by(
                 sort_start_index..sort_end_index,
                 |e0, e1| match e0.block_count().cmp(&e1.block_count()) {
                     cmp::Ordering::Less => cmp::Ordering::Less,
@@ -3720,6 +3916,22 @@ impl AllocBitmap {
         // (as determined in the previous loop) greater than the current s_delta
         // below. Note that this set grows with decreasing s_log2.
         let mut blocks_with_s_str_lsbs: BitmapWord = blocks_with_max_str_lsbs;
+        // Clear the least significant bits in each block in order to prevent bits from
+        // bleeding into the neighbouring block in the y >> 1 from the
+        // nonzero_blocks_lsbs computation below. At this point, only blocks
+        // with a maxstr length of 1 can have the LSB set and these are
+        // handled by the s_per_block initialization, not the the backtracking loop
+        // below, which is only for blocks with a maxstr >= 2.
+        debug_assert_eq!(
+            bitmap_word
+                & Self::bitmap_word_nonzero_blocks_lsbs(
+                    s_per_block & !bitmap_word_blocks_lsbs_mask,
+                    block_allocation_blocks_log2,
+                    bitmap_word_blocks_lsbs_mask,
+                ),
+            0
+        );
+        bitmap_word &= !bitmap_word_blocks_lsbs_mask;
         while s_log2 > 0 {
             s_log2 -= 1;
             let s_delta = 1u32 << s_log2;
@@ -3761,8 +3973,8 @@ impl AllocBitmap {
     /// # Arguments:
     ///
     /// * `bitmap_word` - The [`BitmapWord`] value to examine.
-    /// * `min_str_len` - The 1-string length to search for. Must be a multiple
-    ///   of the alignment as determined by
+    /// * `min_str_len` - The 1-string length to search for. Must be a non-zero
+    ///   multiple of the alignment as determined by
     ///   `str_alignment_allocation_blocks_log2` and strictly less than
     ///   [`BitmapWord::BITS`].
     /// * `str_alignment_allocation_blocks_log2` - Alignment constrained on the
@@ -3777,7 +3989,7 @@ impl AllocBitmap {
         bitmap_word_str_alignment_anchors_mask: BitmapWord,
     ) -> Option<u32> {
         debug_assert!(str_alignment_allocation_blocks_log2 < BITMAP_WORD_BITS_LOG2);
-        debug_assert!(min_str_len.is_aligned_pow2(str_alignment_allocation_blocks_log2));
+        debug_assert!(min_str_len != 0 && min_str_len.is_aligned_pow2(str_alignment_allocation_blocks_log2));
         debug_assert!(min_str_len < 64);
         // This is the the algorithm from Hacker's Delight, 2nd
         // edition, 6-2 ("Find first string of 1-Bits of a Given Length").
@@ -3796,7 +4008,7 @@ impl AllocBitmap {
         }
     }
 
-    /// Packed integer `<=` comparison.
+    /// Packed integer `>=` comparison.
     ///
     /// Interpret `x` and `y` as sequences of packed integers with a width of
     /// two to the power of `block_allocation_blocks_log2` stored in a
@@ -3804,7 +4016,7 @@ impl AllocBitmap {
     /// of `x` and `y` each and return the result as a sequence of packed
     /// integers of matching format with their least significant bits set if
     /// and only if the the corresponding packed integer field from `x` compares
-    /// as less than or equal to the one from `y`.
+    /// as greater than or equal to the one from `y`.
     ///
     /// # Arguments:
     /// `x` - Packed first operand integers.

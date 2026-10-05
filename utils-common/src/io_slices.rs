@@ -17,7 +17,7 @@
 // Lifetimes are not obvious at first sight here, make them explicit.
 #![allow(clippy::needless_lifetimes)]
 
-use crate::{bitmanip::BitManip as _, ct_cmp, xor};
+use crate::{ct_cmp, xor};
 use core::{convert, fmt, iter, marker};
 
 /// Error information for [`IoSlicesIterError::IoSlicesError`].
@@ -151,6 +151,10 @@ impl<I: ?Sized + IoSlicesIterCommon> IoSlicesIterCommon for &mut I {
     fn next_slice_len(&mut self) -> Result<usize, Self::BackendIteratorError> {
         I::next_slice_len(*self)
     }
+
+    fn is_empty(&mut self) -> Result<bool, Self::BackendIteratorError> {
+        I::is_empty(*self)
+    }
 }
 
 /// *IO slice iterator* returning readable, non-`mut` byte slices.
@@ -244,6 +248,10 @@ pub trait IoSlicesIter<'a>: IoSlicesIterCommon {
 impl<'a, 'b: 'a, I: ?Sized + IoSlicesIter<'b>> IoSlicesIter<'a> for &'a mut I {
     fn next_slice(&mut self, max_len: Option<usize>) -> Result<Option<&'a [u8]>, Self::BackendIteratorError> {
         I::next_slice(*self, max_len)
+    }
+
+    fn skip(&mut self, distance: usize) -> Result<(), IoSlicesIterError<Self::BackendIteratorError>> {
+        I::skip(*self, distance)
     }
 }
 
@@ -457,6 +465,10 @@ impl<'a, 'b: 'a, I: ?Sized + DoubleEndedIoSlicesIter<'b>> DoubleEndedIoSlicesIte
     fn next_back_slice(&mut self, max_len: Option<usize>) -> Result<Option<&'a [u8]>, Self::BackendIteratorError> {
         I::next_back_slice(*self, max_len)
     }
+
+    fn skip_back(&mut self, distance: usize) -> Result<(), IoSlicesIterError<Self::BackendIteratorError>> {
+        I::skip_back(*self, distance)
+    }
 }
 
 /// *IO slice iterator* from which writeable, `mut` byte slices can get consumed
@@ -553,7 +565,7 @@ pub trait WalkableIoSlicesIter<'a>: IoSlicesIter<'a> {
             return Ok(false);
         }
         let mut all_multiple_of = true;
-        if divisor.is_pow2() {
+        if divisor.is_power_of_two() {
             self.for_each(&mut |slice| {
                 all_multiple_of &= slice.len() & (divisor - 1) == 0;
                 all_multiple_of
@@ -571,6 +583,14 @@ pub trait WalkableIoSlicesIter<'a>: IoSlicesIter<'a> {
 impl<'a, 'b: 'a, I: ?Sized + WalkableIoSlicesIter<'b>> WalkableIoSlicesIter<'a> for &'a mut I {
     fn for_each(&self, cb: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), Self::BackendIteratorError> {
         I::for_each(*self, cb)
+    }
+
+    fn total_len(&self) -> Result<usize, Self::BackendIteratorError> {
+        I::total_len(*self)
+    }
+
+    fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
+        I::all_lengths_multiple_of(*self, divisor)
     }
 }
 
@@ -828,10 +848,12 @@ impl<'a, 'b: 'a, I: Iterator<Item = Result<&'b [u8], BackendIteratorError>> + Cl
         Self: 'c;
 
     fn decoupled_borrow<'c>(&'c self) -> Self::DecoupledBorrowIterType<'c> {
-        GenericIoSlicesIter::new(
-            self.iter.clone().map(|s: Result<&'b [u8], BackendIteratorError>| s),
-            self.head,
-        )
+        GenericIoSlicesIter {
+            iter: self.iter.clone().map(|s: Result<&'b [u8], BackendIteratorError>| s),
+            head: self.head,
+            tail: self.tail,
+            iter_done: self.iter_done,
+        }
     }
 }
 
@@ -2263,7 +2285,7 @@ where
 {
     fn for_each(&self, cb: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), Self::BackendIteratorError> {
         let mut remaining = self.remaining;
-        let mut buffers_exhausted = false;
+        let mut iterated_all = true;
         self.iter
             .for_each(&mut |slice| {
                 if remaining == 0 {
@@ -2271,16 +2293,14 @@ where
                 }
 
                 let slice_len = remaining.min(slice.len());
-                if slice_len == 0 {
-                    buffers_exhausted = true;
-                    return false;
-                }
+                debug_assert_ne!(slice_len, 0);
                 remaining -= slice_len;
-                cb(&slice[..slice_len])
+                iterated_all = cb(&slice[..slice_len]);
+                iterated_all
             })
             .map_err(IoSlicesIterError::BackendIteratorError)?;
 
-        if !buffers_exhausted {
+        if !iterated_all || remaining == 0 {
             Ok(())
         } else {
             Err(IoSlicesIterError::IoSlicesError(IoSlicesError::BuffersExhausted))
@@ -2288,6 +2308,9 @@ where
     }
 
     fn total_len(&self) -> Result<usize, Self::BackendIteratorError> {
+        // Deliberately don't verify that remaining is <= the underlying iterator's
+        // total_len() at this point here. BuffersExhausted will get reported
+        // when actually iterating.
         Ok(self.remaining)
     }
 }
@@ -2361,6 +2384,7 @@ where
         self.iter0
             .as_mut()
             .map(|iter0| iter0.next_slice_len())
+            .filter(|iter0_next_slice_len| !matches!(iter0_next_slice_len, Ok(0)))
             .or_else(|| self.iter1.as_mut().map(|iter1| iter1.next_slice_len()))
             .unwrap_or(Ok(0))
     }
@@ -2624,10 +2648,12 @@ impl<'a> WalkableIoSlicesIter<'a> for ZeroFilledIoSlices {
     fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
         if divisor == 0 {
             Ok(false)
-        } else if divisor.is_pow2() {
-            Ok(self.remaining & (divisor - 1) == 0)
+        } else if divisor.is_power_of_two() {
+            const _: () = assert!(ZeroFilledIoSlices::CHUNK_SIZE.is_power_of_two());
+            Ok(self.remaining & (divisor - 1) == 0
+                && (self.remaining <= Self::CHUNK_SIZE || divisor <= Self::CHUNK_SIZE))
         } else {
-            Ok(self.remaining.is_multiple_of(divisor))
+            Ok(self.remaining.is_multiple_of(divisor) && self.remaining <= Self::CHUNK_SIZE)
         }
     }
 }

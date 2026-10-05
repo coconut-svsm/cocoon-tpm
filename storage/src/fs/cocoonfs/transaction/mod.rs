@@ -81,6 +81,12 @@ pub struct Transaction {
     /// The primary [`Transaction`] has more freedom regarding in-place writes.
     pub(super) is_primary_pending: bool,
 
+    /// Whether the transaction's data updates have been applied to storage.
+    ///
+    /// When `is_applied` is true, the only task remaining for transaction application is to
+    /// invalidate the journal log.
+    pub(super) is_applied: bool,
+
     /// Updates to the inode index staged at the [`Transaction`].
     pub(super) inode_index_updates: inode_index::TransactionInodeIndexUpdates,
 
@@ -90,12 +96,14 @@ pub struct Transaction {
 
     /// Incremented filesystem update counter.
     ///
-    /// Populated at [`Transaction`] commit and applied once the journal has been written.
+    /// Populated at [`Transaction`] commit and applied once the journal has
+    /// been written.
     filesystem_update_counter: [u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
 
     /// Encrypted [`filesystem_update_counter`](Self::filesystem_update_counter).
     ///
-    /// Populated at [`Transaction`] commit and applied once the journal has been written.
+    /// Populated at [`Transaction`] commit and applied once the journal has
+    /// been written.
     encrypted_filesystem_update_counter: FixedVec<u8, 4>,
 
     /// Pending updates to the authentication tree.
@@ -103,6 +111,10 @@ pub struct Transaction {
     /// Populated at [`Transaction`] commit and applied to the authentication
     /// tree once the journal has been written.
     pending_auth_tree_updates: TransactionPendingAuthTreeUpdates,
+
+    /// Failed authentication tree node writes accumulated over prior attempt to
+    /// apply the transaction's authentication tree updates to storage.
+    failed_auth_tree_updates_nodes_writes: auth_tree::AuthTreeFailedUpdatesApplyNodesWrites,
 
     /// The extents allocated to the journal log's chained encrypted extents'
     /// tail.
@@ -162,11 +174,13 @@ impl Transaction {
             preferred_blkdev_io_blocks_bulk_log2,
             allocs: TransactionAllocations::new(),
             is_primary_pending,
+            is_applied: false,
             inode_index_updates: inode_index::TransactionInodeIndexUpdates::new(&fs_instance_sync_state.inode_index),
             aux_fs_metadata_update: None,
             filesystem_update_counter: [0u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
             encrypted_filesystem_update_counter: FixedVec::new_empty(),
             pending_auth_tree_updates: TransactionPendingAuthTreeUpdates::new(),
+            failed_auth_tree_updates_nodes_writes: auth_tree::AuthTreeFailedUpdatesApplyNodesWrites::default(),
             journal_log_tail_extents: extents::PhysicalExtents::new(),
             #[cfg(test)]
             test_fail_apply_journal: false,

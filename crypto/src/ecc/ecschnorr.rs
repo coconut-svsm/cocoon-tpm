@@ -20,7 +20,7 @@ use crate::{
         zeroize,
     },
 };
-use cmpa::{self, MpMutUInt as _, MpUIntCommon as _};
+use cmpa::{self, MpMutUInt as _, MpUIntCommon as _, MpUIntSlice};
 use core::array;
 
 /// EC Schnorr signature creation.
@@ -186,7 +186,12 @@ pub fn verify(
     // Schnorr Validate").
     let (signature_r, signature_s) = signature;
     let signature_r = cmpa::MpBigEndianUIntByteSlice::from_bytes(signature_r);
+    // signature_s is fed directly into point_scalar_mul() below, and that doesn't
+    // accept overlong buffers. Strip off any leading padding zeros for
+    // interoperability.
     let signature_s = cmpa::MpBigEndianUIntByteSlice::from_bytes(signature_s);
+    let (signature_s_is_nonzero, signature_s_len) = cmpa::ct_find_last_set_byte_mp(&signature_s);
+    let signature_s = signature_s.shrink_to(signature_s_len);
 
     let curve = curve::Curve::new(pub_key.get_curve_id())?;
     let curve_ops = curve.curve_ops()?;
@@ -194,9 +199,9 @@ pub fn verify(
     let order_divisor = cmpa::CtMpDivisor::new(&order, None).unwrap();
 
     // Step a and length sanitization of the signature's r value range.
-    if cmpa::ct_is_zero_mp(&signature_s).unwrap() != 0
+    if signature_s_is_nonzero.unwrap() == 0
         || cmpa::ct_geq_mp_mp(&signature_s, &order).unwrap() != 0
-        || cmpa::ct_find_last_set_bit_mp(&signature_r).1 > 8 * order.len()
+        || cmpa::find_last_set_byte_mp(&signature_r) > order.len()
     {
         return Err(CryptoError::SignatureVerificationFailure);
     }

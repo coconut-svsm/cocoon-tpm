@@ -6,11 +6,16 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use cmpa::MpMutUInt as _;
+
 use crate::ecc::{curve, ecdh, key};
 use crate::{CryptoError, rng};
 use crate::{
     tpm2_interface,
-    utils_common::{alloc::try_alloc_zeroizing_vec, zeroize},
+    utils_common::{
+        alloc::{try_alloc_vec, try_alloc_zeroizing_vec},
+        zeroize,
+    },
 };
 
 enum _EcdhCdhError {
@@ -131,7 +136,20 @@ pub fn ecdh_c_1e_1s_cdh_party_u_key_gen(
 
     let pub_key_u_plain = pub_key_u.into_tpms_ecc_point(&curve_ops)?;
     let pub_key_u_x = &pub_key_u_plain.x.buffer;
+
+    // pub_key_v_x will be used for the PartyVInfo. Bring it into canonical padding
+    // format in order to avoid interoperability issues.
     let pub_key_v_x = &pub_key_v_plain.x.buffer;
+    let mut padded_pub_key_v_x;
+    let p_len = curve_ops.get_curve().get_p_len();
+    let pub_key_v_x = if pub_key_v_x.len() >= p_len {
+        &pub_key_v_x[pub_key_v_x.len() - p_len..]
+    } else {
+        padded_pub_key_v_x = try_alloc_vec(p_len)?;
+        cmpa::MpMutBigEndianUIntByteSlice::from_bytes(&mut padded_pub_key_v_x)
+            .copy_from(&cmpa::MpBigEndianUIntByteSlice::from_bytes(pub_key_v_x));
+        &padded_pub_key_v_x
+    };
 
     Ok((
         ecdh::_ecdh_c_1e_1s_cdh_derive_shared_secret(&z, kdf_hash_alg, kdf_label, pub_key_u_x, pub_key_v_x)?,

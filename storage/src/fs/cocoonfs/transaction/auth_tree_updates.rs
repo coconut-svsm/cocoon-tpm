@@ -145,8 +145,15 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         // Block digest and return.
                         let fs_instance = fs_instance_sync_state.get_fs_ref();
                         let auth_tree_config = fs_instance_sync_state.auth_tree.get_config();
-                        let data_block_index = auth_tree_config
-                            .translate_physical_to_data_block_index(this.auth_tree_data_block_allocation_blocks_begin);
+                        let data_block_index = match auth_tree_config
+                            .translate_physical_to_data_block_index(this.auth_tree_data_block_allocation_blocks_begin)
+                        {
+                            Ok(data_block_index) => data_block_index,
+                            Err(e) => {
+                                this.fut_state = RedigestAuthTreeDataBlockFutureState::Done;
+                                return task::Poll::Ready(Err(e));
+                            }
+                        };
                         let auth_digest = match auth_tree_config.digest_data_block(
                             data_block_index,
                             this.auth_tree_data_block_allocation_blocks_bufs
@@ -169,7 +176,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     let next_subrange_begin_in_auth_tree_data_block =
                         updated_auth_tree_data_block_alloc_bitmap.trailing_zeros();
                     let next_subrange_end_in_auth_tree_data_block = next_subrange_begin_in_auth_tree_data_block
-                        + (!updated_auth_tree_data_block_alloc_bitmap >> next_subrange_begin_in_auth_tree_data_block)
+                        + (!(updated_auth_tree_data_block_alloc_bitmap >> next_subrange_begin_in_auth_tree_data_block))
                             .trailing_zeros();
                     let next_subrange = layout::PhysicalAllocBlockRange::new(
                         this.auth_tree_data_block_allocation_blocks_begin

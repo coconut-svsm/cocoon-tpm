@@ -365,7 +365,7 @@ impl JournalStagingCopyUndisguise {
             io_slices::SingletonIoSliceMut::new(&mut encoded_block_cipher_alg_id).map_infallible_err();
         encoded_block_cipher_alg_id_io_slice.copy_from_iter(&mut src)?;
         if !encoded_block_cipher_alg_id_io_slice.is_empty()? {
-            return Err(nvfs_err_internal!());
+            return Err(NvFsError::from(FormatError::InvalidJournalStagingCopyUndisguiseFormat));
         }
         let (_, block_cipher_alg_id) = tpm2_interface::TpmiAlgSymObject::unmarshal(&encoded_block_cipher_alg_id)
             .map_err(|e| match e {
@@ -380,7 +380,7 @@ impl JournalStagingCopyUndisguise {
             io_slices::SingletonIoSliceMut::new(&mut encoded_block_cipher_key_size).map_infallible_err();
         encoded_block_cipher_key_size_io_slice.copy_from_iter(&mut src)?;
         if !encoded_block_cipher_key_size_io_slice.is_empty()? {
-            return Err(nvfs_err_internal!());
+            return Err(NvFsError::from(FormatError::InvalidJournalStagingCopyUndisguiseFormat));
         }
         let (_, block_cipher_key_size) =
             tpm2_interface::unmarshal_u16(&encoded_block_cipher_key_size).map_err(|_| nvfs_err_internal!())?;
@@ -396,14 +396,14 @@ impl JournalStagingCopyUndisguise {
         let mut encryption_key_io_slice = io_slices::SingletonIoSliceMut::new(&mut encryption_key).map_infallible_err();
         encryption_key_io_slice.copy_from_iter(&mut src)?;
         if !encryption_key_io_slice.is_empty()? {
-            return Err(nvfs_err_internal!());
+            return Err(NvFsError::from(FormatError::InvalidJournalStagingCopyUndisguiseFormat));
         }
 
         let mut iv_gen_key = try_alloc_zeroizing_vec(block_cipher_key_len)?;
         let mut iv_gen_key_io_slice = io_slices::SingletonIoSliceMut::new(&mut iv_gen_key).map_infallible_err();
         iv_gen_key_io_slice.copy_from_iter(&mut src)?;
         if !iv_gen_key_io_slice.is_empty()? {
-            return Err(nvfs_err_internal!());
+            return Err(NvFsError::from(FormatError::InvalidJournalStagingCopyUndisguiseFormat));
         }
 
         Self::new(block_cipher_alg, encryption_key, iv_gen_key)
@@ -543,7 +543,9 @@ fn produce_iv(
     let iv_len = iv_out.len();
     debug_assert_eq!(iv_gen_block_cipher_instance.block_cipher_block_len(), iv_len);
     iv_out.fill(0);
-    debug_assert!(iv_len >= mem::size_of::<u64>());
+    if iv_len < mem::size_of::<u64>() {
+        return Err(NvFsError::Internal);
+    }
     let (iv_out_head, iv_out_tail) = iv_out.split_at_mut(iv_len - mem::size_of::<u64>());
     iv_out_tail.copy_from_slice(&u64::from(journal_staging_copy_allocation_block).to_le_bytes());
 

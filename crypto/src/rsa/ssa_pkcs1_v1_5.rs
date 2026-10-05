@@ -135,7 +135,7 @@ pub fn sign(
     ps[0] = 0x00;
     ps[1] = 0x01;
     let ps_len = ps.len();
-    ps[ps_len - 1] = 0x02;
+    ps[ps_len - 1] = 0x00;
     // The rest of step 5. is implicit.
 
     // 8.2.1, step 2: RSA signature.
@@ -206,7 +206,7 @@ pub fn verify(
 
     // 9.2. step 4-5.
     let ps_len = ps.len();
-    if ps[0] != 0x00 || ps[1] != 0x01 || ps[ps_len - 1] != 0x02 || ps[2..ps_len - 1].iter().any(|b| *b != 0xff) {
+    if ps[0] != 0x00 || ps[1] != 0x01 || ps[ps_len - 1] != 0x00 || ps[2..ps_len - 1].iter().any(|b| *b != 0xff) {
         return Err(CryptoError::SignatureVerificationFailure);
     }
     // The rest of step 5. is implicit.

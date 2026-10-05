@@ -14,6 +14,22 @@ use super::{
 use crate::fs::cocoonfs::extent_ptr;
 
 #[test]
+fn empty_transaction() {
+    for test_config in CocoonFsTestConfigs::new() {
+        for enable_trimming in [false, true] {
+            let fs_instance = cocoonfs_test_mkfs_op_helper(&test_config, None, 3usize << 18, enable_trimming).unwrap();
+
+            let transaction = cocoonfs_test_start_transaction_op_helper(&fs_instance, None).unwrap();
+            // Now commit with failure to apply the journal, thereby leaving it in place.
+            cocoonfs_test_commit_transaction_op_helper(&fs_instance, transaction, true).unwrap();
+            // Close the FS, open and try to read the file.
+            let blkdev = cocoonfs_test_fs_instance_into_blkdev_helper(fs_instance);
+            cocoonfs_test_openfs_op_helper(blkdev).unwrap();
+        }
+    }
+}
+
+#[test]
 fn write_read_one_small() {
     for test_config in CocoonFsTestConfigs::new() {
         for enable_trimming in [false, true] {

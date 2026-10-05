@@ -203,11 +203,23 @@ pub fn decrypt(
             return Err(CryptoError::from(e));
         }
     };
-    let mut h = hash::HashInstance::new(hash_alg)?;
+    let mut h = match hash::HashInstance::new(hash_alg) {
+        Ok(h) => h,
+        Err(e) => {
+            y.zeroize();
+            return Err(CryptoError::from(e));
+        }
+    };
     if let Some(label) = label {
-        h.update(io_slices::SingletonIoSlice::new(label).map_infallible_err())?;
+        if let Err(e) = h.update(io_slices::SingletonIoSlice::new(label).map_infallible_err()) {
+            y.zeroize();
+            return Err(e);
+        }
     }
-    h.finalize_into(&mut lhash)?;
+    if let Err(e) = h.finalize_into(&mut lhash) {
+        y.zeroize();
+        return Err(CryptoError::from(e));
+    }
 
     // 7.1.2, step 3.g.
     let mut format_is_ok = cmpa::ct_eq_l_l(first_byte as cmpa::LimbType, 0);

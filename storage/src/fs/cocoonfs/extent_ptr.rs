@@ -66,6 +66,15 @@ impl EncodedExtentPtr {
 
         let encoded_extent_ptr =
             encoded_extent_allocations_blocks_begin | (encoded_extent_allocation_blocks << 1) | indirect as u64;
+        // encoded_extent_ptr can become the special NIL value only if the
+        // 64 - EXTENT_ALLOCATION_BLOCKS_ENCODING_BITS - 1 == 57 least significant bits
+        // of extent.begin() are set. That however means the image size must be
+        // >= 2^57 Allocation Blocks >= 2^64 Bytes, which violates the
+        // constraint that the image size in units of Bytes must be representable as an
+        // u64.
+        if encoded_extent_ptr == !0 {
+            return Err(nvfs_err_internal!());
+        }
         let encoded_extent_ptr = encoded_extent_ptr.to_le_bytes();
         Ok(Self { encoded_extent_ptr })
     }

@@ -35,7 +35,14 @@ fn fill_padding_with_nonzero_random_bytes(
         .map_err(CryptoError::from)?;
 
         retries += 1;
-        while let Some(zero_index) = padding.iter().position(|b| *b == 0x00) {
+        loop {
+            let zero_index = match padding.iter().position(|b| *b == 0x00) {
+                Some(zero_index) => zero_index,
+                None => {
+                    // All done.
+                    return Ok(());
+                }
+            };
             padding = &mut padding[zero_index..];
             if let Some(non_zero_index) = padding.iter().skip(1).position(|b| *b != 0x00) {
                 let non_zero_index = non_zero_index + 1; // Account for the skip.
@@ -47,19 +54,22 @@ fn fill_padding_with_nonzero_random_bytes(
                 // Some progess has been made, reset the retries counter.
                 retries = 0
             } else {
+                // Need a refill, continue with the outer loop.
                 break;
             }
         }
     }
 
-    if !padding.is_empty() && padding[0] == 0x00 {
+    if padding.is_empty() {
+        Ok(())
+    } else {
         // Even after MAX_RETRIES retries, the RNG failed to produce a non-zero
         // byte. The probability for this is overwhelmingly small and it can
         // be considered a failure.
-        return Err(CryptoError::RandomSamplingRetriesExceeded);
+        debug_assert!(padding[0] == 0x00);
+        debug_assert!(retries >= MAX_RETRIES);
+        Err(CryptoError::RandomSamplingRetriesExceeded)
     }
-
-    Ok(())
 }
 
 #[test]

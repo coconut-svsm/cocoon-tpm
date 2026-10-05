@@ -1807,13 +1807,15 @@ where
                     determine_state_fut,
                     fs_instance,
                 } => {
+                    // Deliberately ignore errors. A failure to reallocate the AuxFsMetadata extents
+                    // should not prevent the filesystem from getting opened.
                     let aux_fs_metadata_extents_reallocation_needed =
                         match blkdev::NvBlkDevFuture::poll(pin::Pin::new(determine_state_fut), &fs_instance.blkdev, cx)
                         {
                             task::Poll::Ready(Ok(aux_fs_metadata_extents_reallocation_needed)) => {
                                 aux_fs_metadata_extents_reallocation_needed
                             }
-                            task::Poll::Ready(Err(e)) => break e,
+                            task::Poll::Ready(Err(_)) => false,
                             task::Poll::Pending => return task::Poll::Pending,
                         };
 

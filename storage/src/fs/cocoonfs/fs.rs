@@ -3071,6 +3071,9 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::BroadcastedFu
                             ) {
                                 Ok(write_journal_fut) => write_journal_fut,
                                 Err((transaction, pending_transactions_sync_state, e)) => {
+                                    if let Some(post_commit_cb) = post_commit_cb.take() {
+                                        post_commit_cb(Err(fs::TransactionCommitError::LogStateClean { reason: e }));
+                                    }
                                     *this = Self::CleanupOnPreCommitError {
                                         // Will receive the
                                         // CocoonFsSyncStateMemberWriteGuard::into_weak() upon
@@ -4256,7 +4259,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> asynchronous::QueuedFuture<
                         None => {
                             *this = Self::Done(marker::PhantomData);
                             return task::Poll::Ready(PendingTransactionsSyncFutureResult::AllocateBlocks {
-                                result: Err(NvFsError::NoSpace),
+                                result: Ok((transaction, Err(NvFsError::NoSpace))),
                             });
                         }
                     };

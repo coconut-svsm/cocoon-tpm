@@ -98,7 +98,7 @@ impl<'a> TcgTpm2KdfA<'a> {
         // Iff label[] does not end in a zero byte itself,
         // it gets separated from the subsequent HMAC input by
         // a 0u8.
-        if self.label.last().map(|b| *b != 0u8).unwrap_or(false) {
+        if !self.label.last().map(|b| *b == 0u8).unwrap_or(false) {
             Some([0u8])
         } else {
             None

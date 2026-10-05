@@ -8,7 +8,7 @@ use cocoon_tpm_bssl_bare_sys as bssl_bare_sys;
 
 use super::error::bssl_get_error;
 use crate::CryptoError;
-use crate::utils_common::alloc::try_alloc_zeroizing_vec;
+use crate::utils_common::{alloc::try_alloc_zeroizing_vec, zeroize};
 use cmpa::MpMutUInt as _;
 use core::{convert, ptr};
 
@@ -71,7 +71,7 @@ impl BsslBn {
             return Ok(());
         }
 
-        if unsafe { bssl_bare_sys::BN_bn2bin_padded(bytes.as_mut_ptr(), bytes_len, self.bn) } < 0 {
+        if unsafe { bssl_bare_sys::BN_bn2bin_padded(bytes.as_mut_ptr(), bytes_len, self.bn) } == 0 {
             return Err(bssl_get_error());
         }
         Ok(())

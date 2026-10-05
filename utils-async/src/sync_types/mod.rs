@@ -35,7 +35,7 @@
 //! [`LockForInner`] and [`SyncRcPtrForInner`] implementations are provided.
 
 extern crate alloc;
-use core::{clone, convert, marker, mem, ops, pin};
+use core::{clone, convert, marker, mem, ops, pin, ptr};
 
 /// Execution environment agnostic lock abstraction.
 ///
@@ -141,8 +141,8 @@ where
 
 /// Locking guard obtained from [`LockForInner::lock()`](LockForInner::lock).
 ///
-/// Alternatively, an existing guard for the [`Lock`] wrapping the outer `OT` may
-/// get converted directly [to](Self::from_outer) and [back
+/// Alternatively, an existing guard for the [`Lock`] wrapping the outer `OT`
+/// may get converted directly [to](Self::from_outer) and [back
 /// from](Self::into_outer) a `LockForInnerGuard` instance.
 pub struct LockForInnerGuard<'a, OT, OL, TAG>
 where
@@ -325,6 +325,12 @@ pub trait WeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>>: Clone + marker::Send + mark
     /// count lease. The raw pointer may eventually get converted back into
     /// a `WeakSyncRcPtr` by means of [`from_raw()`](Self::from_raw). If
     /// that does not happen, the owned lease will be leaked.
+    ///
+    /// <div class="warning">
+    ///
+    /// [`WeakSyncRcPtr`] implementations may return [`ptr::null()`] values.
+    ///
+    /// </div>
     fn into_raw(this: Self) -> *const T;
 
     /// Convert a raw pointer previously obtained from
@@ -494,9 +500,9 @@ pub trait SyncRcPtrRef<'a, T: ?Sized, P: 'a + SyncRcPtr<T>>: Clone + ops::Deref<
 /// the implementation of
 /// [`Pin<SyncRcPtr<T>>::downgrade()`](SyncRcPtr::downgrade).
 ///
-/// Note that it is not possible to simply use `Pin<SyncRcPtr<T>::WeakSyncRcPtr>`
-/// for that, as [`Pin`](pin::Pin) requires the wrapped pointer to be
-/// dereferenceable.
+/// Note that it is not possible to simply use
+/// `Pin<SyncRcPtr<T>::WeakSyncRcPtr>` for that, as [`Pin`](pin::Pin) requires
+/// the wrapped pointer to be dereferenceable.
 pub struct PinnedWeakSyncRcPtr<T: ?Sized, P: SyncRcPtr<T>> {
     weak_ptr: P::WeakSyncRcPtr,
 }
@@ -922,9 +928,9 @@ where
 
 impl<OT, OP, TAG> SyncRcPtr<<OT as DerefInnerByTag<TAG>>::Output> for SyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: ?Sized + DerefInnerByTag<TAG>,
+    OT: Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
-    <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    <OT as DerefInnerByTag<TAG>>::Output: Sized + marker::Send + marker::Sync,
 {
     type WeakSyncRcPtr = WeakSyncRcPtrForInner<OT, OP, TAG>;
     type SyncRcPtrRef<'a>
@@ -994,9 +1000,9 @@ where
 impl<OT, OP, TAG> WeakSyncRcPtr<<OT as DerefInnerByTag<TAG>>::Output, SyncRcPtrForInner<OT, OP, TAG>>
     for WeakSyncRcPtrForInner<OT, OP, TAG>
 where
-    OT: ?Sized + DerefInnerByTag<TAG>,
+    OT: Sized + DerefInnerByTag<TAG>,
     OP: SyncRcPtr<OT>,
-    <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    <OT as DerefInnerByTag<TAG>>::Output: Sized + marker::Send + marker::Sync,
 {
     fn upgrade(&self) -> Option<SyncRcPtrForInner<OT, OP, TAG>> {
         self.weak_ptr_to_outer
@@ -1009,13 +1015,21 @@ where
 
     fn into_raw(this: Self) -> *const <OT as DerefInnerByTag<TAG>>::Output {
         let outer = OP::WeakSyncRcPtr::into_raw(this.weak_ptr_to_outer);
-        <OT as DerefInnerByTag<TAG>>::to_inner_ptr(outer)
+        if !outer.is_null() {
+            <OT as DerefInnerByTag<TAG>>::to_inner_ptr(outer)
+        } else {
+            ptr::null()
+        }
     }
 
     unsafe fn from_raw(ptr: *const <OT as DerefInnerByTag<TAG>>::Output) -> Self {
         // This is safe, part of the contract is that ptr_to_inner originated from
         // Self::into_raw().
-        let ptr_to_outer = unsafe { <OT as DerefInnerByTag<TAG>>::container_of(ptr) };
+        let ptr_to_outer = if !ptr.is_null() {
+            unsafe { <OT as DerefInnerByTag<TAG>>::container_of(ptr) }
+        } else {
+            ptr::null()
+        };
         let weak_ptr_to_outer = unsafe { OP::WeakSyncRcPtr::from_raw(ptr_to_outer) };
         Self {
             weak_ptr_to_outer,
@@ -1028,9 +1042,9 @@ where
 ///
 /// As outlined in the documentation to [`SyncRcPtrRef`], translating a
 /// [`SyncRcPtrRef`] for the outer containing `struct` to a
-/// `SyncRcPtrRefForInner` for the member is a zero cost operation, whereas going
-/// from a [`SyncRcPtr`] for the outer `struct` to a [`SyncRcPtrForInner`] for
-/// the member is not.
+/// `SyncRcPtrRefForInner` for the member is a zero cost operation, whereas
+/// going from a [`SyncRcPtr`] for the outer `struct` to a [`SyncRcPtrForInner`]
+/// for the member is not.
 pub struct SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
     OT: ?Sized + DerefInnerByTag<TAG>,
@@ -1130,10 +1144,10 @@ where
 impl<'a, OT, OP, OR, TAG> SyncRcPtrRef<'a, <OT as DerefInnerByTag<TAG>>::Output, SyncRcPtrForInner<OT, OP, TAG>>
     for SyncRcPtrRefForInner<'a, OT, OP, OR, TAG>
 where
-    OT: 'a + ?Sized + DerefInnerByTag<TAG>,
+    OT: 'a + Sized + DerefInnerByTag<TAG>,
     OP: 'a + SyncRcPtr<OT>,
     OR: SyncRcPtrRef<'a, OT, OP>,
-    <OT as DerefInnerByTag<TAG>>::Output: marker::Send + marker::Sync,
+    <OT as DerefInnerByTag<TAG>>::Output: Sized + marker::Send + marker::Sync,
     TAG: 'a,
 {
     fn new(p: &'a SyncRcPtrForInner<OT, OP, TAG>) -> Self {

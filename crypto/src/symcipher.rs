@@ -39,7 +39,6 @@ use crate::{
     tpm2_interface,
     utils_common::{
         alloc::try_alloc_zeroizing_vec,
-        bitmanip::BitManip as _,
         io_slices::{self, IoSlicesIterCommon as _, IoSlicesMutIter as _},
         zeroize,
     },
@@ -507,7 +506,7 @@ pub(crate) fn transform_next_blocks<
         let first_src_slice_len = src.next_slice_len()?;
         if first_src_slice_len >= 2 * block_len {
             let batch_len = first_dst_slice_len.min(first_src_slice_len);
-            let batch_len = if block_len.is_pow2() {
+            let batch_len = if block_len.is_power_of_two() {
                 batch_len & !(block_len - 1)
             } else {
                 batch_len - (batch_len % block_len)
@@ -555,19 +554,17 @@ pub(crate) fn transform_next_blocks<
         src_block_len += io_slices::SingletonIoSliceMut::new(&mut scratch_block_buf[src_block_len..])
             .map_infallible_err::<CryptoError>()
             .copy_from_iter(src)?;
+        let mut dst_block_len = first_dst_slice.len();
         if src_block_len != block_len {
-            if !ENABLE_PARTIAL_LAST_BLOCK {
+            if !ENABLE_PARTIAL_LAST_BLOCK || dst_block_len > src_block_len {
                 return Err(CryptoError::Internal);
             } else {
                 scratch_block_buf[src_block_len..].fill(0);
             }
-        } else if src_block_len < first_dst_slice.len() {
-            return Err(CryptoError::Internal);
         }
 
         block_transform(scratch_block_buf, None);
 
-        let mut dst_block_len = first_dst_slice.len();
         first_dst_slice.copy_from_slice(&scratch_block_buf[..dst_block_len]);
         dst_block_len += dst.copy_from_iter(
             &mut io_slices::SingletonIoSlice::new(&scratch_block_buf[dst_block_len..src_block_len])
@@ -596,7 +593,7 @@ pub(crate) fn transform_next_blocks_in_place<
     let first_dst_slice_len = dst.next_slice_len()?;
     // Try to process a batch of multiple block cipher blocks at once.
     if first_dst_slice_len >= 2 * block_len {
-        let batch_len = if block_len.is_pow2() {
+        let batch_len = if block_len.is_power_of_two() {
             first_dst_slice_len & !(block_len - 1)
         } else {
             first_dst_slice_len - (first_dst_slice_len % block_len)
@@ -1414,22 +1411,22 @@ fn test_encrypt_decrypt_in_place_ecb_sm4_128() {
 }
 
 macro_rules! cfg_select_block_cipher_alg {
-    (($f:literal, $id:expr)) => {
+    (($f:literal, $id:expr)) => {{
         #[cfg(feature = $f)]
         return $id;
         #[cfg(not(feature = $f))]
         {
             "Force compile error for no block cipher configured"
         }
-    };
-    (($f:literal, $id:expr), $(($f_more:literal, $id_more:expr)),+) => {
+    }};
+    (($f:literal, $id:expr), $(($f_more:literal, $id_more:expr)),+) => {{
         #[cfg(feature = $f)]
         return $id;
         #[cfg(not(feature = $f))]
         {
-            cfg_select_hash!($(($f_more, $id_more)),+)
+            cfg_select_block_cipher_alg!($(($f_more, $id_more)),+)
         }
-    };
+    }};
 }
 
 pub const fn test_block_cipher_alg() -> SymBlockCipherAlg {

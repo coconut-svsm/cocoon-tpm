@@ -20,5 +20,5 @@ mod semaphore;
 pub use semaphore::{
     AsyncSemaphore, AsyncSemaphoreError, AsyncSemaphoreExclusiveAllFuture, AsyncSemaphoreExclusiveAllGuard,
     AsyncSemaphoreExclusiveAllWeakGuard, AsyncSemaphoreLeasesFuture, AsyncSemaphoreLeasesGuard,
-    AsyncSemaphoreLeasesWeakGuard,
+    AsyncSemaphoreLeasesWeakGuard, AsyncSemaphoreNewError,
 };
