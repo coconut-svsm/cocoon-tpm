@@ -2,3 +2,6 @@
 	path = bssl-bare-sys/third-party/boringssl
 	url = https://github.com/nicstange/boringssl.git
 	branch = no-poly1305_vec-for-no_asm
+[submodule "ossl-bare-sys/third-party/openssl"]
+	path = ossl-bare-sys/third-party/openssl
+	url = https://github.com/openssl/openssl.git

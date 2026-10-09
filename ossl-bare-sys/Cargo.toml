@@ -1,0 +1,36 @@
+[package]
+name = "cocoon-tpm-ossl-bare-sys"
+version = "0.1.1"
+edition = "2024"
+
+license = "Apache-2.0"
+description = "Cocoon TPM project - bare OpenSSL FFI bindings"
+homepage = "https://github.com/coconut-svsm/cocoon-tpm"
+repository = "https://github.com/coconut-svsm/cocoon-tpm"
+readme = "README.md"
+
+# Make usage of this crate exclusive with the official ossl-sys.
+# Otherwise linking conflicts will occur.
+links = "ossl"
+
+exclude = [
+  "*.go",
+  "*.png",
+  "third-party/openssl/test",
+  "third-party/openssl/demos",
+]
+
+[lib]
+
+[features]
+# Prefix all OpenSSL symbols to avoid collisions with another libcrypto
+# in the same link. Disable when only one copy of libcrypto exists.
+prefix-symbols = []
+
+[dependencies]
+cocoon-tpm-ossl-bare-sys-target-integration = { version = "0.1.1" }
+
+[build-dependencies]
+bindgen = "0.73.2"
+cc = "1"
+shlex = "2.0.1"

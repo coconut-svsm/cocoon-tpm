@@ -6,7 +6,8 @@
 
 /// Authentication subject identifiers
 ///
-/// Appended to HMACced data for indentifying the authenticated data's type and format.
+/// Appended to HMACced data for indentifying the authenticated data's type and
+/// format.
 #[repr(u8)]
 pub enum AuthSubjectDataSuffix {
     ImageContext = 1,
