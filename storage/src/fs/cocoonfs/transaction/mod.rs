@@ -90,12 +90,14 @@ pub struct Transaction {
 
     /// Incremented filesystem update counter.
     ///
-    /// Populated at [`Transaction`] commit and applied once the journal has been written.
+    /// Populated at [`Transaction`] commit and applied once the journal has
+    /// been written.
     filesystem_update_counter: [u8; image_header::FILESYSTEM_UPDATE_COUNTER_LEN as usize],
 
     /// Encrypted [`filesystem_update_counter`](Self::filesystem_update_counter).
     ///
-    /// Populated at [`Transaction`] commit and applied once the journal has been written.
+    /// Populated at [`Transaction`] commit and applied once the journal has
+    /// been written.
     encrypted_filesystem_update_counter: FixedVec<u8, 4>,
 
     /// Pending updates to the authentication tree.

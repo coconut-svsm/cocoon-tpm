@@ -6,16 +6,15 @@
 
 /// Apply an index permutation to a slice and invert the permutation in place.
 ///
-/// This is equivalent to `result[i] = apply_to[index_perm[i]]` without requiring
-/// a separate intermediate buffer.
+/// This is equivalent to `result[i] = apply_to[index_perm[i]]` without
+/// requiring a separate intermediate buffer.
 ///
 /// # Arguments
 /// * `index_perm` - The index permutation to apply and subsequently invert in
 ///   place. After the function returns, `index_perm` will contain the inverse
 ///   of the original permutation. Its length must be less or equal than
-///   `usize::MAX / 2` for implementation reasons.
-///   The permutation has to be valid: all indices up to `apply_to.len()` have to appear
-///   exactly once.
+///   `usize::MAX / 2` for implementation reasons. The permutation has to be
+///   valid: all indices up to `apply_to.len()` have to appear exactly once.
 /// * `apply_to` - The slice to apply the index permutation to. Its length must
 ///   match the one from `index_perm`.
 pub fn apply_and_invert_index_perm<T>(index_perm: &mut [usize], apply_to: &mut [T]) {
@@ -74,18 +73,17 @@ pub fn apply_and_invert_index_perm<T>(index_perm: &mut [usize], apply_to: &mut [
 
 /// Apply an index permutation to a slice.
 ///
-/// This is equivalent to `result[i] = apply_to[index_perm[i]]` without requiring
-/// a separate intermediate buffer.
+/// This is equivalent to `result[i] = apply_to[index_perm[i]]` without
+/// requiring a separate intermediate buffer.
 ///
 /// # Arguments:
 ///
-/// * `index_perm` - The index permutation to apply. Even though it is taken as a
-///   mutable reference (and is getting modified internally for tracking
+/// * `index_perm` - The index permutation to apply. Even though it is taken as
+///   a mutable reference (and is getting modified internally for tracking
 ///   progress), its contents will return to the original state after the
 ///   function returns. Its length must be less or equal than `usize::MAX / 2`
-///   for implementation reasons.
-///   The permutation has to be valid: all indices up to `apply_to.len()` have to appear
-///   exactly once.
+///   for implementation reasons. The permutation has to be valid: all indices
+///   up to `apply_to.len()` have to appear exactly once.
 /// * `apply_to` - The slice to apply the index permutation to. Its length must
 ///   match the one from `index_perm`.
 pub fn apply_index_perm<T>(index_perm: &mut [usize], apply_to: &mut [T]) {

@@ -10,16 +10,16 @@ use core::{convert, ffi};
 
 /// Reimplementation of BoringSSL's `ERR_GET_LIB()`.
 ///
-/// BoringSSL's ERR_GET_LIB() is inlined and thus, inaccessible through bindgen if static
-/// functions haven't been wrapped up.
+/// BoringSSL's ERR_GET_LIB() is inlined and thus, inaccessible through bindgen
+/// if static functions haven't been wrapped up.
 fn err_get_lib(packed_error: u32) -> ffi::c_int {
     ((packed_error >> 24) & 0xff) as ffi::c_int
 }
 
 /// Reimplementation of BoringSSL's `ERR_GET_REASON()`.
 ///
-/// BoringSSL's ERR_GET_REASON() is inlined and thus, inaccessible through bindgen if static
-/// functions haven't been wrapped up.
+/// BoringSSL's ERR_GET_REASON() is inlined and thus, inaccessible through
+/// bindgen if static functions haven't been wrapped up.
 fn err_get_reason(packed_error: u32) -> ffi::c_int {
     (packed_error & 0xfffu32) as ffi::c_int
 }

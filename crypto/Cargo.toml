@@ -41,6 +41,10 @@ zeroize = [
 # boringssl FFI invocations.
 boringssl = ["dep:cocoon-tpm-bssl-bare-sys"]
 
+# Replace crypto implementations written in pure Rust with
+# OpenSSL FFI invocations.
+openssl = ["dep:cocoon-tpm-ossl-bare-sys"]
+
 # Hashes
 sha1 = ["dep:sha1", "cocoon-tpm-tpm2-interface/sha1"]
 sha256 = ["dep:sha2", "cocoon-tpm-tpm2-interface/sha256"]
@@ -90,6 +94,7 @@ ecc_sm2_p256 = ["ecc", "cocoon-tpm-tpm2-interface/ecc_sm2_p256"]
 
 [dependencies]
 cocoon-tpm-bssl-bare-sys = { version = "0.1.2", optional = true }
+cocoon-tpm-ossl-bare-sys = { version = "0.1.1", optional = true }
 
 cocoon-tpm-utils-common = { version = "0.1.3" }
 cocoon-tpm-tpm2-interface = { version = "0.1.1", default-features = false }

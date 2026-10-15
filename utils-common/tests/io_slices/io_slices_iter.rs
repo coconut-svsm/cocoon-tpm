@@ -778,8 +778,8 @@ fn covariant_io_slices_iter_ref() {
     }
 }
 
-/// Test sub-function that exercises the IoSlicesIter trait on GenericIoSlicesIter,
-/// with and without a head slice.
+/// Test sub-function that exercises the IoSlicesIter trait on
+/// GenericIoSlicesIter, with and without a head slice.
 /// This function is called from `generic_io_slices_iter` test proper.
 fn test_generic_io_slices_iter_variant(
     head: Option<&[u8]>,

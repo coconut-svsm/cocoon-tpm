@@ -28,9 +28,9 @@ pub use crate::backend::rng::*;
 // The HashDrbg is special. Striclty speaking it belongs into the pure_rust
 // backend mod, but is used by a number of Known Answer Tests. So import from
 // here.
-#[cfg(any(not(feature = "boringssl"), test))]
+#[cfg(any(not(any(feature = "boringssl", feature = "openssl")), test))]
 mod hash_drbg;
-#[cfg(any(not(feature = "boringssl"), test))]
+#[cfg(any(not(any(feature = "boringssl", feature = "openssl")), test))]
 pub use hash_drbg::*;
 
 /// Error type returned by [`RngCore::generate()`](RngCore::generate).
@@ -230,7 +230,7 @@ pub trait ReseedableRngCore: RngCore + Sized {
     }
 }
 
-#[cfg(not(feature = "boringssl"))]
+#[cfg(not(any(feature = "boringssl", feature = "openssl")))]
 pub fn test_rng() -> HashDrbg {
     extern crate alloc;
     use super::hash;
@@ -245,4 +245,9 @@ pub fn test_rng() -> HashDrbg {
 #[cfg(feature = "boringssl")]
 pub fn test_rng() -> BsslRandBytesRng {
     BsslRandBytesRng::new()
+}
+
+#[cfg(feature = "openssl")]
+pub fn test_rng() -> OsslRandBytesRng {
+    OsslRandBytesRng::new()
 }

@@ -1335,8 +1335,8 @@ impl AllocBitmap {
     ///    size and alignment in units of [Allocation
     ///    Blocks](layout::ImageLayout::allocation_block_size_128b_log2). Must
     ///    be less than or equal to [`BitmapWord::BITS`].
-    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually
-    ///    as having been allocated, independent of the current state in the
+    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually as
+    ///    having been allocated, independent of the current state in the
     ///    [`AllocBitmap`].
     ///  * `allocated_fullword_chunks` - List of extents to consider virtually
     ///    as having been allocated, independent of the current state in the
@@ -1921,8 +1921,8 @@ impl AllocBitmap {
     ///
     /// # Arguments:
     ///
-    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually
-    ///    as having been allocated, independent of the current state in the
+    ///  * `allocated_blocks` - Sorted list of blocks to consider virtually as
+    ///    having been allocated, independent of the current state in the
     ///    [`AllocBitmap`].
     ///  * `allocated_fullword_chunks` - List of extents to consider virtually
     ///    as having been allocated, independent of the current state in the
@@ -1951,9 +1951,10 @@ impl AllocBitmap {
             bitmaps_words_iter.take(usize::try_from(image_bitmap_words).unwrap_or(usize::MAX))
         {
             if bitmap_word == 0 {
-                // Check if the bitmap word is really free or has perhaps been previously allocated
-                // as part of a preceeding block (in case of a multi-block allocation) or fullword
-                // chunks allocation round for processing the very same request.
+                // Check if the bitmap word is really free or has perhaps been previously
+                // allocated as part of a preceeding block (in case of a
+                // multi-block allocation) or fullword chunks allocation round
+                // for processing the very same request.
                 if loop {
                     if allocated_blocks_index == allocated_blocks.len() {
                         break false;
