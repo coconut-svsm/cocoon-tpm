@@ -884,18 +884,27 @@ enum JournalReplayWritesFutureState<B: blkdev::NvBlkDev> {
         read_fut: blkdev::helpers::NvBlkDevReadRegionBlocksScatterFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     WriteToTarget {
-        cur_target_range_allocation_blocks: layout::AllocBlockCount,
+        cur_target_range: layout::PhysicalAllocBlockRange,
         write_fut: blkdev::helpers::NvBlkDevWriteRegionBlocksGatherFuture<B, FixedVec<FixedVec<u8, 7>, 0>>,
     },
     UpdateAuthTree {
         next_allocation_block_index_in_cur_target_range: layout::AllocBlockCount,
-        cur_target_range_allocation_blocks: layout::AllocBlockCount,
-        auth_tree_write_part_fut: Option<auth_tree::AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B>>,
+        cur_target_range: layout::PhysicalAllocBlockRange,
+        pending_auth_tree_update_op: Option<JournalReplayWritesFuturePendingAuthTreeUpdateOp<B>>,
     },
     FinalizeAuthTreeUpdatesReplay {
         auth_tree_replay_remainder_fut: auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B>,
     },
     Done,
+}
+
+enum JournalReplayWritesFuturePendingAuthTreeUpdateOp<B: blkdev::NvBlkDev> {
+    WritePart {
+        write_fut: auth_tree::AuthTreeReplayJournalUpdateScriptCursorWritePartFuture<B>,
+    },
+    AdvanceCursor {
+        advance_fut: auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture<B>,
+    },
 }
 
 impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
@@ -1257,12 +1266,12 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                     );
 
                     this.fut_state = JournalReplayWritesFutureState::WriteToTarget {
-                        cur_target_range_allocation_blocks: cur_target_range.block_count(),
+                        cur_target_range: *cur_target_range,
                         write_fut,
                     };
                 }
                 JournalReplayWritesFutureState::WriteToTarget {
-                    cur_target_range_allocation_blocks,
+                    cur_target_range,
                     write_fut,
                 } => {
                     this.buffers = match blkdev::NvBlkDevFuture::poll(pin::Pin::new(write_fut), blkdev, cx) {
@@ -1276,34 +1285,54 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
 
                     this.fut_state = JournalReplayWritesFutureState::UpdateAuthTree {
                         next_allocation_block_index_in_cur_target_range: layout::AllocBlockCount::from(0u64),
-                        cur_target_range_allocation_blocks: *cur_target_range_allocation_blocks,
-                        auth_tree_write_part_fut: None,
+                        cur_target_range: *cur_target_range,
+                        pending_auth_tree_update_op: None,
                     };
                 }
                 JournalReplayWritesFutureState::UpdateAuthTree {
                     next_allocation_block_index_in_cur_target_range,
-                    cur_target_range_allocation_blocks,
-                    auth_tree_write_part_fut: fut_auth_tree_write_part_fut,
+                    cur_target_range,
+                    pending_auth_tree_update_op: fut_pending_auth_tree_update_op,
                 } => {
-                    let mut auth_tree_updates_replay_cursor = match fut_auth_tree_write_part_fut {
-                        Some(auth_tree_write_part_fut) => {
-                            match auth_tree::AuthTreeReplayJournalUpdateScriptCursorWritePartFuture::poll(
-                                pin::Pin::new(auth_tree_write_part_fut),
-                                blkdev,
-                                auth_tree_config,
-                                cx,
-                            ) {
-                                task::Poll::Ready(Ok(auth_tree_updates_replay_cursor)) => {
-                                    *fut_auth_tree_write_part_fut = None;
-                                    auth_tree_updates_replay_cursor
+                    let mut auth_tree_updates_replay_cursor = match fut_pending_auth_tree_update_op.as_mut() {
+                        Some(pending_auth_tree_update_op) => match pending_auth_tree_update_op {
+                            JournalReplayWritesFuturePendingAuthTreeUpdateOp::WritePart { write_fut } => {
+                                match auth_tree::AuthTreeReplayJournalUpdateScriptCursorWritePartFuture::poll(
+                                    pin::Pin::new(write_fut),
+                                    blkdev,
+                                    auth_tree_config,
+                                    cx,
+                                ) {
+                                    task::Poll::Ready(Ok(auth_tree_updates_replay_cursor)) => {
+                                        *fut_pending_auth_tree_update_op = None;
+                                        auth_tree_updates_replay_cursor
+                                    }
+                                    task::Poll::Ready(Err(e)) => {
+                                        this.fut_state = JournalReplayWritesFutureState::Done;
+                                        return task::Poll::Ready(Err(e));
+                                    }
+                                    task::Poll::Pending => return task::Poll::Pending,
                                 }
-                                task::Poll::Ready(Err(e)) => {
-                                    this.fut_state = JournalReplayWritesFutureState::Done;
-                                    return task::Poll::Ready(Err(e));
-                                }
-                                task::Poll::Pending => return task::Poll::Pending,
                             }
-                        }
+                            JournalReplayWritesFuturePendingAuthTreeUpdateOp::AdvanceCursor { advance_fut } => {
+                                match auth_tree::AuthTreeReplayJournalUpdateScriptCursorAdvanceFuture::poll(
+                                    pin::Pin::new(advance_fut),
+                                    blkdev,
+                                    auth_tree_config,
+                                    cx,
+                                ) {
+                                    task::Poll::Ready(Ok(auth_tree_updates_replay_cursor)) => {
+                                        *fut_pending_auth_tree_update_op = None;
+                                        auth_tree_updates_replay_cursor
+                                    }
+                                    task::Poll::Ready(Err(e)) => {
+                                        this.fut_state = JournalReplayWritesFutureState::Done;
+                                        return task::Poll::Ready(Err(e));
+                                    }
+                                    task::Poll::Pending => return task::Poll::Pending,
+                                }
+                            }
+                        },
                         None => match this.auth_tree_updates_replay_cursor.take() {
                             Some(auth_tree_updates_replay_cursor) => auth_tree_updates_replay_cursor,
                             None => {
@@ -1315,7 +1344,7 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
 
                     let allocation_block_size_128b_log2 = this.allocation_block_size_128b_log2 as u32;
                     let blkdev_io_block_allocation_blocks_log2 = this.blkdev_io_block_allocation_blocks_log2 as u32;
-                    while next_allocation_block_index_in_cur_target_range != cur_target_range_allocation_blocks {
+                    while *next_allocation_block_index_in_cur_target_range != cur_target_range.block_count() {
                         let blkdev_io_block_index = u64::from(*next_allocation_block_index_in_cur_target_range)
                             >> blkdev_io_block_allocation_blocks_log2;
                         let allocation_block_in_blkdev_io_block_index =
@@ -1323,6 +1352,8 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                                 - (blkdev_io_block_index << blkdev_io_block_allocation_blocks_log2))
                                 as usize;
                         let blkdev_io_block_index = blkdev_io_block_index as usize;
+                        let cur_allocation_block_index_in_cur_target_range =
+                            *next_allocation_block_index_in_cur_target_range;
                         *next_allocation_block_index_in_cur_target_range =
                             *next_allocation_block_index_in_cur_target_range + layout::AllocBlockCount::from(1u64);
 
@@ -1330,9 +1361,12 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                             [allocation_block_in_blkdev_io_block_index << (allocation_block_size_128b_log2 + 7)
                                 ..(allocation_block_in_blkdev_io_block_index + 1)
                                     << (allocation_block_size_128b_log2 + 7)];
-                        auth_tree_updates_replay_cursor = match auth_tree_updates_replay_cursor
-                            .update(auth_tree_config, allocation_block_buf)
-                        {
+                        auth_tree_updates_replay_cursor = match auth_tree_updates_replay_cursor.update(
+                            blkdev,
+                            auth_tree_config,
+                            cur_target_range.begin() + cur_allocation_block_index_in_cur_target_range,
+                            allocation_block_buf,
+                        ) {
                             Ok(auth_tree::AuthTreeReplayJournalUpdateScriptCursorUpdateResult::Done { cursor }) => {
                                 cursor
                             }
@@ -1341,7 +1375,17 @@ impl<B: blkdev::NvBlkDev> JournalReplayWritesFuture<B> {
                                     write_fut,
                                 },
                             ) => {
-                                *fut_auth_tree_write_part_fut = Some(write_fut);
+                                *fut_pending_auth_tree_update_op =
+                                    Some(JournalReplayWritesFuturePendingAuthTreeUpdateOp::WritePart { write_fut });
+                                continue 'outer;
+                            }
+                            Ok(auth_tree::AuthTreeReplayJournalUpdateScriptCursorUpdateResult::NeedCursorAdvance {
+                                advance_fut,
+                            }) => {
+                                *fut_pending_auth_tree_update_op =
+                                    Some(JournalReplayWritesFuturePendingAuthTreeUpdateOp::AdvanceCursor {
+                                        advance_fut,
+                                    });
                                 continue 'outer;
                             }
                             Err(e) => {

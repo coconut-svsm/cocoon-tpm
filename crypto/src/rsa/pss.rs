@@ -183,6 +183,10 @@ pub fn verify(
         return Err(CryptoError::SignatureVerificationFailure);
     }
     let salt = &db[db_pad_end_pos + 1..];
+    // See sign(): the slen is capped at hlen. Verify that.
+    if salt.len() > hlen {
+        return Err(CryptoError::SignatureVerificationFailure);
+    }
 
     // 9.1.2., step 12-13.
     let mut h = hash::HashInstance::new(m_prime_hash_alg)?;

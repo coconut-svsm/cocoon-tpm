@@ -190,7 +190,7 @@ impl BlockAllocationBlocksReadBuffer {
         src_allocation_blocks_begin: layout::PhysicalAllocBlockIndex,
         src_allocation_blocks_bufs: SI,
     ) -> Option<layout::PhysicalAllocBlockIndex> {
-        debug_assert!(self.buffered_allocation_blocks.len().is_pow2());
+        debug_assert!(self.buffered_allocation_blocks.len().is_power_of_two());
         let buffered_block_allocation_blocks_begin = layout::PhysicalAllocBlockIndex::from(
             u64::from(src_allocation_blocks_begin) & !(self.buffered_allocation_blocks.len() as u64 - 1),
         );
@@ -253,7 +253,7 @@ impl BlockAllocationBlocksReadBuffer {
     ) -> Option<layout::PhysicalAllocBlockIndex> {
         // If no block is currently being buffered, return.
         let buffered_block_allocation_blocks_begin = self.buffered_block_allocation_blocks_begin?;
-        debug_assert!(self.buffered_allocation_blocks.len().is_pow2());
+        debug_assert!(self.buffered_allocation_blocks.len().is_power_of_two());
         if (u64::from(src_allocation_blocks_begin) ^ u64::from(buffered_block_allocation_blocks_begin))
             & !(self.buffered_allocation_blocks.len() as u64 - 1)
             != 0
@@ -1059,7 +1059,7 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
         let request_range_auth_tree_data_allocation_blocks_begin =
             auth_tree::AuthTreeDataAllocBlockIndex::new_from_data_block_index(
                 auth_tree_config
-                    .translate_physical_to_data_block_index(auth_tree_data_block_aligned_request_range.begin()),
+                    .translate_physical_to_data_block_index(auth_tree_data_block_aligned_request_range.begin())?,
                 auth_tree_data_block_allocation_blocks_log2 as u32,
             );
 
@@ -1180,6 +1180,19 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             if found_subrange == this.d.request_range {
                                 // All found authenticated in the read buffer -> done.
                                 this.fut_state = BufferedReadAuthenticateDataFutureState::Done;
+
+                                // All Allocation Blocks in the request range are expected to be allocated.
+                                // As a safety-measure against buggy writers, check that and return an error
+                                // if not, so that upper layers aren't getting confused by empty buffers.
+                                if this
+                                    .d
+                                    .dst_allocation_blocks_bufs
+                                    .iter()
+                                    .any(|allocation_block_buf| allocation_block_buf.is_empty())
+                                {
+                                    return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
+                                }
+
                                 return task::Poll::Ready(Ok(mem::take(&mut this.d.dst_allocation_blocks_bufs)));
                             }
                             this.d.authenticated_subrange_from_read_buf = Some(found_subrange);
@@ -1236,7 +1249,22 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             this.d
                                 .alignment_scratch_allocation_blocks_bufs
                                 .fill(FixedVec::new_empty());
-                            this.d.dst_allocation_blocks_bufs.fill(FixedVec::new_empty());
+
+                            // Be careful to reset only that part of dst_allocation_blocks_bufs[]
+                            // that corresponds to a part of found_subrange. Otherwise me might
+                            // reset something in the authenticated_subrange_from_read_buf.
+                            // If that too is overlapping, it will get taken care of below.
+                            let overlap_with_request_range_begin =
+                                found_subrange.begin().max(this.d.request_range.begin());
+                            let overlap_with_request_range_end = found_subrange.end().min(this.d.request_range.end());
+                            if overlap_with_request_range_begin < overlap_with_request_range_end {
+                                this.d.dst_allocation_blocks_bufs[u64::from(
+                                    overlap_with_request_range_begin - this.d.request_range.begin(),
+                                ) as usize
+                                    ..u64::from(overlap_with_request_range_end - this.d.request_range.begin())
+                                        as usize]
+                                    .fill(FixedVec::new_empty());
+                            }
                         } else {
                             this.d.unauthenticated_subrange_from_read_buf = Some(found_subrange);
                         }
@@ -1267,6 +1295,19 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             .unwrap_or(false)
                         {
                             // All the data is there, proceed to the authentication.
+                            // All Allocation Blocks in the request range are expected to be allocated.
+                            // As a safety-measure against buggy writers, check that and return an error
+                            // if not, so that upper layers aren't getting confused by empty buffers.
+                            if this
+                                .d
+                                .dst_allocation_blocks_bufs
+                                .iter()
+                                .any(|allocation_block_buf| allocation_block_buf.is_empty())
+                            {
+                                this.fut_state = BufferedReadAuthenticateDataFutureState::Done;
+                                return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
+                            }
+
                             this.fut_state = BufferedReadAuthenticateDataFutureState::AuthenticateSubrange {
                                 auth_subrange_fut_state: BufferedReadAuthenticateDataFutureAuthenticateState::Init,
                             };
@@ -1283,25 +1324,20 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             &this.d.aligned_request_range,
                         );
 
-                    let ((unused_head_alignment_scratch_allocation_blocks_bufs,
-                          used_head_alignment_scratch_allocation_blocks_bufs),
-                         (used_tail_alignment_scratch_allocation_blocks_bufs,
-                          _unused_tail_alignment_scratch_allocation_blocks_bufs)) =
-                         BufferedReadAuthenticatedDataFutureData
-                        ::split_off_unused_alignment_scratch_allocation_blocks_bufs(
-                            head_alignment_scratch_allocation_blocks_bufs,
-                            tail_alignment_scratch_allocation_blocks_bufs,
+                    let (is_head_alignment_padding_data_needed, is_tail_alignment_padding_data_needed) =
+                        BufferedReadAuthenticatedDataFutureData::is_alignment_padding_data_needed(
                             &this.d.request_range,
                             &this.d.auth_tree_data_block_aligned_request_range,
                             this.d.authenticated_subrange_from_read_buf.as_ref(),
                             this.d.unauthenticated_subrange_from_read_buf.as_ref(),
-                            min_io_block_allocation_blocks_log2
+                            min_io_block_allocation_blocks_log2,
                         );
 
-                    let mut cur_allocation_block_index = this.d.aligned_request_range.begin()
-                        + layout::AllocBlockCount::from(
-                            unused_head_alignment_scratch_allocation_blocks_bufs.len() as u64
-                        );
+                    let mut cur_allocation_block_index = this.d.aligned_request_range.begin();
+                    if !is_head_alignment_padding_data_needed {
+                        cur_allocation_block_index +=
+                            layout::AllocBlockCount::from(head_alignment_scratch_allocation_blocks_bufs.len() as u64);
+                    }
                     debug_assert!(
                         cur_allocation_block_index == this.d.aligned_request_range.begin()
                             || cur_allocation_block_index == this.d.request_range.begin()
@@ -1316,14 +1352,35 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                         cur_allocation_block_index,
                     );
 
-                    for allocation_block_buf in used_head_alignment_scratch_allocation_blocks_bufs
-                        .iter_mut()
-                        .chain(this.d.dst_allocation_blocks_bufs.iter_mut())
-                        .chain(used_tail_alignment_scratch_allocation_blocks_bufs.iter_mut())
-                    {
+                    for allocation_block_buf in {
+                        if is_head_alignment_padding_data_needed {
+                            Some(head_alignment_scratch_allocation_blocks_bufs)
+                        } else {
+                            None
+                        }
+                        .into_iter()
+                        .flatten()
+                    }
+                    .chain(this.d.dst_allocation_blocks_bufs.iter_mut())
+                    .chain(
+                        if is_tail_alignment_padding_data_needed {
+                            Some(tail_alignment_scratch_allocation_blocks_bufs)
+                        } else {
+                            None
+                        }
+                        .into_iter()
+                        .flatten(),
+                    ) {
                         debug_assert!(cur_allocation_block_index < this.d.aligned_request_range.end());
                         let allocation_block_is_allocated = alloc_bitmap_iter.next().unwrap_or(false);
                         // All Allocation Blocks in the requested range are assumed to be allocated.
+                        if !allocation_block_is_allocated
+                            && cur_allocation_block_index >= this.d.request_range.begin()
+                            && cur_allocation_block_index < this.d.request_range.end()
+                        {
+                            this.fut_state = BufferedReadAuthenticateDataFutureState::Done;
+                            return task::Poll::Ready(Err(NvFsError::from(FormatError::InvalidExtents)));
+                        }
                         debug_assert!(
                             cur_allocation_block_index < this.d.request_range.begin()
                                 || cur_allocation_block_index >= this.d.request_range.end()
@@ -1500,8 +1557,15 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                 continue;
                             }
 
-                            let auth_tree_data_block_index = auth_tree_config
-                                .translate_physical_to_data_block_index(this.d.authenticated_allocation_blocks_end);
+                            let auth_tree_data_block_index = match auth_tree_config
+                                .translate_physical_to_data_block_index(this.d.authenticated_allocation_blocks_end)
+                            {
+                                Ok(auth_tree_data_block_index) => auth_tree_data_block_index,
+                                Err(e) => {
+                                    this.fut_state = BufferedReadAuthenticateDataFutureState::Done;
+                                    return task::Poll::Ready(Err(e));
+                                }
+                            };
                             let auth_tree_leaf_node_id =
                                 auth_tree_config.covering_leaf_node_id(auth_tree_data_block_index);
                             let auth_tree_leaf_node_load_fut =
@@ -1550,10 +1614,16 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             // request region are contiguous as well.
                             loop {
                                 debug_assert!({
-                                    let cur_auth_tree_data_block_index = auth_tree_config
+                                    let cur_auth_tree_data_block_index = match auth_tree_config
                                         .translate_physical_to_data_block_index(
                                             this.d.authenticated_allocation_blocks_end,
-                                        );
+                                        ) {
+                                        Ok(cur_auth_tree_data_block_index) => cur_auth_tree_data_block_index,
+                                        Err(e) => {
+                                            this.fut_state = BufferedReadAuthenticateDataFutureState::Done;
+                                            return task::Poll::Ready(Err(e));
+                                        }
+                                    };
                                     let leaf_node_id = leaf_node.get_node_id();
                                     *auth_tree_data_block_index == cur_auth_tree_data_block_index
                                         && cur_auth_tree_data_block_index >= leaf_node_id.first_covered_data_block()
@@ -1741,7 +1811,7 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                     .iter_mut()
                                     .map(Some),
                             );
-                            authenticated_head_alignment_scratch_allocation_blocks_bufs_taken = true;
+                            authenticated_tail_alignment_scratch_allocation_blocks_bufs_taken = true;
                         } else if !authenticated_head_alignment_scratch_allocation_blocks_bufs.is_empty()
                             && head_is_authenticated
                         {
@@ -1751,13 +1821,12 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                     .iter_mut()
                                     .map(Some),
                             );
-                            authenticated_tail_alignment_scratch_allocation_blocks_bufs_taken = true;
+                            authenticated_head_alignment_scratch_allocation_blocks_bufs_taken = true;
                         }
                     }
 
                     // And insert the remaining alignment scratch Allocation Blocks read but not
-                    // authenticated into the read buffer. Don't bother inserting if all are
-                    // unallocated.
+                    // authenticated into the read buffer.
                     if fs_sync_state_read_buffer.min_io_blocks_are_buffered() {
                         let (
                             head_alignment_scratch_allocation_blocks_bufs,
@@ -1767,28 +1836,15 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                             &this.d.request_range,
                             &this.d.aligned_request_range,
                         );
-                        let (
-                            (unused_head_alignment_scratch_allocation_blocks_bufs,
-                             used_head_alignment_scratch_allocation_blocks_bufs),
-                             (used_tail_alignment_scratch_allocation_blocks_bufs,
-                              _unused_tail_alignment_scratch_allocation_blocks_bufs)
-                        ) = BufferedReadAuthenticatedDataFutureData
-                                ::split_off_unused_alignment_scratch_allocation_blocks_bufs(
-                                    head_alignment_scratch_allocation_blocks_bufs,
-                                    tail_alignment_scratch_allocation_blocks_bufs,
-                                    &this.d.request_range,
-                                    &this.d.auth_tree_data_block_aligned_request_range,
-                                    this.d.authenticated_subrange_from_read_buf.as_ref(),
-                                    this.d.unauthenticated_subrange_from_read_buf.as_ref(),
-                                    min_io_block_allocation_blocks_log2
-                                );
-                        let any_allocated_at_head = used_head_alignment_scratch_allocation_blocks_bufs
-                            .iter()
-                            .any(|allocation_block_buf| !allocation_block_buf.is_empty());
-                        let any_allocated_at_tail = used_tail_alignment_scratch_allocation_blocks_bufs
-                            .iter()
-                            .any(|allocation_block_buf| !allocation_block_buf.is_empty());
-                        if any_allocated_at_head || any_allocated_at_tail {
+                        let (is_head_alignment_padding_data_valid, is_tail_alignment_padding_data_valid) =
+                            BufferedReadAuthenticatedDataFutureData::is_alignment_padding_data_needed(
+                                &this.d.request_range,
+                                &this.d.auth_tree_data_block_aligned_request_range,
+                                this.d.authenticated_subrange_from_read_buf.as_ref(),
+                                this.d.unauthenticated_subrange_from_read_buf.as_ref(),
+                                min_io_block_allocation_blocks_log2,
+                            );
+                        if is_head_alignment_padding_data_valid || is_tail_alignment_padding_data_valid {
                             // If any of the authenticated Allocation Block buffers had been taken
                             // and inserted above, they are empty buffers now. Be careful not to
                             // insert those as such, but as None, because otherwise the entry in the
@@ -1798,44 +1854,52 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                 remaining_head_alignment_scratch_allocation_blocks_bufs,
                                 taken_head_alignment_scratch_allocation_blocks_bufs,
                             ) = if authenticated_head_alignment_scratch_allocation_blocks_bufs_taken {
-                                used_head_alignment_scratch_allocation_blocks_bufs.split_at_mut(u64::from(
+                                head_alignment_scratch_allocation_blocks_bufs.split_at_mut(u64::from(
                                     this.d.auth_tree_data_block_aligned_request_range.begin()
                                         - this.d.aligned_request_range.begin(),
                                 )
                                     as usize)
                             } else {
-                                used_head_alignment_scratch_allocation_blocks_bufs
-                                    .split_at_mut(used_head_alignment_scratch_allocation_blocks_bufs.len())
+                                head_alignment_scratch_allocation_blocks_bufs
+                                    .split_at_mut(head_alignment_scratch_allocation_blocks_bufs.len())
                             };
                             let (
                                 taken_tail_alignment_scratch_allocation_blocks_bufs,
                                 remaining_tail_alignment_scratch_allocation_blocks_bufs,
                             ) = if authenticated_tail_alignment_scratch_allocation_blocks_bufs_taken {
-                                used_tail_alignment_scratch_allocation_blocks_bufs.split_at_mut(u64::from(
+                                tail_alignment_scratch_allocation_blocks_bufs.split_at_mut(u64::from(
                                     this.d.auth_tree_data_block_aligned_request_range.end()
                                         - this.d.request_range.end(),
                                 )
                                     as usize)
                             } else {
-                                used_tail_alignment_scratch_allocation_blocks_bufs.split_at_mut(0)
+                                tail_alignment_scratch_allocation_blocks_bufs.split_at_mut(0)
                             };
 
-                            if u64::from(this.d.aligned_request_range.end() - this.d.aligned_request_range.begin())
-                                >> min_io_block_allocation_blocks_log2
-                                == 1
+                            // Only bother inserting if any is Allocation Block in the respective
+                            // range is allocated.
+                            let any_allocated_at_head = is_head_alignment_padding_data_valid
+                                && remaining_head_alignment_scratch_allocation_blocks_bufs
+                                    .iter()
+                                    .any(|allocation_block_buf| !allocation_block_buf.is_empty());
+                            let any_allocated_at_tail = is_tail_alignment_padding_data_valid
+                                && remaining_tail_alignment_scratch_allocation_blocks_bufs
+                                    .iter()
+                                    .any(|allocation_block_buf| !allocation_block_buf.is_empty());
+
+                            if any_allocated_at_head
+                                && any_allocated_at_tail
+                                && u64::from(this.d.aligned_request_range.end() - this.d.aligned_request_range.begin())
+                                    >> min_io_block_allocation_blocks_log2
+                                    == 1
                             {
                                 // The head and tail are contained in the same Authentication Tree Data
                                 // Block, insert them together at once.
                                 fs_sync_state_read_buffer.insert_unauthenticated_buffers(
                                     this.d.aligned_request_range.begin(),
-                                    (unused_head_alignment_scratch_allocation_blocks_bufs
-                                        .iter()
-                                        .map(|_| None))
-                                    .chain(
-                                        remaining_head_alignment_scratch_allocation_blocks_bufs
-                                            .iter_mut()
-                                            .map(Some),
-                                    )
+                                    (remaining_head_alignment_scratch_allocation_blocks_bufs
+                                        .iter_mut()
+                                        .map(Some))
                                     .chain(taken_head_alignment_scratch_allocation_blocks_bufs.iter().map(|_| None))
                                     .chain(this.d.dst_allocation_blocks_bufs.iter().map(|_| None))
                                     .chain(taken_tail_alignment_scratch_allocation_blocks_bufs.iter().map(|_| None))
@@ -1858,16 +1922,11 @@ impl<B: blkdev::NvBlkDev> BufferedReadAuthenticateDataFuture<B> {
                                         ),
                                 );
                             } else if any_allocated_at_head {
-                                fs_sync_state_read_buffer.insert_authenticated_buffers(
+                                fs_sync_state_read_buffer.insert_unauthenticated_buffers(
                                     this.d.aligned_request_range.begin(),
-                                    (unused_head_alignment_scratch_allocation_blocks_bufs
-                                        .iter()
-                                        .map(|_| None))
-                                    .chain(
-                                        remaining_head_alignment_scratch_allocation_blocks_bufs
-                                            .iter_mut()
-                                            .map(Some),
-                                    ),
+                                    remaining_head_alignment_scratch_allocation_blocks_bufs
+                                        .iter_mut()
+                                        .map(Some),
                                 );
                             }
                         }
@@ -2005,21 +2064,16 @@ impl BufferedReadAuthenticatedDataFutureData {
         )
     }
 
-    /// Split off the unused parts of the alignment padding scratch buffers.
+    /// Determine whether data in the alignment padding ranges at either end
+    /// is to get read in from storage.
     ///
     /// In some specific constellations of data obtained from the [`ReadBuffer`]
     /// it is known that certain parts of the alignment padding scratch
-    /// buffers wouldn't ever get accessed. Split these parts off.
-    /// More specifically, return a quadruplet of buffers,
-    /// with the outer entries corresponding to the unused, and the inner two
-    /// entries to the used parts of the head and tail padding scratch
-    /// buffers respectively.
+    /// buffers wouldn't ever get accessed. Return a pair of `bool`
+    /// indicating whether the data in the head or tail alignment padding area
+    /// will be needed.
     ///
     /// # Arguments:
-    /// * `head_alignment_scratch_allocation_blocks_bufs` - Head part obtained
-    ///   from [`get_alignment_scratch_allocation_blocks_bufs()`](Self::get_alignment_scratch_allocation_blocks_bufs).
-    /// * `tail_alignment_scratch_allocation_blocks_bufs` - Tail part obtained
-    ///   from [`get_alignment_scratch_allocation_blocks_bufs()`](Self::get_alignment_scratch_allocation_blocks_bufs).
     /// * `request_range` - Reference to [`Self::request_range`].
     /// * `auth_tree_data_block_aligned_request_range` - Reference to
     ///   [`Self::auth_tree_data_block_aligned_request_range`].
@@ -2030,18 +2084,13 @@ impl BufferedReadAuthenticatedDataFutureData {
     /// * `min_io_block_allocation_blocks_log2` - Value of
     ///   [`Self::min_io_block_allocation_blocks_log2`].
     #[allow(clippy::type_complexity)]
-    fn split_off_unused_alignment_scratch_allocation_blocks_bufs<'a>(
-        head_alignment_scratch_allocation_blocks_bufs: &'a mut [FixedVec<u8, 7>],
-        tail_alignment_scratch_allocation_blocks_bufs: &'a mut [FixedVec<u8, 7>],
+    fn is_alignment_padding_data_needed(
         request_range: &layout::PhysicalAllocBlockRange,
         auth_tree_data_block_aligned_request_range: &layout::PhysicalAllocBlockRange,
         authenticated_subrange_from_read_buf: Option<&layout::PhysicalAllocBlockRange>,
         unauthenticated_subrange_from_read_buf: Option<&layout::PhysicalAllocBlockRange>,
         min_io_block_allocation_blocks_log2: u32,
-    ) -> (
-        (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]),
-        (&'a mut [FixedVec<u8, 7>], &'a mut [FixedVec<u8, 7>]),
-    ) {
+    ) -> (bool, bool) {
         debug_assert!(
             authenticated_subrange_from_read_buf
                 .map(|authenticated_subrange_from_read_buf| authenticated_subrange_from_read_buf != request_range)
@@ -2100,21 +2149,7 @@ impl BufferedReadAuthenticatedDataFutureData {
             })
             .unwrap_or((head_scratch_is_unused, tail_scratch_is_unused));
 
-        let head_alignment_scratch_allocation_blocks_bufs_len = head_alignment_scratch_allocation_blocks_bufs.len();
-        let tail_alignment_scratch_allocation_blocks_bufs_len = tail_alignment_scratch_allocation_blocks_bufs.len();
-
-        (
-            head_alignment_scratch_allocation_blocks_bufs.split_at_mut(if head_scratch_is_unused {
-                head_alignment_scratch_allocation_blocks_bufs_len
-            } else {
-                0
-            }),
-            tail_alignment_scratch_allocation_blocks_bufs.split_at_mut(if tail_scratch_is_unused {
-                0
-            } else {
-                tail_alignment_scratch_allocation_blocks_bufs_len
-            }),
-        )
+        (!head_scratch_is_unused, !tail_scratch_is_unused)
     }
 
     /// Get the [Authentication Tree Data
@@ -2287,6 +2322,7 @@ impl BufferedReadAuthenticatedDataFutureData {
                     {
                         debug_assert!(
                             authenticated_subrange_from_read_buf.end() == self.request_range.end()
+                                || cur_request_allocation_block_index == self.request_range.begin()
                                 || u64::from(cur_request_allocation_block_index)
                                     .is_aligned_pow2(auth_tree_data_block_allocation_blocks_log2)
                         );

@@ -20,7 +20,6 @@ use crate::{
     },
     nvfs_err_internal, tpm2_interface,
     utils_common::{
-        bitmanip::BitManip as _,
         fixed_vec::FixedVec,
         io_slices::{
             self, IoSlicesIter as _, IoSlicesIterCommon as _, IoSlicesMutIter as _, WalkableIoSlicesIter as _,
@@ -64,7 +63,7 @@ fn align_len_down_to_block_cipher_alg_block_len(
     len: usize,
     block_cipher_alg_block_len: usize,
 ) -> Result<(usize, usize), NvFsError> {
-    if !block_cipher_alg_block_len.is_pow2() {
+    if !block_cipher_alg_block_len.is_power_of_two() {
         return Err(nvfs_err_internal!());
     }
     let excess = len & (block_cipher_alg_block_len - 1);
@@ -84,7 +83,7 @@ fn align_len_up_to_block_cipher_alg_block_len(
     len: usize,
     block_cipher_alg_block_len: usize,
 ) -> Result<(usize, usize), NvFsError> {
-    if !block_cipher_alg_block_len.is_pow2() {
+    if !block_cipher_alg_block_len.is_power_of_two() {
         return Err(nvfs_err_internal!());
     }
     // Distance to next alignment boundary.
@@ -115,6 +114,8 @@ pub fn check_cbc_padding<'a, DI: CryptoDoubleEndedIoSlicesIter<'a>>(
     // the extents' end.
     // No constant-time constraints, only authenticated data is getting decrypted.
     let mut trailing_zeroes_len: usize = 0;
+    let mut found_cbc_padding_len = None;
+    let mut remaining_cbc_padding_len = 0;
     while let Some(tail_slice) = decrypted_extents.next_back_slice(None)? {
         let last_nonzero_pos = match tail_slice.iter().rposition(|b| *b != 0) {
             Some(last_nonzero_pos) => last_nonzero_pos,
@@ -130,20 +131,39 @@ pub fn check_cbc_padding<'a, DI: CryptoDoubleEndedIoSlicesIter<'a>>(
             .checked_add(tail_slice.len() - last_nonzero_pos - 1)
             .ok_or(NvFsError::DimensionsNotSupported)?;
 
-        let cbc_padding_len = tail_slice[last_nonzero_pos];
-        if (cbc_padding_len - 1) as usize > last_nonzero_pos {
-            return Err(NvFsError::from(FormatError::InvalidPadding));
-        }
-        if tail_slice[last_nonzero_pos - (cbc_padding_len - 1) as usize..last_nonzero_pos]
+        let encoded_cbc_padding_len = tail_slice[last_nonzero_pos];
+        found_cbc_padding_len = Some(encoded_cbc_padding_len);
+        let cbc_padding_in_cur_slice_len = (encoded_cbc_padding_len as usize).min(last_nonzero_pos + 1);
+        remaining_cbc_padding_len = encoded_cbc_padding_len as usize - cbc_padding_in_cur_slice_len;
+        if tail_slice[last_nonzero_pos - (cbc_padding_in_cur_slice_len - 1)..last_nonzero_pos]
             .iter()
-            .any(|b| *b != cbc_padding_len)
+            .any(|b| *b != encoded_cbc_padding_len)
         {
             return Err(NvFsError::from(FormatError::InvalidPadding));
         }
 
-        return Ok(trailing_zeroes_len + cbc_padding_len as usize);
+        break;
     }
-    Err(NvFsError::from(FormatError::InvalidPadding))
+
+    let found_cbc_padding_len = match found_cbc_padding_len {
+        Some(found_cbc_padding_len) => found_cbc_padding_len,
+        None => return Err(NvFsError::from(FormatError::InvalidPadding)),
+    };
+
+    while remaining_cbc_padding_len != 0 {
+        let tail_slice = match decrypted_extents.next_back_slice(Some(remaining_cbc_padding_len))? {
+            Some(tail_slice) => tail_slice,
+            None => return Err(NvFsError::from(FormatError::InvalidPadding)),
+        };
+        if tail_slice.iter().any(|b| *b != found_cbc_padding_len) {
+            return Err(NvFsError::from(FormatError::InvalidPadding));
+        }
+        remaining_cbc_padding_len -= tail_slice.len();
+    }
+
+    trailing_zeroes_len
+        .checked_add(found_cbc_padding_len as usize)
+        .ok_or(NvFsError::DimensionsNotSupported)
 }
 
 /// Information about a given [block cipher
@@ -974,7 +994,7 @@ impl EncryptedChainedExtentsLayout {
         extent_alignment_allocation_blocks_log2: u8,
         allocation_block_size_128b_log2: u8,
     ) -> Result<Self, NvFsError> {
-        if extent_alignment_allocation_blocks_log2 as u32 > u64::BITS
+        if extent_alignment_allocation_blocks_log2 as u32 >= u64::BITS
             || 1u64 << extent_alignment_allocation_blocks_log2 > EncodedExtentPtr::MAX_EXTENT_ALLOCATION_BLOCKS
         {
             return Err(nvfs_err_internal!());
@@ -1470,6 +1490,9 @@ impl EncryptedChainedExtentsEncryptionInstance {
                 .copy_from_iter_exhaustive(
                     io_slices::SingletonIoSlice::new(prev_extent_inline_authentication_digest).map_infallible_err(),
                 )
+                .map_err(CryptoError::from)?;
+        } else if is_first {
+            dst.skip(self.layout.plain_data_extents_hdr_len)
                 .map_err(CryptoError::from)?;
         }
         debug_assert_eq!(

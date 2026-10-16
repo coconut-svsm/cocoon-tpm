@@ -366,6 +366,7 @@ impl JournalLogEncodeBufferLayout {
             let encoded_trim_script_value_len = num::NonZeroUsize::new(apply_script::JournalTrimsScript::encoded_len(
                 TransactionJournalTrimsScriptIterator::new(
                     fs_sync_state_alloc_bitmap,
+                    &transaction.allocs.pending_allocs,
                     &transaction.allocs.pending_frees,
                     image_layout.io_block_allocation_blocks_log2,
                 ),
@@ -1015,6 +1016,7 @@ impl JournalLog {
                 dst,
                 TransactionJournalTrimsScriptIterator::new(
                     fs_sync_state_alloc_bitmap,
+                    &transaction.allocs.pending_allocs,
                     &transaction.allocs.pending_frees,
                     image_layout.io_block_allocation_blocks_log2,
                 ),
@@ -1098,26 +1100,20 @@ impl JournalLog {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
         // This is considered unauthenticated data, because the encoded extents might
-        // span multiple, independently authenticated Journal log extents. While the
-        // indirect_extents_list_decode() does  already verify all individual
-        // extents are well-formed, it does not check for overlaps.  Do it now.
-        let mut extents_end_high_watermark = layout::PhysicalAllocBlockIndex::from(0u64);
-        for (i, cur_extent) in auth_tree_extents.iter().enumerate() {
+        // span multiple, independently authenticated Journal log extents.
+        // indirect_extents_list_decode() already checks that the extents are
+        // well-formed and non-overlapping. Check that they're aligned
+        // as expected.
+        let auth_tree_node_allocation_blocks_log2 = image_layout
+            .auth_tree_node_io_blocks_log2
+            .checked_add(image_layout.io_block_allocation_blocks_log2)
+            .ok_or(FormatError::InvalidAuthTreeConfig)? as u32;
+        for cur_extent in auth_tree_extents.iter() {
             if !(u64::from(cur_extent.begin()) | u64::from(cur_extent.end()))
                 .is_aligned_pow2(journal_block_allocation_blocks_log2)
+                || !u64::from(cur_extent.block_count()).is_aligned_pow2(auth_tree_node_allocation_blocks_log2)
             {
                 return Err(NvFsError::from(FormatError::UnalignedAuthTreeExtents));
-            }
-
-            if cur_extent.begin() >= extents_end_high_watermark {
-                extents_end_high_watermark = cur_extent.end();
-                continue;
-            }
-
-            for j in 0..i {
-                if auth_tree_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return Err(NvFsError::from(FormatError::InvalidExtents));
-                }
             }
         }
 
@@ -1180,23 +1176,6 @@ impl JournalLog {
         if !encoded_alloc_bitmap_file_extents.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
         }
-        // This is considered unauthenticated data, because the encoded extents might
-        // span multiple, independently authenticated Journal log extents. While the
-        // indirect_extents_list_decode() does  already verify all individual
-        // extents are well-formed, it does not check for overlaps.  Do it now.
-        let mut extents_end_high_watermark = layout::PhysicalAllocBlockIndex::from(0u64);
-        for (i, cur_extent) in alloc_bitmap_file_extents.iter().enumerate() {
-            if cur_extent.begin() >= extents_end_high_watermark {
-                extents_end_high_watermark = cur_extent.end();
-                continue;
-            }
-
-            for j in 0..i {
-                if alloc_bitmap_file_extents.get_extent_range(j).overlaps_with(&cur_extent) {
-                    return Err(NvFsError::from(FormatError::InvalidExtents));
-                }
-            }
-        }
 
         // Journal log field: Allocation Bitmap File digests.
         let (tag, encoded_alloc_bitmap_file_fragments_auth_digests_len) =
@@ -1213,7 +1192,7 @@ impl JournalLog {
             ));
         }
 
-        if src.total_len()? < encoded_alloc_bitmap_file_extents_len {
+        if src.total_len()? < encoded_alloc_bitmap_file_fragments_auth_digests_len {
             return Err(NvFsError::from(FormatError::JournalLogFieldLengthOutOfBounds));
         }
         alloc_bitmap_file_fragments_auth_digests_preauth_cca_protection_hmac_instance.update(
@@ -1242,7 +1221,7 @@ impl JournalLog {
             encoded_alloc_bitmap_file_fragments_auth_digests.as_ref(),
             image_layout.auth_tree_data_block_allocation_blocks_log2,
             image_layout.allocation_block_size_128b_log2,
-            hash::hash_alg_digest_len(image_layout.preauth_cca_protection_hmac_hash_alg) as usize,
+            hash::hash_alg_digest_len(image_layout.auth_tree_data_hmac_hash_alg) as usize,
         )?;
         if !encoded_alloc_bitmap_file_fragments_auth_digests.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
@@ -1303,7 +1282,7 @@ impl JournalLog {
         let apply_writes_script = apply_script::JournalApplyWritesScript::decode(
             encoded_apply_writes_script.as_ref(),
             image_layout.io_block_allocation_blocks_log2 as u32,
-            image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
+            image_layout.allocation_block_size_128b_log2 as u32,
         )?;
         if !encoded_apply_writes_script.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
@@ -1329,7 +1308,7 @@ impl JournalLog {
         let update_auth_digests_script = apply_script::JournalUpdateAuthDigestsScript::decode(
             encoded_update_auth_digests_script.as_ref(),
             image_layout.auth_tree_data_block_allocation_blocks_log2 as u32,
-            image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
+            image_layout.allocation_block_size_128b_log2 as u32,
         )?;
         if !encoded_update_auth_digests_script.is_empty()? {
             return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
@@ -1355,7 +1334,7 @@ impl JournalLog {
                 trim_script = Some(apply_script::JournalTrimsScript::decode(
                     encoded_trim_script.as_ref(),
                     image_layout.io_block_allocation_blocks_log2 as u32,
-                    image_layout.allocation_bitmap_file_block_allocation_blocks_log2 as u32,
+                    image_layout.allocation_block_size_128b_log2 as u32,
                 )?);
                 if !encoded_trim_script.is_empty()? {
                     return Err(NvFsError::from(FormatError::ExcessJournalLogFieldLength));
@@ -1667,14 +1646,13 @@ impl<B: blkdev::NvBlkDev> JournalLogReadHeadExtentFuture<B> {
                     let journal_log_head_extent_blkdev_io_blocks = u64::from(journal_log_head_extent.block_count())
                         << allocation_block_blkdev_io_blocks_log2
                         >> blkdev_io_block_allocation_blocks_log2;
-                    if (journal_log_head_extent_blkdev_io_blocks - 1)
-                        > u64::MAX >> (blkdev_io_block_allocation_blocks_log2 + 7)
+                    if (journal_log_head_extent_blkdev_io_blocks - 1) > u64::MAX >> (blkdev_io_block_size_128b_log2 + 7)
                     {
                         this.fut_state = JournalLogReadHeadExtentFutureState::Done;
                         return task::Poll::Ready(Err(NvFsError::IoError(NvFsIoError::RegionOutOfRange)));
                     }
                     let journal_log_head_extent_tail_len = match usize::try_from(
-                        (journal_log_head_extent_blkdev_io_blocks - 1) << (blkdev_io_block_allocation_blocks_log2 + 7),
+                        (journal_log_head_extent_blkdev_io_blocks - 1) << (blkdev_io_block_size_128b_log2 + 7),
                     ) {
                         Ok(journal_log_head_extent_tail_len) => journal_log_head_extent_tail_len,
                         Err(_) => {

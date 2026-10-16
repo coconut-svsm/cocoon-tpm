@@ -2,6 +2,7 @@
 // Copyright 2025 SUSE LLC
 // Author: Nicolai Stange <nstange@suse.de>
 
+#[cfg(feature = "ecc")]
 pub(super) mod ecc;
 pub(super) mod hash;
 pub(super) mod rng;

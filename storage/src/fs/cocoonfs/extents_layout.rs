@@ -11,7 +11,7 @@ use crate::{
         cocoonfs::{FormatError, layout},
     },
     nvfs_err_internal,
-    utils_common::bitmanip::{BitManip as _, UBitManip as _},
+    utils_common::bitmanip::UBitManip as _,
 };
 
 /// Layout characteristics of a logical group of extents.
@@ -111,8 +111,7 @@ impl ExtentsLayout {
         }
         // The payload alignment must be <= the extent alignment.
         if (extent_payload_len_alignment as u64)
-            >> (extent_alignment_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7)
-            > 1
+            > 1 << (extent_alignment_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32 + 7)
         {
             return Err(nvfs_err_internal!());
         }
@@ -147,7 +146,8 @@ impl ExtentsLayout {
         // For the purpose of the implementation, each extent's length in units of Bytes
         // must fit an usize.
         let max_extent_allocation_blocks_upper_bound = layout::AllocBlockCount::from(
-            u64::try_from(usize::MAX).unwrap_or(u64::MAX) >> (allocation_block_size_128b_log2 + 7),
+            (u64::try_from(usize::MAX).unwrap_or(u64::MAX) >> (allocation_block_size_128b_log2 + 7))
+                .round_down_pow2(extent_alignment_allocation_blocks_log2 as u32),
         );
 
         // Verify that a minimum length extent does not exceed
@@ -221,7 +221,7 @@ impl ExtentsLayout {
             }
             - self.extent_hdr_len as u64;
 
-        let payload_padding_len = if self.extent_payload_len_alignment.is_pow2() {
+        let payload_padding_len = if self.extent_payload_len_alignment.is_power_of_two() {
             total_payload_len & (self.extent_payload_len_alignment as u64 - 1)
         } else {
             total_payload_len % self.extent_payload_len_alignment as u64
@@ -273,7 +273,7 @@ impl ExtentsLayout {
                 u64::MAX
             }
         };
-        let payload_len_padding = if self.extent_payload_len_alignment.is_pow2() {
+        let payload_len_padding = if self.extent_payload_len_alignment.is_power_of_two() {
             payload_len.wrapping_neg() & (self.extent_payload_len_alignment as u64 - 1)
         } else {
             let r = payload_len % self.extent_payload_len_alignment as u64;
@@ -364,7 +364,7 @@ impl ExtentsLayout {
         // depend on the respective extent's allocated size.
         if self.extents_hdr_len == 0 {
             true
-        } else if self.extent_payload_len_alignment.is_pow2() {
+        } else if self.extent_payload_len_alignment.is_power_of_two() {
             // The payload alignment is <= the extent alignment, c.f. Self::new().
             debug_assert!(
                 self.extent_payload_len_alignment as u64
@@ -397,12 +397,17 @@ impl ExtentsLayout {
     /// `extent_allocation_blocks`, defined as the amount of [`effective
     /// payload storage capacity`](Self::extent_effective_payload_len) lost when
     /// compared to not storing the header in that extent.
+    ///
+    /// For fixed `self`, `extents_hdr_placement_cost()` as a function of
+    /// `extent_allocation_blocks` is two-valued at most. If there are two
+    /// possible outcomes, then these differ exactly by the [payload
+    /// alignment padding](Self::extent_payload_len_alignment).
     pub fn extents_hdr_placement_cost(&self, extent_allocation_blocks: layout::AllocBlockCount) -> u64 {
         debug_assert!(extent_allocation_blocks <= self.max_extent_allocation_blocks);
         debug_assert_ne!(u64::from(extent_allocation_blocks), 0);
         if self.extents_hdr_len == 0 {
             0
-        } else if self.extent_payload_len_alignment.is_pow2() {
+        } else if self.extent_payload_len_alignment.is_power_of_two() {
             debug_assert!(self.extents_hdr_placement_cost_is_invariant());
             let payload_padding_wo_extents_hdr_len =
                 (self.extent_hdr_len as u64).wrapping_neg() & (self.extent_payload_len_alignment as u64 - 1);
@@ -424,7 +429,17 @@ impl ExtentsLayout {
                 total_payload_len_w_extents_hdr % self.extent_payload_len_alignment as u64;
             // Does not overflow, extents_hdr_len is an u32 and the payload alignment even
             // fits an u8.
-            self.extents_hdr_len as u64 + payload_padding_w_extents_hdr_len - payload_padding_wo_extents_hdr_len
+            let cost =
+                self.extents_hdr_len as u64 + payload_padding_w_extents_hdr_len - payload_padding_wo_extents_hdr_len;
+            debug_assert!(
+                cost == self.extents_hdr_len as u64
+                    - (self.extents_hdr_len % self.extent_payload_len_alignment as u32) as u64
+                    || cost
+                        == self.extents_hdr_len as u64
+                            - (self.extents_hdr_len % self.extent_payload_len_alignment as u32) as u64
+                            + self.extent_payload_len_alignment as u64
+            );
+            cost
         }
     }
 }

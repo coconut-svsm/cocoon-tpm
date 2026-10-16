@@ -411,8 +411,7 @@ impl SparseAllocBitmap {
                 Err(e) => {
                     // Rollback on error.
                     for extent in extents_iter.take(i) {
-                        self.prune_unused_in_range(&extent, first_entry_index_hint, false);
-                        first_entry_index_hint = None;
+                        self.prune_unused_in_range(&extent, None, false);
                     }
                     return Err(e);
                 }
@@ -815,6 +814,7 @@ impl SparseAllocBitmap {
                     bitmap_words_count == 0 || bitmap_word_index == self.entries[next_entry_index].bitmap_word_index
                 );
 
+                bitmap_word_index += 1;
                 bitmap_words_count = bitmap_words_count.saturating_sub(1);
                 next_entry_index += 1;
             } else {
@@ -894,7 +894,7 @@ impl SparseAllocBitmap {
                     .enumerate()
                     .find(|(_i, e)| e.bitmap_word != 0 || e.bitmap_word_index - bitmap_word_index >= bitmap_words_count)
                     .map(|(i, _e)| i)
-                    .unwrap_or(0)
+                    .unwrap_or(self.entries.len() - entry_index - 1)
                     + 1;
 
                 let next_bitmap_word_index = self.entries[entry_index + cur_batch_len - 1].bitmap_word_index + 1;
@@ -969,7 +969,7 @@ impl SparseAllocBitmap {
             let next_bitmap_word_index = self.entries[entry_index].bitmap_word_index;
             if next_bitmap_word_index != bitmap_word_index {
                 let bits_in_words = ((next_bitmap_word_index - bitmap_word_index - 1) << BITMAP_WORD_BITS_LOG2)
-                    + (u64::BITS - offset_in_bitmap_word) as u64;
+                    + (BitmapWord::BITS - offset_in_bitmap_word) as u64;
                 let bits_in_words = bits_in_words.min(physical_allocation_block_count);
                 physical_allocation_block_count -= bits_in_words;
                 bitmap_word_index = next_bitmap_word_index;
@@ -1314,29 +1314,57 @@ impl<'a> SparseAllocBitmapBlockIterator<'a> {
             None => return,
         };
 
-        debug_assert!(block_allocation_blocks_begin >= cur_sparse_bitmap_word.0);
-        if (u64::from(block_allocation_blocks_begin) ^ u64::from(cur_sparse_bitmap_word.0)) >> BITMAP_WORD_BITS_LOG2
-            != 0
-        {
-            self.sparse_bitmap_iter.skip_to(block_allocation_blocks_begin);
-            self.cur_sparse_bitmap_word = self.sparse_bitmap_iter.next();
-            if self
-                .cur_sparse_bitmap_word
-                .as_ref()
-                .map(|cur_sparse_bitmap_word| {
-                    (u64::from(cur_sparse_bitmap_word.0) ^ u64::from(block_allocation_blocks_begin))
-                        >> BITMAP_WORD_BITS_LOG2
-                        != 0
-                })
-                .unwrap_or(true)
+        // Only allow advancing past the position last returned from next().
+        // If the current next position is at the beginning of the current bitmap word,
+        // we can't tell whether or not that's the case.
+        debug_assert!(
+            self.next_pos_in_cur_sparse_bitmap_word == 0 || block_allocation_blocks_begin >= cur_sparse_bitmap_word.0
+        );
+        if block_allocation_blocks_begin >= cur_sparse_bitmap_word.0 {
+            if (u64::from(block_allocation_blocks_begin) ^ u64::from(cur_sparse_bitmap_word.0)) >> BITMAP_WORD_BITS_LOG2
+                != 0
             {
-                self.next_pos_in_cur_sparse_bitmap_word = 0;
-                return;
+                self.sparse_bitmap_iter.skip_to(block_allocation_blocks_begin);
+                self.cur_sparse_bitmap_word = self.sparse_bitmap_iter.next();
+                debug_assert!(
+                    self.cur_sparse_bitmap_word
+                        .map(
+                            |cur_sparse_bitmap_word| cur_sparse_bitmap_word.0 >= block_allocation_blocks_begin
+                                || (u64::from(cur_sparse_bitmap_word.0) ^ u64::from(block_allocation_blocks_begin))
+                                    >> BITMAP_WORD_BITS_LOG2
+                                    == 0
+                        )
+                        .unwrap_or(true)
+                );
+                if self
+                    .cur_sparse_bitmap_word
+                    .as_ref()
+                    .map(|cur_sparse_bitmap_word| {
+                        (u64::from(cur_sparse_bitmap_word.0) ^ u64::from(block_allocation_blocks_begin))
+                            >> BITMAP_WORD_BITS_LOG2
+                            != 0
+                    })
+                    .unwrap_or(true)
+                {
+                    self.next_pos_in_cur_sparse_bitmap_word = 0;
+                    return;
+                }
             }
+            debug_assert!(
+                self.cur_sparse_bitmap_word
+                    .map(
+                        |cur_sparse_bitmap_word| cur_sparse_bitmap_word.0 <= block_allocation_blocks_begin
+                            && (u64::from(cur_sparse_bitmap_word.0) ^ u64::from(block_allocation_blocks_begin))
+                                >> BITMAP_WORD_BITS_LOG2
+                                == 0
+                    )
+                    .unwrap_or(false)
+            );
+            self.next_pos_in_cur_sparse_bitmap_word =
+                (u64::from(block_allocation_blocks_begin) & u64::trailing_bits_mask(BITMAP_WORD_BITS_LOG2)) as u32;
+        } else {
+            debug_assert_eq!(self.next_pos_in_cur_sparse_bitmap_word, 0);
         }
-
-        self.next_pos_in_cur_sparse_bitmap_word =
-            (u64::from(block_allocation_blocks_begin) & u64::trailing_bits_mask(BITMAP_WORD_BITS_LOG2)) as u32;
     }
 }
 

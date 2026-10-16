@@ -468,15 +468,15 @@ where
     for b in commit_id.iter_mut() {
         *b ^= xor_mask;
     }
-    debug_assert_ne!(commit_id[0], last_commit_ids_tails[0][0]);
-    debug_assert_ne!(commit_id[0], last_commit_ids_tails[1][0]);
+    debug_assert_ne!(commit_id[0], last_commit_ids_tails[0][0] ^ checksum[0]);
+    debug_assert_ne!(commit_id[0], last_commit_ids_tails[1][0] ^ checksum[0]);
     debug_assert_ne!(
         commit_id[checksum::CHECKSUM_LEN as usize - 1],
-        last_commit_ids_tails[0][1]
+        last_commit_ids_tails[0][1] ^ checksum[checksum::CHECKSUM_LEN as usize - 1],
     );
     debug_assert_ne!(
         commit_id[checksum::CHECKSUM_LEN as usize - 1],
-        last_commit_ids_tails[1][1]
+        last_commit_ids_tails[1][1] ^ checksum[checksum::CHECKSUM_LEN as usize - 1],
     );
     (&mut extent)
         .take_exact(checksum::CHECKSUM_LEN as usize)
@@ -520,7 +520,7 @@ where
 /// # Arguments:
 ///
 /// * `values` - Iterator over the byte values to avoid. Must not yield more
-///   than 254 distinct non-zero values.
+///   than 254 values.
 fn find_distinct_u8_value<'a, V: io_slices::PeekableIoSlicesIter<'a>>(
     mut values: V,
 ) -> Result<u8, V::BackendIteratorError> {
@@ -529,6 +529,8 @@ fn find_distinct_u8_value<'a, V: io_slices::PeekableIoSlicesIter<'a>>(
     // less than 256 values, so at least one of the 16 slot will receive less
     // than 16 values.
     let mut c = [0u8; 16];
+    // Record a virtual zero byte.
+    c[0] = 1;
     let mut peeking_values = values.decoupled_borrow();
     while let Some(slice) = peeking_values.next_slice(None)? {
         for v in slice {
@@ -1276,9 +1278,12 @@ where
     let checksum = checksum.finish_send();
 
     // Copy the data from the checkpoint locations to the respective checkpoint
-    // locations data save area slot. Do it in reverse order, to support
-    // the case that the checkpoint locations data save area overlaps with
-    // one of the checkpoint locations.
+    // locations data save area slot. Do it in reverse order, to support the
+    // case that the checkpoint locations data save area overlaps with one of
+    // the checkpoint locations. Note that the checkpoint locations
+    // data save area is considered to contain uninitialized data initially, so the
+    // original data found at the checkpoint locations overlapping with the save
+    // area is not worth saving away.
     for i in (1..=(io_block_allocation_blocks_log2 as u32 + allocation_block_size_128b_log2 as u32)).rev() {
         let checkpoint_location_end = 1usize << (i + 7);
         let mut peeking_extent = extent.decoupled_borrow();
@@ -1733,8 +1738,8 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for ExtentIntegrityProtectio
                     let blkdev_io_block_size_128b_log2 = blkdev.io_block_size_128b_log2();
                     let blkdev_io_block_allocation_blocks_log2 =
                         blkdev_io_block_size_128b_log2.saturating_sub(*allocation_block_size_128b_log2 as u32);
-                    let allocation_block_blkdev_io_blocks_log2 = (*allocation_block_size_128b_log2 as u32)
-                        .saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                    let allocation_block_blkdev_io_blocks_log2 =
+                        (*allocation_block_size_128b_log2 as u32).saturating_sub(blkdev_io_block_size_128b_log2);
                     let extent_begin_blkdev_io_blocks = u64::from(*extent_begin)
                         >> blkdev_io_block_allocation_blocks_log2
                         << allocation_block_blkdev_io_blocks_log2;

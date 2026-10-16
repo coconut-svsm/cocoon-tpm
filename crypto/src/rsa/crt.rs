@@ -117,7 +117,7 @@ impl RsaPrivateKeyCrt {
         // Make a copy of p in native-endian order, it will be needed anyway, so it's
         // better to create it first and use that for all subsequent
         // computations.
-        let p_len = p.len();
+        let p_len = cmpa::ct_find_last_set_byte_mp(p).1;
         let p_nlimbs = cmpa::MpMutNativeEndianUIntLimbsSlice::nlimbs_for_len(p_len);
         let mut p_buf = try_alloc_zeroizing_vec::<cmpa::LimbType>(p_nlimbs)?;
         let mut ne_p = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(&mut p_buf);
@@ -391,7 +391,7 @@ impl RsaPrivateKeyCrt {
     ) -> Result<zeroize::Zeroizing<Vec<cmpa::LimbType>>, CryptoError> {
         let [scratch0, scratch1, scratch2] = scratch;
         // First reduce p modulo q.
-        let mut p_mod_q_scratch = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(scratch2);
+        let mut p_mod_q_scratch = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(scratch0);
         p_mod_q_scratch.copy_from(p);
         cmpa::ct_mod_mp_mp(
             None,
@@ -400,9 +400,10 @@ impl RsaPrivateKeyCrt {
         );
         let mut p_mod_q_scratch = p_mod_q_scratch.shrink_to(q.len());
         // And calculate its inverse mod q.
-        let mut p_inv_mod_q_buf = try_alloc_zeroizing_vec(q.len())?;
+        let mut p_inv_mod_q_buf =
+            try_alloc_zeroizing_vec(cmpa::MpMutNativeEndianUIntLimbsSlice::nlimbs_for_len(q.len()))?;
         let mut p_inv_mod_q = cmpa::MpMutNativeEndianUIntLimbsSlice::from_limbs(&mut p_inv_mod_q_buf);
-        cmpa::ct_inv_mod_odd_mp_mp(&mut p_inv_mod_q, &mut p_mod_q_scratch, q, [scratch0, scratch1]).map_err(
+        cmpa::ct_inv_mod_odd_mp_mp(&mut p_inv_mod_q, &mut p_mod_q_scratch, q, [scratch1, scratch2]).map_err(
             |e| match e {
                 cmpa::CtInvModOddMpMpError::OperandsNotCoprime | cmpa::CtInvModOddMpMpError::InvalidModulus => {
                     CryptoError::KeyBinding
@@ -528,8 +529,13 @@ impl RsaPrivateKeyCrt {
         // scratch = scratch * p
         cmpa::ct_mul_trunc_mp_mp(&mut scratch, self.q_len, &p);
 
-        // x = x_p + scratch. Remember, x_p is still in y and that's where
-        // the final result is supposed to go.
+        // x = x_p + scratch. Remember, x_p is still in y and that's where the final
+        // result is supposed to go. Be careful to trim scratch[] to the y.len()
+        // before the addition: it had been allocated to accomodate for the
+        // maximum needed for any of the different computation step it's been
+        // repurposed for above. Note that this removes only leading zeros from the
+        // most signifcant end, if any.
+        let scratch = scratch.shrink_to(y.len());
         cmpa::ct_add_mp_mp(&mut y, &scratch);
 
         Ok(())

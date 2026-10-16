@@ -68,9 +68,9 @@ macro_rules! key_size_to_key_len {
 macro_rules! gen_match_on_aes_key_size {
     ($aes_key_size_value:expr, $m:ident $(, $($args:tt),*)?) => {
         match $aes_key_size_value {
-            symcipher::SymBlockCipherAesKeySize::Aes128 => $m!($($($args:tt),*,)? 128),
-            symcipher::SymBlockCipherAesKeySize::Aes192 => $m!($($($args:tt),*,)? 192),
-            symcipher::SymBlockCipherAesKeySize::Aes256 => $m!($($($args:tt),*,)? 256),
+            symcipher::SymBlockCipherAesKeySize::Aes128 => $m!($($($args),*,)? 128),
+            symcipher::SymBlockCipherAesKeySize::Aes192 => $m!($($($args),*,)? 192),
+            symcipher::SymBlockCipherAesKeySize::Aes256 => $m!($($($args),*,)? 256),
         }
     };
 }
@@ -339,7 +339,7 @@ impl<'a> BsslCbcAesDecryptor<'a> {
 #[cfg(feature = "cfb")]
 struct BsslCfbAesEncryptorImpl<'a, const ENCRYPT: bool> {
     aes_key: &'a BsslAesEncKey,
-    ivec: [u8; AES_BLOCK_SIZE],
+    ivec: zeroize::ZeroizingFlat<[u8; AES_BLOCK_SIZE]>,
     num: ffi::c_int,
 }
 
@@ -348,7 +348,9 @@ impl<'a, const ENCRYPT: bool> BsslCfbAesEncryptorImpl<'a, ENCRYPT> {
     fn new(aes_key: &'a BsslAesEncKey, iv: &[u8]) -> Result<Self, CryptoError> {
         Ok(Self {
             aes_key,
-            ivec: *<&[u8; AES_BLOCK_SIZE]>::try_from(iv).map_err(|_| CryptoError::InvalidIV)?,
+            ivec: zeroize::ZeroizingFlat::new(
+                *<&[u8; AES_BLOCK_SIZE]>::try_from(iv).map_err(|_| CryptoError::InvalidIV)?,
+            ),
             num: 0,
         })
     }
@@ -383,7 +385,7 @@ impl<'a, const ENCRYPT: bool> BsslCfbAesEncryptorImpl<'a, ENCRYPT> {
         // No IV retrieval after partial block processing.
         debug_assert_eq!(self.num, 0);
         debug_assert_eq!(iv_out.len(), self.ivec.len());
-        iv_out.copy_from_slice(&self.ivec);
+        iv_out.copy_from_slice(&*self.ivec);
     }
 }
 

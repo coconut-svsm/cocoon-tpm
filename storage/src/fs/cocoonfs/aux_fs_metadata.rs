@@ -370,15 +370,13 @@ impl AuxFsMetadata {
 
         // Find the insertion position and the termination record.
         let mut used_encoded_len = 0;
-        let mut insertion_pos = None;
+        let mut insertion_pos = 0;
         for entry in self.iter() {
-            if uuid < entry.0 {
-                insertion_pos = Some(used_encoded_len);
-            }
-
             used_encoded_len += ENTRY_HEADER_LEN + entry.1.len();
+            if uuid >= entry.0 {
+                insertion_pos = used_encoded_len;
+            }
         }
-        let insertion_pos = insertion_pos.unwrap_or(used_encoded_len);
 
         // Account for the termination record.
         let extra_reserve = if self.encoded.is_empty() {
@@ -521,7 +519,7 @@ impl AuxFsMetadata {
         // As an optimization, check whether there's only a termination record with no
         // extra reserve info.
         self.encoded.len() <= ENTRY_HEADER_LEN
-            || (self.iter().next().is_none() && self.get_extra_reserve_capacity() == Some(0))
+            || (self.iter().next().is_none() && self.get_extra_reserve_capacity().is_none())
     }
 
     /// The [`AuxFsMetadata`]'s encoded length.
@@ -666,9 +664,10 @@ impl AuxFsMetadata {
         extents_layout::ExtentsLayout::new(
             Some(max_extent_allocation_blocks),
             io_block_allocation_blocks_log2.max(auth_tree_data_block_allocation_blocks_log2),
-            0,
             extents_hdr_len,
             extent_hdr_len,
+            // No per-extent header in the payload.
+            0,
             // No alignment constraints on the payload.
             1,
             allocation_block_size_128b_log2,
@@ -1423,10 +1422,14 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for DoReadAuxFsMetadataFutur
                     // - and its length in units of Bytes is representable as an usize,
                     // - and its length is at least the minimum size required for the extent type
                     //   (head or tail).
-
-                    // Check for (unexpected) loops.
+                    // Check for (unexpected) loops, including partial overlaps with extents
+                    // collected already. The primary motivation is to not digress into
+                    // infinite loops. Second, an invariant of the PhysicalExtents container
+                    // is that its extents never overlap. The extents list collected here is
+                    // unauthenticated, so check for that as a robustness measure such that the
+                    // implementation cannot get confused somehow.
                     for processed_extent in this.aux_fs_metadata_extents.extents.iter() {
-                        if extent.begin() == processed_extent.begin() {
+                        if extent.overlaps_with(&processed_extent) {
                             this.fut_state = DoReadAuxFsMetadataFutureState::Done;
                             return task::Poll::Ready(Err(NvFsError::from(
                                 FormatError::InconsistentAuxFsMetadataExtentsChain,
@@ -1672,6 +1675,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for DoReadAuxFsMetadataFutur
                                         .aux_fs_metadata_extents
                                         .extents
                                         .get_extent_range(this.aux_fs_metadata_extents.extents.len() - 1);
+                                    this.aux_fs_metadata_extents.extents.pop_extent();
                                     if this.update_groups_heads.ptrs[1]
                                         .as_ref()
                                         .map(|update_group1_head| update_group1_head.begin() == skipped_extent.begin())
@@ -2179,7 +2183,16 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for DoReadAuxFsMetadataFutur
                                     read_full,
                                 }
                             } else {
-                                // Record the to be skipped extent.
+                                // Record the to be skipped extent. Enforce the PhysicalExtents invariant that
+                                // all extents are non-overlapping as a robustness measure.
+                                for processed_extent in this.aux_fs_metadata_extents.extents.iter() {
+                                    if chained_extents_ptrs[0].overlaps_with(&processed_extent) {
+                                        this.fut_state = DoReadAuxFsMetadataFutureState::Done;
+                                        return task::Poll::Ready(Err(NvFsError::from(
+                                            FormatError::InconsistentAuxFsMetadataExtentsChain,
+                                        )));
+                                    }
+                                }
                                 if let Some(insertion_pos) = this
                                     .aux_fs_metadata_extents
                                     .update_group1_extents_begin
@@ -3230,7 +3243,7 @@ impl<B: blkdev::NvBlkDev> WriteAuxFsMetadataUpdateGroupExtentsFuture<B> {
                     // be represented in an usize.
                     this.fut_state = WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtentPrepare {
                         encoding_pos: (head_extent_payload_len as usize).min(aux_fs_metadata.encoded.len()),
-                        extent_index: 1,
+                        extent_index: group_head_extent_index + 1,
                     };
                 }
                 WriteAuxFsMetadataUpdateGroupExtentsFutureState::WriteTailExtentPrepare {
@@ -3553,7 +3566,7 @@ impl<B: blkdev::NvBlkDev> blkdev::NvBlkDevFuture<B> for WriteAuxFsMetadataExtent
                     let blkdev_io_block_allocation_blocks_log2 =
                         blkdev_io_block_size_128b_log2.saturating_sub(allocation_block_size_128b_log2);
                     let allocation_block_blkdev_io_blocks_log2 =
-                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_allocation_blocks_log2);
+                        allocation_block_size_128b_log2.saturating_sub(blkdev_io_block_size_128b_log2);
                     // All AuxFsMetadata extents are aligned to the IO Block
                     // size, hence to the device IO Block size as well.
                     debug_assert!(
@@ -4339,23 +4352,12 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
         let (transaction, result) = 'outer: loop {
             match &mut this.fut_state {
                 TransactionWriteAuxFsMetadataFutureState::Init { transaction } => {
-                    let mut transaction = match transaction.take() {
+                    let transaction = match transaction.take() {
                         Some(transaction) => transaction,
                         None => break (None, Err(nvfs_err_internal!())),
                     };
                     this.fut_state = match transaction.aux_fs_metadata_update.as_ref() {
-                        Some(previous_aux_fs_metatada_update) => {
-                            // Add to journal_frees now, as that can fail. On a subsequent failure,
-                            // they will get removed from journal_frees again. On success, the
-                            // extents will eventually also get removed from pending_allocs.
-                            if let Err(e) = transaction
-                                .allocs
-                                .journal_frees
-                                .add_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter())
-                            {
-                                break (Some(transaction), Err(e));
-                            }
-
+                        Some(_previous_aux_fs_metatada_update) => {
                             TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare {
                                 transaction: Some(transaction),
                             }
@@ -4398,12 +4400,37 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                         Some(transaction) => transaction,
                         None => break (None, Err(nvfs_err_internal!())),
                     };
-                    if let Err(e) = transaction
-                        .allocs
-                        .pending_frees
-                        .add_extents(this.original_aux_fs_metadata_extents.iter())
-                    {
-                        break (Some(transaction), Err(e));
+                    if transaction.aux_fs_metadata_update.is_none() {
+                        if let Err(e) = transaction
+                            .allocs
+                            .pending_frees
+                            .add_extents(this.original_aux_fs_metadata_extents.iter())
+                        {
+                            break (Some(transaction), Err(e));
+                        }
+                    }
+
+                    // AuxFsMetadata are tracked as allocated, but authenticated as unallocated.
+                    // Make sure to stage Deallocate updates at the AuthTreeDataBlocksUpdateStates
+                    // in the range so that nothing would attempt to authenticate them, should the
+                    // freed extents subsequently get repurposed.
+                    for extent in this.original_aux_fs_metadata_extents.iter() {
+                        let extent_updates_states_index_range =
+                            match transaction.auth_tree_data_blocks_update_states.insert_missing_in_range(
+                                extent,
+                                &fs_instance_sync_state.alloc_bitmap,
+                                &transaction.allocs.pending_frees,
+                                None,
+                            ) {
+                                Ok(extent_updates_states_index_range) => extent_updates_states_index_range.0,
+                                Err(e) => break 'outer (Some(transaction), Err(e.0)),
+                            };
+                        for allocation_block_update_state in transaction
+                            .auth_tree_data_blocks_update_states
+                            .iter_allocation_blocks_mut(Some(&extent_updates_states_index_range))
+                        {
+                            allocation_block_update_state.1.stage_deallocation_update();
+                        }
                     }
 
                     this.fut_state = TransactionWriteAuxFsMetadataFutureState::AllocateExtentsPrepare {
@@ -4505,11 +4532,16 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                             let new_update_group1_extents_begin = this.new_extents.len();
                             for extent in allocated_extents.iter().enumerate() {
                                 if let Err(e) = this.new_extents.push_extent(&extent.1, true) {
+                                    transaction
+                                        .allocs
+                                        .pending_allocs
+                                        .remove_extents(allocated_extents.iter());
+                                    transaction.allocs.pending_allocs.reset_remove_rollback();
                                     // Failure to add is non-fatal, the extents will still be recorded at
                                     // the CocoonFsPendingTransactionsSyncState and trimmed, if enabled.
                                     // All that would happen on failure is that this transaction cannot subsequently
                                     // repurpose the allocation.
-                                    let _ = transaction.allocs.journal_allocs.add_extents(allocated_extents.iter());
+                                    let _ = transaction.allocs.journal_frees.add_extents(allocated_extents.iter());
                                     break 'outer (Some(transaction), Err(e));
                                 }
                             }
@@ -4557,39 +4589,54 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
         this.fut_state = TransactionWriteAuxFsMetadataFutureState::Done;
         task::Poll::Ready(match transaction {
             Some(mut transaction) => {
-                if result.is_ok() {
-                    if let Some(previous_aux_fs_metatada_update) = transaction.aux_fs_metadata_update.as_ref() {
-                        // Conclude the deallocation.
-                        transaction
-                            .allocs
-                            .pending_allocs
-                            .remove_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter());
-                        transaction.allocs.pending_allocs.reset_remove_rollback();
+                // Take care of cleaning up the previously staged AuxFsMetadata, if any.
+                let result = match result {
+                    Ok(()) => {
+                        match transaction.aux_fs_metadata_update.as_ref() {
+                            Some(previous_aux_fs_metatada_update) => {
+                                // Add the extents from the previously staged update to
+                                // journal_frees first, as that can fail. On a subsequent failure,
+                                // they will get removed from journal_frees again. On success, the
+                                // extents will eventually also get removed from pending_allocs.
+                                match transaction
+                                    .allocs
+                                    .journal_frees
+                                    .add_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter())
+                                {
+                                    Ok(()) => {
+                                        // Conclude the deallocation.
+                                        transaction.allocs.pending_allocs.remove_extents(
+                                            previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter(),
+                                        );
+                                        transaction.allocs.pending_allocs.reset_remove_rollback();
+                                        Ok(())
+                                    }
+                                    Err(e) => Err(e),
+                                }
+                            }
+                            None => Ok(()),
+                        }
                     }
+                    Err(e) => Err(e),
+                };
 
+                if result.is_ok() {
                     // Make the update effective.
                     transaction.aux_fs_metadata_update = Some(TransactionStagedAuxFsMetatdataUpdate {
                         aux_fs_metatada_extents: mem::replace(&mut this.new_extents, PhysicalExtents::new()),
                         aux_fs_metadata_update_groups_heads: this.new_update_groups_heads,
                     });
                 } else {
-                    match transaction.aux_fs_metadata_update.as_ref() {
-                        Some(previous_aux_fs_metatada_update) => {
-                            // Rollback.
-                            transaction
-                                .allocs
-                                .journal_frees
-                                .remove_extents(previous_aux_fs_metatada_update.aux_fs_metatada_extents.iter());
-                            transaction.allocs.journal_frees.reset_remove_rollback();
-                        }
-                        None => {
-                            // Rollback.
-                            transaction
-                                .allocs
-                                .pending_frees
-                                .remove_extents(this.original_aux_fs_metadata_extents.iter());
-                            transaction.allocs.pending_frees.reset_remove_rollback();
-                        }
+                    if transaction.aux_fs_metadata_update.as_ref().is_none() {
+                        // Rollback.
+                        transaction
+                            .auth_tree_data_blocks_update_states
+                            .reset_staged_extents_updates(this.original_aux_fs_metadata_extents.iter());
+                        transaction
+                            .allocs
+                            .pending_frees
+                            .remove_extents(this.original_aux_fs_metadata_extents.iter());
+                        transaction.allocs.pending_frees.reset_remove_rollback();
                     };
 
                     // Free the newly allocated extents.
@@ -4602,7 +4649,7 @@ impl<ST: sync_types::SyncTypes, B: blkdev::NvBlkDev> CocoonFsSyncStateReadFuture
                     // the CocoonFsPendingTransactionsSyncState and trimmed, if enabled.
                     // All that would happen on failure is that this transaction cannot subsequently
                     // repurpose the allocation.
-                    let _ = transaction.allocs.journal_allocs.add_extents(this.new_extents.iter());
+                    let _ = transaction.allocs.journal_frees.add_extents(this.new_extents.iter());
                 }
 
                 (mem::take(&mut this.new_aux_fs_metadata), Ok((transaction, result)))

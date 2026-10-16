@@ -332,6 +332,12 @@ impl AllocationBlockUpdateState {
         }
     }
 
+    /// Determine whether the [`AllocationBlockUpdateState`] is in the
+    /// [`AllocationBlockUpdateStagedUpdate::FailedUpdate`] state.
+    pub fn has_staged_update_failed(&self) -> bool {
+        matches!(self.staged_update, AllocationBlockUpdateStagedUpdate::FailedUpdate)
+    }
+
     /// Access the [Allocation
     /// Block's](ImageLayout::allocation_block_size_128b_log2) authenticated
     /// encrypted data.
@@ -348,7 +354,9 @@ impl AllocationBlockUpdateState {
             AllocationBlockUpdateStagedUpdate::Deallocate => {
                 return Err(nvfs_err_internal!());
             }
-            AllocationBlockUpdateStagedUpdate::FailedUpdate => (),
+            AllocationBlockUpdateStagedUpdate::FailedUpdate => {
+                return Err(nvfs_err_internal!());
+            }
         }
 
         match &self.nv_sync_state {
@@ -385,6 +393,20 @@ impl AllocationBlockUpdateState {
                 },
             },
         }
+    }
+
+    /// Stage [`Deallocate`](AllocationBlockUpdateStagedUpdate::Deallocate)
+    /// updates for the [Allocation
+    /// Block](ImageLayout::allocation_block_size_128b_log2).
+    pub fn stage_deallocation_update(&mut self) {
+        // In case the NV sync status is already in unallocated state, only reset any
+        // currently staged update not yet applied to the NV sync state, if
+        // any.
+        self.staged_update = if !matches!(self.nv_sync_state, AllocationBlockUpdateNvSyncState::Unallocated(_)) {
+            AllocationBlockUpdateStagedUpdate::Deallocate
+        } else {
+            AllocationBlockUpdateStagedUpdate::None
+        };
     }
 }
 
@@ -1553,7 +1575,7 @@ impl AuthTreeDataBlocksUpdateStates {
                         let states_index_range_offsets = if total_inserted_states_count != 0 {
                             debug_assert!(
                                 total_inserted_states_count as u64
-                                    >= total_missing_states_before_count + total_missing_states_after_count
+                                    >= total_missing_states_before_count + inserted_states_after_range_count
                             );
                             Some(AuthTreeDataBlocksUpdateStatesFillAlignmentGapsRangeOffsets {
                                 inserted_states_before_range_count: total_missing_states_before_count as usize,
@@ -1866,7 +1888,7 @@ impl AuthTreeDataBlocksUpdateStates {
         }
 
         let auth_tree_data_block_allocation_blocks_log2 = self.auth_tree_data_block_allocation_blocks_log2 as u32;
-        let last_auth_tree_data_block_target_allocation_blocks_begin =
+        let mut last_auth_tree_data_block_target_allocation_blocks_begin =
             self.states[cur_auth_tree_data_block_update_states_index.index].target_allocation_blocks_begin;
         cur_auth_tree_data_block_update_states_index = cur_auth_tree_data_block_update_states_index.step();
         while cur_auth_tree_data_block_update_states_index
@@ -1890,6 +1912,8 @@ impl AuthTreeDataBlocksUpdateStates {
                 );
             }
             cur_auth_tree_data_block_update_states_index = cur_auth_tree_data_block_update_states_index.step();
+            last_auth_tree_data_block_target_allocation_blocks_begin =
+                cur_auth_tree_data_block_target_allocation_blocks_begin;
         }
         debug_assert_eq!(
             cur_auth_tree_data_block_update_states_index,
@@ -2929,14 +2953,7 @@ impl AuthTreeDataBlocksUpdateStates {
             // In case the NV sync status is already in unallocated state, only reset any
             // currently staged update not yet applied to the NV sync state, if
             // any.
-            allocation_block_state.staged_update = if !matches!(
-                allocation_block_state.nv_sync_state,
-                AllocationBlockUpdateNvSyncState::Unallocated(_)
-            ) {
-                AllocationBlockUpdateStagedUpdate::Deallocate
-            } else {
-                AllocationBlockUpdateStagedUpdate::None
-            };
+            allocation_block_state.stage_deallocation_update();
             cur_states_allocation_block_index =
                 cur_states_allocation_block_index.step(auth_tree_data_block_allocation_blocks_log2);
         }
@@ -3084,7 +3101,7 @@ impl AuthTreeDataBlocksUpdateStates {
             }
 
             let cur_auth_tree_data_block_index = auth_tree_config
-                .translate_physical_to_data_block_index(cur_auth_tree_data_block_allocation_blocks_begin);
+                .translate_physical_to_data_block_index(cur_auth_tree_data_block_allocation_blocks_begin)?;
             cur_update_state.auth_digest = Some(auth_tree_config.digest_data_block(
                 cur_auth_tree_data_block_index,
                 cur_update_state.iter_auth_digest_allocation_blocks(image_header_end, true),
@@ -4506,7 +4523,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
     }
 
     fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
-        if divisor.is_pow2() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
+        if divisor.is_power_of_two() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
                 .head
@@ -4515,7 +4532,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
                 .unwrap_or(true))
         } else {
             let mut all_multiple_of = true;
-            if divisor.is_pow2() {
+            if divisor.is_power_of_two() {
                 self.for_each(&mut |slice| {
                     all_multiple_of &= slice.len() & (divisor - 1) == 0;
                     all_multiple_of
@@ -4660,7 +4677,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
     }
 
     fn all_lengths_multiple_of(&self, divisor: usize) -> Result<bool, Self::BackendIteratorError> {
-        if divisor.is_pow2() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
+        if divisor.is_power_of_two() && divisor <= (1usize << (self.allocation_block_size_128b_log2 as u32 + 7)) {
             // All Allocation Blocks are aligned. Check the head.
             Ok(self
                 .head
@@ -4669,7 +4686,7 @@ impl<'a> io_slices::WalkableIoSlicesIter<'a>
                 .unwrap_or(true))
         } else {
             let mut all_multiple_of = true;
-            if divisor.is_pow2() {
+            if divisor.is_power_of_two() {
                 self.for_each(&mut |slice| {
                     all_multiple_of &= slice.len() & (divisor - 1) == 0;
                     all_multiple_of

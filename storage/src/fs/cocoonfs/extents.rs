@@ -120,13 +120,6 @@ impl PhysicalExtents {
     }
 
     /// Remove the extent at the sequence's back.
-    ///
-    /// # Arguments:
-    ///
-    /// * `pos` - Index position to insert the extent at.
-    /// * `range` - The extent to insert.
-    /// * `no_merge` - Whether or not to attempt to merge `range` with its
-    ///   preexisting predecessor.
     pub fn pop_extent(&mut self) {
         self.extents.pop();
     }
@@ -225,17 +218,20 @@ impl PhysicalExtents {
 
     /// Sort the extents by a specified comparison predicate.
     ///
+    /// The sort is unstable, that is the relative order of extents comparing
+    /// as equal is not necessarily preserved.
+    ///
     /// # Arguments:
     ///
     /// * `range` - Index range specifying the extents to sort.
     /// * `compare` - The comparison predicate.
     /// * `no_merge` - Whether or not to attempt to merge neighboring extents
     ///   after the sort.
-    pub fn sort_extents_by<F>(&mut self, mut range: ops::Range<usize>, mut compare: F, no_merge: bool)
+    pub fn sort_extents_unstable_by<F>(&mut self, mut range: ops::Range<usize>, mut compare: F, no_merge: bool)
     where
         F: FnMut(&layout::PhysicalAllocBlockRange, &layout::PhysicalAllocBlockRange) -> cmp::Ordering,
     {
-        self.extents[range.clone()].sort_by(|e0, e1| {
+        self.extents[range.clone()].sort_unstable_by(|e0, e1| {
             let r0 = Self::unpack_entry(e0);
             let r1 = Self::unpack_entry(e1);
             compare(&r0, &r1)
@@ -522,7 +518,7 @@ impl PhysicalExtentsSet {
 impl From<PhysicalExtents> for PhysicalExtentsSet {
     fn from(value: PhysicalExtents) -> Self {
         let mut extents = value.extents;
-        extents.sort_by_key(|entry| layout::PhysicalAllocBlockIndex::from(entry.0));
+        extents.sort_unstable_by_key(|entry| layout::PhysicalAllocBlockIndex::from(entry.0));
         for entry in extents.iter_mut() {
             entry.1 = (layout::PhysicalAllocBlockIndex::from(entry.0) + layout::AllocBlockCount::from(entry.1)).into();
         }
@@ -1858,7 +1854,7 @@ impl<'a> LogicalExtentsRangeIterator<'a> {
         Self {
             extents,
             range: Some(range.clone()),
-            index: 0,
+            index: range.index_first,
         }
     }
 }

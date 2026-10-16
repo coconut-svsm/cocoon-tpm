@@ -164,6 +164,17 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         break (Some(transaction), NvFsError::IoError(crate::fs::NvFsIoError::IoFailure));
                     }
 
+                    if transaction.is_applied {
+                        // This is a retry, and a prior attempt to invalidate the journal log failed.
+                        // Do not write out the data updates again while the journal log is in an
+                        // indeterminate state -- if effectively invalidated on storage, and
+                        // the data update write-out fails, the image can get corrupted.
+                        this.fut_state = TransactionApplyJournalFutureState::InvalidateJournalLogPrepare {
+                            transaction: Some(transaction),
+                        };
+                        continue;
+                    }
+
                     // Apply changes to the allocation bitmap.
                     // After that, the pending_allocs/pending_frees will only be used
                     // for trimming at cleanup.
@@ -239,9 +250,10 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         None => break (None, nvfs_err_internal!()),
                     };
 
-                    let auth_tree_apply_updates_fut = auth_tree::AuthTreeApplyUpdatesFuture::new(mem::take(
-                        &mut transaction.pending_auth_tree_updates.pending_nodes_updates,
-                    ));
+                    let auth_tree_apply_updates_fut = auth_tree::AuthTreeApplyUpdatesFuture::new(
+                        mem::take(&mut transaction.pending_auth_tree_updates.pending_nodes_updates),
+                        mem::take(&mut transaction.failed_auth_tree_updates_nodes_writes),
+                    );
                     this.fut_state = TransactionApplyJournalFutureState::ApplyAuthTreeUpdates {
                         transaction: Some(transaction),
                         auth_tree_apply_updates_fut,
@@ -276,32 +288,43 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         &transaction.encrypted_filesystem_update_counter,
                         cx,
                     ) {
-                        task::Poll::Ready((pending_auth_tree_nodes_updates, result)) => {
-                            // Idempotency on error: move the pending_nodes_updates back into
-                            // the transaction on error. Note that if an error happened in a later
-                            // stage, the Authentication Tree updates application on an empty
-                            // pending_nodes_updates upon retry would be a nop.
-                            if let Err(e) = result {
-                                transaction.pending_auth_tree_updates.pending_nodes_updates =
-                                    pending_auth_tree_nodes_updates;
-
-                                drop(fs_instance);
-                                if e == NvFsError::MemoryAllocationFailure
-                                    && this.enter_low_memory(&mut transaction, fs_instance_sync_state.make_borrow())
-                                {
-                                    // Some additional memory could potentially get freed. Retry.
-                                    this.fut_state = TransactionApplyJournalFutureState::ApplyAuthTreeUpdatesPrepare {
-                                        transaction: Some(transaction),
-                                    };
-                                    continue;
-                                }
-
-                                break (Some(transaction), e);
-                            }
-
-                            // The filesystem instance's encrypted filesystem update counter got
+                        task::Poll::Ready(Ok(Ok(()))) => {
+                            // Done writing the authentication tree updates. Note that if an error happened
+                            // in a later stage, the Authentication Tree updates
+                            // application on an empty pending_nodes_updates
+                            // upon retry would be a nop. The filesystem
+                            // instance's encrypted filesystem update counter got
                             // updated now. Copy the plaintext copy as well.
                             fs_sync_state_filesystem_update_counter.value = transaction.filesystem_update_counter;
+                        }
+                        task::Poll::Ready(Ok(Err((
+                            pending_auth_tree_nodes_updates,
+                            failed_auth_tree_updates_nodes_writes,
+                            e,
+                        )))) => {
+                            // Idempotency on error: move the pending_nodes_updates back into
+                            // the transaction on error.
+                            transaction.pending_auth_tree_updates.pending_nodes_updates =
+                                pending_auth_tree_nodes_updates;
+                            transaction.failed_auth_tree_updates_nodes_writes = failed_auth_tree_updates_nodes_writes;
+
+                            drop(fs_instance);
+                            if e == NvFsError::MemoryAllocationFailure
+                                && this.enter_low_memory(&mut transaction, fs_instance_sync_state.make_borrow())
+                            {
+                                // Some additional memory could potentially get freed. Retry.
+                                this.fut_state = TransactionApplyJournalFutureState::ApplyAuthTreeUpdatesPrepare {
+                                    transaction: Some(transaction),
+                                };
+                                continue;
+                            }
+                            break (Some(transaction), e);
+                        }
+                        task::Poll::Ready(Err(e)) => {
+                            // Unrecoverable internal error. Deliberately consume the transaction to
+                            // prevent further retries on of applying an instance in an
+                            // inconsistent/incomplete state.
+                            break (None, e);
                         }
                         task::Poll::Pending => {
                             *fut_transaction = Some(transaction);
@@ -358,6 +381,8 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                         task::Poll::Ready(Err(e)) => break (None, e),
                         task::Poll::Pending => return task::Poll::Pending,
                     };
+
+                    transaction.is_applied = true;
 
                     // Now that the data updates have been written, which might potentially have
                     // taken advantage of any data cached at the transactions' Allocation Block
@@ -721,7 +746,7 @@ impl<B: blkdev::NvBlkDev> TransactionApplyJournalFuture<B> {
                     )
                 };
 
-                read_buffer.update_authenticated_buffers(
+                read_buffer.update_unauthenticated_buffers(
                     cur_allocation_block_index,
                     iter::from_fn(|| {
                         if cur_allocation_block_index >= buffered_unauthenticated_range.end() {
@@ -1294,6 +1319,9 @@ impl<B: blkdev::NvBlkDev> TransactionWriteDataUpdatesFuture<B> {
                         &cur_io_block_states_allocation_blocks_index_range_end,
                         remaining_states_allocation_blocks_index_range.end(),
                     );
+            } else {
+                // Write what we have.
+                break;
             }
 
             cur_states_allocation_block_index = cur_io_block_states_allocation_blocks_index_range_end;

@@ -416,12 +416,23 @@ impl<B: blkdev::NvBlkDev> TransactionReadAuthenticateDataFuture<B> {
                                 }
 
                                 let auth_tree_config = fs_sync_state_auth_tree.get_config();
-                                let cur_auth_tree_data_block_index =
-                                    saved_auth_tree_data_block_index.take().unwrap_or_else(|| {
-                                        auth_tree_config.translate_physical_to_data_block_index(
+                                    let cur_auth_tree_data_block_index = match saved_auth_tree_data_block_index.take() {
+                                        Some(cur_auth_tree_data_block_index) => cur_auth_tree_data_block_index,
+                                        None => {
+                                            match auth_tree_config.translate_physical_to_data_block_index(
                                             cur_physical_auth_tree_data_block_allocation_blocks_begin
-                                        )
-                                    });
+                                            ) {
+                                                Ok(cur_auth_tree_data_block_index) => cur_auth_tree_data_block_index,
+                                                Err(e) => {
+                                                    return task::Poll::Ready(Ok((
+                                                        fut_transaction.take().ok_or_else(|| nvfs_err_internal!())?,
+                                                        this.request_states_range_offsets.take(),
+                                                        Err(e),
+                                                    )));
+                                                }
+                                            }
+                                        }
+                                    };
                                 if let Some(cur_expected_auth_tree_data_block_digest) =
                                         cur_auth_tree_block_state.get_auth_digest() {
                                     let image_header_end = fs_config.image_header_end;
@@ -600,10 +611,19 @@ impl<B: blkdev::NvBlkDev> TransactionReadAuthenticateDataFuture<B> {
                                         cur_auth_tree_block_state.get_target_allocation_blocks_begin();
                                     // Update for check below and also, it will be needed for the next iteration,
                                     // if any.
-                                    cur_auth_tree_data_block_index =
+                                    cur_auth_tree_data_block_index = match
                                         auth_tree_config.translate_physical_to_data_block_index(
                                             cur_physical_auth_tree_data_block_allocation_blocks_begin
-                                        );
+                                        ) {
+                                            Ok(cur_auth_tree_data_block_index) => cur_auth_tree_data_block_index,
+                                            Err(e) => {
+                                                return task::Poll::Ready(Ok((
+                                                    fut_transaction.take().ok_or_else(|| nvfs_err_internal!())?,
+                                                    this.request_states_range_offsets.take(),
+                                                    Err(e),
+                                                )));
+                                            }
+                                        };
                                     let leaf_node_id = leaf_node.get_node_id();
                                     if cur_auth_tree_data_block_index < leaf_node_id.first_covered_data_block() ||
                                        cur_auth_tree_data_block_index > leaf_node_id.last_covered_data_block() {

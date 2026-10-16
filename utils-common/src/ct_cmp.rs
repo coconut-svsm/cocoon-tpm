@@ -73,7 +73,9 @@ where
 /// * `bytes0` - First slice to compare.
 /// * `bytes1` - Second slice to compare.
 pub fn ct_bytes_eq(bytes0: &[u8], bytes1: &[u8]) -> cmpa::LimbChoice {
-    debug_assert_eq!(bytes0.len(), bytes1.len());
+    if bytes0.len() != bytes1.len() {
+        return cmpa::LimbChoice::new(0);
+    }
 
     // Split bytes0 and bytes1 into regions of &[u8], &[LimbType], &[u8] each.
     // SAFETY: `LimbType` is an integer type (`u64` or `u32`), so every possible
