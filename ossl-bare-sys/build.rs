@@ -202,8 +202,6 @@ fn main() {
         "no-cms",
         // Certificate Transparency.
         "no-ct",
-        // DES / 3DES block cipher.
-        "no-des",
         // Diffie-Hellman key exchange.
         "no-dh",
         // Digital Signature Algorithm.
